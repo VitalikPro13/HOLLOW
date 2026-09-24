@@ -113,6 +113,8 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 7. **Member panel toggle** -- toggles `memberPanelProvider`. Icon tints accent when panel is open.
 8. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`) AND when the header is at least 200px wide. Shows columns icon. When split is active, closes this pane; when not split, opens split. Icon tints accent when split is active.
 
+**Rebuilt 2026-09-24 on the shared `ChatHeaderBar`** (see wiki ui_chat_pane_shared): the channel glyph (`hash`, `volume2` for a voice channel's chat via `ChannelChatPane(isVoice: true)`, `video` for a meeting) in `textTertiary`, the name in `subheading`, Ephemeral/NSFW as `HollowBadge`s, then `HollowIconButton`s 4 apart: pins (with a mono count, grey), search, members, split. A toggle that is on is a grey fill, never the accent. The status shows below 480 px of header no longer.
+
 **Narrow-header shed order (2026-07-27).** `_buildHeader` wraps its `Row` in a `LayoutBuilder` and drops content as the chat narrows — status pill below 280px, split toggle below 200px. Opening the member panel in a small window (or at a high interface scale) can leave this header a couple hundred pixels, and the BUTTONS are the only way back out: an overflow that hid the members toggle would strand the panel open. Information goes first, controls go last.
 
 ## Connection and Sync Status Display
@@ -124,7 +126,7 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 3. custom (non-default) relay -> `ConnectionStage.customNetwork`
 4. otherwise -> `ConnectionStage.alone`
 
-Renders `ConnectionProgress` + sync/vault indicators when encrypted. The `loading` branch of `membersAsync` reports `stageFor(false)` rather than a flat "Offline" — our own link is already known.
+**Status by exception (2026-09-24):** an ENCRYPTED room shows no `ConnectionProgress` at all, only sync or vault work in progress; offline, alone and custom network still render. The mobile `_MobileChannelStatus` hides the encrypted stage too. The `loading` branch of `membersAsync` reports `stageFor(false)` rather than a flat "Offline" — our own link is already known.
 
 **"Offline" is about US, never about an empty room (2026-07-27, GitHub issue #23).** The header used to fall through to `offline` whenever nobody else was online, so a connected, synced user sitting in a voice channel read "Offline". `ConnectionStage.alone` ("Only you", `LucideIcons.users`) now covers that case and `offline` means the relay link is down. `ConnectionProgress` (`ui/components/connection_progress.dart`) carries a per-stage `HollowTooltip` plus an optional `tooltip:` override — the DM header passes one, because there the same stage describes the PERSON, not our relay. Pinned by `test/widget/connection_progress_test.dart`.
 
@@ -133,12 +135,12 @@ Renders `ConnectionProgress` + sync/vault indicators when encrypted. The `loadin
 Mobile has its own equivalent: `_MobileChannelStatus` in `mobile_chat_route.dart` (the mobile channel header gained Encrypted/Offline status + the NSFW badge `_MobileNsfwBadge` on the left, 2026-06-21). It carries the same four-stage order, including `alone`.
 
 `_SyncIndicator`: Watches `serverSyncStatusProvider(serverId)` and `syncProgressProvider[serverId]`. Four states:
-- **syncing** -- accent color spinning refresh icon, label "Syncing N/M..." (or just "Syncing...").
-- **synced** -- green success dot, label "Synced".
-- **retrying** -- warning color spinning refresh icon, label "Retrying...".
-- **failed** -- red error dot, label "Sync failed", plus a retry button that calls `network_api.requestChannelSync()` (throttled to 3s between taps).
+- **syncing** -- `HollowSpinner` + "Syncing N of M" (or "Syncing") in `textSecondary`.
+- **synced** -- NOTHING (healthy is silent, 2026-09-24).
+- **retrying** -- warning spinner + "Retrying sync".
+- **failed** -- error dot + "Sync failed" + a ghost compact Retry that calls `network_api.requestChannelSync()` (throttled to 3s between taps).
 
-`_VaultHealthIndicator`: Only renders for servers with 6+ members (erasure coding threshold). Watches `vaultStatusProvider[serverId]`. Only shows when there are active uploads or downloads (not complete/failed). Shows `LucideIcons.database` icon with tooltip describing activity count.
+`_VaultHealthIndicator`: Only renders for servers with 6+ members (erasure coding threshold). Watches `vaultStatusProvider[serverId]`. Only shows when there are active uploads or downloads (not complete/failed). Shows a grey `LucideIcons.database` icon with a tooltip describing the activity count.
 
 ## Pinned Messages Dialog
 

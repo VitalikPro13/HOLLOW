@@ -6,7 +6,7 @@
 
   {"op": "log", "message": "A video first, so the walk has one to reach."},
   {"op": "attach_file", "path": "${UI_PROBE_FIXTURES}/probe_video.mp4"},
-  {"op": "tap", "target": "hint:Type a message..."},
+  {"op": "tap", "target": "field"},
   {"op": "enter_text", "value": "probe viewer video"},
   {"op": "key", "value": "enter"},
   {"op": "wait_for", "target": "type:VideoMessageBubble", "timeout_ms": 60000},
@@ -14,7 +14,7 @@
 
   {"op": "log", "message": "Send the fixture image into the open DM."},
   {"op": "attach_file", "path": "${UI_PROBE_FIXTURES}/probe_image.png"},
-  {"op": "tap", "target": "hint:Type a message..."},
+  {"op": "tap", "target": "field"},
   {"op": "enter_text", "value": "probe viewer image"},
   {"op": "key", "value": "enter"},
   {"op": "wait_for", "target": "text:probe viewer image", "timeout_ms": 60000},

@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/slashed_icon.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
@@ -162,7 +163,7 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     }
     return _ActionRow(
       icon: LucideIcons.download,
-      label: fileBarActionLabel(action, download: 'Save File'),
+      label: fileBarActionLabel(action, download: 'Save file'),
       onTap: () {
         Navigator.pop(context);
         download();
@@ -172,6 +173,61 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
 
   Widget _buildActionsView(HollowTheme hollow) {
     final fileRow = _fileActionRow();
+    void run(VoidCallback action) {
+      Navigator.pop(context);
+      action();
+    }
+
+    // The same groups, in the same order, as the desktop message menu.
+    final groups = <List<Widget>>[
+      [
+        if (widget.onReply != null)
+          _ActionRow(
+            icon: LucideIcons.reply,
+            label: 'Reply',
+            onTap: () => run(widget.onReply!),
+          ),
+      ],
+      [
+        if (widget.onCopy != null)
+          _ActionRow(
+            icon: LucideIcons.copy,
+            label: 'Copy text',
+            onTap: () => run(widget.onCopy!),
+          ),
+        ?fileRow,
+        if (widget.onPin != null)
+          _ActionRow(
+            icon: widget.isPinned ? LucideIcons.pinOff : LucideIcons.pin,
+            label: widget.isPinned ? 'Unpin message' : 'Pin message',
+            onTap: () => run(widget.onPin!),
+          ),
+        if (widget.onEdit != null)
+          _ActionRow(
+            icon: LucideIcons.pencil,
+            label: 'Edit message',
+            onTap: () => run(widget.onEdit!),
+          ),
+      ],
+      [
+        if (widget.onInfo != null)
+          _ActionRow(
+            icon: LucideIcons.shieldCheck,
+            label: 'Message proof',
+            onTap: () => run(widget.onInfo!),
+          ),
+      ],
+      [
+        if (widget.onDelete != null)
+          _ActionRow(
+            icon: LucideIcons.trash2,
+            label: 'Delete message',
+            color: hollow.error,
+            onTap: () => setState(() => _view = _SheetView.deleteConfirm),
+          ),
+      ],
+    ].where((g) => g.isNotEmpty).toList();
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -181,7 +237,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
           timestamp: widget.timestamp,
         ),
         const SizedBox(height: HollowSpacing.md),
-
         if (widget.onReaction != null) ...[
           _QuickReactionsRow(
             onReaction: (emoji) {
@@ -191,62 +246,13 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
             onMoreTap: () => setState(() => _view = _SheetView.allEmojis),
           ),
           const SizedBox(height: HollowSpacing.sm),
-          const HollowDivider(),
         ],
-
-        if (widget.onReply != null)
-          _ActionRow(
-            icon: LucideIcons.reply,
-            label: 'Reply',
-            onTap: () {
-              Navigator.pop(context);
-              widget.onReply!();
-            },
-          ),
-        if (widget.onEdit != null)
-          _ActionRow(
-            icon: LucideIcons.pencil,
-            label: 'Edit Message',
-            onTap: () {
-              Navigator.pop(context);
-              widget.onEdit!();
-            },
-          ),
-        if (widget.onCopy != null)
-          _ActionRow(
-            icon: LucideIcons.copy,
-            label: 'Copy Text',
-            onTap: () {
-              Navigator.pop(context);
-              widget.onCopy!();
-            },
-          ),
-        ?fileRow,
-        if (widget.onInfo != null)
-          _ActionRow(
-            icon: LucideIcons.shieldCheck,
-            label: 'Message Info',
-            onTap: () {
-              Navigator.pop(context);
-              widget.onInfo!();
-            },
-          ),
-        if (widget.onPin != null)
-          _ActionRow(
-            icon: LucideIcons.pin,
-            label: widget.isPinned ? 'Unpin Message' : 'Pin Message',
-            onTap: () {
-              Navigator.pop(context);
-              widget.onPin!();
-            },
-          ),
-        if (widget.onDelete != null)
-          _ActionRow(
-            icon: LucideIcons.trash2,
-            label: 'Delete Message',
-            color: hollow.error,
-            onTap: () => setState(() => _view = _SheetView.deleteConfirm),
-          ),
+        for (final group in groups) ...[
+          const HollowDivider(),
+          const SizedBox(height: HollowSpacing.xs),
+          ...group,
+          const SizedBox(height: HollowSpacing.xs),
+        ],
       ],
     );
   }
@@ -254,34 +260,28 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
   Widget _buildAllEmojisView(HollowTheme hollow) {
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
           child: Row(
             children: [
-              HollowPressable(
-                onTap: () => setState(() => _view = _SheetView.actions),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(LucideIcons.chevronLeft, size: 16, color: hollow.textSecondary),
-                    const SizedBox(width: 4),
-                    Text('Back', style: HollowTypography.body.copyWith(color: hollow.textSecondary)),
-                  ],
-                ),
+              HollowIconButton(
+                icon: LucideIcons.chevronLeft,
+                label: 'Back',
+                size: 44,
+                onPressed: () => setState(() => _view = _SheetView.actions),
               ),
-              const Spacer(),
-              Text('Reactions', style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-              )),
-              const Spacer(),
-              const SizedBox(width: 60),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                'Add a reaction',
+                style: HollowTypography.subheading
+                    .copyWith(color: hollow.textPrimary),
+              ),
             ],
           ),
         ),
-        const SizedBox(height: HollowSpacing.md),
-
+        const SizedBox(height: HollowSpacing.sm),
         SizedBox(
           height: MediaQuery.sizeOf(context).height * 0.5,
           child: EmojiPickerBody(
@@ -301,30 +301,33 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(LucideIcons.alertTriangle, size: 32, color: hollow.error),
-          const SizedBox(height: HollowSpacing.md),
           Text(
             'Delete this message?',
-            style: HollowTypography.subheading.copyWith(color: hollow.textPrimary),
+            style:
+                HollowTypography.subheading.copyWith(color: hollow.textPrimary),
           ),
           const SizedBox(height: HollowSpacing.xs),
           Text(
             "This can't be undone.",
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+            style: HollowTypography.bodyTouch
+                .copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.lg),
           Row(
             children: [
               Expanded(
                 child: HollowButton.ghost(
+                  expand: true,
                   onPressed: () => Navigator.pop(context),
                   child: const Text('Cancel'),
                 ),
               ),
-              const SizedBox(width: HollowSpacing.md),
+              const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: HollowButton.danger(
+                  expand: true,
                   onPressed: () {
                     Navigator.pop(context);
                     widget.onDelete!();
@@ -341,6 +344,8 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
   }
 }
 
+/// The message the sheet acts on, so a long press on the wrong row is caught
+/// before anything happens to it.
 class _MessagePreview extends StatelessWidget {
   final String senderName;
   final String messageText;
@@ -356,51 +361,40 @@ class _MessagePreview extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(HollowSpacing.sm),
-        decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(color: hollow.border),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    senderName,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.accent,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  senderName,
+                  overflow: TextOverflow.ellipsis,
+                  style: HollowTypography.label
+                      .copyWith(color: hollow.textPrimary),
                 ),
-                Text(
-                  timestamp,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
-                  ),
-                ),
-              ],
-            ),
-            if (messageText.isNotEmpty) ...[
-              const SizedBox(height: 2),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
               Text(
-                messageText,
-                style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+                timestamp,
+                style: HollowTypography.monoSmall
+                    .copyWith(color: hollow.textTertiary),
               ),
             ],
+          ),
+          if (messageText.isNotEmpty) ...[
+            const SizedBox(height: HollowSpacing.xxs),
+            Text(
+              messageText,
+              style: HollowTypography.bodyTouch
+                  .copyWith(color: hollow.textSecondary),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -415,42 +409,36 @@ class _QuickReactionsRow extends StatelessWidget {
     required this.onMoreTap,
   });
 
+  static const double _size = 44;
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    Widget cell({required String label, required VoidCallback onTap, required Widget child}) =>
+        HollowPressable(
+          onTap: onTap,
+          semanticLabel: label,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          backgroundColor: hollow.elevated,
+          child: SizedBox.square(dimension: _size, child: Center(child: child)),
+        );
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           for (int i = 0; i < _kQuickReactionCount; i++)
-            HollowPressable(
+            cell(
+              label: 'React ${kQuickReactionEmojis[i]}',
               onTap: () => onReaction(kQuickReactionEmojis[i]),
-              semanticLabel: 'React ${kQuickReactionEmojis[i]}',
-              child: Container(
-                width: 42,
-                height: 42,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: hollow.elevated,
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                ),
-                child: Text(kQuickReactionEmojis[i], style: const TextStyle(fontSize: 22)),
-              ),
+              child: Text(kQuickReactionEmojis[i],
+                  style: HollowTypography.heading),
             ),
-          HollowPressable(
+          cell(
+            label: 'More reactions',
             onTap: onMoreTap,
-            semanticLabel: 'More reactions',
-            child: Container(
-              width: 42,
-              height: 42,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              child: Icon(LucideIcons.plus, size: 18, color: hollow.textSecondary),
-            ),
+            child: Icon(LucideIcons.smilePlus,
+                size: 20, color: hollow.textSecondary),
           ),
         ],
       ),
@@ -479,30 +467,33 @@ class _ActionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final c = color ?? hollow.textPrimary;
+    final iconColor = color ?? hollow.textSecondary;
     return HollowPressable(
       onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg,
-          vertical: HollowSpacing.sm + 2,
-        ),
-        child: Row(
-          children: [
-            if (slashed)
-              SlashedIcon(
-                icon: icon,
-                size: 18,
-                color: c,
-                // The sheet's own surface, so the slash cuts the glyph cleanly.
-                backgroundColor: hollow.overlay,
-              )
-            else
-              Icon(icon, size: 18, color: c),
-            const SizedBox(width: HollowSpacing.md),
-            Text(label, style: HollowTypography.body.copyWith(color: c)),
-          ],
+      child: SizedBox(
+        height: 52,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          child: Row(
+            children: [
+              if (slashed)
+                SlashedIcon(
+                  icon: icon,
+                  size: 20,
+                  color: iconColor,
+                  // The sheet's own surface, so the slash cuts the glyph.
+                  backgroundColor: hollow.overlay,
+                )
+              else
+                Icon(icon, size: 20, color: iconColor),
+              const SizedBox(width: HollowSpacing.lg),
+              Text(
+                label,
+                style: HollowTypography.bodyTouch
+                    .copyWith(color: color ?? hollow.textPrimary),
+              ),
+            ],
+          ),
         ),
       ),
     );

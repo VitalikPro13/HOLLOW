@@ -320,10 +320,11 @@ class ChannelChatNotifier
 
   /// Load history for a channel from SQLCipher.
   /// Also requests a background sync from connected peers.
-  Future<void> loadHistory(String serverId, String channelId) async {
+  /// False when the local read failed, so the pane can offer a retry.
+  Future<bool> loadHistory(String serverId, String channelId) async {
     // Conference chat is RAM-only: nothing in the DB, no sync to request —
     // whatever is in memory IS the meeting's chat.
-    if (serverId.startsWith('conf:')) return;
+    if (serverId.startsWith('conf:')) return true;
     // .catchError, not try/catch: fire-and-forget — an async rejection (e.g.
     // "Node is not running" at startup) would escape a sync try/catch.
     network_api.requestChannelSync(
@@ -433,7 +434,9 @@ class ChannelChatNotifier
       }
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load channel history: $e');
+      return false;
     }
+    return true;
   }
 
   /// Reload reactions from DB for the current in-memory messages.

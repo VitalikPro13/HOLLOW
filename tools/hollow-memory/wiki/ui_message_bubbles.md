@@ -4,140 +4,24 @@ Covers every message rendering widget, action bar, text parser, link preview car
 
 ---
 
-## MessageBubble (DM)
+## MessageRow (the one message row, 2026-09-24)
 
-**File:** `lib/src/ui/chat/message_bubble.dart`
-**Class:** `MessageBubble extends ConsumerWidget`
-**Purpose:** Flat message row for DM conversations. No chat-bubble wrapper -- content is laid out horizontally with an avatar on the left.
+**File:** `lib/src/ui/chat/message_row.dart`
+**Class:** `MessageRow extends ConsumerWidget`
 
-### Constructor Parameters
+The only message row: DMs, channels, meetings, the guest view, the archive viewers and the phone all render through it. `MessageBubble` (`message_bubble.dart`, DM) and `ChannelMessageBubble` (`channel_message_bubble.dart`) are thin adapters that map their model's fields onto it and keep every call site unchanged. Before 2026-09-24 they were two ~90%-identical copies that had already drifted.
 
-| Parameter | Type | Description |
-|---|---|---|
-| `message` | `ChatMessage` | The DM message model |
-| `peerId` | `String` | Peer ID of the conversation partner |
-| `showHeader` | `bool` | Whether to show avatar + name + timestamp (group leader) or just indented text (continuation) |
-| `replyToSenderName` | `String?` | Display name of the person being replied to |
-| `replyToText` | `String?` | Quoted text of the message being replied to |
-| `replyToImagePath` | `String?` | Disk path to a thumbnail if the replied-to message had an image |
-| `isHighlighted` | `bool` | Amber-tinted background when this message is scroll-targeted |
-| `onReplyTap` | `VoidCallback?` | Callback to scroll to the original replied-to message |
-| `onToggleReaction` | `void Function(String emoji)?` | Callback to toggle an emoji reaction |
-| `album` | `List<AlbumItem>?` | Every item of the album this row anchors, itself first; null for a plain message. The file slot then renders `AlbumBubble` and the text is `albumCaption(...)` over the items, so the caption shows whichever item carries it. `ChannelMessageBubble` takes the same param |
+**Inputs:** `messageId`, `senderId` (raw, device or master), `isMe`, `text`, `timestamp`, `editedAt`, `replyToMid`, `reactions`, `fileAttachment`, `linkPreview`, `showHeader`; `serverId` (non-null makes it a channel row: sender resolved with the server nickname via `serverDisplayNameForPeer`, mentions against `serverMemberNamesProvider`, `ProfileTapTarget` gets the nickname + server); `replyToSenderId/Name/Text/ImagePath`, `isHighlighted`, `isMentioned` (both paint the 8% accent wash), `onReplyTap`, `onToggleReaction`, `tileWithPrev/Next` (sticker tiling), `album`.
 
-### Layout — Header Mode (`showHeader == true`)
+**Sender:** always collapsed to the MASTER through `deviceLinkProvider.identityOf` (public channels store raw frame authors; old rows predate the Rust resolve).
 
-```
-AnimatedContainer (400ms easeOut)
-  Row (crossAxisAlignment: start)
-    HollowAvatar (32px, paddingTop 5)
-    SizedBox(width: 10)
-    Expanded Column:
-      Row: senderName (bold 13px) + SizedBox(8) + time (10px muted)
-      SizedBox(height: 3)
-      ?replyWidget
-      ?messageTextWidget
-      ?linkPreviewWidget
-      ?hollowLinkWidgets
-      ?fileWidget
-      ?reactionBarWidget
-```
+**Name colour:** `nameColorFor(master, hollow)` (`core/color_utils.dart`): FNV-1a hash of the master id onto the hue circle minus 35 degrees either side of the CURRENT accent, tone raised to 7:1 on every dark surface / 5:1 on every light one. Your own name is `accentText`. No own-message strip any more (`OwnMessageMarker` and its test were deleted): the accent name is the mark.
 
-Padding: `top: 4, bottom: 4, left: HollowSpacing.md, right: HollowSpacing.md`.
+**Cozy (default):** 36 px avatar, `md` 12 gap (`kMessageIndent` 48), name `body` 600 (`bodyTouch` on a phone), time `monoSmall` + tabular figures at `textTertiary`. A grouped continuation (`showHeader == false`) keeps the avatar column empty and shows its time there only while the row is hovered (`_HoverTime` reads `HoverScope`). Padding is on the ramp: header row `xs` top, `xxs` bottom; continuations `xxs`; tiled seams drop to 0.
 
-### Layout — Continuation Mode (`showHeader == false`)
+**Compact** (`messageDisplayProvider == MessageDisplay.compact`, `core/providers/layout_provider.dart`, loaded in `_bootstrap`, set in Appearance on both platforms): one baseline-aligned row of time (40 wide, right-aligned mono), name (max 160, ellipsis) and the body column; every row repeats time and name; no avatars.
 
-Same vertical stack of content widgets, but:
-- No avatar, no name row, no timestamp.
-- Left padding is `HollowSpacing.md + indent` where `indent = 32 + 10 = 42px` (aligns text under the header mode's text column).
-- Vertical padding reduced to `top: 2, bottom: 2`.
-
-### Decoration Rules
-
-- **Own messages:** `OwnMessageMarker` (from `chat_pane_shared.dart`) wraps the row and paints a `kOwnMessageBarWidth` (3px) accent pill with rounded ends, POSITIONED `kOwnMessageBarInset` (4px) inside the row's left edge. Not a border: it costs the row no layout, and it runs the row's FULL height so a grouped run of your messages reads as one continuous bar instead of a dashed line. Both bubbles apply it through `markedAsOwn({isMe, row})`, so `find.byType(OwnMessageMarker)` is exactly the set of own-message rows.
-- **Highlighted messages:** Accent background at 8% alpha, on the row's own `AnimatedContainer.decoration`. Independent of the marker now — the two used to be fused in one `BoxDecoration`.
-- **Other messages:** No decoration.
-- **History (2026-08-21, issue #54 follow-up):** the marker was a `Border(right:)` until the scroll rail took the gutter, where it landed 4px from the thumb and read as one confused double rule; then a `Border(left:)`, which welded it to the divider against the channel list so it read as a highlight on the PANEL. **A `Border` also INSETS its own Container's child**, so it shifted every own-message avatar 2px right of everyone else's until the row gave that back out of its padding — a positioned pill cannot, which is why that trap is retired. Guarded by `test/widget/message_accent_bar_test.dart`.
-
-### Name Color Logic
-
-`nameColorFromId(String id)` — top-level function. Deterministic hue from `id.hashCode % 360`, saturation 0.6, lightness 0.65. Own messages use the theme accent color instead.
-
-### Sender Name Resolution
-
-Reads `profileProvider` and `identityProvider`. For own messages, uses local peer ID; otherwise uses the conversation `peerId`. Display name comes from `displayNameFor(profiles, senderId)`.
-
-### Timestamp Format
-
-`HH:MM` (24-hour, zero-padded). Displayed at 10px font in muted secondary color.
-
-### Edit Indicator
-
-When `message.editedAt != null`, a `(edited)` suffix span is appended to the message text widget in 10px muted text at 50% alpha.
-
-### File-Only Detection
-
-`isFileOnly` is true when `message.fileAttachment != null` AND the text is empty or starts with `[file:`. In this case `messageTextWidget` is null -- only the file widget renders.
-
-### Reply Widget
-
-Built when `message.replyToMid != null && replyToText != null`. Structure:
-- Thin 2px vertical bar (secondary at 30% alpha, 28px tall, 1px radius)
-- Sender name in accent bold 10px
-- Reply text in secondary 11px, maxLines 1, ellipsized
-- If `replyToImagePath` exists and the file is present on disk: a 32x32 rounded thumbnail (GIF files use `GifFileImage`, others use `Image.file`)
-- If `onReplyTap` is provided, the entire reply widget is wrapped in `MouseRegion(cursor: click)` + `GestureDetector(onTap: onReplyTap)`.
-
-### Link Preview Widget
-
-When `message.linkPreview != null`: renders a `LinkPreviewCard` below the text with `xs` top padding.
-
-### Hollow Link Widgets
-
-Extracts `hollow://` links from message text (code blocks stripped first via regex). Up to 3 links rendered as `HollowLinkCard` instances in a vertical column with `xs` top padding each.
-
-### File Attachment Widget
-
-When `message.fileAttachment != null`: renders `FileAttachmentWidget` with `xs` top padding, or `AlbumBubble` when `album` is set.
-
-**Honest states (2026-09-05, memory `project_file_card_honest_states`).** A file whose bytes are not on disk no longer shows one Download button that can silently do nothing. `lib/src/ui/chat/file_card_status.dart::fileCardStatus()` is the ONE decision point (caption + control) read by the generic file card, the image placeholder, `AudioMessageBubble`, `VideoMessageBubble` and `StickerPackCard`; mobile reuses the same bubbles. Precedence: expired (`attachment.isExpired`, caption `Removed by this server's retention policy`, no control) > share-backed with zero seeders (`Waiting for a peer who has this file`, tap to retry) > Rust's `FileAvailability` state on the transfer row (`requesting` = the button's footprint holds a spinner, caption `Requesting...`; `waiting` = no control, DM caption `<name> is offline. Hollow will fetch it when they return.` / channel caption `Waiting for a peer who has this file`; `gone` = no control, `<name> no longer has this file`) > default Download. The caption replaces the size line. The `Requesting file...` toasts are gone on the FileRequest branch: the card is the feedback.
-
-**The hover bar, the right-click menu row and the mobile long-press sheet mirror the card** through `fileBarAction()` in the same helper (2026-09-06): `download` (label `Download`, mobile `Save File`), `stopWaiting` (busy or waiting: `SlashedIcon` download glyph, label `Stop waiting for this file`, tap = `cancelFileRequest` FFI then `clearAvailability`), `tryAgain` (gone: the plain action relabelled), `none` (expired). `MessageHoverWrapper` computes it with `ref.read` at hover time (the bar is a transient overlay). Guard tests: `test/file_card_states_test.dart`.
-
-### Reaction Bar Widget
-
-When `message.reactions` is non-empty: renders `ReactionBar` passing `localPeerId` and `onToggleReaction`.
-
----
-
-## ChannelMessageBubble
-
-**File:** `lib/src/ui/chat/channel_message_bubble.dart`
-**Class:** `ChannelMessageBubble extends ConsumerWidget`
-**Purpose:** Flat message row for server channel messages. Structurally near-identical to `MessageBubble` with channel-specific additions.
-
-### Differences from MessageBubble
-
-1. **Model type:** Uses `ChannelChatMessage` instead of `ChatMessage`.
-2. **Multi-device sender collapse (device→master):** `build()` first resolves `senderMaster = ref.watch(deviceLinkProvider).identityOf(message.senderId)` and keys EVERYTHING on `senderMaster` — profile, server nickname, display name, `HollowAvatar`, `nameColorFromId`, and both `ProfileTapTarget`s. A channel message's `senderId` may be a per-DEVICE peer id (a public-channel row, or any row stored before the Rust device→master resolve fix); collapsing it makes the bubble show the person's name + avatar instead of a raw `12D3KooW…` + generic colored square — matching the member panel. Single-device senders resolve to themselves (no-op); `watch` keeps the row reactive if the link arrives after first paint. The collapse only re-renders — it does not rewrite the DB (a device-keyed row on disk heals via channel-sync `repair_channel_message_sender`).
-3. **Server nickname resolution:** Reads `serverNicknamesProvider(serverId)` and uses `serverDisplayNameFor(profiles, senderMaster, nickname:)` (the resolved master) which prefers server nicknames over profile display names.
-4. **`isMentioned` flag:** Extra boolean parameter. When true, the message gets the same accent-tinted background as `isHighlighted`. The highlight decoration condition is `isHighlighted || isMentioned`.
-5. **@mention name resolution:** Watches `serverMembersProvider(serverId)` to build a `Set<String>` of all member names (display names, nicknames, profile names). Passes this as `memberNames:` to `buildMessageText()` so @mentions are rendered as highlighted pills.
-6. **Avatar uses `senderMaster`** (the resolved master, not `message.senderId` raw, and not a `peerId` parameter).
-7. **`serverId` parameter:** Required, used for nickname and member lookups.
-
-### Layout
-
-Identical to `MessageBubble` -- same avatar size (32px), same gap (10px), same indent (42px), same padding, same decoration pattern.
-
-### @Mention Highlighting
-
-The `memberNames` set is built by iterating all server members and collecting:
-- The formatted display name via `serverDisplayNameFor`
-- The raw `m.nickname` if non-empty
-- The profile's `displayName` if non-empty
-
-This set is passed to `buildMessageText()` which forwards it to the `MessageText` widget for @mention pill rendering.
+**Body column, in order:** reply line (one line: reply icon, the replied person's name in THEIR colour, the snippet, optional 16 px image; tappable to jump), message text via `buildMessageText` (" (edited)" suffix in caption/tertiary; file-only rows skip it), link preview card, up to three hollow-link cards, album or file card, `ReactionBar`.
 
 ---
 
@@ -493,140 +377,42 @@ Toasts: info on request, error on failure.
 
 ## ReactionBar
 
-**File:** `lib/src/ui/chat/reaction_bar.dart`
-**Class:** `ReactionBar extends StatelessWidget`
-**Purpose:** Displays emoji reaction pills below a message.
-
-### Parameters
-
-- `reactions` — `Map<String, List<String>>`: emoji to list of peer IDs.
-- `localPeerId` — current user's peer ID for highlighting own reactions.
-- `onToggleReaction` — `void Function(String emoji)?`: called on tap. Null in read-only mode (pills render but are not tappable).
-
-### Layout
-
-Returns `SizedBox.shrink()` if reactions is empty.
-
-`Wrap` with spacing 4, runSpacing 4. Reactions sorted by count descending (insertion order for ties).
-
-Each pill is a `HollowPressable` wrapping a `Container`:
-- **Own reaction:** accent at 15% alpha background, accent at 40% alpha border, accent-colored count text at w600.
-- **Others' reaction:** elevated background, border color, secondary count text at normal weight.
-- Content: Row with emoji (14px) + SizedBox(3) + count (caption 11px).
-- **Custom emote reactions:** a key matching the `[e:name:hash]` token (`parseEmoteToken` from `emote_image.dart`) renders an `EmoteImage` (17px) instead of Text; semantic label uses `:name:`.
-- Border radius: 12px (fully rounded pill shape).
+**File:** `lib/src/ui/chat/reaction_bar.dart`. One `HollowChip` per reaction (emoji or emote as `leading`, the count as the label), sorted by count then insertion. Yours is the SELECTED chip (accent-muted fill, accent text, weight unchanged). `onToggleReaction == null` renders them inert (read-only surfaces). Since 2026-09-24; before that a hand-built pill with a pill radius and a weight change.
 
 ---
 
 ## MessageActionBar
 
-**File:** `lib/src/ui/chat/message_action_bar.dart`
-**Purpose:** Hover-triggered action overlay that appears on messages, plus inline message editing.
+**File:** `lib/src/ui/chat/message_action_bar.dart`. The hover highlight, the hover bar, the message menu and inline edit, for every surface that wraps rows in `MessageHoverWrapper` (DM, channel, guest, archive viewers).
 
-### MessageActionBarController
+### MessageActionBarController / MessageActionBarScope
 
-`ChangeNotifier` that coordinates action bar visibility across all messages. Only one message can show its action bar at a time.
+Only one row shows its bar at a time: `claim(key, forceClose)` closes the previous owner, `release(key)`. `dismissAll()` still exists but the panes no longer call it on scroll (see below).
 
-- `claim(key, forceClose)` — takes ownership, closing any previously active bar.
-- `release(key)` — releases ownership if this key is active.
-- `dismissAll()` — force-dismisses the active overlay (used on scroll).
+### Hover (rebuilt 2026-09-24)
 
-### MessageActionBarScope
+The old version inserted a highlight OverlayEntry and a bar OverlayEntry at the row's position measured on hover, so any scroll stranded them over the wrong message, and each pane hid it by calling `dismissAll()` on every ScrollUpdate. Now:
 
-`StatefulWidget` that provides the shared controller to the widget tree. Accessed via `MessageActionBarScope.of(context)`.
+- **Highlight:** painted by the row itself, a `DecoratedBox` behind the message driven by `_highlighted` (row hovered OR bar hovered), colour `hollow.rowHover` (half a step from canvas to `elevated`, so a card inside the row still shows). No layout change, scrolls with the row.
+- **Bar:** an OverlayEntry of `Positioned.fromRect(list viewport, extended up by half the bar) > ClipRect > Stack > CompositedTransformFollower(link: the row's LayerLink, targetAnchor: topRight, followerAnchor: centerRight, offset -16)`. It straddles the row's top edge and the compositor carries it with the row. The theme is read from the ENTRY's context so a theme switch repaints it.
+- **Handoff:** row exit starts a 60 ms timer; entering the bar cancels it (overlay regions are opaque, so the row always sees the exit first). A scroll under a still pointer moves the hover to the next row by itself (MouseTracker re-hit-tests after frames).
+- Pinned by `test/widget/message_hover_test.dart`.
 
-### MessageHoverWrapper
+### The bar (`_ActionBarContent`, 32 px, `overlay` + hairline + `HollowShadows.float`)
 
-**Class:** `MessageHoverWrapper extends StatefulWidget`
-**Purpose:** Wraps a message widget with hover-triggered overlays.
+Three quick reactions (`kQuickReactionEmojis[0..2]`), a hairline, Add reaction (opens the full picker anchored to the button), Reply, Edit (own messages only), More. Each is a `_BarButton` (24 px square inside the 32 bar, 16 px icon, tooltip + semantic label). Download, copy, pin, proof and delete moved OFF the bar into the menu. More opens the menu leftward from the button (`alignEnd`).
 
-**Parameters:**
+### The message menu (right click or More)
 
-| Parameter | Type | Description |
-|---|---|---|
-| `child` | `Widget` | The message bubble widget |
-| `isMe` | `bool` | Whether this is the current user's message |
-| `messageId` | `String?` | Message ID for edit/delete operations |
-| `currentText` | `String` | Current message text (for edit prefill) |
-| `isEditing` | `bool` | Whether inline edit mode is active |
-| `onEditStart` | `VoidCallback?` | Start editing |
-| `onEditSubmit` | `void Function(String)?` | Submit edited text |
-| `onEditCancel` | `VoidCallback?` | Cancel editing |
-| `onDelete` | `VoidCallback?` | Delete message |
-| `onReply` | `VoidCallback?` | Reply to message |
-| `onReaction` | `void Function(String emoji)?` | Add reaction |
-| `onPin` | `VoidCallback?` | Pin message |
-| `onDownload` | `VoidCallback?` | Download file attachment |
-| `onCopy` | `VoidCallback?` | Copy message text |
-| `onCopyImage` | `VoidCallback?` | Copy image to clipboard |
-| `onInfo` | `VoidCallback?` | Show message proof/info |
+Built from the wrapper's callbacks, so a row never offers an action its surface did not wire: quick-reaction strip + Add reaction | Reply | Copy text, Copy image, the file action (mirrors the card via `fileBarAction()`: Download / Try again / Stop waiting), Pin or Unpin, Edit | Message proof, Copy message ID | Delete (danger, LAST since 2026-09-24).
 
-**Hover Behavior:**
+### Inline edit
 
-1. Mouse enters message area: `_onMessageEnter()` claims the controller slot, shows overlays.
-2. Mouse exits message area: starts 60ms dismiss timer.
-3. Mouse enters action bar: cancels dismiss timer.
-4. Mouse exits action bar: starts 60ms dismiss timer.
-5. If neither message nor bar are hovered after 60ms, overlays are removed.
+`_buildEditView`: a TextField on `elevated` with the hairline border (accent when focused), caption hint "Enter to save, Escape to cancel, Shift+Enter for a new line" in `textTertiary`. Keys via the FocusNode: Escape cancels, Enter submits if changed, Shift+Enter inserts a newline; tap outside cancels.
 
-**Right-click:** opens the full message context menu via `showHollowMenu` (issue #61). Message Proof used to BE the whole right-click; it is one row now. The rows are built from the callbacks this wrapper already holds, so all seven chat surfaces (DM, channel, guest, four archive viewers) got the menu with zero call-site changes, and a row can never offer an action the surface did not wire up.
+### Focus
 
-**Overlay Entries (two separate OverlayEntry instances):**
-
-1. **Highlight overlay:** Positioned exactly over the message. `IgnorePointer` container with `textPrimary` at 3% alpha. Gives a subtle hover tint.
-
-2. **Action bar overlay:** Vertically centered on the right side of the message. A floating `_ActionBarContent` widget.
-
-Position calculation:
-- `barTop = offset.dy + (size.height / 2) - 14` (center vertically)
-- `barRight = screenWidth - (offset.dx + size.width) + HollowSpacing.md`
-
-The action bar is only created if at least one action callback is non-null.
-
-Every action button calls `_dismissNow()` first (removes overlays) then invokes its callback. This prevents stale overlay state.
-
-**Overflow button (`_MoreButton`, issue #61):** a trailing `...` (`moreHorizontal`, semantic label "More message actions") that opens the SAME menu right-click gives. Without it the rows that live only in the menu (the quick-reaction strip, Copy message ID) were reachable by right-click and by nothing else. It captures its own position so the menu opens under the button rather than at the far-left origin of the message row.
-
-**Known gap:** message rows are not in the tab order (hundreds of rows would wreck Tab traversal), so Menu / Shift+F10 cannot reach this menu the way it reaches the sidebar and strip menus. Screen readers get it through the row's custom semantics action; keyboard-only sighted users get the overflow button, which still needs a hover to appear. A real fix means a message-focus model.
-
-### _ActionBarContent
-
-Floating bar with elevated background, border, drop shadow (black 15%, blur 6, offset 0,2). Row of `HollowPressable` icon buttons (14px icons, 6px padding each):
-
-| Button | Icon | Color | Condition |
-|---|---|---|---|
-| Download | `download` | accent | `onDownload != null` |
-| Copy text | `copy` | secondary | `onCopy != null` |
-| Copy image | `image` | secondary | `onCopyImage != null` |
-| Emoji reaction | `smile` | secondary | `onReaction != null` |
-| Reply | `reply` | secondary | `onReply != null` |
-| Message proof | `shieldCheck` | secondary | `onInfo != null` |
-| Pin | `pin` | secondary | `onPin != null` |
-| Edit | `pencil` | secondary | `onEdit != null` |
-| Delete | `trash2` | error | `onDelete != null` |
-
-Buttons are conditionally included -- only those with non-null callbacks appear.
-
-### _EmojiButton
-
-Special button that captures its `RenderBox` global position and passes it to the reaction callback. The position is used to anchor the emoji picker overlay.
-
-### Inline Edit Mode
-
-When `isEditing` is true, `MessageHoverWrapper.build()` returns `_buildEditView()` instead of the hover wrapper.
-
-**Edit view layout:**
-- Container with `textPrimary` at 3% alpha background, md horizontal / xs vertical padding.
-- `TextField` with `_editController`, maxLines 5, minLines 1, elevated fill color, accent-colored border (1.5px on focus).
-- Helper text below: "escape to cancel . enter to save . shift+enter for new line" (10px muted).
-
-**Edit key handling via FocusNode.onKeyEvent:**
-- Escape: calls `onEditCancel`.
-- Enter (no shift): submits if text changed and non-empty, otherwise cancels.
-- Shift+Enter: inserts newline at cursor position.
-- Tap outside (`onTapOutside`): cancels editing.
-
-When entering edit mode (`didUpdateWidget`): dismisses any hover overlay, updates controller text, requests focus, moves cursor to end. Also handled in `initState` when `widget.isEditing` is already true (happens when `ScrollablePositionedList.jumpTo()` destroys and recreates the widget during scroll-position restoration — `didUpdateWidget` never fires in that case).
+On desktop a click outside a TextField drops its focus (Flutter's default `onTapOutside`), so the panes' `_toggleReaction` hands focus back to the composer after a reaction (not while editing). See memory `feedback_desktop_tap_outside_unfocus`.
 
 ---
 
@@ -842,7 +628,7 @@ Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosti
 
 ### EmojiPickerBody (public, reusable)
 
-`EmojiPickerBody({serverId, onSelect})` — the tabbed body, embedded directly by mobile bottom sheets (`MobileChatRoute._showEmojiSheet`, `mobile_message_actions.dart` reactions view).
+`EmojiPickerBody({serverId, onSelect})` — the tabbed body, embedded by the expression picker's Emoji tab (both platforms) and the mobile long-press sheet's reactions view.
 
 - **Search field** (HollowTextField, isDense, autofocus) filters the active tab; on the FFZ tab it drives a 350ms-debounced endpoint search.
 - **Tabs:** `Emoji` (Unicode; recents removable via right-click/long-press context menu) / `Server` (only when `serverId != null`; from `serverEmotesProvider`) / `Mine` (personal set + Upload emote button; remove via right-click/long-press context menu — a topmost OverlayEntry, NOT showDialog, which renders behind the picker) / `FFZ` (default = curated popular list via proxy `curated=1`, global-sets fallback; tap = `ffzImportEmote` → add to personal set → insert token).
@@ -857,6 +643,10 @@ Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosti
 `kQuickReactionEmojis` (8 entries) — the mobile long-press quick row. The old ~30-emoji `kReactionEmojis` list is GONE.
 
 ---
+
+## ExpressionPicker (2026-09-24)
+
+**File:** `lib/src/ui/chat/expression_picker.dart`. The composer's ONE picker for emoji, GIFs and stickers, replacing three composer buttons. `showExpressionPicker()` (desktop Overlay host, 360 x 440, above its button, flips below when there is no room, steps aside via `hidden` while an emoji-tab dialog runs, #76) and `showExpressionSheet()` (phone, `showHollowSheet` at 62% height). Tabs Emoji / GIFs / Stickers with a 2 px accent bar under the open one (48 tall on touch); each tab is the existing body (`EmojiPickerBody`, `GifPickerBody`, `StickerPickerBody`) and ONLY the open tab is built, so the GIF tab never calls the proxy unless opened. The last tab is remembered for the run. An emoji inserts and closes; a GIF or sticker SENDS and the picker stays open (#36); sharing a pack closes it. The emoji body's first chip is "Standard" (was "Emoji", which repeated the tab).
 
 ## VoiceRecorderBar
 
@@ -955,4 +745,4 @@ Both bubbles take two more flags from the pane, decided the same way `showHeader
 - **profileProvider + serverNicknamesProvider** — name resolution for sender display names, @mention matching.
 - **serverMembersProvider** — member list for @mention name set construction in channel messages.
 - **shareTabProvider** — share state for "Keep & Seed" buttons and `HollowLinkCard` share status.
-- **MessageActionBarScope** — inherited controller ensuring only one message's action bar is visible at a time. Parent should call `controller.dismissAll()` on scroll.
+- **MessageActionBarScope** — inherited controller ensuring only one message's action bar is visible at a time. No dismissal on scroll: the bar follows its row through a LayerLink.

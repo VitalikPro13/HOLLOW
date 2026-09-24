@@ -299,7 +299,8 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
   }
 
   /// Load chat history from SQLCipher for a peer.
-  Future<void> loadHistory(String peerId) async {
+  /// False when the local read failed, so the pane can offer a retry.
+  Future<bool> loadHistory(String peerId) async {
     try {
       final storageService = ref.read(storageServiceProvider);
       final stored = await storageService.loadMessages(
@@ -410,7 +411,9 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       }
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load history for $peerId: $e');
+      return false;
     }
+    return true;
   }
 
   /// Add a file message optimistically (sender side).

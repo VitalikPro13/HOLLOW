@@ -2,16 +2,19 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/moderation_format.dart';
-import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
@@ -48,14 +51,12 @@ import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
-import 'package:hollow/src/ui/chat/emoji_picker.dart';
-import 'package:hollow/src/ui/chat/gif_picker.dart';
-import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
@@ -86,12 +87,16 @@ class ChannelChatPane extends ConsumerStatefulWidget {
   /// Which split pane this is in: null = not split, 0 = left, 1 = right.
   final int? splitPaneIndex;
 
+  /// The text chat of a voice channel: its name carries no `#`.
+  final bool isVoice;
+
   const ChannelChatPane({
     super.key,
     required this.serverId,
     required this.channelId,
     required this.channelName,
     this.splitPaneIndex,
+    this.isVoice = false,
   });
 
   @override
@@ -116,6 +121,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   final _scrollOffsetController = ScrollOffsetController();
   final _focusNode = FocusNode();
   bool _historyLoaded = false;
+  bool _historyFailed = false;
   bool _isPicking = false;
   String? _editingMessageId;
   String? _replyToMessageId;
@@ -261,12 +267,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // but late-arriving network messages, which would hide the DB history.
     // `loadHistory` merges, so an optimistic in-flight send survives.
     _loadingHistory = true;
-    await ref
+    final ok = await ref
         .read(channelChatProvider.notifier)
         .loadHistory(widget.serverId, widget.channelId);
     if (!mounted) return;
     ref.read(pinnedProvider.notifier).loadPins(widget.serverId, widget.channelId);
     _historyLoaded = true;
+    _historyFailed = !ok;
     _loadingHistory = false;
     setState(() {});
     // ScrollablePositionedList honours `initialScrollIndex` only at first
@@ -422,7 +429,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         content: pinnedMessages.isEmpty
             ? const HollowEmptyState(
                 dense: true,
-                title: 'Pinned messages not loaded in current view.',
+                title: 'Pinned messages are further back than this view',
               )
             : Column(
                 mainAxisSize: MainAxisSize.min,
@@ -469,19 +476,17 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             children: [
               Text(
                 name,
-                style: HollowTypography.body.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
+                style: HollowTypography.label.copyWith(
+                  color: msg.isMe
+                      ? hollow.accentText
+                      : nameColorFor(pinnedMaster, hollow),
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
               Text(
                 _hhmm(msg.timestamp),
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary.withValues(alpha: 0.5),
-                  fontSize: 10,
-                ),
+                style: HollowTypography.monoSmall
+                    .copyWith(color: hollow.textTertiary),
               ),
             ],
           ),
@@ -1387,51 +1392,24 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       _isPicking = false;
     }
   }
-
-  /// Opens the emoji and emote picker anchored to the composer button, and
-  /// inserts the selection at the cursor.
-  void _openComposerEmojiPicker(BuildContext btnCtx) {
-    final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box == null
-        ? Offset.zero
-        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
-    showEmojiPicker(
-      context: context,
-      anchorPosition: anchor,
-      serverId: widget.serverId,
-      onSelect: _insertEmojiAtCursor,
-    );
-  }
-
   /// Opens the GIF picker anchored to the composer button. The pick arrives as
   /// an `[a:g:hash:w:h]` token and stages like an emote.
-  void _openComposerGifPicker(BuildContext btnCtx) {
-    final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box == null
-        ? Offset.zero
-        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
-    showGifPicker(
-      context: context,
-      anchorPosition: anchor,
-      onSelect: _sendAsset,
-      // A conference has no CRDT NSFW flag: it is the participants' own room,
-      // so it uses the user's rating like a DM.
-      serverId: _isConference ? null : widget.serverId,
-    );
-  }
-
   /// Opens the sticker picker anchored to the composer button. A pick SENDS
   /// immediately and the panel stays open.
-  void _openComposerStickerPicker(BuildContext btnCtx) {
-    final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box == null
-        ? Offset.zero
-        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
-    showStickerPicker(
+  /// Opens the emoji, GIF and sticker picker over the composer.
+  void _openExpressions(BuildContext buttonContext) {
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    showExpressionPicker(
       context: context,
-      anchorPosition: anchor,
-      onSelect: _sendAsset,
+      anchorPosition: box == null
+          ? Offset.zero
+          : overlayAnchorOf(buttonContext,
+              localOffset: Offset(box.size.width, 0)),
+      onEmoji: _insertEmojiAtCursor,
+      onAsset: _sendAsset,
       onSharePack: _shareFileToChat,
+      // A conference has no CRDT NSFW flag or emotes: it is the participants'
+      // own room, so it rates like a DM.
       serverId: _isConference ? null : widget.serverId,
     );
   }
@@ -1477,7 +1455,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
     // Sync can clear the cache while this channel is not being viewed, which
     // leaves nothing to render until the DB is read again.
-    if (allMessages.isEmpty && _historyLoaded && !_loadingHistory) {
+    if (allMessages.isEmpty &&
+        _historyLoaded &&
+        !_historyFailed &&
+        !_loadingHistory) {
       _historyLoaded = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _loadHistory();
@@ -1614,186 +1595,87 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// its non-controls first: losing the members toggle behind an overflow would
   /// strand the panel open with no way back.
   Widget _buildHeader(HollowTheme hollow) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm + 2,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(bottom: BorderSide(color: hollow.border)),
-      ),
-      child: LayoutBuilder(builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        final showStatus = width >= 280;
-        final showSplit = width >= 200;
-        return Row(
-        children: [
-          Icon(_isConference ? LucideIcons.video : LucideIcons.hash,
-              size: 20, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              widget.channelName,
-              style: HollowTypography.subheading.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (_isConference) ...[
-            const SizedBox(width: HollowSpacing.sm),
-            HollowTooltip(
+    final searchOpen = ref.watch(chatSearchOpenProvider);
+    final isSplit = ref.watch(splitViewProvider).isSplit;
+    final membersOpen = ref.watch(memberPanelProvider);
+    final pinnedIds =
+        ref.watch(pinnedProvider)['${widget.serverId}:${widget.channelId}'] ??
+            const <String>[];
+    return LayoutBuilder(builder: (context, constraints) {
+      final width = constraints.maxWidth;
+      return ChatHeaderBar(
+        leading: Icon(
+            _isConference
+                ? LucideIcons.video
+                : widget.isVoice
+                    ? LucideIcons.volume2
+                    : LucideIcons.hash,
+            size: 20,
+            color: hollow.textTertiary),
+        title: widget.channelName,
+        badges: [
+          if (_isConference)
+            const HollowTooltip(
               message:
                   "Meeting chat isn't stored. It disappears when the meeting ends",
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: 2,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.accent.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(hollow.radiusXs),
-                ),
-                child: Text(
-                  'Ephemeral',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accentText,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
+              child: HollowBadge('Ephemeral'),
             ),
-          ],
           if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
-              false) ...[
-            const SizedBox(width: HollowSpacing.sm),
+              false)
             const HollowBadge('NSFW', kind: HollowBadgeKind.error),
-          ],
-          if (showStatus) ...[
-            const SizedBox(width: HollowSpacing.md),
-            _ChannelConnectionStatus(
-              serverId: widget.serverId,
-              channelId: widget.channelId,
-            ),
-          ],
-          _buildPinnedHeaderButton(hollow),
-          const SizedBox(width: HollowSpacing.sm),
-          _buildSearchToggleButton(hollow),
-          // Members and split view are server concepts; a conference shows its
-          // participants in the call area instead.
-          if (!_isConference) ...[
-            const SizedBox(width: HollowSpacing.sm),
-            HollowTooltip(
-              message: 'Toggle member panel',
-              child: HollowPressable(
-                semanticLabel: 'Toggle member panel',
-                onTap: () => ref.read(memberPanelProvider.notifier).state =
-                    !ref.read(memberPanelProvider),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  LucideIcons.users,
-                  size: 20,
-                  color: ref.watch(memberPanelProvider)
-                      ? hollow.accent
-                      : hollow.textSecondary,
-                ),
-              ),
-            ),
-          ],
-          if (showSplit &&
-              !_isConference &&
-              ref.watch(layoutModeProvider) == LayoutMode.dock) ...[
-            const SizedBox(width: HollowSpacing.sm),
-            _buildSplitToggleButton(hollow),
-          ],
         ],
-        );
-      }),
-    );
-  }
-
-  /// Pin-count button, hidden while nothing is pinned in this channel.
-  Widget _buildPinnedHeaderButton(HollowTheme hollow) {
-    final pinKey = '${widget.serverId}:${widget.channelId}';
-    final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
-    if (pinnedIds.isEmpty) return const SizedBox.shrink();
-    final label =
-        '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}';
-    return HollowTooltip(
-      message: label,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: () => _showPinnedMessages(context, hollow, pinnedIds),
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.pin, size: 16, color: hollow.accent),
-            const SizedBox(width: 2),
-            Text(
-              '${pinnedIds.length}',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.accent,
-                fontWeight: FontWeight.w600,
-              ),
+        status: width >= 480
+            ? _ChannelConnectionStatus(
+                serverId: widget.serverId,
+                channelId: widget.channelId,
+              )
+            : null,
+        actions: [
+          // Hidden while nothing is pinned in this channel.
+          if (pinnedIds.isNotEmpty)
+            HollowIconButton(
+              icon: LucideIcons.pin,
+              count: '${pinnedIds.length}',
+              label:
+                  '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
+              onPressed: () => _showPinnedMessages(context, hollow, pinnedIds),
             ),
-          ],
-        ),
-      ),
-    );
+          HollowIconButton(
+            icon: LucideIcons.search,
+            label: 'Search messages',
+            selected: searchOpen,
+            onPressed: () {
+              ref.read(chatSearchOpenProvider.notifier).state = !searchOpen;
+              if (!searchOpen) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _searchFocusNode.requestFocus();
+                });
+              }
+            },
+          ),
+          // Members and split view are server concepts; a conference shows
+          // its participants in the call area instead.
+          if (!_isConference)
+            HollowIconButton(
+              icon: LucideIcons.users,
+              label: membersOpen ? 'Hide members' : 'Show members',
+              selected: membersOpen,
+              onPressed: () =>
+                  ref.read(memberPanelProvider.notifier).state = !membersOpen,
+            ),
+          if (width >= 200 &&
+              !_isConference &&
+              ref.watch(layoutModeProvider) == LayoutMode.dock)
+            HollowIconButton(
+              icon: LucideIcons.columns,
+              label: isSplit ? 'Close this pane' : 'Split view',
+              selected: isSplit,
+              onPressed: _handleSplitToggle,
+            ),
+        ],
+      );
+    });
   }
-
-  Widget _buildSearchToggleButton(HollowTheme hollow) {
-    return HollowTooltip(
-      message: 'Search messages',
-      child: HollowPressable(
-        semanticLabel: 'Search messages',
-        onTap: () {
-          final current = ref.read(chatSearchOpenProvider);
-          ref.read(chatSearchOpenProvider.notifier).state = !current;
-          if (!current) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _searchFocusNode.requestFocus();
-            });
-          }
-        },
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          LucideIcons.search,
-          size: 18,
-          color: ref.watch(chatSearchOpenProvider)
-              ? hollow.accent
-              : hollow.textSecondary,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSplitToggleButton(HollowTheme hollow) {
-    final isSplit = ref.watch(splitViewProvider).isSplit;
-    final label = isSplit ? 'Close this pane' : 'Split view';
-    return HollowTooltip(
-      message: label,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: _handleSplitToggle,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          LucideIcons.columns,
-          size: 18,
-          color: isSplit ? hollow.accent : hollow.textSecondary,
-        ),
-      ),
-    );
-  }
-
   /// In-channel message search: query field + up to 20 tappable results.
   Widget _buildSearchBar(HollowTheme hollow) {
     return Container(
@@ -1811,15 +1693,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           HollowTextField(
             controller: _searchController,
             focusNode: _searchFocusNode,
-            hintText: 'Search in #${widget.channelName}...',
+            hintText: 'Search in #${widget.channelName}',
             autofocus: true,
             isDense: true,
             prefixIcon: const Icon(LucideIcons.search, size: 16),
             onChanged: _onSearch,
-            style: HollowTypography.body.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 13,
-            ),
           ),
           if (_searchResults.isNotEmpty)
             ConstrainedBox(
@@ -1839,65 +1717,25 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   Widget _buildSearchResultTile(HollowTheme hollow, dynamic msg) {
     // Collapse device to master so a result shows the person, not a raw device
     // id.
-    final searchMaster =
-        ref.watch(deviceLinkProvider).identityOf(msg.senderId);
+    final links = ref.watch(deviceLinkProvider);
+    final searchMaster = links.identityOf(msg.senderId);
     final senderProfile =
         ref.watch(profileProvider.select((p) => p[searchMaster]));
     final senderNickname = ref.watch(serverNicknamesProvider(widget.serverId)
         .select((n) => n[searchMaster]));
-    final name = serverDisplayNameForPeer(
-      senderProfile,
-      searchMaster,
-      nickname: senderNickname ?? '',
-    );
-    final time = DateTime.fromMillisecondsSinceEpoch(msg.timestamp);
-    return Padding(
-      padding: const EdgeInsets.only(top: HollowSpacing.xs),
-      child: HollowPressable(
-        subtle: true,
-        onTap: () => _jumpToSearchResult(msg),
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        hoverColor: hollow.elevated,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.xs,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  name,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 11,
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  _hhmm(time),
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary.withValues(alpha: 0.5),
-                    fontSize: 10,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            Text(
-              msg.text,
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 12,
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
+    final isMe = searchMaster ==
+        links.identityOf(ref.watch(identityProvider).peerId ?? '');
+    return ChatSearchResultRow(
+      name: serverDisplayNameForPeer(
+        senderProfile,
+        searchMaster,
+        nickname: senderNickname ?? '',
       ),
+      nameColor:
+          isMe ? hollow.accentText : nameColorFor(searchMaster, hollow),
+      time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp),
+      text: msg.text,
+      onTap: () => _jumpToSearchResult(msg),
     );
   }
 
@@ -1946,26 +1784,37 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       HollowTheme hollow, List<ChannelChatMessage> messages) {
     return MessageActionBarScope(
       child: Builder(
-        builder: (scopeContext) => NotificationListener<ScrollNotification>(
-          onNotification: (notification) {
-            if (notification is ScrollUpdateNotification) {
-              MessageActionBarScope.of(scopeContext)?.dismissAll();
-            }
-            return false;
-          },
-          child: Container(
+        builder: (scopeContext) => Container(
             color: hollow.background,
             child: messages.isEmpty
-                ? (_historyLoaded
+                ? (_historyFailed
                     ? HollowEmptyState(
-                        glyph: LucideIcons.hash,
-                        title: 'Welcome to #${widget.channelName}',
+                        glyph: LucideIcons.circleAlert,
+                        title: "These messages didn't load",
+                        action: HollowButton.ghost(
+                          onPressed: () {
+                            setState(() {
+                              _historyLoaded = false;
+                              _historyFailed = false;
+                            });
+                            _loadHistory();
+                          },
+                          child: const Text('Try again'),
+                        ),
+                      )
+                    : _historyLoaded
+                    ? HollowEmptyState(
+                        glyph: widget.isVoice
+                            ? LucideIcons.volume2
+                            : LucideIcons.hash,
+                        title: widget.isVoice
+                            ? 'Welcome to ${widget.channelName}'
+                            : 'Welcome to #${widget.channelName}',
                         description: 'This is the beginning of the channel.',
                       )
                     : const SizedBox.shrink())
                 : _buildMessageList(hollow, messages),
           ),
-        ),
       ),
     );
   }
@@ -2182,6 +2031,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     String? localMentionNick,
     ({bool prev, bool next}) tiling,
   ) {
+    String? replySenderId;
     String? replySender;
     String? replyText;
     String? replyImagePath;
@@ -2196,6 +2046,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         // a device id.
         final origMaster =
             ref.watch(deviceLinkProvider).identityOf(original.senderId);
+        replySenderId = origMaster;
         replySender = serverDisplayNameFor(
           ref.watch(profileProvider),
           origMaster,
@@ -2220,6 +2071,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ? null
           : channelAlbumItems(albumMessages,
               identityOf: ref.read(deviceLinkProvider).identityOf),
+      replyToSenderId: replySenderId,
       replyToSenderName: replySender,
       replyToText: replyText,
       replyToImagePath: replyImagePath,
@@ -2353,6 +2205,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   Future<void> _toggleReaction(ChannelChatMessage msg, String emoji) async {
+    // A click outside the composer drops its focus on desktop; reacting is not
+    // leaving the conversation, so the next keystroke still lands in it.
+    if (_editingMessageId == null) _focusNode.requestFocus();
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
     final notifier = ref.read(channelChatProvider.notifier);
@@ -2668,79 +2523,24 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           : _buildComposerRow(hollow),
     );
   }
-
   Widget _buildComposerRow(HollowTheme hollow) {
-    return Row(
-      children: [
-        // Conference chat is RAM-only text, so a file or voice send would ride
-        // the persisting channel pipeline. Hidden, not disabled.
-        if (!_isConference) ...[
-          HollowPressable(
-            semanticLabel: 'Attach file',
-            onTap: _pickAndStageFile,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(
-              LucideIcons.paperclip,
-              color: hollow.textSecondary,
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            semanticLabel: 'Record voice message',
-            onTap: _staged.isNotEmpty ? null : _startVoiceRecording,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(
-              LucideIcons.mic,
-              color: _staged.isNotEmpty
-                  ? hollow.textSecondary.withValues(alpha: 0.4)
-                  : hollow.textSecondary,
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-        ],
-        Expanded(
-          child: CompositedTransformTarget(
-            link: _mentionLayerLink,
-            child: Focus(
-              onKeyEvent: (_, event) => _handleComposerKey(event),
-              child: chatComposerField(
-                hollow,
-                controller: _controller,
-                focusNode: _focusNode,
-                hintText: 'Message #${widget.channelName}',
-                onChanged: _onTextChanged,
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        composerGifButton(hollow, onOpen: _openComposerGifPicker),
-        composerStickerButton(hollow,
-            onOpen: _openComposerStickerPicker),
-        const SizedBox(width: HollowSpacing.xs),
-        composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
-        const SizedBox(width: HollowSpacing.sm),
-        if (_slowModeReadyAt != null) ...[
-          _buildSlowModeCountdown(),
-          const SizedBox(width: HollowSpacing.xs),
-        ],
-        HollowPressable(
-          semanticLabel: 'Send message',
-          onTap: _handleSend,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          backgroundColor: hollow.accent,
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            LucideIcons.send,
-            color: hollow.textOnAccent,
-            size: 20,
-          ),
-        ),
-      ],
+    return ChatComposerRow(
+      controller: _controller,
+      focusNode: _focusNode,
+      layerLink: _mentionLayerLink,
+      hintText: widget.isVoice
+          ? 'Message ${widget.channelName}'
+          : 'Message #${widget.channelName}',
+      onChanged: _onTextChanged,
+      onKey: _handleComposerKey,
+      // Conference chat is RAM-only text, so a file or voice send would ride
+      // the persisting channel pipeline. Hidden, not disabled.
+      onAttach: _isConference ? null : _pickAndStageFile,
+      onRecord: _isConference ? null : _startVoiceRecording,
+      onExpressions: _openExpressions,
+      onSend: _handleSend,
+      hasStaged: _staged.isNotEmpty || _stagedPreviewUrl != null,
+      beforeSend: _slowModeReadyAt != null ? _buildSlowModeCountdown() : null,
     );
   }
 
@@ -2850,18 +2650,16 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             .any((m) => m.peerId != localPeerId && online.contains(m.peerId));
         final stage = stageFor(anyOnline);
 
+        // Healthy is silent: an encrypted room shows only sync or vault work
+        // in progress.
+        if (stage != ConnectionStage.encrypted) {
+          return ConnectionProgress(key: ValueKey('conn-$serverId'), stage: stage);
+        }
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ConnectionProgress(
-              key: ValueKey('conn-$serverId'),
-              stage: stage,
-            ),
-            if (stage == ConnectionStage.encrypted) ...[
-              const SizedBox(width: HollowSpacing.md),
-              _SyncIndicator(serverId: serverId, channelId: channelId),
-              _VaultHealthIndicator(serverId: serverId),
-            ],
+            _SyncIndicator(serverId: serverId, channelId: channelId),
+            _VaultHealthIndicator(serverId: serverId),
           ],
         );
       },
@@ -2907,118 +2705,47 @@ class _SyncIndicatorState extends ConsumerState<_SyncIndicator> {
     final syncStatus = ref.watch(serverSyncStatusProvider(widget.serverId));
     final progress = ref.watch(syncProgressProvider)[widget.serverId];
 
-    if (syncStatus == ServerSyncStatus.idle ||
-        syncStatus == ServerSyncStatus.connecting) {
-      return const SizedBox.shrink();
-    }
-
-    final Color dotColor;
-    final bool useSpinning;
-    final String label;
-    final bool showRetry;
+    Widget line(Widget mark, String label, Color color) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            mark,
+            const SizedBox(width: HollowSpacing.xs),
+            Text(label, style: HollowTypography.caption.copyWith(color: color)),
+          ],
+        );
 
     switch (syncStatus) {
       case ServerSyncStatus.syncing:
-        dotColor = hollow.accent;
-        useSpinning = true;
-        label = progress != null && progress.totalCount > 0
-            ? 'Syncing ${progress.receivedCount}/${progress.totalCount}...'
-            : 'Syncing...';
-        showRetry = false;
-      case ServerSyncStatus.synced:
-        dotColor = hollow.success;
-        useSpinning = false;
-        label = 'Synced';
-        showRetry = false;
+        return line(
+          const HollowSpinner(),
+          progress != null && progress.totalCount > 0
+              ? 'Syncing ${progress.receivedCount} of ${progress.totalCount}'
+              : 'Syncing',
+          hollow.textSecondary,
+        );
       case ServerSyncStatus.retrying:
-        dotColor = hollow.warning;
-        useSpinning = true;
-        label = 'Retrying...';
-        showRetry = false;
+        return line(HollowSpinner(color: hollow.warning), 'Retrying sync',
+            hollow.warning);
       case ServerSyncStatus.failed:
-        dotColor = hollow.error;
-        useSpinning = false;
-        label = 'Sync failed';
-        showRetry = true;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            line(StatusDot(color: hollow.error), 'Sync failed', hollow.error),
+            const SizedBox(width: HollowSpacing.xs),
+            HollowButton.ghost(
+              compact: true,
+              onPressed: _retry,
+              child: const Text('Retry'),
+            ),
+          ],
+        );
       default:
         return const SizedBox.shrink();
     }
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (useSpinning)
-          _SpinningRefreshIcon(size: 10, color: dotColor)
-        else
-          StatusDot(color: dotColor),
-        const SizedBox(width: HollowSpacing.xs),
-        Text(
-          label,
-          style: HollowTypography.caption.copyWith(color: dotColor),
-        ),
-        if (showRetry) ...[
-          const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            semanticLabel: 'Retry sync',
-            onTap: _retry,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(2),
-            child: Icon(
-              LucideIcons.refreshCw,
-              size: 12,
-              color: hollow.error,
-            ),
-          ),
-        ],
-      ],
-    );
   }
 }
 
-/// A continuously spinning refresh icon.
-class _SpinningRefreshIcon extends StatefulWidget {
-  final double size;
-  final Color color;
-
-  const _SpinningRefreshIcon({required this.size, required this.color});
-
-  @override
-  State<_SpinningRefreshIcon> createState() => _SpinningRefreshIconState();
-}
-
-class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    final reduce = ReduceMotionController.instance.isReduced;
-    _controller = AnimationController(
-      vsync: this,
-      duration:
-          reduce ? Duration.zero : const Duration(milliseconds: 1500),
-    );
-    if (!reduce) _controller.repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return RotationTransition(
-      turns: _controller,
-      child:
-          Icon(LucideIcons.refreshCw, size: widget.size, color: widget.color),
-    );
-  }
-}
-
-/// Vault distribution health, as a coloured dot.
+/// Vault files moving between members, shown only while some are.
 class _VaultHealthIndicator extends ConsumerWidget {
   final String serverId;
   const _VaultHealthIndicator({required this.serverId});
@@ -3053,7 +2780,7 @@ class _VaultHealthIndicator extends ConsumerWidget {
       message: tooltip,
       child: Padding(
         padding: const EdgeInsets.only(left: HollowSpacing.sm),
-        child: Icon(LucideIcons.database, size: 13, color: hollow.accent),
+        child: Icon(LucideIcons.database, size: 14, color: hollow.textSecondary),
       ),
     );
   }

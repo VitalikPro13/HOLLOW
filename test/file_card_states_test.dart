@@ -354,7 +354,7 @@ void main() {
     });
   });
 
-  group('the hover bar itself', () {
+  group('the More menu of the hover bar', () {
     Future<void> hoverMessage(
       WidgetTester tester, {
       FileTransferState? row,
@@ -394,6 +394,10 @@ void main() {
       await mouse.moveTo(tester.getCenter(find.text('here is the file')));
       // Not pumpAndSettle: the tooltip and the bar keep timers running.
       await tester.pump();
+      // The file action lives on the card and in this menu, not on the bar.
+      await tester.tap(find.bySemanticsLabel('More message actions'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
     }
 
     testWidgets('nothing known: the plain Download action', (tester) async {

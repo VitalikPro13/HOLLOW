@@ -827,6 +827,7 @@ class EventStreamNotifier extends Notifier<bool> {
           // atomically, so live-delivered messages are never briefly wiped.
           chatNotifier.loadHistory(peerId).catchError((e) {
             debugPrint('[HOLLOW] Failed to load DM history after sync for $peerId: $e');
+            return false;
           });
           ref.read(unreadProvider.notifier).recomputeDmUnread(peerId);
           _requestMissingFilesForDm(peerId);

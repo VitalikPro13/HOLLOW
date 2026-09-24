@@ -114,6 +114,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         serverId: widget.serverId,
         channelId: widget.channelId,
         channelName: widget.channelName,
+        isVoice: true,
       );
     }
 
@@ -130,6 +131,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       serverId: widget.serverId,
       channelId: widget.channelId,
       channelName: widget.channelName,
+      isVoice: true,
     );
     final allUnwatched = vcState.unwatchedRemoteShares;
     final unwatched = allUnwatched
@@ -258,6 +260,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       serverId: widget.serverId,
                       channelId: widget.channelId,
                       channelName: widget.channelName,
+                      isVoice: true,
                     ),
                   ),
                 ),
@@ -633,6 +636,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       serverId: widget.serverId,
                       channelId: widget.channelId,
                       channelName: widget.channelName,
+                      isVoice: true,
                     ),
                   ),
                 ),
@@ -1639,6 +1643,7 @@ class _VcChatOverlayState extends State<VcChatOverlay> {
               serverId: widget.serverId,
               channelId: widget.channelId,
               channelName: widget.channelName,
+              isVoice: true,
             ),
           ),
         ),

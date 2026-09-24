@@ -181,7 +181,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
       ),
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.md),
@@ -192,7 +192,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(LucideIcons.package, size: 28, color: hollow.accent),
+                Icon(LucideIcons.package, size: 24, color: hollow.textSecondary),
                 const SizedBox(width: HollowSpacing.md),
                 Flexible(
                   child: Column(

@@ -1,50 +1,24 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/models/chat_message.dart';
-import 'package:hollow/src/core/color_utils.dart';
-import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/ui/chat/album_bubble.dart';
-import 'package:hollow/src/ui/chat/file_attachment_widget.dart';
-import 'package:hollow/src/ui/chat/hollow_link_card.dart';
-import 'package:hollow/src/ui/chat/bubble_perf.dart';
-import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
-import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/chat/link_preview_card.dart';
-import 'package:hollow/src/ui/chat/message_text_parser.dart';
-import 'package:hollow/src/ui/chat/profile_tap.dart';
-import 'package:hollow/src/ui/chat/reaction_bar.dart';
-import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
-import 'package:hollow/src/ui/components/support_glyph.dart';
-import 'package:hollow/src/ui/components/attachment_image.dart';
+import 'package:hollow/src/core/models/chat_message.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/ui/chat/message_row.dart';
 
-/// Flat message row for DMs. [showHeader] is false for a grouped continuation,
-/// which drops the avatar, name and timestamp.
+/// A DM message as a [MessageRow].
 class MessageBubble extends ConsumerWidget {
   final ChatMessage message;
   final String peerId;
   final bool showHeader;
+  final String? replyToSenderId;
   final String? replyToSenderName;
   final String? replyToText;
   final String? replyToImagePath;
   final bool isHighlighted;
   final VoidCallback? onReplyTap;
   final void Function(String emoji)? onToggleReaction;
-
-  /// This message and its neighbour are BOTH sticker-only and grouped, so the
-  /// seam is drawn continuous and a run becomes one tall image (see
-  /// [stickerTilingFor]).
   final bool tileWithPrev;
   final bool tileWithNext;
-
-  /// Every item of the album this message anchors, itself first. Null for a
-  /// message that renders on its own.
   final List<AlbumItem>? album;
 
   const MessageBubble({
@@ -52,6 +26,7 @@ class MessageBubble extends ConsumerWidget {
     required this.message,
     required this.peerId,
     required this.showHeader,
+    this.replyToSenderId,
     this.replyToSenderName,
     this.replyToText,
     this.replyToImagePath,
@@ -65,291 +40,31 @@ class MessageBubble extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final isMe = message.isMe;
-    final time =
-        '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
-    final isEdited = message.editedAt != null;
-
-    final localPeerId = ref.watch(identityProvider).peerId ?? '';
-    final senderId = isMe ? localPeerId : peerId;
-    final senderProfile =
-        ref.watch(profileProvider.select((p) => p[senderId]));
-    final senderName = displayNameForPeer(senderProfile, senderId);
-
-    const avatarSize = 32.0;
-    const avatarGap = HollowSpacing.sm + 2; // 10px
-    const indent = avatarSize + avatarGap;
-
-    final hasReply = message.replyToMid != null && replyToText != null;
-
-    Widget? replyWidget;
-    if (hasReply) {
-      final replyContent = Row(
-        children: [
-          Container(
-            width: 2,
-            height: 28,
-            decoration: BoxDecoration(
-              color: hollow.textSecondary.withValues(alpha: 0.3),
-              borderRadius: BorderRadius.circular(1),
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  replyToSenderName ?? '',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 10,
-                  ),
-                ),
-                Text(
-                  replyToText!,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          if (replyToImagePath != null && cachedFileExists(replyToImagePath!))
-            Padding(
-              padding: const EdgeInsets.only(left: HollowSpacing.sm),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: AttachmentImage(
-                  path: replyToImagePath!,
-                  animated: replyToImagePath!.toLowerCase().endsWith('.gif'),
-                  width: 32,
-                  height: 32,
-                  fit: BoxFit.cover,
-                ),
-              ),
-            ),
-        ],
-      );
-      replyWidget = Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: onReplyTap != null
-            ? HollowFocusRing(
-                enabled: onReplyTap != null,
-                onActivate: onReplyTap,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: onReplyTap,
-                    child: replyContent,
-                  ),
-                ),
-              )
-            : replyContent,
-      );
-    }
-
-    // A file placeholder carries no text of its own.
-    // An album shows its caption whichever item carries it.
-    final albumItems = album;
-    final text = albumItems == null
-        ? message.text
-        : albumCaption([for (final i in albumItems) i.text]);
-    final isFileOnly = message.fileAttachment != null &&
-        (text.isEmpty || text.startsWith('[file:'));
-    final messageTextWidget = isFileOnly
-        ? null
-        : buildMessageText(
-            text,
-            context,
-            tiling: (top: tileWithPrev, bottom: tileWithNext),
-            suffixSpans: isEdited
-                ? [
-                    TextSpan(
-                      text: ' (edited)',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textTertiary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ]
-                : null,
-          );
-
-    final linkPreviewWidget = message.linkPreview != null
-        ? Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.xs),
-            child: LinkPreviewCard(
-              preview: message.linkPreview!,
-              messageId: message.messageId,
-            ),
-          )
-        : null;
-
-    // Cheap gate first: no per-row RegExp compile or full-text scan for the
-    // overwhelmingly common no-link message.
-    final hollowLinks = mightContainHollowLinks(text)
-        ? extractHollowLinks(text.replaceAll(codeBlockRegex, ''))
-        : const <HollowLink>[];
-    final hollowLinkWidgets = hollowLinks.isNotEmpty
-        ? Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final link in hollowLinks.take(3))
-                Padding(
-                  padding: const EdgeInsets.only(top: HollowSpacing.xs),
-                  child: HollowLinkCard(link: link),
-                ),
-            ],
-          )
-        : null;
-
-    final fileWidget = albumItems != null
-        ? Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.xs),
-            child: AlbumBubble(items: albumItems),
-          )
-        : message.fileAttachment != null
-        ? Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.xs),
-            child: FileAttachmentWidget(
-              attachment: message.fileAttachment!,
-              messageId: message.messageId,
-              senderId: senderId,
-              timestampMs: message.timestamp.millisecondsSinceEpoch,
-              isMine: isMe,
-            ),
-          )
-        : null;
-
-    final reactionBarWidget = message.reactions.isNotEmpty
-        ? ReactionBar(
-            reactions: message.reactions,
-            localPeerId: localPeerId,
-            onToggleReaction: onToggleReaction,
-          )
-        : null;
-
-
-    // The row carries only the highlight wash; being YOURS is an
-    // [OwnMessageMarker] painted over it, which costs no layout.
-    final highlightDecoration = isHighlighted
-        ? BoxDecoration(color: hollow.accent.withValues(alpha: 0.08))
-        : null;
-
-    if (showHeader) {
-      return markedAsOwn(
-        isMe: isMe,
-        row: AnimatedContainer(
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeOut,
-          padding: EdgeInsets.only(
-            top: 4,
-            // A group header starts the run, so it never tiles upward.
-            bottom: tileWithNext ? 0 : 4,
-            left: HollowSpacing.md,
-            right: HollowSpacing.md,
-          ),
-          decoration: highlightDecoration,
-          child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 5),
-                  child: ProfileTapTarget(
-                    peerId: senderId,
-                    child: HollowAvatar(peerId: senderId, size: avatarSize),
-                  ),
-                ),
-                const SizedBox(width: avatarGap),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Flexible(
-                            child: ProfileTapTarget(
-                              peerId: senderId,
-                              child: Text(
-                                senderName,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: HollowTypography.body.copyWith(
-                                  color: isMe
-                                      ? hollow.accent
-                                      : nameColorFromId(senderId),
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                          ),
-                          // Opt-in by the holder, a shrunk box for everyone
-                          // else.
-                          SupportNameGlyph(peerId: senderId),
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text(
-                            time,
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textTertiary,
-                              fontSize: 10,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 3),
-                      ?replyWidget,
-                      ?messageTextWidget,
-                      ?linkPreviewWidget,
-                      ?hollowLinkWidgets,
-                      ?fileWidget,
-                      ?reactionBarWidget,
-                    ],
-                  ),
-                ),
-              ],
-            ),
-        ),
-      );
-    }
-
-
-    // A tiled seam drops the row padding on that side, and the block asset
-    // drops its own to match.
-    return markedAsOwn(
-      isMe: isMe,
-      row: AnimatedContainer(
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeOut,
-        padding: EdgeInsets.only(
-          top: tileWithPrev ? 0 : 2,
-          bottom: tileWithNext ? 0 : 2,
-          left: HollowSpacing.md + indent,
-          right: HollowSpacing.md,
-        ),
-        decoration: highlightDecoration,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ?replyWidget,
-            ?messageTextWidget,
-            ?linkPreviewWidget,
-            ?hollowLinkWidgets,
-            ?fileWidget,
-            ?reactionBarWidget,
-          ],
-        ),
-      ),
+    final sender = message.isMe
+        ? ref.watch(identityProvider).peerId ?? ''
+        : peerId;
+    return MessageRow(
+      messageId: message.messageId,
+      senderId: sender,
+      isMe: message.isMe,
+      text: message.text,
+      timestamp: message.timestamp,
+      editedAt: message.editedAt,
+      replyToMid: message.replyToMid,
+      reactions: message.reactions,
+      fileAttachment: message.fileAttachment,
+      linkPreview: message.linkPreview,
+      showHeader: showHeader,
+      replyToSenderId: replyToSenderId,
+      replyToSenderName: replyToSenderName,
+      replyToText: replyToText,
+      replyToImagePath: replyToImagePath,
+      isHighlighted: isHighlighted,
+      onReplyTap: onReplyTap,
+      onToggleReaction: onToggleReaction,
+      tileWithPrev: tileWithPrev,
+      tileWithNext: tileWithNext,
+      album: album,
     );
   }
 }

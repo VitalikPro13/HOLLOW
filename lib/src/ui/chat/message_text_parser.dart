@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -587,7 +588,8 @@ class MessageText extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final style = baseStyle ??
-        HollowTypography.body.copyWith(color: hollow.textPrimary);
+        (isTouchForm ? HollowTypography.bodyTouch : HollowTypography.body)
+            .copyWith(color: hollow.textPrimary);
 
     final scaler = MediaQuery.textScalerOf(context);
 
@@ -834,3 +836,6 @@ class _SpoilerTextState extends State<_SpoilerText> {
     );
   }
 }
+
+/// A phone or tablet: bigger message text, touch-sized targets.
+bool get isTouchForm => Platform.isAndroid || Platform.isIOS;

@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 /// Custom Hollow text field: flat, with no Material floating label.
 class HollowTextField extends StatefulWidget {
   final TextEditingController? controller;
@@ -25,6 +24,15 @@ class HollowTextField extends StatefulWidget {
   final TextInputType? keyboardType;
   final List<TextInputFormatter>? inputFormatters;
 
+  /// A control inside the field's trailing edge (the composer's emoji
+  /// button), laid out at its own size.
+  final Widget? trailing;
+
+  /// Focus keeps the resting hairline instead of the accent border, for a
+  /// field that holds focus all the time (the chat composer). The caret still
+  /// marks it.
+  final bool quietFocus;
+
   const HollowTextField({
     super.key,
     this.controller,
@@ -45,6 +53,8 @@ class HollowTextField extends StatefulWidget {
     this.showCounter = true,
     this.keyboardType,
     this.inputFormatters,
+    this.trailing,
+    this.quietFocus = false,
   });
 
   @override
@@ -61,7 +71,6 @@ final TextSelectionControls _selectionControls = MaterialTextSelectionControls()
 class _HollowTextFieldState extends State<HollowTextField>
     with SingleTickerProviderStateMixin {
   late final FocusNode _focusNode;
-  bool _isFocused = false;
   int _charCount = 0;
 
   AnimationController? _shakeController;
@@ -71,13 +80,8 @@ class _HollowTextFieldState extends State<HollowTextField>
   void initState() {
     super.initState();
     _focusNode = widget.focusNode ?? FocusNode();
-    _focusNode.addListener(_onFocusChange);
     _charCount = widget.controller?.text.length ?? 0;
     widget.controller?.addListener(_onTextChanged);
-  }
-
-  void _onFocusChange() {
-    setState(() => _isFocused = _focusNode.hasFocus);
   }
 
   void _onTextChanged() {
@@ -113,7 +117,6 @@ class _HollowTextFieldState extends State<HollowTextField>
   @override
   void dispose() {
     widget.controller?.removeListener(_onTextChanged);
-    _focusNode.removeListener(_onFocusChange);
     if (widget.focusNode == null) _focusNode.dispose();
     _shakeController?.dispose();
     super.dispose();
@@ -127,7 +130,9 @@ class _HollowTextFieldState extends State<HollowTextField>
 
     // Precedence: error, then focused, then default.
     final borderColor = hasError ? hollow.error : hollow.border;
-    final focusBorderColor = hasError ? hollow.error : hollow.accent;
+    final focusBorderColor = hasError
+        ? hollow.error
+        : (widget.quietFocus ? hollow.border : hollow.accent);
 
     Widget field = TextField(
       controller: widget.controller,
@@ -170,6 +175,10 @@ class _HollowTextFieldState extends State<HollowTextField>
         prefixIconConstraints: widget.prefixIcon != null
             ? const BoxConstraints(minWidth: 40, minHeight: 0)
             : null,
+        suffixIcon: widget.trailing,
+        suffixIconConstraints: widget.trailing != null
+            ? const BoxConstraints(minWidth: 0, minHeight: 0)
+            : null,
         filled: true,
         fillColor: hollow.elevated,
         contentPadding: EdgeInsets.symmetric(
@@ -205,25 +214,6 @@ class _HollowTextFieldState extends State<HollowTextField>
       );
     }
 
-    final glowColor = hasError ? hollow.error : hollow.accent;
-    field = AnimatedContainer(
-      duration: HollowDurations.fast,
-      curve: HollowCurves.subtle,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        boxShadow: _isFocused
-            ? [
-                BoxShadow(
-                  color: glowColor.withValues(alpha: 0.15),
-                  blurRadius: 6,
-                  spreadRadius: 1,
-                ),
-              ]
-            : [],
-      ),
-      child: field,
-    );
-
     if ((widget.maxLength != null && widget.showCounter) || hasError) {
       final nearLimit = widget.maxLength != null &&
           _charCount >= widget.maxLength! * 0.8;
@@ -252,7 +242,6 @@ class _HollowTextFieldState extends State<HollowTextField>
                     '$_charCount/${widget.maxLength}',
                     style: HollowTypography.caption.copyWith(
                       color: nearLimit ? hollow.warning : hollow.textTertiary,
-                      fontSize: 10,
                     ),
                   ),
               ],

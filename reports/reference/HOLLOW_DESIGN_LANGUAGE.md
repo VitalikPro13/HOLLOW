@@ -66,7 +66,7 @@ Five colour-only levels per theme, in `lib/src/theme/surface_ladder.dart`, plus 
 
 A card painted `surface` is a bug: with chrome below the canvas it reads as a hole. `opaqueSurface` and `opaqueBackground` are the same tokens at full alpha, for bars that stay solid over a wallpaper.
 
-**Shadows.** Only on `overlay` things and small: `blurRadius` at most 12. A shadow is never a substitute for a surface step, and never appears on a card or a row.
+**Shadows.** Only on `overlay` things and small: `blurRadius` at most 12, and the one shadow is `HollowShadows.float`. A shadow is never a substitute for a surface step, and never appears on a card or a row.
 
 **Ambient background.** Flat by default. The drifting blobs are an opt-in in Appearance (`ambientBackgroundProvider`) and stay off under reduce motion.
 
@@ -87,6 +87,8 @@ Every foreground token is validated against **all five** surfaces (`Contrast.ens
 
 Fading text with `withOpacity` or `withValues(alpha:)` is forbidden. It was how `textTertiary` used to fail contrast at roughly 2:1. Pick a tier.
 
+**People's names in a chat** take their own colour, `nameColorFor(master, hollow)` (`core/color_utils.dart`): a stable hash of the MASTER identity (the same on every platform, the web included) onto the whole hue circle, skipping 35 degrees either side of the accent, at the tone that clears 7:1 on every dark surface and 5:1 on every light one. Your own name is `accentText`, so the accent is you and nobody else is. Only in the conversation itself (message rows, reply lines, search results, pinned lists); panels and lists of people (the member panel, the friends strip, Home) stay neutral, because that is where people are named, not told apart.
+
 ### 3.3 Type
 
 **Onest** for the interface and **Geist Mono** for the console voice, bundled as static instances (`assets/fonts/`, 400/500/600 and 400/500), so the app reads the same on every OS and no weight is ever synthesised. ThemeData carries the family, so a raw `TextStyle` inherits it.
@@ -101,6 +103,7 @@ Skia on Windows draws light text on a dark ground about 1.4 px heavier than dark
 | `heading` | 20 | 600 | Screen title. |
 | `subheading` | 16 | 600 | Section title. |
 | `body` | 14 | 400 | Message text, prose, dialog body. |
+| `bodyTouch` | 16 | 400 | Message text and sheet rows on a phone, one step up from `body` (5.4). |
 | `label` | 13 | 500 | Control labels, list row titles, buttons. |
 | `bodySmall` | 12 | 400 | Secondary row text, descriptions. |
 | `caption` | 11 | 400 | Metadata, hints. |
@@ -265,6 +268,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 | `ConversationRow` + `PresenceAvatar` | Home's hand-built row (the sidebar, mobile Chats and Archive rows follow in their passes) | The ONE conversation row (check 8 in 5.3): leading, title plus quiet detail (a channel's server), one-line preview, mono time, count badge. Unread is weight 600 and a `textPrimary` preview; read is 500 and `textSecondary`. |
 | `HollowTextLink` | a ghost button used as a link under prose | Accent text on the text's own edge, underline on hover, `HollowFocusRing`. For a link inside running content only; a standalone action stays a button. |
 | `ServerAvatar` | per-site server initials | A server's icon at list size: its image, else initials on its identity colour. |
+| `HollowIconButton` | a pressable, a tooltip and an 18 px icon built at every site | The icon-only button: headers, panel strips, toolbars. `label` is the tooltip and the screen-reader name at once. A square `size` (32 on desktop, 44 on a phone, the composer's 44), the icon 20 at 32 and up, 16 below. `selected` is a toggle that is on (a panel shown), a `hover` fill, **never the accent**. Siblings sit `xs` 4 apart; a header never spreads them. `count` carries a short number (pinned messages) in mono. |
 
 **Cards.** A card is a background step (`elevated`) and nothing else: no hairline, no shadow, in both themes. Cards do not nest. A coloured strip on a card edge is forbidden; status is a dot or a word. Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item **is** the art (the Shop, a gallery), in which case the art is the card: full bleed, title and price beneath it.
 
@@ -286,6 +290,15 @@ One route, one frame, one action rule.
 ### 4.5 Surfaces that already have one law
 
 These are settled and stay settled: context menus through `showHollowMenu` opened by `ContextMenuTarget`, toasts through `HollowToast`, scrollbars through `HollowScrollBehavior` (one app-wide gutter, never a manual `Scrollbar`).
+
+**The chat (session 12, 2026-09-24).** One of each, shared by DMs, channels, meetings, the archive, the guest view and the phone:
+
+- **`MessageRow`** (`chat/message_row.dart`) is the one message row; `MessageBubble` and `ChannelMessageBubble` only adapt a model to it. Cozy: a 36 avatar, the name in its colour, the time in `monoSmall` at `textTertiary`; a grouped continuation shows its time in the avatar column on hover. Compact (`messageDisplayProvider`, Appearance): time, name and text on one line, no avatars. Your own rows carry no strip or tint: your name in the accent is the mark.
+- **Hover** is painted by the row itself (`rowHover`, half a step from canvas to raised, so a card inside the row still stands out) and moves nothing. The action bar is an Overlay entry pinned to the row by a `LayerLink`, clipped to the list, straddling the row's top edge: three quick reactions, add reaction, reply, edit (yours), More. Everything else (copy, pin, proof, download, delete last) is the More menu, which is the right-click menu.
+- **`ChatHeaderBar`**: one 48 px bar, the title in `subheading`, a subline for a status line, `HollowIconButton`s 4 apart at the right edge. **No status while healthy**: Encrypted and Synced are silent, Offline, "nobody else is here", syncing and a failed sync speak. A panel toggle that is on is a grey fill.
+- **`ChatComposerRow`**: attach, the text field with ONE expression button inside it, then the microphone, which becomes Send (the row's one accent) once there is text or a staged file. 44 tall throughout. The field's focus is quiet (the composer always has it). The expression button opens one picker with Emoji, GIFs and Stickers tabs (`showExpressionPicker`, `showExpressionSheet` on a phone): an emoji inserts and closes, a GIF or sticker sends and stays open.
+- **The DM side panel** (`DmProfilePanel`) sits on the right, built and sized like the member panel, sharing its width and seam: banner, avatar, name, an icon strip (nickname, mute, More), then About Me, Now Playing and Encryption (verify is the one action). Block and Report live in More.
+- A text field shows focus with its accent border and nothing else: **no glow**, anywhere.
 
 ---
 

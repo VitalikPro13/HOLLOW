@@ -171,20 +171,12 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
         // While the video is up, taps belong to the player's play/pause, not to
         // the card's open-in-browser.
         onTap: _videoState == _CardVideoState.poster ? _handleTap : null,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
         padding: EdgeInsets.zero,
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          child: Container(
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              border: Border(
-                left: BorderSide(color: hollow.accent, width: 3),
-                top: BorderSide(color: hollow.border),
-                right: BorderSide(color: hollow.border),
-                bottom: BorderSide(color: hollow.border),
-              ),
-            ),
+          borderRadius: BorderRadius.circular(hollow.radiusLg),
+          child: ColoredBox(
+            color: hollow.elevated,
             child: _isLarge ? _buildLarge(hollow) : _buildCompact(hollow),
           ),
         ),

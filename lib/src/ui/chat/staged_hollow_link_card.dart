@@ -118,23 +118,23 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
               '${serverInfo.memberCount} ${serverInfo.memberCount == 1 ? 'member' : 'members'}  ·  Already joined';
           subtitleColor = hollow.success;
         } else {
-          title = 'Server Invite';
+          title = 'Server invite';
           subtitle = 'You haven\'t joined this server';
           subtitleColor = hollow.textSecondary;
         }
       case HollowLinkType.roomInvite:
         icon = LucideIcons.messageCircle;
-        title = 'Room Invite';
+        title = 'Room invite';
         subtitle = 'Room: ${widget.link.id}';
         subtitleColor = hollow.textSecondary;
       case HollowLinkType.recovery:
         icon = LucideIcons.lifeBuoy;
-        title = 'Recovery Pool Invite';
+        title = 'Recovery pool invite';
         subtitle = 'Server: ${widget.link.id}';
         subtitleColor = hollow.textSecondary;
       case HollowLinkType.conference:
         icon = LucideIcons.video;
-        title = 'Conference Invite';
+        title = 'Conference invite';
         subtitle = 'Meeting: ${widget.link.id}';
         subtitleColor = hollow.textSecondary;
       case HollowLinkType.redeem:
@@ -154,17 +154,10 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-            ),
-            child: Icon(icon,
-                color: _shareValid ? hollow.accent : hollow.error, size: 20),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
+          Icon(icon,
+              color: _shareValid ? hollow.textSecondary : hollow.error,
+              size: 20),
+          const SizedBox(width: HollowSpacing.md),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -172,11 +165,10 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
               children: [
                 Text(
                   title,
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.label.copyWith(
                     color: _shareValid
                         ? hollow.textPrimary
                         : hollow.error,
-                    fontWeight: FontWeight.w600,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

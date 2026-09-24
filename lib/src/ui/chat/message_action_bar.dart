@@ -6,6 +6,7 @@ import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
@@ -15,7 +16,6 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
-import 'package:hollow/src/ui/components/slashed_icon.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
@@ -78,7 +78,9 @@ class _MessageActionBarScopeState extends State<MessageActionBarScope> {
 
 /// Wraps a message with its hover highlight and action bar.
 ///
-/// Both are Overlay entries, so they never touch the message's layout.
+/// The row paints its own highlight behind the message, so it scrolls with it
+/// and costs no layout. The bar floats in the Overlay, linked to the row by a
+/// [LayerLink] so the compositor carries it along on scroll.
 class MessageHoverWrapper extends ConsumerStatefulWidget {
   final Widget child;
   final bool isMe;
@@ -142,12 +144,15 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   /// frame plays while the pointer is anywhere over the MESSAGE. A notifier,
   /// because this wrapper drives its overlays without rebuilding.
   final ValueNotifier<bool> _rowHovered = ValueNotifier<bool>(false);
-  OverlayEntry? _highlightEntry;
+
+  /// The pointer is on the row OR on its bar: leaving the row for the bar
+  /// must not drop the highlight.
+  final ValueNotifier<bool> _highlighted = ValueNotifier<bool>(false);
+  final LayerLink _link = LayerLink();
   OverlayEntry? _actionBarEntry;
   Timer? _dismissTimer;
   late TextEditingController _editController;
   late FocusNode _editFocusNode;
-  final GlobalKey _messageKey = GlobalKey();
   MessageActionBarController? _controller;
 
   @override
@@ -225,6 +230,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     _editController.dispose();
     _editFocusNode.dispose();
     _rowHovered.dispose();
+    _highlighted.dispose();
     super.dispose();
   }
 
@@ -265,142 +271,105 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     };
   }
 
-  void _showOverlays() {
-    if (_highlightEntry != null) return;
+  bool get _hasAnyAction =>
+      (widget.isMe && widget.messageId != null) ||
+      widget.onReply != null ||
+      widget.onReaction != null ||
+      widget.onDownload != null ||
+      widget.onCopy != null ||
+      widget.onCopyImage != null ||
+      widget.onInfo != null;
 
-    final renderBox =
-        _messageKey.currentContext?.findRenderObject() as RenderBox?;
-    if (renderBox == null) return;
+  /// Where the bar may paint, in overlay space: the message list plus the
+  /// bar's overhang above it, so the top row's bar is not cut in half and no
+  /// bar ever floats over the composer.
+  Rect _barClip(RenderBox overlayBox) {
+    final viewport =
+        Scrollable.maybeOf(context)?.context.findRenderObject() as RenderBox?;
+    if (viewport == null || !viewport.hasSize) {
+      return Offset.zero & overlayBox.size;
+    }
+    final r = viewport.localToGlobal(Offset.zero, ancestor: overlayBox) &
+        viewport.size;
+    return Rect.fromLTRB(r.left, r.top - kActionBarHeight / 2, r.right, r.bottom);
+  }
 
+  void _showBar() {
+    if (_actionBarEntry != null || !_hasAnyAction) return;
     final overlay = Overlay.of(context);
-    final overlayBox =
-        overlay.context.findRenderObject() as RenderBox?;
-    if (overlayBox == null) return;
+    final overlayBox = overlay.context.findRenderObject() as RenderBox?;
+    if (overlayBox == null || !overlayBox.hasSize) return;
+    final clip = _barClip(overlayBox);
 
-    final size = renderBox.size;
-    final offset = renderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
-    final hollow = HollowTheme.of(context);
-    final screenWidth = overlayBox.size.width;
-
-    _highlightEntry = OverlayEntry(
-      builder: (context) => Positioned(
-        left: offset.dx,
-        top: offset.dy,
-        width: size.width,
-        height: size.height,
-        child: IgnorePointer(
-          child: Container(
-            color: hollow.textPrimary.withValues(alpha: 0.03),
+    _actionBarEntry = OverlayEntry(
+      builder: (entryContext) => Positioned.fromRect(
+        rect: clip,
+        child: ClipRect(
+          child: Stack(
+            children: [
+              CompositedTransformFollower(
+                link: _link,
+                showWhenUnlinked: false,
+                // Straddles the row's top edge, so on a one-line row it never
+                // covers the message's own text.
+                targetAnchor: Alignment.topRight,
+                followerAnchor: Alignment.centerRight,
+                offset: const Offset(-HollowSpacing.lg, 0),
+                child: MouseRegion(
+                  onEnter: (_) => _onBarEnter(),
+                  onExit: (_) => _onBarExit(),
+                  child: _ActionBarContent(
+                    // Read at build, not at hover: a theme switch while the
+                    // bar is up repaints it too.
+                    hollow: HollowTheme.of(entryContext),
+                    onQuickReaction: widget.onReaction != null
+                        ? (emoji) {
+                            _dismissNow();
+                            widget.onReaction?.call(emoji);
+                          }
+                        : null,
+                    onReaction: widget.onReaction != null
+                        ? (anchor) {
+                            _dismissNow();
+                            showEmojiPicker(
+                              context: context,
+                              anchorPosition: anchor,
+                              serverId: EmoteScope.of(context)?.serverId,
+                              onSelect: (emoji) =>
+                                  widget.onReaction?.call(emoji),
+                            );
+                          }
+                        : null,
+                    onReply: widget.onReply != null
+                        ? () {
+                            _dismissNow();
+                            widget.onReply?.call();
+                          }
+                        : null,
+                    onEdit: widget.onEditStart != null
+                        ? () {
+                            _dismissNow();
+                            widget.onEditStart?.call();
+                          }
+                        : null,
+                    // Without this button the rest of the menu is reachable
+                    // only by right-clicking.
+                    onMore: (anchor) => _openMenuAt(anchor, alignEnd: true),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
 
-    final hasAnyAction = (widget.isMe && widget.messageId != null) ||
-        widget.onReply != null ||
-        widget.onReaction != null ||
-        widget.onDownload != null ||
-        widget.onCopy != null ||
-        widget.onCopyImage != null ||
-        widget.onInfo != null;
-    if (hasAnyAction) {
-      final double barTop = offset.dy + (size.height / 2) - 14;
-      final double barRight =
-          screenWidth - (offset.dx + size.width) + HollowSpacing.md;
-
-      _actionBarEntry = OverlayEntry(
-        builder: (context) => Positioned(
-          top: barTop,
-          right: barRight,
-          child: MouseRegion(
-            onEnter: (_) => _onBarEnter(),
-            onExit: (_) => _onBarExit(),
-            child: _ActionBarContent(
-              hollow: hollow,
-              onCopy: widget.onCopy != null
-                  ? () {
-                      _dismissNow();
-                      widget.onCopy?.call();
-                    }
-                  : null,
-              onReaction: widget.onReaction != null
-                  ? (globalPosition) {
-                      _dismissNow();
-                      showEmojiPicker(
-                        context: context,
-                        anchorPosition: globalPosition,
-                        serverId: EmoteScope.of(context)?.serverId,
-                        onSelect: (emoji) => widget.onReaction?.call(emoji),
-                      );
-                    }
-                  : null,
-              onReply: widget.onReply != null
-                  ? () {
-                      _dismissNow();
-                      widget.onReply?.call();
-                    }
-                  : null,
-              onEdit: widget.onEditStart != null
-                  ? () {
-                      _dismissNow();
-                      widget.onEditStart?.call();
-                    }
-                  : null,
-              onDelete: widget.onDelete != null
-                  ? () {
-                      _dismissNow();
-                      widget.onDelete?.call();
-                    }
-                  : null,
-              onPin: widget.onPin != null
-                  ? () {
-                      _dismissNow();
-                      widget.onPin?.call();
-                    }
-                  : null,
-              onDownload: widget.onDownload != null
-                  ? () {
-                      _dismissNow();
-                      widget.onDownload?.call();
-                    }
-                  : null,
-              // The bar says what the card says.
-              fileAction: _fileAction(),
-              onStopWaiting: _stopWaitingTap(),
-              onCopyImage: widget.onCopyImage != null
-                  ? () {
-                      _dismissNow();
-                      widget.onCopyImage?.call();
-                    }
-                  : null,
-              onInfo: widget.onInfo != null
-                  ? () {
-                      _dismissNow();
-                      widget.onInfo?.call();
-                    }
-                  : null,
-              // Without this button the rest of the menu is reachable only by
-              // right-clicking.
-              onMore: (globalPosition) =>
-                  _openContextMenu(globalPosition),
-            ),
-          ),
-        ),
-      );
-    }
-
-    overlay.insert(_highlightEntry!);
-    if (_actionBarEntry != null) {
-      overlay.insert(_actionBarEntry!);
-    }
+    overlay.insert(_actionBarEntry!);
     OverlayHosts.register(this, _removeOverlays);
   }
 
   void _removeOverlays() {
     OverlayHosts.unregister(this);
-    _highlightEntry?.remove();
-    _highlightEntry?.dispose();
-    _highlightEntry = null;
     _actionBarEntry?.remove();
     _actionBarEntry?.dispose();
     _actionBarEntry = null;
@@ -412,7 +381,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       if (!_hovered && !_barHovered) {
         _controller?.release(this);
         _removeOverlays();
-        if (mounted) setState(() {});
+        _highlighted.value = false;
       }
     });
   }
@@ -423,6 +392,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     _barHovered = false;
     _controller?.release(this);
     _removeOverlays();
+    _highlighted.value = false;
   }
 
   void _forceClose() {
@@ -430,7 +400,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     _hovered = false;
     _barHovered = false;
     _removeOverlays();
-    if (mounted) setState(() {});
+    _highlighted.value = false;
   }
 
   void _onBarEnter() {
@@ -449,7 +419,8 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     _dismissTimer?.cancel();
     _controller?.claim(this, _forceClose);
     _hovered = true;
-    _showOverlays();
+    _highlighted.value = true;
+    _showBar();
   }
 
   void _onMessageExit() {
@@ -464,14 +435,20 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   /// surface gets the menu without touching its call site and no row can offer
   /// an action the surface did not wire up.
   void _openContextMenu(Offset globalPosition) {
-    if (widget.isEditing) return;
     // Window coordinates are not overlay coordinates under interface zoom.
-    final anchor = overlayPositionOf(context, globalPosition);
+    _openMenuAt(overlayPositionOf(context, globalPosition));
+  }
+
+  /// [anchor] is already in overlay space. [alignEnd] makes it the menu's
+  /// top-right corner, for a trigger at the right of the row.
+  void _openMenuAt(Offset anchor, {bool alignEnd = false}) {
+    if (widget.isEditing) return;
     if (_buildMenuEntries(anchor).isEmpty) return;
     _dismissNow();
     showHollowMenu(
       context: context,
       anchor: anchor,
+      alignEnd: alignEnd,
       builder: (_, _) => _buildMenuEntries(anchor),
     );
   }
@@ -550,17 +527,6 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     ];
     if (edit.isNotEmpty) groups.add(edit);
 
-    if (widget.onDelete != null) {
-      groups.add([
-        HollowMenuItem(
-          icon: LucideIcons.trash2,
-          label: 'Delete message',
-          isDanger: true,
-          onTap: widget.onDelete,
-        ),
-      ]);
-    }
-
     final messageId = widget.messageId;
     final meta = <HollowMenuEntry>[
       if (widget.onInfo != null)
@@ -577,6 +543,17 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
         ),
     ];
     if (meta.isNotEmpty) groups.add(meta);
+
+    if (widget.onDelete != null) {
+      groups.add([
+        HollowMenuItem(
+          icon: LucideIcons.trash2,
+          label: 'Delete message',
+          isDanger: true,
+          onTap: widget.onDelete,
+        ),
+      ]);
+    }
 
     final entries = <HollowMenuEntry>[];
     for (final group in groups) {
@@ -605,21 +582,33 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       child: MouseRegion(
         onEnter: (_) => _onMessageEnter(),
         onExit: (_) => _onMessageExit(),
-        child: KeyedSubtree(
-          key: _messageKey,
-          child: HoverScope(hovered: _rowHovered, child: widget.child),
+        child: CompositedTransformTarget(
+          link: _link,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _highlighted,
+            builder: (context, lit, child) => DecoratedBox(
+              decoration: BoxDecoration(
+                color: lit ? HollowTheme.of(context).rowHover : null,
+              ),
+              child: child,
+            ),
+            child: HoverScope(hovered: _rowHovered, child: widget.child),
+          ),
         ),
       ),
     );
   }
 
   Widget _buildEditView(HollowTheme hollow) {
-    return Container(
+    OutlineInputBorder border(Color color) => OutlineInputBorder(
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          borderSide: BorderSide(color: color),
+        );
+    return Padding(
       padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
+        horizontal: HollowSpacing.lg,
         vertical: HollowSpacing.xs,
       ),
-      color: hollow.textPrimary.withValues(alpha: 0.03),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -633,31 +622,19 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
               filled: true,
               fillColor: hollow.elevated,
               contentPadding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
+                horizontal: HollowSpacing.md,
                 vertical: HollowSpacing.sm,
               ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                borderSide: BorderSide(color: hollow.accent),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                borderSide: BorderSide(color: hollow.accent),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                borderSide: BorderSide(color: hollow.accent, width: 1.5),
-              ),
+              border: border(hollow.border),
+              enabledBorder: border(hollow.border),
+              focusedBorder: border(hollow.accent),
             ),
             onTapOutside: (_) => widget.onEditCancel?.call(),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: HollowSpacing.xs),
           Text(
-            'escape to cancel  •  enter to save  •  shift+enter for new line',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary.withValues(alpha: 0.5),
-              fontSize: 10,
-            ),
+            'Enter to save, Escape to cancel, Shift+Enter for a new line',
+            style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
           ),
         ],
       ),
@@ -665,241 +642,142 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   }
 }
 
-/// The action bar's buttons.
+/// Height of the hover bar; it straddles its row's top edge by half.
+const double kActionBarHeight = 32;
+
+/// How many one-click reactions lead the hover bar.
+const int _kBarQuickReactions = 3;
+
+/// The action bar's buttons. Everything else lives in the More menu, which is
+/// the same menu a right click opens.
 class _ActionBarContent extends StatelessWidget {
   final HollowTheme hollow;
-  final VoidCallback? onCopy;
-  final void Function(Offset globalPosition)? onReaction;
+  final void Function(String emoji)? onQuickReaction;
+  final void Function(Offset anchor)? onReaction;
   final VoidCallback? onReply;
   final VoidCallback? onEdit;
-  final VoidCallback? onDelete;
-  final VoidCallback? onPin;
-  final VoidCallback? onDownload;
-  final VoidCallback? onCopyImage;
-  final VoidCallback? onInfo;
-
-  /// What the file control offers, mirroring the card.
-  final FileBarAction fileAction;
-
-  /// The [FileBarAction.stopWaiting] tap.
-  final VoidCallback? onStopWaiting;
-
-  /// Opens the full message menu, receiving the button's WINDOW position, the
-  /// same thing a right click hands over.
-  final void Function(Offset globalPosition)? onMore;
+  final void Function(Offset anchor) onMore;
 
   const _ActionBarContent({
     required this.hollow,
-    this.onCopy,
+    this.onQuickReaction,
     this.onReaction,
     this.onReply,
     this.onEdit,
-    this.onDelete,
-    this.onPin,
-    this.onDownload,
-    this.onCopyImage,
-    this.onInfo,
-    this.fileAction = FileBarAction.download,
-    this.onStopWaiting,
-    this.onMore,
+    required this.onMore,
   });
 
   @override
   Widget build(BuildContext context) {
+    final quick = onQuickReaction;
     return Container(
+      height: kActionBarHeight,
+      padding: const EdgeInsets.all(HollowSpacing.xxs),
       decoration: BoxDecoration(
         color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        boxShadow: HollowShadows.float,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (onDownload != null)
-            _FileActionButton(
-              hollow: hollow,
-              action: fileAction,
-              onDownload: onDownload,
-              onStopWaiting: onStopWaiting,
-            ),
-          if (onCopy != null)
-            HollowPressable(
-              onTap: onCopy,
-              semanticLabel: 'Copy',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.copy,
-                size: 14,
-                color: hollow.textSecondary,
+          if (quick != null) ...[
+            for (var i = 0; i < _kBarQuickReactions; i++)
+              _BarButton(
+                hollow: hollow,
+                label: 'React ${kQuickReactionEmojis[i]}',
+                onTap: (_) => quick(kQuickReactionEmojis[i]),
+                child: Text(
+                  kQuickReactionEmojis[i],
+                  style: HollowTypography.body,
+                ),
               ),
+            Container(
+              width: 1,
+              height: HollowSpacing.lg,
+              margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
+              color: hollow.border,
             ),
-          if (onCopyImage != null)
-            HollowPressable(
-              onTap: onCopyImage,
-              semanticLabel: 'Copy image',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.image,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
-            ),
+          ],
           if (onReaction != null)
-            _EmojiButton(hollow: hollow, onReaction: onReaction!),
+            _BarButton(
+              hollow: hollow,
+              label: 'Add reaction',
+              icon: LucideIcons.smilePlus,
+              onTap: onReaction!,
+            ),
           if (onReply != null)
-            HollowPressable(
-              onTap: onReply,
-              semanticLabel: 'Reply',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.reply,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
-            ),
-          if (onInfo != null)
-            HollowPressable(
-              onTap: onInfo,
-              semanticLabel: 'View message proof',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.shieldCheck,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
-            ),
-          if (onPin != null)
-            HollowPressable(
-              onTap: onPin,
-              semanticLabel: 'Pin message',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.pin,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
+            _BarButton(
+              hollow: hollow,
+              label: 'Reply',
+              icon: LucideIcons.reply,
+              onTap: (_) => onReply!(),
             ),
           if (onEdit != null)
-            HollowPressable(
-              onTap: onEdit,
-              semanticLabel: 'Edit message',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.pencil,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
+            _BarButton(
+              hollow: hollow,
+              label: 'Edit message',
+              icon: LucideIcons.pencil,
+              onTap: (_) => onEdit!(),
             ),
-          if (onDelete != null)
-            HollowPressable(
-              onTap: onDelete,
-              semanticLabel: 'Delete message',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.trash2,
-                size: 14,
-                color: hollow.error,
-              ),
-            ),
-          if (onMore != null)
-            _MoreButton(hollow: hollow, onMore: onMore!),
+          _BarButton(
+            hollow: hollow,
+            label: 'More message actions',
+            icon: LucideIcons.moreHorizontal,
+            // The menu opens under the button, not at the row's far left.
+            anchorBelow: true,
+            onTap: onMore,
+          ),
         ],
       ),
     );
   }
 }
 
-/// The bar's file control, mirroring the card.
-///
-/// Download and Try again are one action under two words; stop is a different
-/// action and gets a different glyph, because Download while the ask is queued
-/// re-issues a request that visibly does nothing.
-class _FileActionButton extends StatelessWidget {
+/// One square button on the hover bar. [onTap] receives the button's own
+/// anchor in overlay space, for anything it opens.
+class _BarButton extends StatelessWidget {
   final HollowTheme hollow;
-  final FileBarAction action;
-  final VoidCallback? onDownload;
-  final VoidCallback? onStopWaiting;
+  final String label;
+  final IconData? icon;
+  final Widget? child;
+  final bool anchorBelow;
+  final void Function(Offset anchor) onTap;
 
-  const _FileActionButton({
+  const _BarButton({
     required this.hollow,
-    required this.action,
-    required this.onDownload,
-    required this.onStopWaiting,
+    required this.label,
+    required this.onTap,
+    this.icon,
+    this.child,
+    this.anchorBelow = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (action == FileBarAction.none) return const SizedBox.shrink();
-    final stop = action == FileBarAction.stopWaiting;
-    final onTap = stop ? onStopWaiting : onDownload;
-    // A surface with no stop hook offers nothing rather than a control that
-    // cannot fire.
-    if (onTap == null) return const SizedBox.shrink();
-    final label = fileBarActionLabel(action);
+    final side = kActionBarHeight - 2 * HollowSpacing.xxs - 2;
     return HollowTooltip(
       message: label,
       child: HollowPressable(
-        onTap: onTap,
         semanticLabel: label,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(6),
-        child: stop
-            ? SlashedIcon(
-                icon: LucideIcons.download,
-                size: 14,
-                color: hollow.accent,
-                // The bar's own surface, so the slash cuts the glyph.
-                backgroundColor: hollow.overlay,
-              )
-            : Icon(
-                LucideIcons.download,
-                size: 14,
-                color: hollow.accent,
-              ),
-      ),
-    );
-  }
-}
-
-/// Overflow button: the whole message menu without a right click. Captures its
-/// own position, or the menu opens at the far-left origin of the message row.
-class _MoreButton extends StatelessWidget {
-  final HollowTheme hollow;
-  final void Function(Offset globalPosition) onMore;
-
-  const _MoreButton({required this.hollow, required this.onMore});
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowPressable(
-      semanticLabel: 'More message actions',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(6),
-      onTap: () {
-        final box = context.findRenderObject() as RenderBox?;
-        final position = box == null
-            ? Offset.zero
-            : box.localToGlobal(Offset(0, box.size.height));
-        onMore(position);
-      },
-      child: Icon(
-        LucideIcons.moreHorizontal,
-        size: 14,
-        color: hollow.textSecondary,
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
+        onTap: () {
+          final box = context.findRenderObject() as RenderBox?;
+          onTap(overlayAnchorOf(
+            context,
+            localOffset: anchorBelow && box != null
+                ? Offset(box.size.width, box.size.height)
+                : Offset.zero,
+          ));
+        },
+        child: SizedBox.square(
+          dimension: side,
+          child: Center(
+            child: child ??
+                Icon(icon, size: 16, color: hollow.textSecondary),
+          ),
+        ),
       ),
     );
   }
@@ -940,34 +818,6 @@ class _QuickReactionStrip extends StatelessWidget {
             ),
           ),
       ],
-    );
-  }
-}
-
-/// Emoji button that captures its own position for the picker anchor.
-class _EmojiButton extends StatelessWidget {
-  final HollowTheme hollow;
-  final void Function(Offset globalPosition) onReaction;
-
-  const _EmojiButton({
-    required this.hollow,
-    required this.onReaction,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowPressable(
-      onTap: () {
-        onReaction(overlayAnchorOf(context));
-      },
-      semanticLabel: 'Add reaction',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(6),
-      child: Icon(
-        LucideIcons.smile,
-        size: 14,
-        color: hollow.textSecondary,
-      ),
     );
   }
 }

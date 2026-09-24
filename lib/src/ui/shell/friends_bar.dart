@@ -706,38 +706,8 @@ class _FriendsListTab extends ConsumerWidget {
                   message: 'Remove friend',
                   child: HollowPressable(
                     semanticLabel: 'Remove friend',
-                    onTap: () async {
-                      final peerId = friend.peerId;
-                      // Captured up front: the awaited removal rebuilds the
-                      // friends list and may unmount this row before the
-                      // cleanup below runs.
-                      final favourites =
-                          ref.read(favouriteFriendsProvider.notifier);
-                      final selectedPeer =
-                          ref.read(selectedPeerProvider.notifier);
-                      final wasSelected =
-                          ref.read(selectedPeerProvider) == peerId;
-                      final splitView =
-                          ref.read(splitViewProvider.notifier);
-                      final split = ref.read(splitViewProvider);
-                      final shownInSplit = split.isSplit &&
-                          split.rightPane?.peerId == peerId;
-                      try {
-                        await ref
-                            .read(friendsProvider.notifier)
-                            .removeFriend(peerId);
-                      } catch (_) {
-                        if (context.mounted) {
-                          HollowToast.show(
-                              context, 'Could not remove friend',
-                              type: HollowToastType.error);
-                        }
-                        return;
-                      }
-                      favourites.remove(peerId);
-                      if (wasSelected) selectedPeer.state = null;
-                      if (shownInSplit) splitView.closeSplit();
-                    },
+                    onTap: () =>
+                        removeFriendAndTidy(context, ref, friend.peerId),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1400,4 +1370,30 @@ class _FriendChip extends StatelessWidget { // design-ignore: an avatar tab in t
       ),
     );
   }
+}
+
+/// Removes a friend and closes whatever still shows them: the favourite, the
+/// open DM, the split pane. Toasts on failure.
+Future<void> removeFriendAndTidy(
+    BuildContext context, WidgetRef ref, String peerId) async {
+  // Captured up front: the awaited removal rebuilds the friends list and may
+  // unmount the caller before the cleanup below runs.
+  final favourites = ref.read(favouriteFriendsProvider.notifier);
+  final selectedPeer = ref.read(selectedPeerProvider.notifier);
+  final wasSelected = ref.read(selectedPeerProvider) == peerId;
+  final splitView = ref.read(splitViewProvider.notifier);
+  final split = ref.read(splitViewProvider);
+  final shownInSplit = split.isSplit && split.rightPane?.peerId == peerId;
+  try {
+    await ref.read(friendsProvider.notifier).removeFriend(peerId);
+  } catch (_) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not remove friend',
+          type: HollowToastType.error);
+    }
+    return;
+  }
+  favourites.remove(peerId);
+  if (wasSelected) selectedPeer.state = null;
+  if (shownInSplit) splitView.closeSplit();
 }

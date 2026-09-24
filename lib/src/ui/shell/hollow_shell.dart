@@ -1009,6 +1009,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Dock vs Classic shell (#58): read from a provider's build() this races the
     // store open, and Classic never survives a restart.
     await ref.read(layoutModeProvider.notifier).load();
+    await ref.read(messageDisplayProvider.notifier).load();
     // Home's first-run checklist flags, same reason.
     await ref
         .read(homeSetupProvider.notifier)

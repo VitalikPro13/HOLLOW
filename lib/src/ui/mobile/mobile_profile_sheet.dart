@@ -25,7 +25,10 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -87,6 +90,27 @@ class MobileProfileSheet extends ConsumerWidget {
     this.labels,
   });
 
+  void _openChat(BuildContext context, WidgetRef ref) {
+    final nav = Navigator.of(context, rootNavigator: true);
+    final container = ProviderScope.containerOf(context, listen: false);
+    Navigator.of(context).pop();
+    ref.read(selectedPeerProvider.notifier).state = peerId;
+    nav
+        .push(
+      hollowMobileRoute(
+        settings: const RouteSettings(name: MobileChatRoute.routeName),
+        builder: (_) => MobileChatRoute(peerId: peerId),
+      ),
+    )
+        .then((_) {
+      // The sheet is gone by now, so this uses the captured container rather
+      // than `ref`.
+      if (container.read(selectedPeerProvider) == peerId) {
+        container.read(selectedPeerProvider.notifier).state = null;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
@@ -134,16 +158,7 @@ class MobileProfileSheet extends ConsumerWidget {
                 ? constraints.maxWidth
                 : MediaQuery.sizeOf(context).width;
             final height = width / 2.5;
-            final fallback = Container(
-              height: height,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [bannerColor, bannerColor.withValues(alpha: 0.7)],
-                ),
-              ),
-            );
+            final fallback = Container(height: height, color: bannerColor);
             return SizedBox(
               height: height,
               width: double.infinity,
@@ -289,10 +304,8 @@ class MobileProfileSheet extends ConsumerWidget {
                 const SizedBox(height: HollowSpacing.sm),
                 Text(
                   profile.status,
-                  style: HollowTypography.bodySmall.copyWith(
-                    color: hollow.accent,
-                    fontStyle: FontStyle.italic,
-                  ),
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
                   textAlign: TextAlign.center,
                 ),
               ],
@@ -341,7 +354,7 @@ class MobileProfileSheet extends ConsumerWidget {
                     onPressed: () => showShowcaseEditorDialog(context, ref),
                     icon: const Icon(LucideIcons.layoutGrid, size: 16),
                     expand: true,
-                    child: const Text('Edit Showcase'),
+                    child: const Text('Edit showcase'),
                   ),
                 ),
                 const SizedBox(height: HollowSpacing.sm),
@@ -349,152 +362,37 @@ class MobileProfileSheet extends ConsumerWidget {
 
               if (!isMe) ...[
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
                   child: Column(
                     children: [
-                      if (friendInfo?.status == 'accepted')
+                      // Already in their DM: Message would open a second copy
+                      // of the chat underneath this sheet.
+                      if (friendInfo?.status == 'accepted' &&
+                          ref.watch(selectedPeerProvider) != peerId)
                         Padding(
-                          padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+                          padding:
+                              const EdgeInsets.only(bottom: HollowSpacing.sm),
                           child: HollowButton.filled(
-                            onPressed: () {
-                              final nav =
-                                  Navigator.of(context, rootNavigator: true);
-                              final container = ProviderScope.containerOf(
-                                  context,
-                                  listen: false);
-                              Navigator.of(context).pop();
-                              ref.read(selectedPeerProvider.notifier).state = peerId;
-                              nav.push(
-                                hollowMobileRoute(
-                                  settings: const RouteSettings(
-                                      name: MobileChatRoute.routeName),
-                                  builder: (_) => MobileChatRoute(peerId: peerId),
-                                ),
-                              ).then((_) {
-                                // The sheet is gone by now, so this uses the
-                                // captured container rather than `ref`.
-                                if (container.read(selectedPeerProvider) ==
-                                    peerId) {
-                                  container
-                                      .read(selectedPeerProvider.notifier)
-                                      .state = null;
-                                }
-                              });
-                            },
-                            icon: const Icon(LucideIcons.messageCircle, size: 16),
+                            onPressed: () => _openChat(context, ref),
+                            icon: const Icon(LucideIcons.messageCircle),
                             expand: true,
                             child: const Text('Message'),
                           ),
                         ),
-
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-                        child: HollowButton.outline(
-                          onPressed: () => _showNicknameDialog(context, ref),
-                          icon: Icon(
-                            localNick != null ? LucideIcons.pencil : LucideIcons.tag,
-                            size: 16,
-                          ),
-                          expand: true,
-                          child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
-                        ),
-                      ),
-
-                      Builder(builder: (context) {
-                        final master =
-                            ref.watch(deviceLinkProvider).identityOf(peerId);
-                        final isVerified =
-                            ref.watch(isPeerVerifiedProvider(master));
-                        return Padding(
-                          padding:
-                              const EdgeInsets.only(bottom: HollowSpacing.sm),
-                          child: HollowButton.outline(
-                            onPressed: () => _openVerify(context, master),
-                            icon: Icon(
-                              isVerified
-                                  ? LucideIcons.shieldCheck
-                                  : LucideIcons.shield,
-                              size: 16,
-                            ),
-                            expand: true,
-                            child: Text(isVerified
-                                ? 'Verified: view number'
-                                : 'Verify contact'),
-                          ),
-                        );
-                      }),
-
                       _FriendActionRow(peerId: peerId),
-
-                      // Ghost, because `.danger` is reserved for the confirm
-                      // dialog's destructive action. Both key on the MASTER
-                      // identity.
                       const SizedBox(height: HollowSpacing.sm),
-                      Builder(builder: (context) {
-                        final master =
-                            ref.watch(deviceLinkProvider).identityOf(peerId);
-                        final isBlocked =
-                            ref.watch(blockedUsersProvider).contains(master);
-                        return Column(
-                          children: [
-                            HollowButton.ghost(
-                              onPressed: isBlocked
-                                  ? () =>
-                                      unblockUser(context, masterId: master)
-                                  : () => confirmAndBlockUser(
-                                        context,
-                                        masterId: master,
-                                        displayName: name,
-                                      ),
-                              icon: const Icon(LucideIcons.ban, size: 16),
-                              expand: true,
-                              child: Text(isBlocked ? 'Unblock' : 'Block'),
-                            ),
-                            const SizedBox(height: HollowSpacing.sm),
-                            HollowButton.ghost(
-                              onPressed: () => showReportUserDialog(
-                                context,
-                                masterId: master,
-                                displayName: name,
-                              ),
-                              icon: const Icon(LucideIcons.flag, size: 16),
-                              expand: true,
-                              child: const Text('Report'),
-                            ),
-                          ],
-                        );
-                      }),
+                      _ProfileActionStrip(
+                        peerId: peerId,
+                        name: name,
+                        hasNickname: localNick != null,
+                        onNickname: () => _showNicknameDialog(context, ref),
+                        onVerify: (master) => _openVerify(context, master),
+                      ),
                     ],
                   ),
                 ),
               ],
-
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
-                child: HollowPressable(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: peerId));
-                    HollowToast.show(context, 'Peer ID copied',
-                        type: HollowToastType.success);
-                  },
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        '${peerId.substring(0, 8)}...${peerId.substring(peerId.length - 8)}',
-                        style: HollowTypography.mono.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                      Icon(LucideIcons.copy, size: 12, color: hollow.textSecondary),
-                    ],
-                  ),
-                ),
-              ),
 
               const SizedBox(height: HollowSpacing.md),
             ],
@@ -696,5 +594,100 @@ class _NicknameDialogState extends ConsumerState<_NicknameDialog> {
         type: HollowToastType.success,
       );
     }
+  }
+}
+
+/// Nickname and verification as icons, everything that could go wrong behind
+/// More: one row, so the sheet's one primary action stays the obvious one.
+class _ProfileActionStrip extends ConsumerWidget {
+  final String peerId;
+  final String name;
+  final bool hasNickname;
+  final VoidCallback onNickname;
+  final void Function(String master) onVerify;
+
+  const _ProfileActionStrip({
+    required this.peerId,
+    required this.name,
+    required this.hasNickname,
+    required this.onNickname,
+    required this.onVerify,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Block, report and verification key on the MASTER identity.
+    final master = ref.watch(deviceLinkProvider).identityOf(peerId);
+    final verified = ref.watch(isPeerVerifiedProvider(master));
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        HollowIconButton(
+          icon: LucideIcons.tag,
+          label: hasNickname ? 'Edit nickname' : 'Set nickname',
+          size: 44,
+          onPressed: onNickname,
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowIconButton(
+          icon: verified ? LucideIcons.shieldCheck : LucideIcons.shield,
+          label: verified ? 'Verified, view safety number' : 'Verify contact',
+          size: 44,
+          color: verified ? HollowTheme.of(context).success : null,
+          onPressed: () => onVerify(master),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        Builder(
+          builder: (buttonContext) => HollowIconButton(
+            icon: LucideIcons.moreHorizontal,
+            label: 'More',
+            size: 44,
+            onPressed: () => _openMenu(buttonContext, ref, master),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _openMenu(BuildContext buttonContext, WidgetRef ref, String master) {
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final isBlocked = ref.read(blockedUsersProvider).contains(master);
+    showHollowMenu(
+      context: buttonContext,
+      anchor: overlayAnchorOf(buttonContext,
+          localOffset: Offset(box.size.width, box.size.height)),
+      alignEnd: true,
+      builder: (_, _) => [
+        HollowMenuItem(
+          icon: LucideIcons.copy,
+          label: 'Copy user ID',
+          onTap: () async {
+            await Clipboard.setData(ClipboardData(text: master));
+            if (buttonContext.mounted) {
+              HollowToast.show(buttonContext, 'User ID copied',
+                  type: HollowToastType.success);
+            }
+          },
+        ),
+        const HollowMenuDivider(),
+        HollowMenuItem(
+          icon: LucideIcons.ban,
+          label: isBlocked ? 'Unblock' : 'Block',
+          isDanger: !isBlocked,
+          onTap: isBlocked
+              ? () => unblockUser(buttonContext, masterId: master)
+              : () => confirmAndBlockUser(buttonContext,
+                  masterId: master, displayName: name),
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.flag,
+          label: 'Report',
+          isDanger: true,
+          onTap: () => showReportUserDialog(buttonContext,
+              masterId: master, displayName: name),
+        ),
+      ],
+    );
   }
 }

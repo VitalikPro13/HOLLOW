@@ -2,26 +2,24 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/conversation_row.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
-import 'package:hollow/src/ui/chat/emoji_picker.dart';
-import 'package:hollow/src/ui/chat/gif_picker.dart';
-import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/message_preview.dart';
-import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
-import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
@@ -30,16 +28,12 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
-import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
-import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
-import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -58,10 +52,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
-import 'package:hollow/src/ui/components/connection_progress.dart';
-import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -72,7 +63,6 @@ import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/share_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
@@ -83,24 +73,20 @@ import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
-import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
-import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
-import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
-import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
-import 'package:hollow/src/core/brand_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/chat/dm_profile_panel.dart';
+import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
@@ -413,6 +399,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           .map((e) => ComposerEmote(e.name, e.hash))
           .toList();
   bool _historyLoaded = false;
+  bool _historyStarted = false;
+  bool _historyFailed = false;
   bool _isPicking = false;
   String? _editingMessageId;
   String? _replyToMessageId;
@@ -489,11 +477,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   Future<void> _loadHistory() async {
-    if (_historyLoaded) return;
-    _historyLoaded = true;
-    await ref.read(chatProvider.notifier).loadHistory(widget.peerId);
+    if (_historyStarted) return;
+    _historyStarted = true;
+    final ok = await ref.read(chatProvider.notifier).loadHistory(widget.peerId);
     if (!mounted) return;
-    setState(() {});
+    setState(() {
+      _historyLoaded = true;
+      _historyFailed = !ok;
+    });
     // ScrollablePositionedList honours `initialScrollIndex` only at first
     // build, so a list grown by loadHistory needs an explicit jump.
     _jumpToBottom();
@@ -1107,11 +1098,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       peerHint: widget.peerId,
       child: Row(
       children: [
-        _DmProfilePanelSlider(
-          visible: showProfilePanel && !isScreenShareActive,
-          peerId: widget.peerId,
-        ),
-
         Expanded(
           child: ChatDropZone(
             onFilesDropped: _stageFiles,
@@ -1143,6 +1129,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       ],
           ),
           ),
+        ),
+        _DmProfilePanelSlider(
+          visible: showProfilePanel && !isScreenShareActive,
+          peerId: widget.peerId,
         ),
       ],
       ),
@@ -1236,77 +1226,60 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// DM header: avatar, name(s), connection status, and pane actions.
   Widget _buildHeader(HollowTheme hollow,
       {required bool isSavedMessages, required bool showProfilePanel}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm + 2,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(
-          bottom: BorderSide(color: hollow.border),
-        ),
-      ),
-      child: Row(
-        children: [
-          if (isSavedMessages)
-            const SavedMessagesAvatar(size: 28)
-          else
-            HollowAvatar(peerId: widget.peerId, size: 28),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(child: _buildHeaderTitle(hollow, isSavedMessages)),
-          if (!isSavedMessages) _buildConnectionStatus(),
-          const SizedBox(width: HollowSpacing.sm),
-          // Hidden for Saved messages: you cannot call yourself.
-          if (!isSavedMessages) ...[
-            _buildVoiceCallButton(hollow),
-            const SizedBox(width: HollowSpacing.xs),
-            _buildVideoCallButton(hollow),
-          ],
-          const SizedBox(width: HollowSpacing.xs),
-          _buildSearchToggleButton(hollow),
-          const SizedBox(width: HollowSpacing.xs),
-          _buildProfileToggleButton(hollow, showProfilePanel),
-          // Hidden for Saved messages: a self-DM never notifies.
-          if (!isSavedMessages) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            _buildMuteToggleButton(hollow),
-          ],
-          if (ref.watch(layoutModeProvider) == LayoutMode.dock) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            _buildSplitToggleButton(hollow),
-          ],
+    final searchOpen = ref.watch(chatSearchOpenProvider);
+    final isSplit = ref.watch(splitViewProvider).isSplit;
+    final profile =
+        ref.watch(profileProvider.select((p) => p[widget.peerId]));
+    final localNick =
+        ref.watch(localNicknameProvider.select((m) => m[widget.peerId]));
+    final realName = displayNameForPeer(profile, widget.peerId);
+    final hasNick = localNick != null && localNick.isNotEmpty;
+    final status = profile?.status ?? '';
+    return ChatHeaderBar(
+      leading: isSavedMessages
+          ? const SavedMessagesAvatar(size: 28)
+          : PresenceAvatar(
+              peerId: widget.peerId,
+              size: 28,
+              online: identityIsOnline(ref, widget.peerId),
+              ring: hollow.surface,
+            ),
+      title: isSavedMessages ? 'Saved messages' : (hasNick ? localNick : realName),
+      subtitle: isSavedMessages ? null : (hasNick ? realName : status),
+      actions: [
+        // Hidden for Saved messages: you cannot call yourself.
+        if (!isSavedMessages) ...[
+          _buildVoiceCallButton(hollow),
+          _buildVideoCallButton(hollow),
         ],
-      ),
-    );
-  }
-
-  /// HH:MM, 24h, zero-padded — the shape the channel search results use.
-  static String _hhmm(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
-  Widget _buildSearchToggleButton(HollowTheme hollow) {
-    final open = ref.watch(chatSearchOpenProvider);
-    return HollowTooltip(
-      message: 'Search messages',
-      child: HollowPressable(
-        semanticLabel: 'Search messages',
-        onTap: () {
-          ref.read(chatSearchOpenProvider.notifier).state = !open;
-          if (!open) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _searchFocusNode.requestFocus();
-            });
-          }
-        },
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          LucideIcons.search,
-          size: 16,
-          color: open ? hollow.accent : hollow.textSecondary,
+        HollowIconButton(
+          icon: LucideIcons.search,
+          label: 'Search messages',
+          selected: searchOpen,
+          onPressed: () {
+            ref.read(chatSearchOpenProvider.notifier).state = !searchOpen;
+            if (!searchOpen) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _searchFocusNode.requestFocus();
+              });
+            }
+          },
         ),
-      ),
+        HollowIconButton(
+          icon: LucideIcons.panelRight,
+          label: showProfilePanel ? 'Hide profile' : 'Show profile',
+          selected: showProfilePanel,
+          onPressed: () => ref.read(dmProfilePanelProvider.notifier).state =
+              !showProfilePanel,
+        ),
+        if (ref.watch(layoutModeProvider) == LayoutMode.dock)
+          HollowIconButton(
+            icon: LucideIcons.columns,
+            label: isSplit ? 'Close this pane' : 'Split view',
+            selected: isSplit,
+            onPressed: () => _handleSplitToggle(ref),
+          ),
+      ],
     );
   }
 
@@ -1330,15 +1303,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           HollowTextField(
             controller: _searchController,
             focusNode: _searchFocusNode,
-            hintText: 'Search in $name...',
+            hintText: 'Search in $name',
             autofocus: true,
             isDense: true,
             prefixIcon: const Icon(LucideIcons.search, size: 16),
             onChanged: _onSearch,
-            style: HollowTypography.body.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 13,
-            ),
           ),
           if (_searchResults.isNotEmpty)
             ConstrainedBox(
@@ -1357,152 +1326,24 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   Widget _buildSearchResultTile(
       HollowTheme hollow, storage_api.StoredMessage msg, bool isSavedMessages) {
-    // A DM has exactly two sides, so the sender is a bool — no device→master
-    // resolution to do, unlike a channel's result list.
-    final name = msg.isMine
-        ? 'You'
-        : (isSavedMessages
-            ? 'You'
-            : displayNameFor(ref.watch(profileProvider), widget.peerId));
-    final time = DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt());
-    return Padding(
-      padding: const EdgeInsets.only(top: HollowSpacing.xs),
-      child: HollowPressable(
-        subtle: true,
-        onTap: () => _jumpToSearchResult(msg),
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        hoverColor: hollow.elevated,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.xs,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  name,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accentText,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 11,
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  _hhmm(time),
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textTertiary,
-                    fontSize: 10,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            Text(
-              messagePreviewText(msg.text),
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 12,
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
-      ),
+    // A DM has exactly two sides, so the sender is a bool: no device to
+    // master resolution to do, unlike a channel's result list.
+    final mine = msg.isMine || isSavedMessages;
+    return ChatSearchResultRow(
+      name: mine
+          ? 'You'
+          : displayNameFor(ref.watch(profileProvider), widget.peerId),
+      nameColor: mine ? hollow.accentText : nameColorFor(widget.peerId, hollow),
+      time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt()),
+      text: messagePreviewText(msg.text),
+      onTap: () => _jumpToSearchResult(msg),
     );
   }
-
-  /// Header names. A local nickname takes the top line and the friend's own
-  /// profile name (or their short peer id) drops to a subline; with no local
-  /// nickname there is no subline. No status dot, because the ConnectionProgress
-  /// on the right already carries online and offline.
-  Widget _buildHeaderTitle(HollowTheme hollow, bool isSavedMessages) {
-    if (isSavedMessages) {
-      return Text(
-        'Saved messages',
-        style: HollowTypography.body.copyWith(
-          color: hollow.textPrimary,
-          fontWeight: FontWeight.w600,
-          fontSize: 13,
-        ),
-        overflow: TextOverflow.ellipsis,
-      );
-    }
-    final profile =
-        ref.watch(profileProvider.select((p) => p[widget.peerId]));
-    final localNick =
-        ref.watch(localNicknameProvider.select((m) => m[widget.peerId]));
-    final shortId = widget.peerId.length > 16
-        ? '${widget.peerId.substring(0, 16)}...'
-        : widget.peerId;
-    final realName = (profile != null && profile.displayName.isNotEmpty)
-        ? profile.displayName
-        : shortId;
-    final hasLocalNick = localNick != null && localNick.isNotEmpty;
-    final topLine = hasLocalNick ? localNick : realName;
-    final subLine = hasLocalNick ? realName : null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          topLine,
-          style: HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-            fontWeight: FontWeight.w600,
-            fontSize: 13,
-          ),
-          overflow: TextOverflow.ellipsis,
-        ),
-        if (subLine != null)
-          Text(
-            subLine,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 10,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
-      ],
-    );
-  }
-
   /// `widget.peerId` is the friend's MASTER id while `peersProvider` is keyed by
   /// the DEVICE ids the relay reports, so a direct `peers[master]` lookup is
   /// always null for a multi-device friend and the header would read Offline
   /// while the dots and call buttons read online. Scan for ANY device of this
   /// master with an encrypted session.
-  Widget _buildConnectionStatus() {
-    final links = ref.watch(deviceLinkProvider);
-    final peers = ref.watch(peersProvider);
-    final isEncryptedViaAnyDevice = peers.entries.any((e) =>
-        links.identityOf(e.key) == widget.peerId && e.value.isEncrypted);
-    final isInvisible =
-        ref.watch(invisiblePeersProvider).contains(widget.peerId);
-    final isCustomRelay =
-        ref.watch(relayDomainProvider) != kDefaultRelayDomain;
-    final ConnectionStage stage;
-    if (isEncryptedViaAnyDevice && !isInvisible) {
-      stage = ConnectionStage.encrypted;
-    } else if (isCustomRelay) {
-      stage = ConnectionStage.customNetwork;
-    } else {
-      stage = ConnectionStage.offline;
-    }
-    return ConnectionProgress(
-      key: ValueKey('dm-conn-${widget.peerId}-${stage.index}'),
-      stage: stage,
-      // In a DM header the stage describes THE OTHER PERSON, not our own relay
-      // link, so it must not read as "you are offline".
-      tooltip: stage == ConnectionStage.offline
-          ? "This person isn't reachable right now"
-          : null,
-    );
-  }
-
   /// Confirms leaving a server voice channel, which starting a DM call
   /// disconnects (issue #49). Returns true to proceed.
   Future<bool> _confirmLeaveVoiceForCall() async {
@@ -1531,29 +1372,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final call = ref.watch(callProvider);
     final isOnline = identityIsOnline(ref, widget.peerId);
     final isInCall = call.status != CallStatus.idle;
-    final isCallWithThisPeer = call.peerId == widget.peerId && isInCall;
-
-    return HollowTooltip(
-      message: isCallWithThisPeer
-          ? 'In call'
-          : (isOnline && !isInCall ? 'Start voice call' : 'Voice call'),
-      child: HollowPressable(
-        semanticLabel: isCallWithThisPeer ? 'In call' : 'Start voice call',
-        onTap: isOnline && !isInCall
-            ? () => _startDmCall(withVideo: false)
-            : null,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
-          size: 16,
-          color: isCallWithThisPeer
-              ? hollow.success
-              : (isOnline && !isInCall
-                  ? hollow.textSecondary
-                  : hollow.textSecondary.withValues(alpha: 0.3)),
-        ),
-      ),
+    final withThisPeer = call.peerId == widget.peerId && isInCall;
+    return HollowIconButton(
+      icon: withThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
+      label: withThisPeer ? 'In call' : 'Start voice call',
+      color: withThisPeer ? hollow.success : null,
+      onPressed: isOnline && !isInCall
+          ? () => _startDmCall(withVideo: false)
+          : null,
     );
   }
 
@@ -1561,93 +1387,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final call = ref.watch(callProvider);
     final isOnline = identityIsOnline(ref, widget.peerId);
     final isInCall = call.status != CallStatus.idle;
-
-    return HollowTooltip(
-      message: 'Start video call',
-      child: HollowPressable(
-        semanticLabel: 'Start video call',
-        onTap: isOnline && !isInCall
-            ? () => _startDmCall(withVideo: true)
-            : null,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          LucideIcons.video,
-          size: 16,
-          color: isOnline && !isInCall
-              ? hollow.textSecondary
-              : hollow.textSecondary.withValues(alpha: 0.3),
-        ),
-      ),
+    return HollowIconButton(
+      icon: LucideIcons.video,
+      label: 'Start video call',
+      onPressed:
+          isOnline && !isInCall ? () => _startDmCall(withVideo: true) : null,
     );
   }
-
-  Widget _buildProfileToggleButton(HollowTheme hollow, bool showProfilePanel) {
-    final label = showProfilePanel ? 'Hide profile' : 'Show profile';
-    return HollowTooltip(
-      message: label,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: () {
-          ref.read(dmProfilePanelProvider.notifier).state = !showProfilePanel;
-        },
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(LucideIcons.user,
-            size: 16,
-            color: showProfilePanel ? hollow.accent : hollow.textSecondary),
-      ),
-    );
-  }
-
-  Widget _buildMuteToggleButton(HollowTheme hollow) {
-    final dmNotifEnabled = ref.watch(notificationSettingsProvider
-        .select((s) => s.dmEnabled[widget.peerId] ?? true));
-    final label = dmNotifEnabled ? 'Mute notifications' : 'Unmute notifications';
-    return HollowTooltip(
-      message: label,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: () {
-          final current = ref
-              .read(notificationSettingsProvider.notifier)
-              .isDmEnabled(widget.peerId);
-          ref
-              .read(notificationSettingsProvider.notifier)
-              .setDmEnabled(widget.peerId, !current);
-        },
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          dmNotifEnabled ? LucideIcons.bell : LucideIcons.bellOff,
-          size: 18,
-          color: dmNotifEnabled
-              ? hollow.textSecondary
-              : hollow.textSecondary.withValues(alpha: 0.4),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSplitToggleButton(HollowTheme hollow) {
-    final isSplit = ref.watch(splitViewProvider).isSplit;
-    final label = isSplit ? 'Close this pane' : 'Split view';
-    return HollowTooltip(
-      message: label,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: () => _handleSplitToggle(ref),
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(
-          LucideIcons.columns,
-          size: 16,
-          color: isSplit ? hollow.accent : hollow.textSecondary,
-        ),
-      ),
-    );
-  }
-
   /// Full-bleed screen-share layout: the share fills the pane and the source
   /// pill, chat overlay and controls pill float above it, auto-hiding together.
   Widget _buildScreenShareLayout(
@@ -1779,46 +1525,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       ),
     );
   }
-
-  /// Opens the emoji and emote picker anchored to the composer button, and
-  /// inserts the selection at the cursor.
-  void _openComposerEmojiPicker(BuildContext btnCtx) {
-    final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box == null
-        ? Offset.zero
-        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
-    showEmojiPicker(
-      context: context,
-      anchorPosition: anchor,
-      onSelect: _insertEmojiAtCursor,
-    );
-  }
-
   /// Opens the GIF picker anchored to the composer button. The pick arrives as
   /// an `[a:g:hash:w:h]` token and stages like an emote.
-  void _openComposerGifPicker(BuildContext btnCtx) {
-    final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box == null
-        ? Offset.zero
-        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
-    showGifPicker(
-      context: context,
-      anchorPosition: anchor,
-      onSelect: _sendAsset,
-    );
-  }
-
   /// Opens the sticker picker anchored to the composer button. A pick SENDS
   /// immediately and the panel stays open.
-  void _openComposerStickerPicker(BuildContext btnCtx) {
-    final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box == null
-        ? Offset.zero
-        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
-    showStickerPicker(
+  /// Opens the emoji, GIF and sticker picker over the composer.
+  void _openExpressions(BuildContext buttonContext) {
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    showExpressionPicker(
       context: context,
-      anchorPosition: anchor,
-      onSelect: _sendAsset,
+      anchorPosition: box == null
+          ? Offset.zero
+          : overlayAnchorOf(buttonContext,
+              localOffset: Offset(box.size.width, 0)),
+      onEmoji: _insertEmojiAtCursor,
+      onAsset: _sendAsset,
       onSharePack: _shareFileToChat,
     );
   }
@@ -1938,26 +1659,49 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   ) {
     return MessageActionBarScope(
       child: Builder(
-        builder: (scopeContext) => NotificationListener<ScrollNotification>(
-          onNotification: (notification) {
-            if (notification is ScrollUpdateNotification) {
-              MessageActionBarScope.of(scopeContext)?.dismissAll();
-            }
-            return false;
-          },
-          child: Container(
+        builder: (scopeContext) => Container(
             color: hollow.background,
             child: messages.isEmpty
-                ? (_historyLoaded
-                    ? const HollowEmptyState(
-                        glyph: LucideIcons.messageCircle,
-                        title: 'No messages yet',
-                      )
-                    : const SizedBox.shrink())
+                ? _buildConversationStart()
                 : _buildMessageList(hollow, messages, profiles, localPeerId),
           ),
-        ),
       ),
+    );
+  }
+
+  /// Nothing while the first read runs (it is local and brief), a retry when
+  /// it failed, and the start of the conversation when there is none yet.
+  Widget _buildConversationStart() {
+    if (!_historyLoaded) return const SizedBox.shrink();
+    if (_historyFailed) {
+      return HollowEmptyState(
+        glyph: LucideIcons.circleAlert,
+        title: "These messages didn't load",
+        action: HollowButton.ghost(
+          onPressed: () {
+            setState(() {
+              _historyStarted = false;
+              _historyLoaded = false;
+            });
+            _loadHistory();
+          },
+          child: const Text('Try again'),
+        ),
+      );
+    }
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    if (savedId != null &&
+        ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId) {
+      return const HollowEmptyState(
+        glyph: LucideIcons.bookmark,
+        title: 'Nothing saved yet',
+        description: 'Notes and messages you keep for yourself land here.',
+      );
+    }
+    final name = displayNameFor(ref.watch(profileProvider), widget.peerId);
+    return HollowEmptyState(
+      glyph: LucideIcons.messageCircle,
+      title: 'This is the start of your conversation with $name',
     );
   }
 
@@ -2153,6 +1897,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     String localPeerId,
     ({bool prev, bool next}) tiling,
   ) {
+    String? replySenderId;
     String? replySender;
     String? replyText;
     String? replyImagePath;
@@ -2164,6 +1909,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         final original = _albumItemById(messages[idx], msg.replyToMid!);
         replyText = _messagePreviewText(original);
         final origSenderId = original.isMe ? localPeerId : widget.peerId;
+        replySenderId = origSenderId;
         replySender = displayNameFor(profiles, origSenderId);
         if (original.fileAttachment?.isImage == true) {
           replyImagePath = original.fileAttachment?.diskPath;
@@ -2179,6 +1925,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ? null
           : dmAlbumItems(albumMessages,
               localPeerId: localPeerId, peerId: widget.peerId),
+      replyToSenderId: replySenderId,
       replyToSenderName: replySender,
       replyToText: replyText,
       replyToImagePath: replyImagePath,
@@ -2303,6 +2050,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   Future<void> _toggleReaction(ChatMessage msg, String emoji) async {
+    // A click outside the composer drops its focus on desktop; reacting is not
+    // leaving the conversation, so the next keystroke still lands in it.
+    if (_editingMessageId == null) _focusNode.requestFocus();
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
     final notifier = ref.read(chatProvider.notifier);
@@ -2482,82 +2232,35 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           : _buildComposerRow(hollow),
     );
   }
-
   Widget _buildComposerRow(HollowTheme hollow) {
-    return Row(
-      children: [
-        HollowPressable(
-          semanticLabel: 'Attach file',
-          onTap: _pickAndStageFile,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            LucideIcons.paperclip,
-            color: hollow.textSecondary,
-            size: 20,
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        HollowPressable(
-          semanticLabel: 'Record voice message',
-          onTap: _staged.isNotEmpty
-              ? null
-              : () => setState(() => _isRecordingVoice = true),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            LucideIcons.mic,
-            color: _staged.isNotEmpty
-                ? hollow.textSecondary.withValues(alpha: 0.4)
-                : hollow.textSecondary,
-            size: 20,
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        Expanded(
-          child: CompositedTransformTarget(
-            link: _composerLayerLink,
-            child: Focus(
-              onKeyEvent: (_, event) {
-                final r = _emoteAutocomplete.handleKey(event);
-                if (r == KeyEventResult.handled) return r;
-                return handleChatInputKey(
-                  event, _controller, _focusNode, _handleSend,
-                  onPasteImage: _stageClipboardImage,
-                  formatBindings:
-                      ref.read(appShortcutsProvider).valueOrNull,
-                );
-              },
-              child: chatComposerField(
-                hollow,
-                controller: _controller,
-                focusNode: _focusNode,
-                hintText: 'Type a message...',
-                onChanged: _onTextChanged,
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        composerGifButton(hollow, onOpen: _openComposerGifPicker),
-        composerStickerButton(hollow,
-            onOpen: _openComposerStickerPicker),
-        const SizedBox(width: HollowSpacing.xs),
-        composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
-        const SizedBox(width: HollowSpacing.sm),
-        HollowPressable(
-          semanticLabel: 'Send message',
-          onTap: _handleSend,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          backgroundColor: hollow.accent,
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            LucideIcons.send,
-            color: hollow.textOnAccent,
-            size: 20,
-          ),
-        ),
-      ],
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    final isSaved = savedId != null &&
+        ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId;
+    final localNick =
+        ref.watch(localNicknameProvider.select((m) => m[widget.peerId]));
+    final name = (localNick?.isNotEmpty ?? false)
+        ? localNick!
+        : displayNameFor(ref.watch(profileProvider), widget.peerId);
+    return ChatComposerRow(
+      controller: _controller,
+      focusNode: _focusNode,
+      layerLink: _composerLayerLink,
+      hintText: isSaved ? 'Note to self' : 'Message $name',
+      onChanged: _onTextChanged,
+      onKey: (event) {
+        final r = _emoteAutocomplete.handleKey(event);
+        if (r == KeyEventResult.handled) return r;
+        return handleChatInputKey(
+          event, _controller, _focusNode, _handleSend,
+          onPasteImage: _stageClipboardImage,
+          formatBindings: ref.read(appShortcutsProvider).valueOrNull,
+        );
+      },
+      onAttach: _pickAndStageFile,
+      onRecord: () => setState(() => _isRecordingVoice = true),
+      onExpressions: _openExpressions,
+      onSend: _handleSend,
+      hasStaged: _staged.isNotEmpty || _stagedPreviewUrl != null,
     );
   }
 }
@@ -4422,7 +4125,7 @@ class _DmProfilePanelSliderState extends State<_DmProfilePanelSlider>
         if (_curved.value == 0.0) return const SizedBox.shrink();
         return ClipRect(
           child: Align(
-            alignment: Alignment.centerLeft,
+            alignment: Alignment.centerRight,
             widthFactor: _curved.value,
             child: FadeTransition(
               opacity: _curved,
@@ -4431,414 +4134,7 @@ class _DmProfilePanelSliderState extends State<_DmProfilePanelSlider>
           ),
         );
       },
-      child: _DmProfilePanel(peerId: widget.peerId),
+      child: DmProfilePanel(peerId: widget.peerId),
     );
   }
-}
-
-/// Profile panel shown on the left side of DM chats.
-class _DmProfilePanel extends ConsumerWidget {
-  final String peerId;
-  const _DmProfilePanel({required this.peerId});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final profile = ref.watch(profileProvider.select((p) => p[peerId]));
-    final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
-    final localNicknames = ref.watch(localNicknameProvider);
-    final localNick = localNicknames[peerId];
-    final isOnline = identityIsOnline(ref, peerId);
-    final friends = ref.watch(friendsProvider);
-    final friendInfo = friends[peerId];
-
-    // Block and report key on the MASTER identity.
-    final master = ref.watch(deviceLinkProvider).identityOf(peerId);
-    final isBlocked = ref.watch(blockedUsersProvider).contains(master);
-
-    // Saved messages is a self-DM: there is nobody here to nickname, block or
-    // report.
-    final savedId = ref.watch(savedMessagesPeerIdProvider);
-    final isSavedMessages = savedId != null && master == savedId;
-
-    final displayName = profile?.displayName ?? '';
-    final status = profile?.status ?? '';
-    final aboutMe = profile?.aboutMe ?? '';
-    final bannerBytes = watchAnimatedBanner(ref, peerId) ??
-        ref.watch(bannerProvider(peerId)).valueOrNull;
-
-    final shownName = displayName.isNotEmpty
-        ? displayName
-        : (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
-
-    final bannerColor = _bannerColorFromId(peerId);
-
-    return Container(
-      width: 240,
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(
-          right: BorderSide(color: hollow.border),
-        ),
-      ),
-      child: Column(
-        children: [
-          // The 2.5:1 ratio every user banner surface shares with Rust's
-          // 1200x480 storage.
-          SizedBox(
-            height: 96,
-            width: double.infinity,
-            child: bannerBytes != null && bannerBytes.isNotEmpty
-                ? AnimatedGifImage(bytes: bannerBytes, height: 96, width: double.infinity, fit: BoxFit.cover,
-                    errorWidget: _bannerGradient(bannerColor))
-                : _bannerGradient(bannerColor),
-          ),
-
-          Transform.translate(
-            offset: const Offset(0, -32),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-              child: Column(
-                children: [
-                  _buildAvatarWithStatus(hollow, isOnline),
-                  const SizedBox(height: HollowSpacing.sm),
-                  ..._buildNameLines(hollow, localNick, shownName),
-                  if (status.isNotEmpty) ...[
-                    const SizedBox(height: HollowSpacing.xxs),
-                    Text(
-                      status,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontStyle: FontStyle.italic,
-                        fontSize: 11,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                  // VERIFIED accounts only: the profile's own
-                  // `twitch_username` is a self-declaration and draws nothing.
-                  if (verifiedTwitch != null) ...[
-                    const SizedBox(height: HollowSpacing.xs),
-                    _buildTwitchBadge(hollow, verifiedTwitch),
-                  ],
-                ],
-              ),
-            ),
-          ),
-
-          Expanded(
-            child: Transform.translate(
-              offset: const Offset(0, -16),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-                child: ListView(
-                  padding: EdgeInsets.zero,
-                  children: [
-                    if (aboutMe.isNotEmpty) ...[
-                      Container(height: 1, color: hollow.border),
-                      const SizedBox(height: HollowSpacing.sm),
-                      Text(
-                        '"$aboutMe"',
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textSecondary,
-                          fontStyle: FontStyle.italic,
-                          fontSize: 12,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: HollowSpacing.sm),
-                      Container(height: 1, color: hollow.border),
-                    ],
-
-                    const SizedBox(height: HollowSpacing.sm),
-
-                    // Hidden for Saved messages: there is nobody to nickname,
-                    // block or report on a self-DM.
-                    if (!isSavedMessages)
-                      ..._buildDmActions(context, ref, hollow,
-                          master: master,
-                          isBlocked: isBlocked,
-                          shownName: shownName,
-                          localNick: localNick),
-
-                    if (friendInfo != null && friendInfo.status == 'accepted') ...[
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(LucideIcons.userCheck, size: 14, color: hollow.success),
-                          const SizedBox(width: HollowSpacing.xs),
-                          Text(
-                            'Friends',
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.success,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: HollowSpacing.sm),
-                    ],
-                    Container(height: 1, color: hollow.border),
-                    const SizedBox(height: HollowSpacing.sm),
-
-                    _buildPeerIdCopy(context, hollow),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAvatarWithStatus(HollowTheme hollow, bool isOnline) {
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-            border: Border.all(color: hollow.surface, width: 3),
-          ),
-          child: HollowAvatar(
-            peerId: peerId,
-            size: 64,
-            animate: true,
-          ),
-        ),
-        Positioned(
-          right: 0,
-          bottom: 0,
-          child: Container(
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              shape: BoxShape.circle,
-            ),
-            padding: const EdgeInsets.all(2),
-            child: StatusDot(
-              color: isOnline ? hollow.success : hollow.textSecondary,
-              size: 10,
-              filled: isOnline,
-              semanticLabel: isOnline ? 'Online' : 'Offline',
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// A local nickname takes the top line and pushes the profile name to a
-  /// subline; without one there is no subline.
-  List<Widget> _buildNameLines(
-      HollowTheme hollow, String? localNick, String shownName) {
-    final nameStyle = HollowTypography.subheading.copyWith(
-      color: hollow.textPrimary,
-      fontWeight: FontWeight.w700,
-      fontSize: 15,
-    );
-    if (localNick != null && localNick.isNotEmpty) {
-      return [
-        Text(
-          localNick,
-          style: nameStyle,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-        ),
-        Text(
-          shownName,
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 11,
-          ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-        ),
-      ];
-    }
-    return [
-      Text(
-        shownName,
-        style: nameStyle,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        textAlign: TextAlign.center,
-      ),
-    ];
-  }
-
-  /// [login] is a VERIFIED Twitch account; there is no other source for this
-  /// badge.
-  Widget _buildTwitchBadge(HollowTheme hollow, String login) { // design-ignore: Twitch's brand purple, rendered only from a verified credential
-    return GestureDetector(
-      onTap: () => launchUrl(
-        Uri.parse('https://twitch.tv/$login'),
-        mode: LaunchMode.externalApplication,
-      ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: 3,
-        ),
-        decoration: BoxDecoration(
-          color: const Color(0xFF9146FF).withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(hollow.radiusXs),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(BrandIcons.twitch, size: 11, color: Color(0xFF9146FF)),
-            const SizedBox(width: 4),
-            Text(
-              login,
-              style: HollowTypography.caption.copyWith(
-                color: const Color(0xFF9146FF),
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// The nickname button and the Block and Report row.
-  List<Widget> _buildDmActions(
-    BuildContext context,
-    WidgetRef ref,
-    HollowTheme hollow, {
-    required String master,
-    required bool isBlocked,
-    required String shownName,
-    required String? localNick,
-  }) {
-    final hasNick = localNick != null && localNick.isNotEmpty;
-    final isVerified = ref.watch(isPeerVerifiedProvider(master));
-    return [
-      SizedBox(
-        width: double.infinity,
-        child: HollowButton.outline(
-          onPressed: () {
-            showLocalNicknameDialog(
-              context, ref, peerId,
-              currentNickname: localNick ?? '',
-            );
-          },
-          compact: true,
-          icon: Icon(hasNick ? LucideIcons.pencil : LucideIcons.tag),
-          child: Text(hasNick ? 'Edit Nickname' : 'Set Nickname'),
-        ),
-      ),
-      const SizedBox(height: HollowSpacing.xs),
-      // Same action and ordering as the profile card, so verification is never
-      // quietly unavailable here.
-      SizedBox(
-        width: double.infinity,
-        child: HollowButton.outline(
-          onPressed: () => showVerifyContactDialog(context, peerId: master),
-          compact: true,
-          icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
-          child: Text(isVerified ? 'Verified: view number' : 'Verify contact'),
-        ),
-      ),
-      const SizedBox(height: HollowSpacing.xs),
-      Row(
-        children: [
-          Expanded(
-            child: HollowButton.outline(
-              danger: true,
-              onPressed: isBlocked
-                  ? () => unblockUser(context, masterId: master)
-                  : () => confirmAndBlockUser(
-                        context,
-                        masterId: master,
-                        displayName: shownName,
-                      ),
-              compact: true,
-              expand: true,
-              icon: const Icon(LucideIcons.ban),
-              child: Text(isBlocked ? 'Unblock' : 'Block'),
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          Expanded(
-            child: HollowButton.outline(
-              danger: true,
-              onPressed: () => showReportUserDialog(
-                context,
-                masterId: master,
-                displayName: shownName,
-              ),
-              compact: true,
-              expand: true,
-              icon: const Icon(LucideIcons.flag),
-              child: const Text('Report'),
-            ),
-          ),
-        ],
-      ),
-      const SizedBox(height: HollowSpacing.sm),
-    ];
-  }
-
-  /// Peer id, copied on tap.
-  Widget _buildPeerIdCopy(BuildContext context, HollowTheme hollow) {
-    return HollowPressable(
-      onTap: () {
-        Clipboard.setData(ClipboardData(text: peerId));
-        HollowToast.show(
-          context,
-          'Peer ID copied',
-          type: HollowToastType.success,
-          duration: const Duration(seconds: 1),
-        );
-      },
-      subtle: true,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xs,
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(LucideIcons.copy, size: 14, color: hollow.textTertiary),
-          const SizedBox(width: HollowSpacing.xs),
-          Flexible(
-            child: Text(
-              peerId,
-              style: HollowTypography.monoSmall
-                  .copyWith(color: hollow.textTertiary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _bannerGradient(Color bannerColor) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [bannerColor, bannerColor.withValues(alpha: 0.7)],
-        ),
-      ),
-    );
-  }
-}
-
-/// Banner colour derived from a peer id.
-Color _bannerColorFromId(String id) {
-  final hash = id.hashCode;
-  final hue = ((hash % 360).abs() + 40) % 360;
-  return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }

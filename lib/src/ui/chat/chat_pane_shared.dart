@@ -3,10 +3,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -16,6 +16,9 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -158,23 +161,24 @@ bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
       current.day != previous.day;
 }
 
-/// "Today", "Yesterday", or "February 16, 2026", shared by the date separator
-/// and the unread line when the two merge.
-String chatDayLabel(DateTime date) {
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
+/// "Today", "Yesterday", "February 16", or "February 16, 2025" for another
+/// year, shared by the date separator and the unread line when the two merge.
+String chatDayLabel(DateTime date, {DateTime? now}) {
+  final today = now ?? DateTime.now();
   final messageDay = DateTime(date.year, date.month, date.day);
-  final diff = today.difference(messageDay).inDays;
+  final diff =
+      DateTime(today.year, today.month, today.day).difference(messageDay).inDays;
   if (diff == 0) return 'Today';
   if (diff == 1) return 'Yesterday';
   const months = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December',
   ];
-  return '${months[date.month - 1]} ${date.day}, ${date.year}';
+  final monthDay = '${months[date.month - 1]} ${date.day}';
+  return date.year == today.year ? monthDay : '$monthDay, ${date.year}';
 }
 
-/// ASOT-style date separator: ——— February 16, 2026 ———
+/// The day rule between messages: a hairline, the day, a hairline.
 ///
 /// The only thing in a chat that draws all the way across, so an unbalanced
 /// gutter shows up at its two ends: with the rail holding [kChatRailWidth] of
@@ -195,40 +199,27 @@ class DateSeparator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final label = chatDayLabel(date);
-
     return Padding(
       padding: EdgeInsets.only(
-        top: HollowSpacing.md + 2,
-        bottom: HollowSpacing.sm,
+        top: HollowSpacing.lg,
+        bottom: HollowSpacing.xs,
         left: HollowSpacing.lg,
         right: endInset,
       ),
       child: Row(
         children: [
-          Expanded(
-            child: Container(
-              height: 1,
-              color: hollow.border,
-            ),
-          ),
+          const Expanded(child: HollowDivider()),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
             child: Text(
-              label,
+              chatDayLabel(date),
               style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.6),
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
+                color: hollow.textTertiary,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ),
-          Expanded(
-            child: Container(
-              height: 1,
-              color: hollow.border,
-            ),
-          ),
+          const Expanded(child: HollowDivider()),
         ],
       ),
     );
@@ -265,16 +256,14 @@ int? unreadDividerIndex({
   return null;
 }
 
-/// The "new messages" line: a rule in [HollowTheme.error] with a badge at its
-/// right end, above the first message that arrived while you were away.
+/// The "new messages" line: an accent rule with a New badge at its right end,
+/// above the first message that arrived while you were away.
 ///
-/// The badge is the app's own unread pill rather than a word in red, so it
-/// reads as the same thing the sidebar and dock badges mean. A non-null [date]
-/// MERGES the day separator into this rule: coming back the next day is the
-/// ordinary way to see the line at all, and two full-width rules 30px apart
-/// read as a mistake. Deliberately not centred, merged or not, because a
-/// centred label reads as another date. The label colour is lifted to 4.5:1
-/// against the pane; the raw error red fails as small text on the light theme.
+/// Accent, like every unread count; red is kept for a mention. A non-null
+/// [date] MERGES the day separator into this rule: coming back the next day is
+/// the ordinary way to see the line at all, and two full-width rules 30px
+/// apart read as a mistake. Deliberately not centred, merged or not, because a
+/// centred label reads as another date.
 class UnreadDivider extends StatelessWidget {
   /// Matches [DateSeparator.endInset] so the two line up when they do not
   /// merge.
@@ -289,15 +278,13 @@ class UnreadDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final line = hollow.error.withValues(alpha: 0.75);
-    final label = Contrast.ensureContrast(hollow.error, hollow.background,
-        targetRatio: 4.5);
+    final line = Container(height: 1, color: hollow.accent);
     final day = date == null ? null : chatDayLabel(date!);
     return Padding(
       padding: EdgeInsets.only(
         // Merged, this rule is also the day separator, so it takes that
         // separator's breathing room above.
-        top: day == null ? HollowSpacing.sm : HollowSpacing.md + 2,
+        top: day == null ? HollowSpacing.sm : HollowSpacing.lg,
         bottom: HollowSpacing.xxs,
         left: HollowSpacing.lg,
         right: endInset,
@@ -308,7 +295,7 @@ class UnreadDivider extends StatelessWidget {
         child: ExcludeSemantics(
           child: Row(
             children: [
-              Expanded(child: Container(height: 1, color: line)),
+              Expanded(child: line),
               if (day != null) ...[
                 Padding(
                   padding:
@@ -316,34 +303,15 @@ class UnreadDivider extends StatelessWidget {
                   child: Text(
                     day,
                     style: HollowTypography.caption.copyWith(
-                      color: label,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
+                      color: hollow.accentText,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
-                Expanded(child: Container(height: 1, color: line)),
+                Expanded(child: line),
               ],
-              Padding(
-                padding: const EdgeInsets.only(left: HollowSpacing.sm),
-                child: Container(
-                  height: 14,
-                  padding: const EdgeInsets.symmetric(horizontal: 5),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: hollow.error,
-                    borderRadius: BorderRadius.circular(7),
-                  ),
-                  child: Text(
-                    'New',
-                    style: HollowTypography.micro.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                      height: 1,
-                    ),
-                  ),
-                ),
-              ),
+              const SizedBox(width: HollowSpacing.sm),
+              const HollowBadge('New', kind: HollowBadgeKind.accent),
             ],
           ),
         ),
@@ -506,17 +474,6 @@ const double kChatRailWidth = kWindowEdgeDeadStrip + kScrollGutter;
 /// Flutter pointer event: a control hugging the edge renders perfectly, passes
 /// every widget test and does nothing when clicked.
 const double kWindowEdgeDeadStrip = 8.0;
-
-/// Width of the accent pill that marks your own messages.
-const double kOwnMessageBarWidth = 3.0;
-
-/// How far that pill floats inside the chat's left edge.
-///
-/// Not zero: flush against the edge it welds itself to the divider against the
-/// channel list and reads as a highlight on the PANEL rather than a mark on the
-/// message. Inside the row's padding it sits in the left margin, opposite the
-/// rail's groove in the right one.
-const double kOwnMessageBarInset = HollowSpacing.xs;
 
 /// Height of a jump cap: the cap already fills the rail's live width, so height
 /// is the only dimension left to make it a comfortable target.
@@ -939,7 +896,7 @@ Widget dateSeparatedChatRow({
   final showDate = shouldShowDateSeparator(timestamp, prevTimestamp);
   final messageWidget = showHeader
       ? Padding(
-          padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
+          padding: const EdgeInsets.only(top: HollowSpacing.sm),
           child: child,
         )
       : child;
@@ -970,47 +927,166 @@ Widget dateSeparatedChatRow({
   );
 }
 
-/// Wraps a chat row with the accent pill that marks it as YOURS.
-///
-/// The pill runs the row's FULL height on purpose: a grouped run is several
-/// rows whose boxes touch, and any vertical inset breaks the run into a dashed
-/// line. It is positioned rather than a [Border], which insets its Container's
-/// child and moved every own-message avatar off everyone else's alignment.
-class OwnMessageMarker extends StatelessWidget {
-  final Widget child;
+/// Height of every conversation header, DM, channel or meeting.
+const double kChatHeaderHeight = 48;
 
-  const OwnMessageMarker({super.key, required this.child});
+/// The bar above a conversation: what it is on the left, its tools on the
+/// right. One height, one title size and one button gap for DMs, channels and
+/// meetings, so switching between them moves nothing.
+///
+/// [status] is for what has gone wrong or is in progress only (offline,
+/// syncing, nobody else here); a healthy conversation says nothing.
+class ChatHeaderBar extends StatelessWidget {
+  final Widget leading;
+  final String title;
+  final String? subtitle;
+  final List<Widget> badges;
+  final Widget? status;
+  final List<Widget> actions;
+
+  const ChatHeaderBar({
+    super.key,
+    required this.leading,
+    required this.title,
+    this.subtitle,
+    this.badges = const [],
+    this.status,
+    this.actions = const [],
+  });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Stack(
-      children: [
-        // Non-positioned, so the Stack sizes to the row. Never let this become
-        // a conditional `SizedBox.shrink()` or the row collapses
-        // (feedback_stack_nonpositioned_child_collapse).
-        child,
-        Positioned(
-          left: kOwnMessageBarInset,
-          top: 0,
-          bottom: 0,
-          width: kOwnMessageBarWidth,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: hollow.accent,
-              borderRadius: BorderRadius.circular(kOwnMessageBarWidth / 2),
+    final subtitle = this.subtitle;
+    return Container(
+      height: kChatHeaderHeight,
+      padding: const EdgeInsets.only(
+        left: HollowSpacing.lg,
+        right: HollowSpacing.md,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(bottom: BorderSide(color: hollow.border)),
+      ),
+      child: Row(
+        children: [
+          leading,
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Row(
+              children: [
+                Flexible(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: HollowTypography.subheading
+                            .copyWith(color: hollow.textPrimary),
+                      ),
+                      if (subtitle != null && subtitle.isNotEmpty)
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: HollowTypography.caption
+                              .copyWith(color: hollow.textSecondary),
+                        ),
+                    ],
+                  ),
+                ),
+                for (final badge in badges) ...[
+                  const SizedBox(width: HollowSpacing.sm),
+                  badge,
+                ],
+              ],
             ),
           ),
-        ),
-      ],
+          if (status != null) ...[
+            const SizedBox(width: HollowSpacing.md),
+            status!,
+            const SizedBox(width: HollowSpacing.md),
+          ],
+          for (var i = 0; i < actions.length; i++) ...[
+            if (i > 0) const SizedBox(width: HollowSpacing.xs),
+            actions[i],
+          ],
+        ],
+      ),
     );
   }
 }
 
-/// Yours gets the pill and everyone else's row comes back untouched, so
-/// `find.byType(OwnMessageMarker)` is exactly the set of own-message rows.
-Widget markedAsOwn({required bool isMe, required Widget row}) =>
-    isMe ? OwnMessageMarker(child: row) : row;
+/// One search hit under a chat's search field: who, when, and the text.
+class ChatSearchResultRow extends StatelessWidget {
+  final String name;
+  final Color nameColor;
+  final DateTime time;
+  final String text;
+  final VoidCallback onTap;
+
+  const ChatSearchResultRow({
+    super.key,
+    required this.name,
+    required this.nameColor,
+    required this.time,
+    required this.text,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.xs),
+      child: HollowPressable(
+        subtle: true,
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        hoverColor: hollow.elevated,
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Flexible(
+                  child: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: HollowTypography.label.copyWith(color: nameColor),
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  conversationTimeLabel(time),
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textTertiary),
+                ),
+              ],
+            ),
+            Text(
+              text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textPrimary),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// Reply-target preview bar shown above the input while composing a reply.
 class ChatReplyPreviewBar extends StatelessWidget {
@@ -1033,63 +1109,56 @@ class ChatReplyPreviewBar extends StatelessWidget {
     final path = imagePath;
     return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.xs + 2,
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
         color: hollow.surface,
-        border: Border(
-          top: BorderSide(color: hollow.border),
-          left: BorderSide(color: hollow.accent, width: 3),
-        ),
+        border: Border(top: BorderSide(color: hollow.border)),
       ),
       child: Row(
         children: [
-          Icon(LucideIcons.reply, size: 14, color: hollow.accent),
+          Icon(LucideIcons.reply, size: 16, color: hollow.textTertiary),
           const SizedBox(width: HollowSpacing.sm),
+          if (path != null && File(path).existsSync()) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
+              child: gifAwareImage(path,
+                  width: HollowSpacing.xl, height: HollowSpacing.xl),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+          ],
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Replying to ${senderName ?? ''}',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
+            child: Text.rich(
+              TextSpan(children: [
+                TextSpan(
+                  text: 'Replying to ',
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+                TextSpan(
+                  text: senderName ?? '',
+                  style: HollowTypography.bodySmall.copyWith(
+                    color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,
-                    fontSize: 11,
                   ),
                 ),
-                Row(
-                  children: [
-                    if (path != null && File(path).existsSync()) ...[
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: gifAwareImage(path, width: 32, height: 32),
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                    ],
-                    Expanded(
-                      child: Text(
-                        text ?? '',
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 12,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+                if ((text ?? '').isNotEmpty)
+                  TextSpan(
+                    text: '  ${text!}',
+                    style: HollowTypography.bodySmall
+                        .copyWith(color: hollow.textTertiary),
+                  ),
+              ]),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
-          HollowPressable(
-            semanticLabel: 'Cancel reply',
-            onTap: onCancel,
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
+          HollowIconButton(
+            icon: LucideIcons.x,
+            label: 'Cancel reply',
+            size: isTouchForm ? 44 : 28,
+            onPressed: onCancel,
           ),
         ],
       ),
@@ -1155,102 +1224,165 @@ Widget chatInputBarShell(HollowTheme hollow,
   );
 }
 
-/// The composer text field shared by both panes. Carries the chat text scale
-/// too, since reading at 150% and typing the reply at 100% helps nobody.
+/// Height of every composer control, and of a one-line composer field.
+const double kComposerHeight = 44;
+
+/// The composer text field. Carries the chat text scale too, since reading at
+/// 150% and typing the reply at 100% helps nobody. Its focus stays quiet: the
+/// composer holds focus all the time and an accent ring would never go out.
 Widget chatComposerField(
   HollowTheme hollow, {
   required EmoteComposerController controller,
   required FocusNode focusNode,
   required String hintText,
   required ValueChanged<String> onChanged,
+  Widget? trailing,
+  bool autofocus = true,
 }) {
   return ChatTextScale(
     child: HollowTextField(
       controller: controller,
       focusNode: focusNode,
       hintText: hintText,
-      autofocus: true,
+      autofocus: autofocus,
       maxLines: 5,
       minLines: 1,
       maxLength: 4000,
       showCounter: false,
-      style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-      borderRadius: hollow.radiusLg,
+      quietFocus: true,
+      style: (isTouchForm ? HollowTypography.bodyTouch : HollowTypography.body)
+          .copyWith(color: hollow.textPrimary),
+      trailing: trailing,
       onChanged: onChanged,
     ),
   );
 }
 
-/// Emoji-picker button. [onOpen] receives the button's own BuildContext so the
-/// picker can anchor to it.
-Widget composerEmojiButton(HollowTheme hollow,
-    {required void Function(BuildContext btnCtx) onOpen}) {
-  return Builder(
-    builder: (btnCtx) => HollowPressable(
-      semanticLabel: 'Insert emoji',
-      onTap: () => onOpen(btnCtx),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.sm),
-      child: Icon(
-        LucideIcons.smile,
-        color: hollow.textSecondary,
-        size: 20,
-      ),
-    ),
-  );
-}
+/// The composer row: attach, the text with the one expression button inside
+/// it, then the microphone, which becomes Send as soon as there is something
+/// to send. Send is the only accent on the row, and only while it can act.
+class ChatComposerRow extends StatelessWidget {
+  final EmoteComposerController controller;
+  final FocusNode focusNode;
+  final String hintText;
+  final ValueChanged<String> onChanged;
+  final KeyEventResult Function(KeyEvent event) onKey;
+  final LayerLink layerLink;
 
-/// GIF-picker button, a text badge because no icon set carries a GIF glyph.
-/// [onOpen] receives the button's own BuildContext so the picker can anchor.
-Widget composerGifButton(HollowTheme hollow,
-    {required void Function(BuildContext btnCtx) onOpen}) {
-  return Builder(
-    builder: (btnCtx) => HollowPressable(
-      semanticLabel: 'Insert GIF',
-      onTap: () => onOpen(btnCtx),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.sm),
-      child: Container(
-        height: 20,
-        padding: const EdgeInsets.symmetric(horizontal: 3),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          border: Border.all(color: hollow.textSecondary, width: 1.5),
-          borderRadius: BorderRadius.circular(5),
-        ),
-        child: Text(
-          'GIF',
-          style: HollowTypography.micro.copyWith(
-            color: hollow.textSecondary,
-            fontWeight: FontWeight.w600,
-            height: 1.0,
+  /// Null hides attach (a conference is text only).
+  final VoidCallback? onAttach;
+
+  /// Null leaves Send in the mic's place for good.
+  final VoidCallback? onRecord;
+
+  /// Opens the expression picker, anchored to the button's own context.
+  final void Function(BuildContext buttonContext) onExpressions;
+  final VoidCallback onSend;
+
+  /// A staged file or link counts as something to send.
+  final bool hasStaged;
+
+  /// Sits just before Send (the slow mode countdown).
+  final Widget? beforeSend;
+
+  /// Off on a phone, where focus raises the keyboard over half the chat.
+  final bool autofocus;
+
+  const ChatComposerRow({
+    super.key,
+    required this.controller,
+    required this.focusNode,
+    required this.hintText,
+    required this.onChanged,
+    required this.onKey,
+    required this.layerLink,
+    required this.onExpressions,
+    required this.onSend,
+    this.onAttach,
+    this.onRecord,
+    this.hasStaged = false,
+    this.beforeSend,
+    this.autofocus = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (onAttach != null) ...[
+          HollowIconButton(
+            icon: LucideIcons.plus,
+            label: 'Attach a file',
+            size: kComposerHeight,
+            onPressed: onAttach,
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+        ],
+        Expanded(
+          child: CompositedTransformTarget(
+            link: layerLink,
+            child: Focus(
+              onKeyEvent: (_, event) => onKey(event),
+              child: chatComposerField(
+                hollow,
+                controller: controller,
+                focusNode: focusNode,
+                hintText: hintText,
+                onChanged: onChanged,
+                autofocus: autofocus,
+                trailing: Padding(
+                  padding: const EdgeInsets.only(right: HollowSpacing.xs),
+                  child: Builder(
+                    builder: (buttonContext) => HollowIconButton(
+                      icon: LucideIcons.smile,
+                      label: 'Emoji, GIFs and stickers',
+                      onPressed: () => onExpressions(buttonContext),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
-      ),
-    ),
-  );
-}
-
-/// Sticker-picker button. [onOpen] receives the button's own BuildContext so
-/// the picker can anchor to it.
-///
-/// A third composer button is PROVISIONAL; `StickerPickerBody` is host-agnostic
-/// so moving the panel later touches only its host.
-Widget composerStickerButton(HollowTheme hollow,
-    {required void Function(BuildContext btnCtx) onOpen}) {
-  return Builder(
-    builder: (btnCtx) => HollowPressable(
-      semanticLabel: 'Insert sticker',
-      onTap: () => onOpen(btnCtx),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.sm),
-      child: Icon(
-        LucideIcons.sticker,
-        color: hollow.textSecondary,
-        size: 20,
-      ),
-    ),
-  );
+        const SizedBox(width: HollowSpacing.sm),
+        if (beforeSend != null) ...[
+          SizedBox(height: kComposerHeight, child: Center(child: beforeSend)),
+          const SizedBox(width: HollowSpacing.sm),
+        ],
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: controller,
+          builder: (context, value, _) {
+            final ready = hasStaged || value.text.trim().isNotEmpty;
+            if (!ready && onRecord != null) {
+              return HollowIconButton(
+                icon: LucideIcons.mic,
+                label: 'Record a voice message',
+                size: kComposerHeight,
+                onPressed: onRecord,
+              );
+            }
+            return HollowPressable(
+              semanticLabel: 'Send message',
+              onTap: ready ? onSend : null,
+              disabled: !ready,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              backgroundColor: ready ? hollow.accent : null,
+              child: SizedBox.square(
+                dimension: kComposerHeight,
+                child: Icon(
+                  LucideIcons.send,
+                  size: 20,
+                  color: ready ? hollow.textOnAccent : hollow.textTertiary,
+                ),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
 }
 
 /// The chat-overlay pin toggle shown at the edge of the screen-share chat

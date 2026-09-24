@@ -169,8 +169,8 @@ The `build()` method reads:
 - `callProvider` -- current call state
 
 Top-level structure is a `Row`:
-1. Left: `_DmProfilePanelSlider` (animated, 240px, shown unless screen share is active)
-2. Right: `Expanded` containing `ChatDropZone` wrapping a `Column`
+1. `Expanded` containing `ChatDropZone` wrapping a `Column`
+2. RIGHT (since 2026-09-24): `_DmProfilePanelSlider` (animated from the right edge, shown unless screen share is active) holding `DmProfilePanel`
 
 The Column's children depend on whether screen share is active:
 
@@ -186,16 +186,12 @@ The Column's children depend on whether screen share is active:
 
 ## Chat Header Bar
 
-Always shown at the top. `Container` with `hollow.surface` background and bottom border. Contains a `Row` with:
+The shared `ChatHeaderBar` (`chat_pane_shared.dart`, 48 px, `surface`, bottom hairline), the same bar the channel pane uses:
 
-1. **Avatar**: `HollowAvatar(peerId, size: 28)` with avatar bytes from `profileProvider`
-2. **Name column** (2026-06-21 rework — the redundant status dot was REMOVED, since the right-side `ConnectionProgress` already conveys online/offline): if a LOCAL nickname is set → local nickname (bold 13px) on top + the friend's real name (raw `profile.displayName`, fallback truncated peer ID) below in 10px caption; if NO local nickname → just the real name, NO subline (the old truncated-peer-ID subline is gone). Watches `localNicknameProvider` + `profileProvider.select`.
-3. **Connection progress**: `ConnectionProgress` widget showing encryption stage. **Multi-device (fixed 2026-06-15):** stage is `encrypted` if ANY device of the friend's master has an encrypted session — `peers.entries.any((e) => links.identityOf(e.key) == widget.peerId && e.value.isEncrypted)` — not a direct `peersProvider[widget.peerId]` lookup (that's device-keyed → always null for a multi-device/keystone-rotated friend → falsely showed Offline while dots/call-buttons showed online). Same scan pattern as the Home network column. Else `customNetwork` (custom relay) / `offline`. Invisible peer → not encrypted.
-4. **Voice call button**: `LucideIcons.phone` / `LucideIcons.phoneCall`. Enabled when peer is online and not already in a call. Tapping calls `callProvider.notifier.startCall(peerId)`. Green when in-call with this peer
-5. **Video call button**: `LucideIcons.video`. Same enable logic. Calls `startCall(peerId, withVideo: true)`
-6. **Profile toggle**: `LucideIcons.user`. Toggles `dmProfilePanelProvider`. Accent when panel visible
-7. **Notification mute**: `LucideIcons.bell` / `LucideIcons.bellOff`. Reads/writes `notificationSettingsProvider` for per-DM mute. Uses `.select((s) => s.dmEnabled[peerId] ?? true)` for granular rebuilds
-8. **Split view button** (dock mode only): `LucideIcons.columns`. Shown only when `layoutModeProvider` is `LayoutMode.dock`. Calls `_handleSplitToggle()` which either opens a split via `splitViewProvider.notifier.openSplit()` or closes this pane via `splitViewProvider.notifier.closePane(splitPaneIndex ?? 0)`. Accent when split is active
+1. **Leading:** `PresenceAvatar(size 28, online: identityIsOnline)` (Saved messages: `SavedMessagesAvatar`).
+2. **Title** `subheading`: the local nickname if set, else the profile name; **subline**: the real name when a nickname is set, else the person's status line.
+3. **No status while healthy.** The old `ConnectionProgress` ("Encrypted") is gone from the DM header; presence is the avatar's dot and verification lives in the panel.
+4. **Actions** (`HollowIconButton`, 32 px, 4 apart): voice call (green `phoneCall` while in a call with them), video call, search (selected while open), profile panel toggle (`panelRight`, selected = grey fill, never accent), split view (dock mode). Mute moved into the panel.
 
 ## _buildMessageArea() -- Message List, Typing, Reply, Input
 
@@ -205,8 +201,8 @@ Returns a `List<Widget>` used by both the normal layout and the screen-share ove
 
 `Expanded` containing a `Stack` of `_buildMessageListLayer` + `_buildUnreadPillOverlay`.
 
-**_buildMessageListLayer** -- `MessageActionBarScope` wrapping a `NotificationListener<ScrollNotification>` that dismisses all action bars on scroll. Contains either:
-- Empty (if `messages.isEmpty` after history loaded): `HollowEmptyState(glyph: messageCircle, title: 'No messages yet')`. Before history loaded: `SizedBox.shrink()`.
+**_buildMessageListLayer** -- `MessageActionBarScope` (no scroll dismissal since 2026-09-24: the bar follows its row). Contains either:
+- Empty: `_buildConversationStart()`: nothing until the first read returns (`_historyStarted` / `_historyLoaded` / `_historyFailed`; `chatProvider.loadHistory` returns false on a failed read), "These messages didn't load" + Try again on failure, "Nothing saved yet" for Saved messages, else "This is the start of your conversation with {name}". The old version set its loaded flag BEFORE the await and flashed "No messages yet".
 - `_buildMessageList`: renders `_displayMessages(messages)` (the frozen prefix while scrolled up, every album folded into its earliest item via `collapseDmAlbums`, see `album_grouping.dart`); precomputes `replyIndexById` (one pass per build, every album item also mapped to its anchor row's index; `_jumpToMessageId` maps through `_albums.anchorIdByItemId` the same way) and the unread divider (entry seen id mapped to its album row via `_albumRowId`), then calls the shared `reversedChatList()` shell (see wiki ui_chat_pane_shared) with `listKey: ValueKey('dm-list-${peerId}')`, the instance scroll controllers, and `itemBuilder: _buildMessageRow`. The shell owns `reverse: true`, index-0-bottom pinning, and `findChildIndexCallback` keyed-row reuse.
 
 **_buildMessageRow(context, revIndex, messages, replyIndexById, profiles, localPeerId)** -- maps the reversed index back to chronological, determines `showHeader` via `shouldGroup()`, and builds a `MessageHoverWrapper` whose action callbacks come from nullable factories (null hides the affordance; tap-time reads use `ref.read` for freshness):
@@ -233,7 +229,7 @@ The wrapper's child is `_buildBubble(...)`: resolves reply preview via `replyInd
 
 ### Reply Preview Bar
 
-Shown when `_replyToMessageId != null` -- the shared `ChatReplyPreviewBar` widget (accent left border, "Replying to {name}", single-line preview, optional 32x32 gif-aware thumb, cancel X -> `_cancelReply()`).
+Shown when `_replyToMessageId != null` -- the shared `ChatReplyPreviewBar`: a grey reply icon, one line of "Replying to **name**  snippet", an optional 24 px gif-aware thumb, and a `HollowIconButton` cancel (28, 44 on touch). No accent strip since 2026-09-24.
 
 ### Staged Attachments
 
@@ -245,12 +241,11 @@ The shared `StagedLinkArea` widget: `StagedHollowLinkCard` for `hollow://` links
 
 ### Input Bar
 
-`_buildInputBar` -> shared `chatInputBarShell(hollow, flushTop: reply/staged/preview visible, child: ...)` (flushTop drops the top border to prevent double borders). When `_isRecordingVoice`: `VoiceRecorderBar(onFinished: _stageVoiceMessage, ...)`; otherwise `_buildComposerRow`:
-1. **Paperclip button**: `_pickAndStageFile()`
-2. **Microphone button**: disabled (0.4 alpha) when a file is staged; sets `_isRecordingVoice = true`
-3. **Text field**: `Expanded` > `CompositedTransformTarget(_composerLayerLink)` > `Focus` (emote autocomplete keys, then `handleChatInputKey()` with `onPasteImage: _stageClipboardImage`) > shared `chatComposerField(hollow, hintText: 'Type a message...', onChanged: _onTextChanged)`
-4. **Emoji button**: shared `composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker)`
-5. **Send button**: `LucideIcons.send` on `hollow.accent`; calls `_handleSend()`
+`_buildInputBar` -> shared `chatInputBarShell(hollow, flushTop: reply/staged/preview visible, child: ...)`. When `_isRecordingVoice`: `VoiceRecorderBar` (discard is a grey `HollowIconButton` at composer height, not red at rest); otherwise `_buildComposerRow` = the shared `ChatComposerRow` (`chat_pane_shared.dart`, all controls 44 tall, 8 apart):
+
+1. **`+`** attach (`_pickAndStageFile`).
+2. **The field** (`chatComposerField`, `quietFocus`: the composer always holds focus, so its border stays the hairline; hint "Message {name}", "Note to self" for Saved messages) with ONE smiley inside it that opens `showExpressionPicker` (`_openExpressions`): emoji inserts via `_insertEmojiAtCursor`, GIFs and stickers send via `_sendAsset`.
+3. **Mic / Send:** the mic while nothing is typed or staged; once there is, the accent Send (the row's only accent). Keys go through the emote autocomplete then `handleChatInputKey`.
 
 ## Providers Read by ChatPane
 
@@ -403,29 +398,19 @@ Has its own `_durationTimer` and `_handleScreenShareToggle()` (same pattern as i
 
 ## _DmProfilePanelSlider
 
-`StatefulWidget` with `SingleTickerProviderStateMixin`. Animated horizontal slider for the DM profile panel. Slides from the left. Uses `ClipRect` + `Align(widthFactor, centerLeft)` + `FadeTransition`. Contains `_DmProfilePanel`.
+Animated slider (`ClipRect` + `Align(widthFactor, centerRight)` + fade) holding `DmProfilePanel`.
 
-## _DmProfilePanel
+## DmProfilePanel (2026-09-24)
 
-`ConsumerWidget`. 240px wide panel shown on the left side of DM chats.
+**File:** `lib/src/ui/chat/dm_profile_panel.dart`. The person you are talking to, on the RIGHT, built and sized like a server's member panel: it uses `memberPanelWidthProvider` (default 280 since 2026-09-24, was 240) and a `PanelResizeHandle` seam on its left edge.
 
-### Providers read
-- `profileProvider` -- display name, status, aboutMe, avatar bytes, banner bytes, twitchUsername
-- `localNicknameProvider` -- local nickname for this peer
-- `peersProvider` + `invisiblePeersProvider` -- online status
-- `friendsProvider` -- friend status
-
-### Layout
-1. **Banner**: 90px tall. If peer has banner bytes, renders `AnimatedGifImage`. Otherwise renders a gradient derived from `_bannerColorFromId()` (HSL hue from peer ID hash, saturation 0.45, lightness 0.35).
-2. **Avatar section**: 64px `HollowAvatar` with 3px surface-colored border, overlapping the banner by -32px (Transform.translate). Status dot in bottom-right corner (10px, green pulsing if online).
-3. **Names**: If local nickname is set, shows nickname in bold 15px + display name below in caption 11px. Otherwise just display name.
-4. **Status**: Italic caption text if set.
-5. **Twitch badge**: If `profile.twitchUsername` is non-empty, shows a clickable purple pill (Twitch icon + username). Tapping opens `https://twitch.tv/{username}` externally. Synced via global `HavenMessage::ProfileUpdate`.
-6. **Scrollable content** (ListView):
-   - **About Me**: Quoted italic text in a bordered section
-   - **Set/Edit Nickname** button: Full-width outline button. Shows pencil icon if nickname exists, tag icon if not. Opens `showLocalNicknameDialog()`
-   - **Friend status**: "Friends" badge with checkmark icon (green) if friend status is "accepted"
-   - **Peer ID**: Mono-font, 8px, 0.5 alpha. Full ID in a pressable row with copy icon. Tapping copies to clipboard and shows success toast
+- **Banner** at 2.5:1 of the panel width: their banner (animated via `watchAnimatedBanner`, else `bannerProvider`), else a FLAT tone of their avatar colour (no gradient).
+- **Avatar** 72 in a 4 px `surface` ring overlapping the banner, left-aligned on the text edge, `StatusDot` corner.
+- **Icon strip** under the banner's right edge: Set/Edit nickname, Mute notifications (selected when muted), More (Copy user ID; Remove friend with a confirm, through `removeFriendAndTidy` shared with the friends bar; then Block/Unblock and Report in the error tint). Hidden for Saved messages.
+- **Names:** nickname or profile name in `heading`, the profile name as a caption when a nickname is set, the status line in `bodySmall`, the verified Twitch badge.
+- **Sections** (`HollowSectionHeader` dense, 24 apart): About Me, Now Playing (the showcase board's `nowPlaying` block via `ShowcaseGameRow`), Encryption ("Not verified yet" / "Verified" over "End-to-end encrypted", with compact outline Verify or ghost View). The raw peer id is no longer shown.
+- **Footer:** ghost "View full profile" -> `showProfileDialog`.
+- **Known issue (Vitalik, 2026-09-24):** below about 260 px the avatar collides with the icon strip and the Encryption row wraps a word per line; next session.
 
 ## TypingIndicatorBar
 

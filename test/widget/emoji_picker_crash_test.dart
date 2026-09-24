@@ -134,7 +134,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).first, 'zzz');
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
+    await tester.tap(find.text('Standard'));
     await tester.pumpAndSettle();
 
     await tester.tapAt(const Offset(5, 5));

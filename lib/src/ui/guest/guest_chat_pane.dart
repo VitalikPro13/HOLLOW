@@ -332,14 +332,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                         controller: _itemScrollController,
                         positions: _itemPositionsListener,
                       ),
-                      list: NotificationListener<ScrollNotification>(
-                          onNotification: (notification) {
-                            if (notification is ScrollUpdateNotification) {
-                              MessageActionBarScope.of(scopeContext)?.dismissAll();
-                            }
-                            return false;
-                          },
-                          child: ChatTextScale(
+                      list: ChatTextScale(
                             // Issue #35: off 100% the SelectionArea moves to
                             // the ROWS below.
                             child: _listSelectionWrap(
@@ -452,7 +445,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                               ),
                             ),
                           ),
-                        ),
                     ),
                   ),
                 ),

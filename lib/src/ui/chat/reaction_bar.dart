@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 
-/// Emoji reaction pills below a message, sorted by count and then by earliest
-/// addition.
+/// Reactions below a message, one chip each, sorted by count and then by
+/// earliest addition. Yours is the selected chip.
 class ReactionBar extends StatelessWidget {
   /// Emoji to the peer ids that reacted with it.
   final Map<String, List<String>> reactions;
@@ -13,7 +13,7 @@ class ReactionBar extends StatelessWidget {
   /// Highlights this peer's own reactions.
   final String localPeerId;
 
-  /// Null in read-only mode, where pills render but do not take taps.
+  /// Null in read-only mode, where the chips render but do not take taps.
   final void Function(String emoji)? onToggleReaction;
 
   const ReactionBar({
@@ -27,71 +27,40 @@ class ReactionBar extends StatelessWidget {
   Widget build(BuildContext context) {
     if (reactions.isEmpty) return const SizedBox.shrink();
 
-    final hollow = HollowTheme.of(context);
-
     // Insertion order breaks ties, so equal counts stay chronological.
     final sorted = reactions.entries.toList()
       ..sort((a, b) => b.value.length.compareTo(a.value.length));
 
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.only(top: HollowSpacing.xs),
       child: Wrap(
-        spacing: 4,
-        runSpacing: 4,
-        children: sorted.map((entry) {
-          final emoji = entry.key;
-          final reactors = entry.value;
-          final isMine = reactors.contains(localPeerId);
-          final emote = parseEmoteToken(emoji);
-
-          return HollowPressable(
-            onTap: onToggleReaction != null
-                ? () => onToggleReaction!(emoji)
-                : null,
-            semanticLabel:
-                'Reaction ${emote != null ? ':${emote.name}:' : emoji}, ${reactors.length}',
-            borderRadius: BorderRadius.circular(12),
-            padding: EdgeInsets.zero,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: isMine
-                    ? hollow.accent.withValues(alpha: 0.15)
-                    : hollow.elevated,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isMine
-                      ? hollow.accent.withValues(alpha: 0.4)
-                      : hollow.border,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (emote != null)
-                    EmoteImage(
-                      name: emote.name,
-                      hash: emote.hash,
-                      size: 17,
-                      fallbackStyle: const TextStyle(fontSize: 11),
-                    )
-                  else
-                    Text(emoji, style: const TextStyle(fontSize: 14)),
-                  const SizedBox(width: 3),
-                  Text(
-                    reactors.length.toString(),
-                    style: HollowTypography.caption.copyWith(
-                      color: isMine ? hollow.accent : hollow.textSecondary,
-                      fontSize: 11,
-                      fontWeight: isMine ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }).toList(),
+        spacing: HollowSpacing.xs,
+        runSpacing: HollowSpacing.xs,
+        children: [
+          for (final entry in sorted)
+            _reaction(entry.key, entry.value),
+        ],
       ),
+    );
+  }
+
+  Widget _reaction(String emoji, List<String> reactors) {
+    final emote = parseEmoteToken(emoji);
+    final toggle = onToggleReaction;
+    return HollowChip(
+      label: '${reactors.length}',
+      selected: reactors.contains(localPeerId),
+      onTap: toggle == null ? null : () => toggle(emoji),
+      semanticLabel:
+          'Reaction ${emote != null ? ':${emote.name}:' : emoji}, ${reactors.length}',
+      leading: emote != null
+          ? EmoteImage(
+              name: emote.name,
+              hash: emote.hash,
+              size: 16,
+              fallbackStyle: HollowTypography.caption,
+            )
+          : Text(emoji, style: HollowTypography.body),
     );
   }
 }

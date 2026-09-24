@@ -226,7 +226,7 @@ Active tab: `hollow.accent` + w600. Inactive: `hollow.textSecondary` + w400. Bad
 **MobileChatRoute** (`ConsumerStatefulWidget`, `lib/src/ui/mobile/mobile_chat_route.dart`): Custom mobile chat — does NOT wrap desktop ChatPane. Reuses `MessageBubble`/`ChannelMessageBubble` widgets directly. Features:
 - `_MobileChatHeader` (52px): back arrow + avatar with status dot + tappable name (opens profile bottom sheet) + online/offline subtitle.
 - Message list: `ScrollablePositionedList` with same grouping logic as desktop (5-min window, same sender = continuation). Header messages get `Padding(top: sm+2)`, continuations have no extra padding. Auto-scrolls to bottom on open and new messages.
-- `_MobileInputBar`: paperclip (file_picker) + pill-shaped TextField (up to 5 lines) + teal send button.
+- Composer: the shared `ChatComposerRow` (2026-09-24; the old `_MobileInputBar` is gone), see wiki ui_chat_pane_shared.
 - `_ReplyPreview`: teal accent line + sender name + text, shown above input bar. Long-press message to reply.
 - `_TypingBar`: "X is typing..." indicator above input bar.
 - `_ProfileSheet`: bottom sheet with 180px banner (AnimatedGifImage for GIFs, gradient fallback), avatar overlapping banner, name, online status, bio text.

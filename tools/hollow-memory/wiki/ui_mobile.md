@@ -169,7 +169,7 @@ Scaffold
 │       ├── StagedLinkArea (shared; hollow-link or OG preview)
 │       ├── StagedAttachmentStrip (if files staged, shared; reorderable for an album)
 │       ├── _buildSlowModePill (channel, cooldown active)
-│       └── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR _MobileInputBar ([+] attach + text + emoji-in-field + mic + send)
+│       └── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR the shared `ChatComposerRow` (2026-09-24: [+] attach sheet (Photo or video, File) + text with the expression button inside (`showExpressionSheet`: Emoji / GIFs / Stickers) + mic that becomes Send; no autofocus)
 ```
 
 ### Message Rendering
@@ -465,7 +465,7 @@ Column (mainAxisSize: min)
 ├── Divider
 └── Action rows (HollowPressable, icon + label)
     ├── Reply (LucideIcons.reply)
-    ├── Edit Message (LucideIcons.pencil) — own messages only, no file
+    ├── Edit message (LucideIcons.pencil) — own messages only, no file (2026-09-24: sentence-case labels, 52 px rows, grouped like the desktop menu, Delete message alone at the end)
     ├── Copy Text (LucideIcons.copy) — text messages only
     ├── Save File (LucideIcons.download) — file messages only
     ├── Message Info (LucideIcons.shieldCheck) — shows proof dialog

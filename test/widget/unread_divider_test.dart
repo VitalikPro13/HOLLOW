@@ -137,7 +137,7 @@ void main() {
           reason: 'the day merges INTO the unread rule');
       expect(find.byType(UnreadDivider), findsOneWidget);
 
-      final date = tester.getRect(find.text('January 5, 2026'));
+      final date = tester.getRect(find.text(chatDayLabel(DateTime(2026, 1, 5))));
       final badge = tester.getRect(find.text('New'));
       final body = tester.getRect(find.byKey(const ValueKey('body')));
       // One row: the day sits between the rule's two halves, the badge at the

@@ -561,7 +561,7 @@ class FileAttachmentWidget extends ConsumerWidget {
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -573,8 +573,8 @@ class FileAttachmentWidget extends ConsumerWidget {
               children: [
                 Icon(
                   _fileIcon(),
-                  size: 28,
-                  color: hollow.accent,
+                  size: 24,
+                  color: hollow.textSecondary,
                 ),
                 const SizedBox(width: HollowSpacing.md),
                 Flexible(
@@ -584,10 +584,8 @@ class FileAttachmentWidget extends ConsumerWidget {
                     children: [
                       Text(
                         attachment.fileName,
-                        style: HollowTypography.body.copyWith(
+                        style: HollowTypography.label.copyWith(
                           color: hollow.textPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,

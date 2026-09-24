@@ -61,7 +61,7 @@ Widget? buildShowcaseBlockCard(
       ),
     ShowcaseBlockType.nowPlaying => _BlockCard(
         label: 'Now playing',
-        child: _GameRow(block: block, assets: assets),
+        child: ShowcaseGameRow(block: block, assets: assets),
       ),
     ShowcaseBlockType.favoriteGame => _BlockCard(
         label: 'Favorite game',
@@ -207,11 +207,12 @@ Widget _tappableGame(
 }
 
 /// Now Playing: cover beside name/year.
-class _GameRow extends StatelessWidget {
+/// A game with its cover, tapping through to the game card.
+class ShowcaseGameRow extends StatelessWidget {
   final ShowcaseBlock block;
   final Map<String, Uint8List> assets;
 
-  const _GameRow({required this.block, required this.assets});
+  const ShowcaseGameRow({super.key, required this.block, required this.assets});
 
   @override
   Widget build(BuildContext context) {
@@ -234,7 +235,6 @@ class _GameRow extends StatelessWidget {
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,
-                    fontSize: 14,
                   ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -245,7 +245,6 @@ class _GameRow extends StatelessWidget {
                     '${block.gameYear}',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 11,
                     ),
                   ),
                 ],

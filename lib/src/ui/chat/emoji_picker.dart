@@ -480,7 +480,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
           child: EdgeScrollRow(
             semanticLabel: 'tabs',
             children: [
-              _tabItem(_PickerTab.emoji, 'Emoji'),
+              _tabItem(_PickerTab.emoji, 'Standard'),
               const SizedBox(width: HollowSpacing.sm),
               if (widget.serverId != null) ...[
                 _tabItem(_PickerTab.server, 'Server'),

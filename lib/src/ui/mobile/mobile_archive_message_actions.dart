@@ -99,7 +99,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
     if (widget.onCopy != null) {
       actions.add(_stagger(actionIndex++, child: _ActionRow(
         icon: LucideIcons.copy,
-        label: 'Copy Text',
+        label: 'Copy text',
         onTap: () {
           Navigator.pop(context);
           widget.onCopy!();
@@ -109,7 +109,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
     if (widget.onDownload != null) {
       actions.add(_stagger(actionIndex++, child: _ActionRow(
         icon: LucideIcons.download,
-        label: 'Save File',
+        label: 'Save file',
         onTap: () {
           Navigator.pop(context);
           widget.onDownload!();
@@ -119,7 +119,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
     if (widget.onInfo != null) {
       actions.add(_stagger(actionIndex, child: _ActionRow(
         icon: LucideIcons.shieldCheck,
-        label: 'Message Info',
+        label: 'Message proof',
         onTap: () {
           Navigator.pop(context);
           widget.onInfo!();

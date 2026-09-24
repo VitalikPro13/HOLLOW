@@ -9,6 +9,8 @@ import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
@@ -38,14 +40,12 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
-import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
-import 'package:hollow/src/ui/chat/gif_picker.dart';
-import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
@@ -55,6 +55,9 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
@@ -65,7 +68,6 @@ import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
-import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -130,6 +132,7 @@ class MobileChatRoute extends ConsumerStatefulWidget {
 
 class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   final _controller = EmoteComposerController();
+  final _composerLink = LayerLink();
   final _focusNode = FocusNode();
   final _scrollController = ItemScrollController();
   final _positionsListener = ItemPositionsListener.create();
@@ -368,13 +371,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  String _formatTime(DateTime dt) {
-    final now = DateTime.now();
-    if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
-      return _hhmm(dt);
-    }
-    return '${dt.month}/${dt.day}';
-  }
+  /// `14:05` today, then words: never `9/17`, which reads as another day in
+  /// half the world.
+  String _formatTime(DateTime dt) => conversationTimeLabel(dt);
 
   void _jumpToBottom() {
     if (_frozenLen != null) setState(() => _frozenLen = null);
@@ -436,7 +435,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _startEditing(String messageId) {
-    setState(() => _editingMessageId = messageId);
+    setState(() {
+      _editingMessageId = messageId;
+      _editSeededFor = null;
+    });
     // After the keyboard has animated in, or the editor sits behind it.
     Future.delayed(const Duration(milliseconds: 300), () {
       if (!mounted || !_scrollController.isAttached) return;
@@ -1048,57 +1050,25 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (mounted) _focusNode.requestFocus();
     });
   }
-
-  void _showEmojiSheet() {
+  /// Emoji, GIFs and stickers in one sheet. An emoji goes into the text and
+  /// closes it; a GIF or sticker sends and leaves it open (issue #36).
+  void _showExpressions() {
     // The software keyboard otherwise stays up under the sheet and covers half
-    // the picker.
+    // of it.
     _focusNode.unfocus();
-    showHollowSheet<void>(
+    showExpressionSheet(
       context: context,
-      scrollControlled: true,
-      builder: (_) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * 0.55,
-          child: EmojiPickerBody(
-            serverId: widget.serverId,
-            onSelect: (emoji) {
-              Navigator.pop(context);
-              // Emote tokens become 1-char placeholders rendered inline as the
-              // image.
-              _insertAtCursor(_controller.displayTextFor(emoji));
-            },
-          ),
-        ),
-      ),
+      // Emote tokens become 1-char placeholders rendered inline as the image.
+      onEmoji: (emoji) => _insertAtCursor(_controller.displayTextFor(emoji)),
+      onAsset: _sendAsset,
+      onSharePack: _shareFileToChat,
+      // Null in a DM or a conference: the rating clamp, the Server tabs and
+      // server emotes only apply to real servers.
+      serverId: (widget.serverId?.startsWith('conf:') ?? true)
+          ? null
+          : widget.serverId,
     );
   }
-
-  /// GIF picker as a bottom sheet; the pick arrives as an `[a:g:hash:w:h]`
-  /// token and stages in the composer like an emote.
-  void _showGifSheet() {
-    _focusNode.unfocus();
-    showHollowSheet<void>(
-      context: context,
-      scrollControlled: true,
-      builder: (_) => SafeArea(
-        child: SizedBox(
-          // Taller than the sticker sheet: the Popular row costs a line of
-          // chrome and the grid still needs two full rows.
-          height: MediaQuery.sizeOf(context).height * 0.62,
-          child: GifPickerBody(
-            // Sends and stays open, mirroring the sticker sheet (issue #36).
-            onSelect: _sendAsset,
-            // Null in a DM or a conference: the rating clamp only applies to
-            // real servers.
-            serverId: (widget.serverId?.startsWith('conf:') ?? true)
-                ? null
-                : widget.serverId,
-          ),
-        ),
-      ),
-    );
-  }
-
   /// Inserts [text] at the composer's cursor, replacing any selection.
   void _insertAtCursor(String text, {bool refocus = true}) {
     final sel = _controller.selection;
@@ -1131,57 +1101,29 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     await _sendFiles([StagedAttachment.fromPath(path, name: fileName)],
         caption: '', errorToast: 'Failed to share pack');
   }
-
-  /// Sticker picker as a bottom sheet. A pick SENDS immediately and the sheet
-  /// stays OPEN, unlike the GIF sheet, so sending several is repeated taps.
-  void _showStickerSheet() {
-    _focusNode.unfocus();
-    showHollowSheet<void>(
-      context: context,
-      scrollControlled: true,
-      builder: (_) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * 0.62,
-          child: StickerPickerBody(
-            onSelect: _sendAsset,
-            onSharePack: _shareFileToChat,
-            // Null in a DM or a conference: the rating clamp and the Server tab
-            // only apply to real servers.
-            serverId: (widget.serverId?.startsWith('conf:') ?? true)
-                ? null
-                : widget.serverId,
-          ),
-        ),
-      ),
-    );
-  }
-
   void _showAttachSheet() {
     final hollow = HollowTheme.of(context);
-    Widget row({
-      required IconData icon,
-      required String label,
-      required VoidCallback onTap,
-    }) {
+    Widget row(IconData icon, String label, VoidCallback onTap) {
       return HollowPressable(
         onTap: () {
           Navigator.pop(context);
           onTap();
         },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.lg,
-            vertical: HollowSpacing.md,
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 22, color: hollow.accent),
-              const SizedBox(width: HollowSpacing.md),
-              Text(
-                label,
-                style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-              ),
-            ],
+        child: SizedBox(
+          height: 52,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+            child: Row(
+              children: [
+                Icon(icon, size: 20, color: hollow.textSecondary),
+                const SizedBox(width: HollowSpacing.lg),
+                Text(
+                  label,
+                  style: HollowTypography.bodyTouch
+                      .copyWith(color: hollow.textPrimary),
+                ),
+              ],
+            ),
           ),
         ),
       );
@@ -1193,26 +1135,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            row(
-              icon: LucideIcons.image,
-              label: 'Photo',
-              onTap: () => _pickFile(imagesOnly: true),
-            ),
-            row(
-              icon: Icons.gif_box_outlined,
-              label: 'GIF',
-              onTap: _showGifSheet,
-            ),
-            row(
-              icon: LucideIcons.sticker,
-              label: 'Sticker',
-              onTap: _showStickerSheet,
-            ),
-            row(
-              icon: LucideIcons.paperclip,
-              label: 'File',
-              onTap: _pickFile,
-            ),
+            row(LucideIcons.image, 'Photo or video',
+                () => _pickFile(imagesOnly: true)),
+            row(LucideIcons.paperclip, 'File', _pickFile),
             const SizedBox(height: HollowSpacing.sm),
           ],
         ),
@@ -1782,20 +1707,35 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         ),
       );
     }
-    // The chat text scale rides the composer too: reading at 150% and typing at
-    // 100% helps nobody.
-    return ChatTextScale(
-      child: _MobileInputBar(
+    return chatInputBarShell(
+      HollowTheme.of(context),
+      flushTop: _replyToMessageId != null || _staged.isNotEmpty,
+      child: ChatComposerRow(
         controller: _controller,
         focusNode: _focusNode,
-        onSend: _handleSend,
-        onAttach: _showAttachSheet,
-        onMic: _staged.isNotEmpty ? null : _startVoiceRecording,
-        onEmoji: _showEmojiSheet,
+        layerLink: _composerLink,
+        hintText: _composerHint(),
         onChanged: _onTextChanged,
-        hasStagedFile: _staged.isNotEmpty,
+        // A phone keyboard's return adds a line; Send is the button.
+        onKey: (_) => KeyEventResult.ignored,
+        onAttach: _showAttachSheet,
+        onRecord: _startVoiceRecording,
+        onExpressions: (_) => _showExpressions(),
+        onSend: _handleSend,
+        hasStaged: _staged.isNotEmpty,
+        autofocus: false,
       ),
     );
+  }
+
+  String _composerHint() {
+    if (!widget.isDm) return 'Message #${widget.channelName ?? 'channel'}';
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    if (savedId != null &&
+        ref.watch(deviceLinkProvider).identityOf(widget.peerId!) == savedId) {
+      return 'Note to self';
+    }
+    return 'Message ${displayNameFor(ref.watch(profileProvider), widget.peerId!)}';
   }
 
   void _startVoiceRecording() {
@@ -2053,6 +1993,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
     // The linear scan runs only for rows that ARE replies, and only when the
     // per-conversation list itself changed.
+    String? replySenderId;
     String? replySender;
     String? replyText;
     if (msg.replyToMid != null) {
@@ -2061,6 +2002,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         final original = _dmItemById(messages[idx], msg.replyToMid!);
         replyText = _dmPreview(original);
         final origSenderId = original.isMe ? localPeerId : widget.peerId!;
+        replySenderId = origSenderId;
         replySender = displayNameFor(profiles, origSenderId);
       }
     }
@@ -2090,8 +2032,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             ? null
             : dmAlbumItems(_dmAlbums.itemsFor(msg.messageId)!,
                 localPeerId: localPeerId, peerId: widget.peerId!),
+        isHighlighted: _highlightIndex == index,
+        replyToSenderId: replySenderId,
         replyToSenderName: replySender,
         replyToText: replyText,
+        onReplyTap: msg.replyToMid == null
+            ? null
+            : () => _jumpToMessageId(msg.replyToMid!),
         onToggleReaction: msg.messageId != null
             ? (emoji) => _toggleDmReaction(msg, emoji)
             : null,
@@ -2291,6 +2238,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
 
     // Look up reply target for this message.
+    String? replySenderId;
     String? replySender;
     String? replyText;
     if (msg.replyToMid != null) {
@@ -2298,8 +2246,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (idx != -1) {
         final original = _channelItemById(messages[idx], msg.replyToMid!);
         replyText = _channelPreview(original);
-        replySender =
-            displayNameFor(profiles, links.identityOf(original.senderId));
+        replySenderId = links.identityOf(original.senderId);
+        replySender = displayNameFor(profiles, replySenderId);
       }
     }
 
@@ -2331,8 +2279,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             : channelAlbumItems(_channelAlbums.itemsFor(msg.messageId)!,
                 identityOf: links.identityOf),
         isHighlighted: _highlightIndex == index,
+        replyToSenderId: replySenderId,
         replyToSenderName: replySender,
         replyToText: replyText,
+        onReplyTap: msg.replyToMid == null
+            ? null
+            : () => _jumpToMessageId(msg.replyToMid!),
         onToggleReaction: msg.messageId != null
             ? (emoji) => _toggleChannelReaction(msg, emoji)
             : null,
@@ -2745,6 +2697,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
+  /// Which message the edit field was last filled from: seeded once per edit,
+  /// never per build, or any rebuild (a new message arriving) wipes what the
+  /// user has typed.
+  String? _editSeededFor;
+
   Widget _buildEditView({
     required String originalText,
     required void Function(String) onSave,
@@ -2752,66 +2709,61 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }) {
     final hollow = HollowTheme.of(context);
 
-    _editController.text = originalText;
-    _editController.selection = TextSelection.fromPosition(
-      TextPosition(offset: originalText.length),
-    );
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _editFocusNode.requestFocus();
-    });
+    if (_editSeededFor != _editingMessageId) {
+      _editSeededFor = _editingMessageId;
+      _editController.text = originalText;
+      _editController.selection = TextSelection.fromPosition(
+        TextPosition(offset: originalText.length),
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _editFocusNode.requestFocus();
+      });
+    }
 
     return Padding(
       padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
+        horizontal: HollowSpacing.lg,
         vertical: HollowSpacing.xs,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            decoration: BoxDecoration(
-              border: Border.all(color: hollow.accent),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              color: hollow.elevated,
-            ),
-            child: TextField(
-              controller: _editController,
-              focusNode: _editFocusNode,
-              maxLines: 5,
-              minLines: 1,
-              textInputAction: TextInputAction.newline,
-              style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-              decoration: InputDecoration(
-                contentPadding: const EdgeInsets.all(HollowSpacing.sm),
-                border: InputBorder.none,
-                hintText: 'Edit your message...',
-                hintStyle: HollowTypography.body.copyWith(
-                  color: hollow.textSecondary,
-                ),
+          TextField(
+            controller: _editController,
+            focusNode: _editFocusNode,
+            maxLines: 5,
+            minLines: 1,
+            textInputAction: TextInputAction.newline,
+            style: HollowTypography.bodyTouch.copyWith(color: hollow.textPrimary),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: hollow.elevated,
+              contentPadding: const EdgeInsets.all(HollowSpacing.md),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                borderSide: BorderSide(color: hollow.border),
               ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                borderSide: BorderSide(color: hollow.accent),
+              ),
+              hintText: 'Edit message',
+              hintStyle: HollowTypography.bodyTouch
+                  .copyWith(color: hollow.textTertiary),
             ),
           ),
-          const SizedBox(height: HollowSpacing.xs),
+          const SizedBox(height: HollowSpacing.sm),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              HollowPressable(
-                onTap: onCancel,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  child: Text('Cancel',
-                      style: HollowTypography.caption
-                          .copyWith(color: hollow.textSecondary)),
-                ),
+              HollowButton.ghost(
+                onPressed: onCancel,
+                child: const Text('Cancel'),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              HollowPressable(
-                onTap: () {
+              HollowButton.filled(
+                onPressed: () {
                   final newText = _editController.text.trim();
                   if (newText.isNotEmpty && newText != originalText) {
                     onSave(newText);
@@ -2819,21 +2771,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     onCancel();
                   }
                 },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.md,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.accent,
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  ),
-                  child: Text('Save',
-                      style: HollowTypography.caption.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                      )),
-                ),
+                child: const Text('Save'),
               ),
             ],
           ),
@@ -2870,16 +2808,14 @@ class _MobileChatHeader extends ConsumerWidget {
     final isDm = peerId != null;
 
     // Saved messages is a DM with our OWN master identity: a bookmark header, no
-    // presence line and no call buttons.
+    // presence and no call buttons.
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     final isSaved = isDm &&
         savedId != null &&
         ref.watch(deviceLinkProvider).identityOf(peerId!) == savedId;
 
-    final isOnline = isDm && !isSaved && identityIsOnline(ref, peerId!);
-
     return Container(
-      constraints: const BoxConstraints(minHeight: 52),
+      height: 56,
       decoration: BoxDecoration(
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
@@ -2887,145 +2823,105 @@ class _MobileChatHeader extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
       child: Row(
         children: [
-          HollowPressable(
-            onTap: () => Navigator.of(context).pop(),
-            semanticLabel: 'Back',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
+          HollowIconButton(
+            icon: LucideIcons.arrowLeft,
+            label: 'Back',
+            size: 44,
+            onPressed: () => Navigator.of(context).pop(),
           ),
           const SizedBox(width: HollowSpacing.xs),
-          ..._leadingAvatar(hollow, isDm: isDm, isSaved: isSaved, isOnline: isOnline),
           Expanded(
             child: _titleBlock(context, ref, hollow,
-                isDm: isDm, isSaved: isSaved, isOnline: isOnline),
+                isDm: isDm, isSaved: isSaved),
           ),
-          ..._trailingActions(context, ref, hollow, isDm: isDm, isSaved: isSaved),
+          ..._trailingActions(context, ref, hollow,
+              isDm: isDm, isSaved: isSaved),
         ],
       ),
     );
   }
-
-  /// The saved-messages bookmark or the DM avatar with its presence dot; empty
-  /// for a channel.
-  List<Widget> _leadingAvatar(HollowTheme hollow,
-      {required bool isDm, required bool isSaved, required bool isOnline}) {
+  /// Title and subtitle column, tappable for the DM profile sheet.
+  /// The avatar and names, tappable through to the person's profile in a DM.
+  Widget _titleBlock(BuildContext context, WidgetRef ref, HollowTheme hollow,
+      {required bool isDm, required bool isSaved}) {
+    final profiles = ref.watch(profileProvider);
+    final String title;
+    final String? subtitle;
     if (isSaved) {
-      return const [
-        SavedMessagesAvatar(size: 32),
-        SizedBox(width: HollowSpacing.sm),
-      ];
+      title = 'Saved messages';
+      subtitle = null;
+    } else if (isDm) {
+      title = displayNameFor(profiles, peerId!);
+      subtitle = profiles[peerId!]?.status;
+    } else {
+      title = channelName ?? 'Channel';
+      subtitle = serverId == null
+          ? null
+          : ref.watch(serverListProvider.select((m) => m[serverId]?.name));
     }
-    if (!isDm) return const [];
-    return [
-      SizedBox(
-        width: 32, height: 32,
-        child: Stack(
-                 clipBehavior: Clip.none,
+    final nsfw = !isDm &&
+        serverId != null &&
+        (ref.watch(serverIsNsfwProvider(serverId!)).valueOrNull ?? false);
+
+    final leading = isSaved
+        ? const SavedMessagesAvatar(size: 32)
+        : isDm
+            ? PresenceAvatar(
+                peerId: peerId!,
+                size: 32,
+                online: identityIsOnline(ref, peerId!),
+                ring: hollow.surface,
+              )
+            : Icon(LucideIcons.hash, size: 20, color: hollow.textTertiary);
+
+    return HollowPressable(
+      onTap: isDm && !isSaved
+          ? () => showMobileProfileSheet(context, peerId: peerId!)
+          : null,
+      semanticLabel: isDm && !isSaved ? 'Profile of $title' : null,
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      child: SizedBox(
+        height: 44,
+        child: Row(
           children: [
-            HollowAvatar(peerId: peerId!, size: 32),
-            Positioned(
-              right: 0, bottom: 0,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: hollow.surface, shape: BoxShape.circle,
-                ),
-                padding: const EdgeInsets.all(1),
-                child: StatusDot(
-                  color: isOnline ? hollow.success : hollow.textSecondary,
-                  size: 8, 
-                  filled: isOnline,
-                  semanticLabel: isOnline ? 'Online' : 'Offline',
-                ),
+            leading,
+            const SizedBox(width: HollowSpacing.sm),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: HollowTypography.subheading
+                        .copyWith(color: hollow.textPrimary),
+                  ),
+                  if (subtitle != null && subtitle.isNotEmpty)
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HollowTypography.caption
+                          .copyWith(color: hollow.textSecondary),
+                    ),
+                ],
               ),
             ),
+            if (nsfw) ...[
+              const SizedBox(width: HollowSpacing.sm),
+              const HollowBadge('NSFW', kind: HollowBadgeKind.error),
+            ],
           ],
         ),
       ),
-      const SizedBox(width: HollowSpacing.sm),
-    ];
-  }
-
-  /// Title and subtitle column, tappable for the DM profile sheet.
-  Widget _titleBlock(BuildContext context, WidgetRef ref, HollowTheme hollow,
-      {required bool isDm, required bool isSaved, required bool isOnline}) {
-    final profiles = ref.watch(profileProvider);
-    String title;
-    if (isSaved) {
-      title = 'Saved messages';
-    } else if (isDm) {
-      title = displayNameFor(profiles, peerId!);
-    } else {
-      title = '# ${channelName ?? 'Channel'}';
-    }
-
-    final subtitle = _subtitleText(ref, hollow,
-        isDm: isDm, isSaved: isSaved, isOnline: isOnline);
-
-    return HollowPressable(
-      onTap: isDm ? () => _showProfileSheet(context, ref, peerId!) : null,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  title,
-                  style: HollowTypography.body.copyWith(
-                    fontWeight: FontWeight.w600,
-                    color: hollow.textPrimary,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (!isDm &&
-                  serverId != null &&
-                  (ref.watch(serverIsNsfwProvider(serverId!)).valueOrNull ??
-                      false)) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                const HollowBadge('NSFW', kind: HollowBadgeKind.error),
-              ],
-            ],
-          ),
-          ?subtitle,
-        ],
-      ),
     );
   }
-
-  /// Header subtitle: the DM presence line, or the channel's server name so it
-  /// is clear which server it belongs to. Null when neither applies.
-  Widget? _subtitleText(WidgetRef ref, HollowTheme hollow,
-      {required bool isDm, required bool isSaved, required bool isOnline}) {
-    if (isDm && !isSaved) {
-      return Text(
-        isOnline ? 'Online' : 'Offline',
-        style: HollowTypography.caption.copyWith(
-          color: isOnline ? hollow.success : hollow.textSecondary,
-        ),
-      );
-    }
-    final serverName = (!isDm && serverId != null)
-        ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
-        : null;
-    if (serverName == null || serverName.isEmpty) return null;
-    return Text(
-      serverName,
-      style: HollowTypography.caption.copyWith(
-        color: hollow.textSecondary,
-      ),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-    );
-  }
-
   /// Right-edge header actions: the DM call and mute buttons, or the channel
   /// cluster.
+  /// The DM's call and mute, or the channel's status, members, pins and
+  /// search.
   List<Widget> _trailingActions(
       BuildContext context, WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved}) {
@@ -3036,67 +2932,37 @@ class _MobileChatHeader extends ConsumerWidget {
         _DmMuteButton(peerId: peerId!),
       ];
     }
+    final pinnedIds = serverId != null && channelId != null
+        ? ref.watch(pinnedProvider)['$serverId:$channelId'] ?? const <String>[]
+        : const <String>[];
     return [
-      if (serverId != null) ...[
-        _MobileChannelStatus(serverId: serverId!),
-        const SizedBox(width: HollowSpacing.xs),
-      ],
-      if (serverId != null)
-        HollowPressable(
-          onTap: () => showMobileMemberPanel(context, serverId!),
-          semanticLabel: 'Members',
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
+      if (serverId != null) _MobileChannelStatus(serverId: serverId!),
+      if (pinnedIds.isNotEmpty)
+        HollowIconButton(
+          icon: LucideIcons.pin,
+          count: '${pinnedIds.length}',
+          label: '${pinnedIds.length} pinned',
+          size: 44,
+          onPressed: () => _showPinnedMessagesSheet(
+              context, ref, serverId!, channelId!, pinnedIds),
         ),
-      if (serverId != null && channelId != null)
-        _pinnedButton(context, ref, hollow),
+      if (serverId != null)
+        HollowIconButton(
+          icon: LucideIcons.users,
+          label: 'Members',
+          size: 44,
+          onPressed: () => showMobileMemberPanel(context, serverId!),
+        ),
       if (onSearchToggle != null)
-        HollowPressable(
-          onTap: onSearchToggle,
-          semanticLabel: 'Search messages',
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            LucideIcons.search,
-            size: 20,
-            color: searchOpen ? hollow.accent : hollow.textSecondary,
-          ),
+        HollowIconButton(
+          icon: LucideIcons.search,
+          label: 'Search messages',
+          size: 44,
+          selected: searchOpen,
+          onPressed: onSearchToggle,
         ),
     ];
   }
-
-  Widget _pinnedButton(BuildContext context, WidgetRef ref, HollowTheme hollow) {
-    final pinKey = '$serverId:$channelId';
-    final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
-    if (pinnedIds.isEmpty) return const SizedBox.shrink();
-    return HollowPressable(
-      onTap: () => _showPinnedMessagesSheet(
-          context, ref, serverId!, channelId!, pinnedIds),
-      semanticLabel: 'Pinned messages',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.sm),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.pin, size: 16, color: hollow.accent),
-          const SizedBox(width: 2),
-          Text(
-            '${pinnedIds.length}',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.accent,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showProfileSheet(BuildContext context, WidgetRef ref, String peerId) {
-    showMobileProfileSheet(context, peerId: peerId);
-  }
-
   void _showPinnedMessagesSheet(
     BuildContext context,
     WidgetRef ref,
@@ -3127,7 +2993,7 @@ class _MobileChatHeader extends ConsumerWidget {
               child: Align(
                 alignment: AlignmentDirectional.centerStart,
                 child: Text(
-                  'Pinned Messages',
+                  'Pinned messages',
                   style: HollowTypography.subheading.copyWith(
                     color: hollow.textPrimary,
                   ),
@@ -3136,7 +3002,7 @@ class _MobileChatHeader extends ConsumerWidget {
             ),
             if (pinnedMessages.isEmpty)
               const HollowEmptyState(
-                title: 'Pinned messages not loaded in current view',
+                title: 'Pinned messages are further back than this view',
               )
             else
               Flexible(
@@ -3170,19 +3036,17 @@ class _MobileChatHeader extends ConsumerWidget {
                             children: [
                               Text(
                                 name,
-                                style: HollowTypography.body.copyWith(
-                                  color: hollow.accent,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12,
+                                style: HollowTypography.label.copyWith(
+                                  color: msg.isMe
+                                      ? hollow.accentText
+                                      : nameColorFor(pinnedMaster, hollow),
                                 ),
                               ),
                               const SizedBox(width: HollowSpacing.sm),
                               Text(
                                 time,
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.textSecondary,
-                                  fontSize: 10,
-                                ),
+                                style: HollowTypography.monoSmall
+                                    .copyWith(color: hollow.textTertiary),
                               ),
                             ],
                           ),
@@ -3191,7 +3055,7 @@ class _MobileChatHeader extends ConsumerWidget {
                             messagePreviewText(msg.text,
                                 attachment: msg.fileAttachment,
                                 singleLine: false),
-                            style: HollowTypography.body
+                            style: HollowTypography.bodyTouch
                                 .copyWith(color: hollow.textPrimary),
                             maxLines: 3,
                             overflow: TextOverflow.ellipsis,
@@ -3242,131 +3106,18 @@ class _MobileChannelStatus extends ConsumerWidget {
         } else {
           stage = ConnectionStage.alone;
         }
-        return ConnectionProgress(
-          key: ValueKey('mob-chan-conn-$serverId-${stage.index}'),
-          stage: stage,
+        // Healthy is silent.
+        if (stage == ConnectionStage.encrypted) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(right: HollowSpacing.xs),
+          child: ConnectionProgress(
+            key: ValueKey('mob-chan-conn-$serverId-${stage.index}'),
+            stage: stage,
+          ),
         );
       },
       loading: () => const SizedBox.shrink(),
       error: (_, _) => const SizedBox.shrink(),
-    );
-  }
-}
-
-class _MobileInputBar extends StatelessWidget {
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final VoidCallback onSend;
-  final VoidCallback onAttach;
-  final VoidCallback? onMic;
-  final VoidCallback onEmoji;
-  final ValueChanged<String> onChanged;
-  final bool hasStagedFile;
-
-  const _MobileInputBar({
-    required this.controller,
-    required this.focusNode,
-    required this.onSend,
-    required this.onAttach,
-    this.onMic,
-    required this.onEmoji,
-    required this.onChanged,
-    this.hasStagedFile = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(top: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          // One attach button rather than two icons, which crowd the row on a
-          // small phone.
-          HollowPressable(
-            onTap: onAttach,
-            semanticLabel: 'Attach photo or file',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(LucideIcons.plus, color: hollow.textSecondary, size: 24),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          Expanded(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 120),
-              child: TextField(
-                controller: controller,
-                focusNode: focusNode,
-                maxLines: 5,
-                minLines: 1,
-                textInputAction: TextInputAction.newline,
-                style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-                decoration: InputDecoration(
-                  hintText: 'Type a message...',
-                  hintStyle: HollowTypography.body.copyWith(color: hollow.textSecondary),
-                  filled: true,
-                  fillColor: hollow.elevated,
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.md,
-                    vertical: HollowSpacing.md,
-                  ),
-                  // Inside the field, so the row has room for the text field to
-                  // breathe.
-                  suffixIcon: HollowPressable(
-                    onTap: onEmoji,
-                    semanticLabel: 'Emoji',
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    child: Icon(LucideIcons.smile,
-                        color: hollow.textSecondary, size: 22),
-                  ),
-                  suffixIconConstraints: const BoxConstraints(
-                    minWidth: 40,
-                    minHeight: 40,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(hollow.radiusXl),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-                onChanged: onChanged,
-              ),
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            onTap: onMic,
-            semanticLabel: 'Record voice message',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(
-              LucideIcons.mic,
-              color: onMic != null
-                  ? hollow.textSecondary
-                  : hollow.textSecondary.withValues(alpha: 0.3),
-              size: 22,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            onTap: onSend,
-            semanticLabel: 'Send',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            backgroundColor: hollow.accent,
-            padding: const EdgeInsets.all(HollowSpacing.sm + 2),
-            child: Icon(LucideIcons.send, color: hollow.textOnAccent, size: 20),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -3377,12 +3128,16 @@ class _DmMuteButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final enabled = ref.watch(notificationSettingsProvider
         .select((s) => s.isDmEnabled(peerId)));
-    return HollowPressable(
-      onTap: () {
-        ref.read(notificationSettingsProvider.notifier)
+    return HollowIconButton(
+      icon: enabled ? LucideIcons.bell : LucideIcons.bellOff,
+      label: enabled ? 'Mute notifications' : 'Unmute notifications',
+      size: 44,
+      selected: !enabled,
+      onPressed: () {
+        ref
+            .read(notificationSettingsProvider.notifier)
             .setDmEnabled(peerId, !enabled);
         HollowToast.show(
           context,
@@ -3390,16 +3145,6 @@ class _DmMuteButton extends ConsumerWidget {
           type: HollowToastType.info,
         );
       },
-      semanticLabel: enabled ? 'Mute notifications' : 'Unmute notifications',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.sm),
-      child: Icon(
-        enabled ? LucideIcons.bell : LucideIcons.bellOff,
-        size: 20,
-        color: enabled
-            ? hollow.textSecondary
-            : hollow.textSecondary.withValues(alpha: 0.4),
-      ),
     );
   }
 }
@@ -3425,7 +3170,7 @@ class _DmCallButtons extends ConsumerWidget {
         final channelName = vc.currentChannelName ?? 'voice';
         final confirmed = await showHollowConfirm(
           context: context,
-          title: 'Start a call?',
+          title: 'Start call?',
           message: 'Starting this call will disconnect you from #$channelName.',
           confirmLabel: 'Start call',
         );
@@ -3446,49 +3191,33 @@ class _DmCallButtons extends ConsumerWidget {
       );
     }
 
+    void openCall() => Navigator.of(context).push(
+          hollowMobileRoute(
+            settings: const RouteSettings(name: 'call-screen'),
+            transition: HollowRouteTransition.slideUp,
+            builder: (_) => MobileCallScreen(peerId: peerId),
+          ),
+        );
+
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        HollowPressable(
-          onTap: canCall
+        HollowIconButton(
+          icon: isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
+          label: isCallWithThisPeer ? 'Open call' : 'Voice call',
+          size: 44,
+          color: isCallWithThisPeer ? hollow.success : null,
+          onPressed: canCall
               ? () => startAndOpen()
               : isCallWithThisPeer
-                  ? () => Navigator.of(context).push(
-                        hollowMobileRoute(
-                          settings:
-                              const RouteSettings(name: 'call-screen'),
-                          transition: HollowRouteTransition.slideUp,
-                          builder: (_) => MobileCallScreen(peerId: peerId),
-                        ),
-                      )
+                  ? openCall
                   : null,
-          semanticLabel: 'Voice call',
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
-            size: 20,
-            color: isCallWithThisPeer
-                ? hollow.success
-                : canCall
-                    ? hollow.textSecondary
-                    : hollow.textSecondary.withValues(alpha: 0.3),
-          ),
         ),
-        HollowPressable(
-          onTap: canCall
-              ? () => startAndOpen(withVideo: true)
-              : null,
-          semanticLabel: 'Video call',
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            LucideIcons.video,
-            size: 20,
-            color: canCall
-                ? hollow.textSecondary
-                : hollow.textSecondary.withValues(alpha: 0.3),
-          ),
+        HollowIconButton(
+          icon: LucideIcons.video,
+          label: 'Video call',
+          size: 44,
+          onPressed: canCall ? () => startAndOpen(withVideo: true) : null,
         ),
       ],
     );

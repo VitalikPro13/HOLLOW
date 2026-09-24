@@ -51,6 +51,13 @@ abstract final class HollowTypography {
     fontWeight: FontWeight.w400,
   );
 
+  /// Message text on a phone: one step up from [body], because a phone is read
+  /// at arm's length and a desktop at the width of a keyboard.
+  static final bodyTouch = _base.copyWith(
+    fontSize: 16,
+    fontWeight: FontWeight.w400,
+  );
+
   static final bodySmall = _base.copyWith(
     fontSize: 12,
     fontWeight: FontWeight.w400,

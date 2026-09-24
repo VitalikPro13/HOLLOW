@@ -11,6 +11,8 @@ import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
@@ -160,25 +162,23 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
 
     return Row(
       children: [
-        HollowPressable(
-          onTap: _cancel,
-          semanticLabel: 'Discard recording',
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(LucideIcons.trash2,
-              color: hollow.error, size: 20),
+        HollowIconButton(
+          icon: LucideIcons.trash2,
+          label: 'Discard recording',
+          size: kComposerHeight,
+          onPressed: _cancel,
         ),
-        const SizedBox(width: HollowSpacing.xs),
+        const SizedBox(width: HollowSpacing.sm),
 
         Expanded(
           child: Container(
-            height: 40,
+            height: kComposerHeight,
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.md,
             ),
             decoration: BoxDecoration(
               color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusLg),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             child: Row(
               children: [

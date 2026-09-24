@@ -135,7 +135,7 @@
     {
       "peer": "a",
       "op": "enter_text",
-      "target": "hint:Type a message...",
+      "target": "field",
       "value": "sheet probe"
     },
     {

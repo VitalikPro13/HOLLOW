@@ -4,6 +4,7 @@ import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -649,6 +650,44 @@ class AmbientBackgroundToggle extends ConsumerWidget {
           .read(ambientBackgroundProvider.notifier)
           .setEnabled(v)
           .catchError((_) {}),
+    );
+  }
+}
+
+/// Cozy or compact chat, shared by the desktop and mobile Appearance pages.
+class MessageDisplayPicker extends ConsumerWidget {
+  const MessageDisplayPicker({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final display = ref.watch(messageDisplayProvider);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Message display',
+          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+        ),
+        Text(
+          display == MessageDisplay.cozy
+              ? 'Cozy: avatars, messages grouped under a name'
+              : 'Compact: one line per message, no avatars',
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        TriStateSegment<MessageDisplay>(
+          value: display,
+          options: const [
+            (MessageDisplay.cozy, 'Cozy'),
+            (MessageDisplay.compact, 'Compact'),
+          ],
+          onChanged: (d) => ref
+              .read(messageDisplayProvider.notifier)
+              .set(d)
+              .catchError((_) {}),
+        ),
+      ],
     );
   }
 }

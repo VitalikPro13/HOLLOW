@@ -60,21 +60,13 @@ Widget _cardContainer({
     constraints: const BoxConstraints(maxWidth: 400),
     child: HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      borderRadius: BorderRadius.circular(hollow.radiusLg),
       padding: EdgeInsets.zero,
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
         child: Container(
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            border: Border(
-              left: BorderSide(color: hollow.accent, width: 3),
-              top: BorderSide(color: hollow.border),
-              right: BorderSide(color: hollow.border),
-              bottom: BorderSide(color: hollow.border),
-            ),
-          ),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
+          color: hollow.elevated,
+          padding: const EdgeInsets.all(HollowSpacing.md),
           child: child,
         ),
       ),
@@ -97,7 +89,7 @@ class _ShareLinkCard extends ConsumerWidget {
       onTap: () => _openShareDialog(context),
       child: Row(
         children: [
-          Icon(LucideIcons.share2, size: 20, color: hollow.accent),
+          Icon(LucideIcons.share2, size: 20, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Column(
@@ -171,7 +163,7 @@ class _ServerInviteCard extends ConsumerWidget {
       onTap: alreadyJoined ? null : () => _handleJoin(context, ref),
       child: Row(
         children: [
-          Icon(LucideIcons.server, size: 20, color: hollow.accent),
+          Icon(LucideIcons.server, size: 20, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Column(
@@ -179,7 +171,7 @@ class _ServerInviteCard extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  alreadyJoined ? serverInfo.name : 'Server Invite',
+                  alreadyJoined ? serverInfo.name : 'Server invite',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,
@@ -245,7 +237,7 @@ class _RoomInviteCard extends ConsumerWidget {
       onTap: () => _handleJoin(context, ref),
       child: Row(
         children: [
-          Icon(LucideIcons.messageCircle, size: 20, color: hollow.accent),
+          Icon(LucideIcons.messageCircle, size: 20, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Column(
@@ -253,7 +245,7 @@ class _RoomInviteCard extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Room Invite',
+                  'Room invite',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,
@@ -306,7 +298,7 @@ class _RedeemCodeCard extends ConsumerWidget {
       onTap: () => showRedeemCodeDialog(context, link.id),
       child: Row(
         children: [
-          Icon(LucideIcons.gift, size: 20, color: hollow.accent),
+          Icon(LucideIcons.gift, size: 20, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Column(
@@ -351,7 +343,7 @@ class _ConferenceInviteCard extends ConsumerWidget {
       onTap: () => _handleJoin(context, ref),
       child: Row(
         children: [
-          Icon(LucideIcons.video, size: 20, color: hollow.accent),
+          Icon(LucideIcons.video, size: 20, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Column(
@@ -359,7 +351,7 @@ class _ConferenceInviteCard extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Conference Invite',
+                  'Conference invite',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,
@@ -421,7 +413,7 @@ class _RecoveryLinkCard extends ConsumerWidget {
       onTap: () => showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl),
       child: Row(
         children: [
-          Icon(LucideIcons.lifeBuoy, size: 20, color: hollow.accent),
+          Icon(LucideIcons.lifeBuoy, size: 20, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Column(
@@ -429,7 +421,7 @@ class _RecoveryLinkCard extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Recovery Pool Invite',
+                  'Recovery pool invite',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,

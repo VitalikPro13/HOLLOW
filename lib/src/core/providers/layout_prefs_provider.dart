@@ -29,7 +29,7 @@ const double kChannelSidebarWidthDefault = 240.0;
 const double kChannelSidebarWidthMin = 180.0;
 const double kChannelSidebarWidthMax = 460.0;
 
-const double kMemberPanelWidthDefault = 240.0;
+const double kMemberPanelWidthDefault = 280.0;
 const double kMemberPanelWidthMin = 180.0;
 const double kMemberPanelWidthMax = 420.0;
 

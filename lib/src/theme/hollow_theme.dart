@@ -208,6 +208,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   Color noticeSurface(Color tint, {double alpha = 0.14}) =>
       Color.alphaBlend(tint.withValues(alpha: alpha), elevated);
 
+  /// A message row's hover on the canvas: half a step toward [elevated], so a
+  /// card or file inside the row, which IS elevated, still stands out.
+  Color get rowHover => Color.lerp(background, elevated, 0.5)!;
+
   static HollowTheme of(BuildContext context) =>
       Theme.of(context).extension<HollowTheme>()!;
 

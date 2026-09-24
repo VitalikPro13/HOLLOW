@@ -480,17 +480,9 @@ class _ArchiveMessageListCoreState<T>
           child: MessageActionBarScope(
             child: Builder(
               builder: (scopeContext) =>
-                  NotificationListener<ScrollNotification>(
-                onNotification: (notification) {
-                  if (notification is ScrollUpdateNotification) {
-                    MessageActionBarScope.of(scopeContext)?.dismissAll();
-                  }
-                  return false;
-                },
-                child: perRowSelection
+                  perRowSelection
                     ? list
                     : chatSelectionArea(child: list),
-              ),
             ),
           ),
         ),

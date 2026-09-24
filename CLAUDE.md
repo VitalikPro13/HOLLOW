@@ -41,9 +41,9 @@ pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 **Releases: load the `release` skill FIRST** (whole flow incl. the go-live gate; `reference_release_pipeline`). **Certum signing:** CNG binding self-heals; output `installer\Output\` (`reference_certum_signing_procedure`). **Linux release = BOTH artifacts uploaded + `scripts/publish_flatpak_repo.sh` (VM, own GPG-signed OSTree repo, NEVER Flathub) BEFORE the LAST step `scripts\sign_manifest.ps1`** (key OUTSIDE repo, `project_update_integrity`, `project_linux_auto_update`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
-**Load the `hollow-ui` skill BEFORE widget work:** tokens only, gap ramp, ONE chip, ONE badge, button variant per context. Rules `reports/reference/HOLLOW_DESIGN_LANGUAGE.md`, ratchet `test/design_language_guard_test.dart`.
-All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable/Button/TextField/Dialog (`showHollowDialog()`)/Tooltip/Toast/Toggle, StatusDot, StatBar.
-- **CRITICAL: hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black, pass `backgroundColor: null`); hover never paints outside the control. Dialogs = `HollowDialog`/`HollowDialogSurface` on a flat scrim (NO blur), ghost Cancel + ONE filled, `.danger` ONLY destructive, yes/no = `showHollowConfirm`; selection = chips. `feedback_hover_state_patterns`.
+**Load the `hollow-ui` skill BEFORE widget work:** tokens only, gap ramp, ONE chip/badge, button variant per context. Rules `reports/reference/HOLLOW_DESIGN_LANGUAGE.md`; ratchet `test/design_language_guard_test.dart`.
+All UI = Hollow widgets (`src/ui/components/`), no Material: HollowPressable/Button/IconButton/TextField/Dialog (`showHollowDialog()`)/Tooltip/Toast/Toggle. Chat = ONE MessageRow/ChatHeaderBar/ChatComposerRow; names `nameColorFor(MASTER)`.
+- **CRITICAL: hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black; pass `backgroundColor: null`); hover never paints outside its control. Dialogs = `HollowDialog`/`HollowDialogSurface` on a flat scrim (NO blur), ghost Cancel + ONE filled, `.danger` ONLY destructive, yes/no = `showHollowConfirm`; selection = chips. `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
 - **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic;** ALWAYS verify ring-1/ring-2 changes there. NOT covered: media/native/relay C++ (the UI probe), device→master attribution (process-global resolver, `resolver::forget`). `feedback_harness_first_testing`.
@@ -212,10 +212,10 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - `memory_search(query)` = memory+wiki+plan/whitepaper; ALWAYS search before arguing, designing or re-investigating; `memory_reindex()` after modifying indexed files.
 
 ## Rules
-- Never commit secrets, keys, or credentials.
-- Rust handles networking/crypto/CRDTs/storage; Dart handles UI/app logic/state.
+- Never commit secrets, keys or credentials.
+- Rust: networking/crypto/CRDTs/storage; Dart: UI/app logic/state.
 - All crypto operations must use constant-time implementations.
-- **HOLLOW_PLAN.md is the authoritative source** for phases, feature checklists and completion status (never duplicated here or in memory); ask before architectural decisions it does not cover.
+- **HOLLOW_PLAN.md is authoritative** for phases, checklists, completion (never duplicated here or in memory); ask before architectural decisions it does not cover.
 - **HARD budget: 50,000 chars.** Entries = 1–3 lines: rule + memory pointer. Buy room by COMPRESSING prose and moving narrative to its memory file, NEVER by dropping a rule: a crypto, security or data-integrity rule stays even when the file is tight, because the cost of not knowing it is silent breakage.
-- **SSH hosts (relay VPS, Mac, VM, Hostinger):** in `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
-- **Local dev:** checks/tests/codegen run freely; Vitalik runs `flutter run -d windows`.
+- **SSH hosts (relay VPS, Mac, VM, Hostinger):** `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
+- **Local dev:** checks/tests/codegen free; Vitalik runs `flutter run -d windows`.

@@ -108,6 +108,8 @@ class AppearanceSettingsView extends ConsumerWidget {
               ref.read(layoutModeProvider.notifier).setMode(m);
             },
           ),
+          const SizedBox(height: HollowSpacing.lg),
+          const MessageDisplayPicker(),
           if (isDesktop) ...[
             const SizedBox(height: HollowSpacing.md),
             SettingsToggleRow(

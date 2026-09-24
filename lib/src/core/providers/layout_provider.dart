@@ -43,3 +43,33 @@ class LayoutModeNotifier extends Notifier<LayoutMode> {
     );
   }
 }
+
+/// How chat messages are laid out: cozy (avatars, grouped under a name) or
+/// compact (one line each: time, name, text).
+enum MessageDisplay { cozy, compact }
+
+/// Persisted message display. Default: cozy. Loaded from `_bootstrap` like
+/// [layoutModeProvider], and a plain [Notifier] for the same reason: every
+/// chat row reads it, and an async first frame would draw cozy then jump.
+final messageDisplayProvider =
+    NotifierProvider<MessageDisplayNotifier, MessageDisplay>(
+        MessageDisplayNotifier.new);
+
+class MessageDisplayNotifier extends Notifier<MessageDisplay> {
+  @override
+  MessageDisplay build() => MessageDisplay.cozy;
+
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'message_display');
+      state = val == 'compact' ? MessageDisplay.compact : MessageDisplay.cozy;
+    } catch (e) {
+      debugPrint('[HOLLOW] messageDisplay.load() failed: $e');
+    }
+  }
+
+  Future<void> set(MessageDisplay display) async {
+    state = display;
+    await storage_api.saveSetting(key: 'message_display', value: display.name);
+  }
+}

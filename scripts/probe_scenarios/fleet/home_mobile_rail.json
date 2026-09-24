@@ -102,25 +102,25 @@
   {
    "peer": "b",
    "op": "wait_for",
-   "target": "hint:Type a message...",
+   "target": "field",
    "timeout_ms": 15000
   },
   {
    "peer": "b",
    "op": "tap",
-   "target": "hint:Type a message...",
+   "target": "field",
    "index": 0
   },
   {
    "peer": "b",
    "op": "enter_text",
-   "target": "hint:Type a message...",
+   "target": "field",
    "value": "sent you the stems ${RUN}"
   },
   {
    "peer": "b",
    "op": "tap",
-   "target": "semantics:Send",
+   "target": "semantics:Send message",
    "index": 0
   },
   {
@@ -324,7 +324,7 @@
   {
    "peer": "b",
    "op": "wait_for",
-   "target": "hint:Type a message...",
+   "target": "field",
    "timeout_ms": 15000
   },
   {
@@ -335,19 +335,19 @@
   {
    "peer": "b",
    "op": "tap",
-   "target": "hint:Type a message...",
+   "target": "field",
    "index": 0
   },
   {
    "peer": "b",
    "op": "enter_text",
-   "target": "hint:Type a message...",
+   "target": "field",
    "value": "@probe-a can you check the relay logs ${RUN}"
   },
   {
    "peer": "b",
    "op": "tap",
-   "target": "semantics:Send",
+   "target": "semantics:Send message",
    "index": 0
   },
   {

@@ -53,6 +53,7 @@ times for chips alone. Do not invent a 47th. Reach for the component.
 | `heading` | 20 / 600 | Screen title |
 | `subheading` | 16 / 600 | Section title |
 | `body` | 14 / 400 | Message text, prose, dialog body |
+| `bodyTouch` | 16 / 400 | Message text and sheet rows on a phone |
 | `label` | 13 / 500 | Control labels, row titles, buttons |
 | `bodySmall` | 12 / 400 | Secondary row text, descriptions |
 | `caption` | 11 / 400 | Metadata, hints |
@@ -221,7 +222,13 @@ slider; `onMedia: true` over video) · `HollowToggle` (the only switch, with a
 `HollowCountBadge` (the unread counter: accent for unread, error plus `@` for a
 mention, never hand-drawn) · `ConversationRow` + `PresenceAvatar` (the one
 conversation row) · `HollowTextLink` (a link inside prose, on the text's edge) ·
-`ServerAvatar`. List times go through `conversationTimeLabel()`, never `M/D`,
+`ServerAvatar` · `HollowIconButton` (every icon-only control: `label` is
+tooltip and screen-reader name, `size` 32 desktop / 44 touch, `selected` is a
+grey fill never the accent, siblings `xs` apart). A person's name in a chat is
+`nameColorFor(master, hollow)`, yours `accentText`; panels and people lists
+stay neutral. Chat surfaces reuse `MessageRow`, `ChatHeaderBar`,
+`ChatComposerRow`, `showExpressionPicker` (design language 4.5), never a copy.
+List times go through `conversationTimeLabel()`, never `M/D`,
 in the interface face (a written date in mono reads as a typewriter).
 
 **Cards:** only for a repeatable self-contained unit (a listing, a device, a
@@ -256,7 +263,8 @@ Already-settled surfaces: `showHollowMenu` via
 ## Shadows and decoration
 
 Shadows only on things that float above the app (menus, popovers, dialogs,
-toasts), `blurRadius` at most 12. Never on a card or a row, never as a
+toasts), `blurRadius` at most 12: `HollowShadows.float`. A focused field shows
+its accent border, never a glow. Never on a card or a row, never as a
 substitute for a surface step. **No gradients**, no glass, no blur, no glow. The
 ambient background is an Appearance opt-in, off by default and under reduce
 motion; never add another.
