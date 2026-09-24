@@ -214,7 +214,7 @@ Content column:
 `DownloadIconButton(iconSize: 16)` — shows active file transfer count, opens download panel.
 
 #### Settings Button
-`HollowPressable` with `LucideIcons.settings` (16px, `textSecondary`). Wrapped in `HollowTooltip("Settings")`. On tap: `showUserSettingsDialog(context)`.
+`HollowPressable` with `LucideIcons.settings` (16px, `textSecondary`). Wrapped in `HollowTooltip("Settings")`. On tap: `toggleSettings(ref.read)` (the Settings place).
 
 #### Recovery Phrase Button (Conditional)
 Only shown when `identity.mnemonic != null`. `HollowPressable` with `LucideIcons.keyRound` (16px, `textSecondary`). Wrapped in `HollowTooltip("Recovery phrase")`. On tap: `showMnemonicDialog(context, identity.mnemonic!)`.

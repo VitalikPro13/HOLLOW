@@ -32,7 +32,9 @@ void main() {
             body: Consumer(
               builder: (context, ref, _) {
                 container = ProviderScope.containerOf(context);
-                return const AccessibilitySettingsView();
+                // The Settings place owns the scroll, as it does here.
+                return const SingleChildScrollView(
+                    child: AccessibilitySettingsView());
               },
             ),
           ),
@@ -45,11 +47,11 @@ void main() {
   testWidgets('renders the three scale controls at their defaults',
       (tester) async {
     await pumpSettings(tester);
-    expect(find.text('Interface scale'), findsOneWidget);
-    expect(find.text('Chat text size'), findsOneWidget);
-    // Side panel size joined them in issue #54.
-    expect(find.text('Side panel size'), findsOneWidget);
-    // All three sit at 100%, and the min/max captions frame each range.
+    expect(find.text('Interface'), findsOneWidget);
+    expect(find.text('Chat text'), findsOneWidget);
+    // Side panels joined them in issue #54.
+    expect(find.text('Side panels'), findsOneWidget);
+    // All three read 100%.
     expect(find.text('100%'), findsNWidgets(3));
     expect(find.byType(Slider), findsNWidgets(3));
   });
@@ -82,7 +84,7 @@ void main() {
     await pumpSettings(tester);
     expect(container.read(chatTextScaleProvider), kChatTextScaleDefault);
 
-    // Order in the card: interface scale, chat text size, side panel size.
+    // Order on the page: interface, chat text, side panels.
     final slider = find.byType(Slider).at(1);
     final center = tester.getCenter(slider);
     final gesture = await tester.startGesture(center);

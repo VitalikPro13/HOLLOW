@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
@@ -32,6 +33,7 @@ void main() {
         ShellTab.archive: c.read(archiveTabOpenProvider),
         ShellTab.conference: c.read(conferenceTabOpenProvider),
         ShellTab.shop: c.read(shopTabOpenProvider),
+        ShellTab.settings: c.read(settingsTabOpenProvider),
       };
       expect(open[tab], isTrue, reason: '$tab did not open');
       expect(
@@ -51,6 +53,7 @@ void main() {
     expect(c.read(archiveTabOpenProvider), isFalse);
     expect(c.read(conferenceTabOpenProvider), isFalse);
     expect(c.read(shopTabOpenProvider), isFalse);
+    expect(c.read(settingsTabOpenProvider), isFalse);
     expect(c.read(anyShellTabOpenProvider), isFalse);
   });
 

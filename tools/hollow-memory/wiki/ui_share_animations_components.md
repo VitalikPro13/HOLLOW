@@ -924,7 +924,7 @@ Top-level function. Creates `OverlayEntry` with `_ProfileCardOverlay`. Accepts `
 - Status: italic text if non-empty.
 - Divider.
 - About Me: `HollowSectionHeader('About me', dense: true)` + text (max 4 lines).
-- Self actions: "Edit Profile" outline button opening `showUserSettingsDialog`.
+- Self actions: "Edit Profile" outline button opening `openSettings(read, category: SettingsCategory.profile)`.
 - Non-self actions:
   - "Set Nickname" / "Edit Nickname" ghost button opening `showLocalNicknameDialog`.
   - `_FriendActionButton` — state-aware friend action.

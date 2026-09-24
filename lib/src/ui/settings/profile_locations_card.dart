@@ -15,15 +15,19 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Profiles block (issue #47): switch between or erase separate identities,
-/// each in its own data folder. Desktop-only, because mobile data roots are
-/// sandboxed and the iOS push extension opens one fixed App Group DB path.
+/// The Profiles rows of Settings > Files & Storage (issue #47): switch between
+/// or erase separate identities, each in its own data folder. Desktop-only,
+/// because mobile data roots are sandboxed and the iOS push extension opens
+/// one fixed App Group DB path.
 ///
 /// Switching pins the chosen root in the registry and restarts Hollow; erasing
 /// the running profile goes through the pending-wipe marker, because
@@ -51,11 +55,6 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
   bool get _envOverrideActive => dataDirEnvOverrideActive;
 
   List<ProfileRow> _buildRows() => listProfileRows(_registry);
-
-  IconData _iconFor(ProfileRow row) {
-    if (row.portable) return LucideIcons.usb;
-    return row.builtin ? LucideIcons.hardDrive : LucideIcons.folder;
-  }
 
   /// Empty folders and recognizable Hollow data roots qualify; anything else is
   /// refused, so we never onboard into (or erase) a folder of unrelated files.
@@ -108,7 +107,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           ),
           HollowButton.filled(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Switch & restart'),
+            child: const Text('Switch and restart'),
           ),
         ],
       ),
@@ -352,134 +351,122 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final rows = _buildRows();
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        HollowSectionHeader(
-          'Profiles on This Computer',
-          subtitle: 'Each profile is a separate identity stored in its own '
-              'folder. Switching restarts Hollow; the profile you leave '
-              'stays on disk. Identity protection via the OS keychain holds '
-              'only one identity per computer. Use password protection for '
-              'additional profiles.',
-          action: _busy ? const HollowSpinner() : null,
-        ),
-        if (_envOverrideActive) ...[
-          Text(
-            'HOLLOW_DATA_DIR is set. It overrides the profile selection '
-            'until Hollow is started without it.',
-            style: HollowTypography.caption.copyWith(color: hollow.warning),
+        SettingsRow(
+          title: 'Profiles',
+          subtitle: 'Separate identities, each in its own folder. Switching '
+              'restarts Hollow.',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // A switch or erase is running; every profile action waits.
+              if (_busy) ...[
+                const HollowSpinner(),
+                const SizedBox(width: HollowSpacing.sm),
+              ],
+              HollowButton.ghost(
+                compact: true,
+                onPressed: _busy ? null : _addProfile,
+                child: const Text('Add a profile'),
+              ),
+            ],
           ),
-          const SizedBox(height: HollowSpacing.sm),
-        ],
-        const SizedBox(height: HollowSpacing.xs),
-        for (final row in rows) ...[
-          _buildRow(hollow, row),
-          const SizedBox(height: HollowSpacing.xs),
-        ],
-        const SizedBox(height: HollowSpacing.xs),
-        HollowButton.outline(
-          onPressed: _busy ? null : _addProfile,
-          icon: const Icon(LucideIcons.folderPlus, size: 14),
-          compact: true,
-          child: const Text('Add profile folder'),
+        ),
+        if (_envOverrideActive)
+          const SettingsNote(
+              'HOLLOW_DATA_DIR is set, so it picks the folder until Hollow '
+              'starts without it.'),
+        Padding(
+          padding: const EdgeInsets.only(left: HollowSpacing.md),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [for (final row in rows) _buildRow(row)],
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildRow(HollowTheme hollow, ProfileRow row) {
+  Widget _buildRow(ProfileRow row) {
+    final hollow = HollowTheme.of(context);
     final active = sameProfilePath(row.path, _runningRoot);
     final exists = Directory(row.path).existsSync();
+    final menu = [
+      if (!row.builtin)
+        HollowMenuItem(
+          icon: LucideIcons.pencil,
+          label: 'Rename',
+          enabled: !_busy,
+          onTap: () => _renameProfile(row),
+        ),
+      if (!row.builtin && !active)
+        HollowMenuItem(
+          icon: LucideIcons.listX,
+          label: 'Remove from the list',
+          enabled: !_busy,
+          onTap: () => _removeProfile(row),
+        ),
+      if (exists)
+        HollowMenuItem(
+          icon: LucideIcons.trash2,
+          label: 'Erase',
+          isDanger: true,
+          enabled: !_busy,
+          onTap: () => _confirmErase(row),
+        ),
+    ];
 
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
+    return SettingsRow(
+      title: row.name,
+      titleTrailing: active ? const HollowBadge('In use') : null,
+      subtitleWidget: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(_iconFor(row), size: 16,
-              color: active ? hollow.accentText : hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        row.name,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (active) ...[
-                      const SizedBox(width: HollowSpacing.xs),
-                      const HollowBadge('Active',
-                          kind: HollowBadgeKind.accent),
-                    ],
-                  ],
-                ),
-                Text(
-                  row.path,
-                  style: HollowTypography.monoSmall.copyWith(
-                    color: hollow.textSecondary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (!exists)
-                  Text(
-                    'Not created yet. Switching starts a new identity here',
-                    style: HollowTypography.micro.copyWith(
-                      color: hollow.textSecondary,
-                    ),
-                  ),
-              ],
-            ),
+          Text(
+            row.path,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style:
+                HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
           ),
-          const SizedBox(width: HollowSpacing.sm),
+          if (!exists)
+            const Text('Not created yet. Switching starts a new identity here'),
+        ],
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
           if (!active)
             HollowButton.outline(
-              onPressed: _busy ? null : () => _confirmSwitch(row),
               compact: true,
+              onPressed: _busy ? null : () => _confirmSwitch(row),
               child: const Text('Switch'),
             ),
-          if (!row.builtin) ...[
+          if (menu.isNotEmpty) ...[
             const SizedBox(width: HollowSpacing.xs),
-            HollowButton.ghost(
-              onPressed: _busy ? null : () => _renameProfile(row),
-              compact: true,
-              child: const Text('Rename'),
-            ),
-            if (!active) ...[
-              const SizedBox(width: HollowSpacing.xs),
-              HollowButton.ghost(
-                onPressed: _busy ? null : () => _removeProfile(row),
-                compact: true,
-                child: const Text('Remove'),
+            Builder(
+              builder: (buttonContext) => HollowIconButton(
+                icon: LucideIcons.ellipsis,
+                label: 'More for ${row.name}',
+                tooltip: 'More',
+                onPressed: () => showHollowMenu(
+                  context: buttonContext,
+                  anchor: overlayAnchorOf(
+                    buttonContext,
+                    localOffset: Offset(buttonContext.size?.width ?? 0,
+                        (buttonContext.size?.height ?? 0) + HollowSpacing.xs),
+                  ),
+                  alignEnd: true,
+                  builder: (_, _) => menu,
+                ),
               ),
-            ],
-          ],
-          if (exists) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            HollowButton.danger(
-              onPressed: _busy ? null : () => _confirmErase(row),
-              compact: true,
-              child: const Text('Erase'),
             ),
           ],
         ],

@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
@@ -48,7 +49,6 @@ import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/voice_here_badge.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
@@ -78,6 +78,8 @@ class BottomBar extends ConsumerWidget {
     final inVoice =
         ref.watch(voiceChannelProvider.select((s) => s.isInVoiceChannel));
     final location = ref.watch(dockLocationProvider);
+    final atSettings =
+        location is _AtPlace && location.tab == ShellTab.settings;
 
     return Container(
       height: kDockHeight + 1,
@@ -141,10 +143,14 @@ class BottomBar extends ConsumerWidget {
                 const SizedBox(width: HollowSpacing.xs),
                 const _HelpButton(),
                 const SizedBox(width: HollowSpacing.xs),
-                HollowIconButton(
-                  icon: LucideIcons.settings,
-                  label: 'Settings',
-                  onPressed: () => showUserSettingsDialog(context),
+                _DockSlot(
+                  marked: atSettings,
+                  child: HollowIconButton(
+                    icon: LucideIcons.settings,
+                    label: 'Settings',
+                    selected: atSettings,
+                    onPressed: () => toggleSettings(ref.read),
+                  ),
                 ),
                 const SizedBox(width: HollowSpacing.md),
               ],
@@ -227,6 +233,8 @@ void _openPlace(WidgetRef ref, ShellTab tab) {
       ref.read(archiveSelectedChannelProvider.notifier).state = null;
       setShellTab(ref.read, tab);
       _clearSelection(ref);
+    case ShellTab.settings:
+      openSettings(ref.read);
     case ShellTab.guest || ShellTab.share:
       _closeSplit(ref);
       setShellTab(ref.read, tab);
@@ -1048,8 +1056,9 @@ class _Places extends ConsumerWidget {
       if (ref.watch(shopAvailableProvider))
         const _PlaceSpec(ShellTab.shop, 'Hollow Shop', LucideIcons.store),
     ];
+    // Settings is a place, but its mark sits on the dock's gear.
     final active = switch (location) {
-      _AtPlace(:final tab) => tab,
+      _AtPlace(:final tab) when tab != ShellTab.settings => tab,
       _ => null,
     };
 

@@ -14,8 +14,7 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
-import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 
 /// Anything unread anywhere, driving the tray icon's red-dot variant. DM
 /// counts go through the notification-settings-filtered badge, so a muted
@@ -262,12 +261,8 @@ class TrayService with TrayListener {
 
   Future<void> _openSettings() async {
     await restoreWindow();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final context = hollowNavigatorKey.currentContext;
-      if (context == null) return;
-      // toggle: false, so a settings dialog left open behind a hidden window
-      // is returned to rather than closed.
-      showUserSettingsDialog(context, toggle: false);
-    });
+    // Opens, never toggles: Settings left open behind a hidden window is
+    // returned to rather than closed.
+    openSettings(_container.read);
   }
 }

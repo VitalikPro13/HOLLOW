@@ -2,277 +2,437 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/settings/relay_health_card.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Network category of the desktop Settings dialog: relay selection, offline
-/// delivery and the anti-censorship tunnel. The relay selection state lives on
-/// the dialog so it survives switching categories, and arrives as callbacks.
-class NetworkSettingsView extends ConsumerWidget {
-  final String selectedRelay;
-  final String initialRelay;
-  final bool showAddRelay;
-  final TextEditingController newRelayController;
-  final ValueChanged<String> onSelectRelay;
-  final ValueChanged<String> onRemoveRelay;
-  final VoidCallback onShowAddRelay;
-  final VoidCallback onSubmitAddRelay;
-  final VoidCallback onCancelAddRelay;
-  final VoidCallback onApplyRestart;
+/// The pieces of Settings > Network. The page composes them; the phone's
+/// settings tab still hosts the GIF and link preview groups on their own.
 
-  const NetworkSettingsView({
-    super.key,
-    required this.selectedRelay,
-    required this.initialRelay,
-    required this.showAddRelay,
-    required this.newRelayController,
-    required this.onSelectRelay,
-    required this.onRemoveRelay,
-    required this.onShowAddRelay,
-    required this.onSubmitAddRelay,
-    required this.onCancelAddRelay,
-    required this.onApplyRestart,
+/// Width of a field row's controls on a pointer screen. Touch stacks them
+/// under the title at full width instead.
+const double _kFieldWidth = 340;
+
+/// Awaits a settings write and says so when it fails.
+Future<void> _saveSetting(BuildContext context, Future<void> write) async {
+  try {
+    await write;
+  } catch (_) {
+    if (!context.mounted) return;
+    HollowToast.show(context, 'Could not save that setting',
+        type: HollowToastType.error);
+  }
+}
+
+/// Opens a menu under the trailing edge of the button that owns [context].
+void _openMenuBelow(BuildContext context, HollowMenuBuilder builder) {
+  showHollowMenu(
+    context: context,
+    anchor: overlayAnchorOf(
+      context,
+      localOffset: Offset(context.size?.width ?? 0,
+          (context.size?.height ?? 0) + HollowSpacing.xs),
+    ),
+    alignEnd: true,
+    builder: builder,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Relay
+// ---------------------------------------------------------------------------
+
+/// The relay this identity is on, and the list to pick another. A pick only
+/// applies through "Switch and restart": the relay is never switched for you.
+class RelaySettingsSection extends ConsumerStatefulWidget {
+  const RelaySettingsSection({super.key});
+
+  @override
+  ConsumerState<RelaySettingsSection> createState() =>
+      _RelaySettingsSectionState();
+}
+
+class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
+  static bool get _phone => Platform.isAndroid || Platform.isIOS;
+
+  /// The relay this process is connected to; a change needs a restart.
+  late final String _activeRelay = ref.read(relayDomainProvider);
+  late String _selectedRelay = _activeRelay;
+  bool _open = false;
+  bool _adding = false;
+  bool _switching = false;
+  final _newRelay = TextEditingController();
+
+  @override
+  void dispose() {
+    _newRelay.dispose();
+    super.dispose();
+  }
+
+  Future<void> _switchAndRestart() async {
+    setState(() => _switching = true);
+    try {
+      await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
+      await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
+      await exitForRelaySwitch();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _switching = false);
+      HollowToast.show(context, 'Could not switch relays: $e',
+          type: HollowToastType.error);
+    }
+  }
+
+  Future<void> _remove(String domain) async {
+    try {
+      await ref.read(savedRelayListProvider.notifier).removeRelay(domain);
+      if (!mounted) return;
+      if (_selectedRelay == domain) {
+        setState(() => _selectedRelay = kDefaultRelayDomain);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Could not remove that relay',
+          type: HollowToastType.error);
+    }
+  }
+
+  Future<void> _submitNewRelay() async {
+    final raw = _newRelay.text.trim();
+    if (raw.isEmpty) return;
+    final domain = normalizeRelayHost(raw);
+    if (domain == null) {
+      HollowToast.show(
+          context, 'Enter a relay address such as myrelay.duckdns.org',
+          type: HollowToastType.error);
+      return;
+    }
+    if (ref.read(savedRelayListProvider).contains(domain)) return;
+    try {
+      await ref.read(savedRelayListProvider.notifier).addRelay(domain);
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Could not add that relay',
+          type: HollowToastType.error);
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _selectedRelay = domain;
+      _newRelay.clear();
+      _adding = false;
+    });
+  }
+
+  void _cancelAdd() => setState(() {
+        _newRelay.clear();
+        _adding = false;
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    final noTurn = ref.watch(relayStatusProvider)?.turn == false;
+    final relays = ref.watch(savedRelayListProvider);
+    return SettingsSection(
+      title: 'Relay',
+      children: [
+        _ActiveRelayRow(
+          domain: _activeRelay,
+          open: _open,
+          onToggle: () => setState(() => _open = !_open),
+        ),
+        if (_open)
+          Padding(
+            padding: const EdgeInsets.only(
+                left: HollowSpacing.md, bottom: HollowSpacing.sm),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final domain in relays)
+                  _RelayChoiceRow(
+                    domain: domain,
+                    selected: domain == _selectedRelay,
+                    inUse: domain == _activeRelay,
+                    noTurn: domain == _activeRelay && noTurn,
+                    onSelect: () => setState(() => _selectedRelay = domain),
+                    onRemove: () => _remove(domain),
+                  ),
+                const SizedBox(height: HollowSpacing.sm),
+                if (_adding)
+                  _AddRelayField(
+                    controller: _newRelay,
+                    onSubmit: _submitNewRelay,
+                    onCancel: _cancelAdd,
+                  )
+                else
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: HollowButton.ghost(
+                      compact: true,
+                      icon: const Icon(LucideIcons.plus, size: 14),
+                      onPressed: () => setState(() => _adding = true),
+                      child: const Text('Add a relay'),
+                    ),
+                  ),
+                const SettingsNote(
+                    "Friends and servers on another relay can't be reached "
+                    'from here.'),
+              ],
+            ),
+          ),
+        if (_selectedRelay != _activeRelay)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                HollowButton.filled(
+                  loading: _switching,
+                  onPressed: _switchAndRestart,
+                  // A phone app cannot start itself again, so it closes.
+                  child: Text(_phone ? 'Switch and close' : 'Switch and restart'),
+                ),
+                if (_phone)
+                  const SettingsNote(
+                      'Open Hollow again to connect to the new relay.'),
+              ],
+            ),
+          ),
+        const RelayHealthRow(),
+      ],
+    );
+  }
+}
+
+/// The relay in use, named in the console voice, with how it is doing. A
+/// healthy relay reads as one quiet line; trouble takes a warning or error.
+class _ActiveRelayRow extends ConsumerWidget {
+  final String domain;
+  final bool open;
+  final VoidCallback onToggle;
+
+  const _ActiveRelayRow({
+    required this.domain,
+    required this.open,
+    required this.onToggle,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final offlineInbox = ref.watch(offlineInboxProvider);
-    final retentionDays = ref.watch(offlineInboxRetentionProvider);
-    return settingsCardList([
-      SettingsCard(
-        title: 'Relay',
-        children: [
-          Text(
-            'Your relay determines your network. Friends and servers on a '
-            'different relay won\'t be reachable.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-            ),
+    final connection = ref.watch(overallConnectionProvider);
+    final stats = ref.watch(relayStatsProvider);
+    final load = relayLoadOf(stats);
+
+    final quiet =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
+    final parts = <TextSpan>[
+      if (domain == kDefaultRelayDomain) const TextSpan(text: 'Official'),
+      if (!connection.isOnline)
+        TextSpan(
+          text: connection.label,
+          style: TextStyle(
+            color: connection == OverallConnection.error ||
+                    connection == OverallConnection.offline
+                ? hollow.error
+                : hollow.warning,
           ),
-          const SizedBox(height: HollowSpacing.sm),
-          for (final domain in ref.watch(savedRelayListProvider)) ...[
-            _buildRelayRow(hollow, domain,
-                noTurn: domain == initialRelay &&
-                    ref.watch(relayStatusProvider)?.turn == false),
-            const SizedBox(height: HollowSpacing.xs),
-          ],
-          if (showAddRelay)
-            _buildAddRelayField(hollow)
-          else
-            Align(
-              alignment: Alignment.centerLeft,
-              child: HollowButton.ghost(
-                compact: true,
-                icon: const Icon(LucideIcons.plus, size: 14),
-                onPressed: onShowAddRelay,
-                child: const Text('Add relay'),
-              ),
-            ),
-          if (selectedRelay != initialRelay) ...[
-            const SizedBox(height: HollowSpacing.md),
-            SizedBox(
-              width: double.infinity,
-              child: HollowButton.filled(
-                onPressed: onApplyRestart,
-                child: const Text('Apply & restart'),
-              ),
-            ),
-          ],
-        ],
-      ),
-      const RelayHealthCard(),
-      SettingsCard(
-        title: 'Offline Delivery',
-        children: [
-          SettingsToggleRow(
-            icon: LucideIcons.inbox,
-            label: 'Hold my messages while I\'m offline',
-            subtitle:
-                'Messages and file cards sent TO YOU while you\'re offline '
-                'wait on the relay, encrypted, and arrive when you come back, '
-                'even if the sender has gone offline by then. This only '
-                'affects what you receive; senders don\'t need it enabled. '
-                'The relay can\'t read any of it.',
-            value: offlineInbox,
-            onChanged: (v) =>
-                ref.read(offlineInboxProvider.notifier).setEnabled(v),
+        )
+      else ...[
+        if (stats.isFresh)
+          TextSpan(
+              text: stats.onlineUsers == 1
+                  ? '1 person online'
+                  : '${stats.onlineUsers} people online'),
+        if (load != null)
+          TextSpan(
+            text: 'load ${load.name}',
+            style: load == RelayLoad.high
+                ? TextStyle(color: hollow.warning)
+                : null,
           ),
-          if (offlineInbox) ...[
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'Keep messages for',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.xs),
-            TriStateSegment<int>(
-              value: retentionDays,
-              options: const [
-                (1, '1 day'),
-                (3, '3 days'),
-                (7, '7 days'),
-              ],
-              onChanged: (d) =>
-                  ref.read(offlineInboxRetentionProvider.notifier).setDays(d),
-            ),
-          ],
-        ],
+      ],
+    ];
+    final subtitle = <TextSpan>[
+      for (var i = 0; i < parts.length; i++) ...[
+        if (i > 0) const TextSpan(text: ' · '),
+        parts[i],
+      ],
+    ];
+
+    return SettingsRow(
+      title: domain,
+      monoTitle: true,
+      subtitleWidget: subtitle.isEmpty
+          ? null
+          : Text.rich(TextSpan(style: quiet, children: subtitle)),
+      trailing: HollowButton.ghost(
+        compact: true,
+        onPressed: onToggle,
+        child: Text(open ? 'Done' : 'Change'),
       ),
-      const GifProxySettingsCard(),
-      const LinkPreviewSettingsCard(),
-      // Hidden: the current REALITY transport is non-functional. Kept, widget
-      // and Rust side, for a future transport attempt.
-      // if (!Platform.isAndroid && !Platform.isIOS) const _AntiCensorshipCard(),
-    ]);
+    );
   }
+}
 
-  Widget _buildRelayRow(HollowTheme hollow, String domain,
-      {required bool noTurn}) {
-    final isSelected = domain == selectedRelay;
-    final isActive = domain == initialRelay;
-    final isOfficial = domain == kDefaultRelayDomain;
+/// One saved relay in the picker: a radio mark, the host, and what is worth
+/// knowing about it.
+class _RelayChoiceRow extends StatelessWidget {
+  final String domain;
+  final bool selected;
+  final bool inUse;
+  final bool noTurn;
+  final VoidCallback onSelect;
+  final VoidCallback onRemove;
 
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: () => onSelectRelay(domain),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: GestureDetector(
-        onTap: () => onSelectRelay(domain),
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.sm,
-          ),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.08)
-                : hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(
-              color: isSelected
-                  ? hollow.accent.withValues(alpha: 0.4)
-                  : hollow.border.withValues(alpha: 0.3),
+  const _RelayChoiceRow({
+    required this.domain,
+    required this.selected,
+    required this.inUse,
+    required this.noTurn,
+    required this.onSelect,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final official = domain == kDefaultRelayDomain;
+    final notes = [
+      if (official) 'Official',
+      if (inUse) 'In use',
+    ];
+    final quiet =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
+    return Semantics(
+      selected: selected,
+      inMutuallyExclusiveGroup: true,
+      child: HollowPressable(
+        onTap: onSelect,
+        subtle: true,
+        hoverColor: hollow.elevated,
+        semanticLabel: domain,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
+        child: Row(
+          children: [
+            Icon(
+              selected ? LucideIcons.circleDot : LucideIcons.circle,
+              size: 16,
+              color: selected ? hollow.accentText : hollow.textSecondary,
             ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                isSelected ? LucideIcons.checkCircle : LucideIcons.circle,
-                size: 16,
-                color: isSelected ? hollow.accent : hollow.textSecondary,
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
                       domain,
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontSize: 13,
-                        fontWeight:
-                            isSelected ? FontWeight.w600 : FontWeight.w400,
-                      ),
+                      overflow: TextOverflow.ellipsis,
+                      style: HollowTypography.mono
+                          .copyWith(color: hollow.textPrimary),
                     ),
-                    if (isActive)
-                      Text(
-                        'Currently active',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                        ),
-                      ),
+                    if (notes.isNotEmpty || noTurn)
+                      Text.rich(TextSpan(style: quiet, children: [
+                        TextSpan(text: notes.join(' · ')),
+                        if (noTurn) ...[
+                          if (notes.isNotEmpty) const TextSpan(text: ' · '),
+                          TextSpan(
+                            text: 'No TURN: calls need a direct route',
+                            style: TextStyle(color: hollow.warning),
+                          ),
+                        ],
+                      ])),
                   ],
                 ),
               ),
-              if (isOfficial)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.accent.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(hollow.radiusXs),
-                  ),
-                  child: Text(
-                    'Official',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.accent,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              if (noTurn) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                const RelayNoTurnChip(),
-              ],
-              if (!isOfficial) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                GestureDetector(
-                  onTap: () => onRemoveRelay(domain),
-                  child: Icon(
-                    LucideIcons.x,
-                    size: 14,
-                    semanticLabel: 'Remove relay',
-                    color: hollow.textSecondary,
+            ),
+            if (!official)
+              Builder(
+                builder: (buttonContext) => HollowIconButton(
+                  icon: LucideIcons.ellipsis,
+                  label: 'More for $domain',
+                  tooltip: 'More',
+                  onPressed: () => _openMenuBelow(
+                    buttonContext,
+                    (_, _) => [
+                      HollowMenuItem(
+                        icon: LucideIcons.trash2,
+                        label: 'Remove from the list',
+                        onTap: onRemove,
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
   }
+}
 
-  Widget _buildAddRelayField(HollowTheme hollow) {
+class _AddRelayField extends StatelessWidget {
+  final TextEditingController controller;
+  final VoidCallback onSubmit;
+  final VoidCallback onCancel;
+
+  const _AddRelayField({
+    required this.controller,
+    required this.onSubmit,
+    required this.onCancel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return Row(
       children: [
         Expanded(
-          child: SizedBox(
-            height: 36,
-            child: HollowTextField(
-              controller: newRelayController,
-              hintText: 'relay.example.com',
-              isDense: true,
-              autofocus: true,
-            ),
+          child: HollowTextField(
+            controller: controller,
+            hintText: 'relay.example.com',
+            isDense: true,
+            autofocus: true,
+            onSubmitted: (_) => onSubmit(),
           ),
         ),
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.outline(
           compact: true,
-          onPressed: onSubmitAddRelay,
+          onPressed: onSubmit,
           child: const Text('Add'),
         ),
-        const SizedBox(width: HollowSpacing.xs),
+        const SizedBox(width: HollowSpacing.sm),
         HollowButton.ghost(
           compact: true,
-          onPressed: onCancelAddRelay,
+          onPressed: onCancel,
           child: const Text('Cancel'),
         ),
       ],
@@ -280,50 +440,245 @@ class NetworkSettingsView extends ConsumerWidget {
   }
 }
 
-/// GIF search card: content rating and the two ways to change WHERE results
-/// come from, a self-hosted copy of `gifs/` or the user's own Klipy API key.
-/// Everything applies immediately and the next search reads the new source.
-class GifProxySettingsCard extends ConsumerStatefulWidget {
-  const GifProxySettingsCard({super.key});
+// ---------------------------------------------------------------------------
+// While you're offline
+// ---------------------------------------------------------------------------
+
+/// The relay's offline inbox for this device, and how long it holds things.
+class OfflineDeliverySection extends ConsumerWidget {
+  const OfflineDeliverySection({super.key});
 
   @override
-  ConsumerState<GifProxySettingsCard> createState() =>
-      _GifProxySettingsCardState();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final enabled = ref.watch(offlineInboxProvider);
+    final days = ref.watch(offlineInboxRetentionProvider);
+    return SettingsSection(
+      title: "While you're offline",
+      children: [
+        SettingsSwitchRow(
+          title: 'Hold my messages',
+          subtitle: "Messages and files sent to you while you're offline wait "
+              "on the relay, encrypted, and arrive when you're back, even if "
+              "the sender has gone offline. The relay can't read them, and "
+              "senders don't need this on.",
+          value: enabled,
+          onChanged: (v) => _saveSetting(
+              context, ref.read(offlineInboxProvider.notifier).setEnabled(v)),
+        ),
+        if (enabled)
+          SettingsChoiceRow<int>(
+            title: 'Keep them for',
+            value: days,
+            options: const [(1, '1 day'), (3, '3 days'), (7, '7 days')],
+            onChanged: (d) => _saveSetting(context,
+                ref.read(offlineInboxRetentionProvider.notifier).setDays(d)),
+          ),
+      ],
+    );
+  }
 }
 
-class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
-  final _controller = TextEditingController();
-  final _keyController = TextEditingController();
-  final _hostsController = TextEditingController();
-  bool _hydrated = false;
+// ---------------------------------------------------------------------------
+// GIFs and link previews
+// ---------------------------------------------------------------------------
+
+/// A rating as the picker names it: the short codes ("pg-13") read as the
+/// acronyms they are, anything already a word stays as the server wrote it.
+String _ratingLabel(String rating) =>
+    RegExp(r'^[a-z]{1,3}(-\d+)?$').hasMatch(rating)
+        ? rating.toUpperCase() // design-ignore: rating acronyms (PG, R)
+        : rating;
+
+class GifRatingRow extends ConsumerWidget {
+  const GifRatingRow({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final rating = ref.watch(gifRatingProvider);
+    final ratings =
+        ref.watch(gifRatingsProvider).valueOrNull ?? const [kDefaultGifRating];
+    return SettingsChoiceRow<String>(
+      title: 'GIF rating',
+      subtitle: 'Servers not marked NSFW stay at PG-13',
+      value: ratings.contains(rating) ? rating : ratings.first,
+      options: [for (final r in ratings) (r, _ratingLabel(r))],
+      onChanged: (r) => _saveSetting(
+          context, ref.read(gifRatingProvider.notifier).setRating(r)),
+    );
+  }
+}
+
+class GifAutoplayRow extends ConsumerWidget {
+  const GifAutoplayRow({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SettingsSwitchRow(
+      title: 'Play GIFs automatically',
+      subtitle: 'Animates every GIF in the picker. Off loads still frames '
+          'and uses less data; hovering a GIF still plays it on desktop.',
+      value: ref.watch(gifAutoplayProvider),
+      onChanged: (v) => _saveSetting(
+          context, ref.read(gifAutoplayProvider.notifier).setEnabled(v)),
+    );
+  }
+}
+
+/// Link previews (issue #45): whether this device fetches cards for links it
+/// sends. Cards other people attach show either way.
+class LinkPreviewsRow extends ConsumerStatefulWidget {
+  const LinkPreviewsRow({super.key});
+
+  @override
+  ConsumerState<LinkPreviewsRow> createState() => _LinkPreviewsRowState();
+}
+
+class _LinkPreviewsRowState extends ConsumerState<LinkPreviewsRow> {
   bool _busy = false;
+
+  Future<void> _setEnabled(bool enabled) async {
+    setState(() => _busy = true);
+    await _saveSetting(context,
+        ref.read(linkPreviewsEnabledProvider.notifier).setEnabled(enabled));
+    if (mounted) setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsSwitchRow(
+      title: 'Previews for links I send',
+      subtitle: 'Your device fetches the title and image and sends them with '
+          'the message, so the people who get it never open the link. Off: '
+          'your device never touches a link you paste.',
+      value: ref.watch(linkPreviewsEnabledProvider),
+      // Swallow taps mid-save rather than disabling the row: the write is a
+      // single settings key and finishes in a frame or two.
+      onChanged: (v) {
+        if (!_busy) _setEnabled(v);
+      },
+    );
+  }
+}
+
+class GifsAndPreviewsSection extends StatelessWidget {
+  const GifsAndPreviewsSection({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const SettingsSection(
+      title: 'GIFs and link previews',
+      children: [GifRatingRow(), GifAutoplayRow(), LinkPreviewsRow()],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Advanced
+// ---------------------------------------------------------------------------
+
+/// A settings row whose control is a text field and its buttons.
+class _FieldRow extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+  final Widget field;
+  final List<Widget> actions;
+
+  /// A second action under the field ("Remove key", "Reset to default").
+  final Widget? secondary;
+
+  const _FieldRow({
+    required this.title,
+    this.subtitle,
+    required this.field,
+    required this.actions,
+    this.secondary,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final controls = Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            Expanded(child: field),
+            for (final a in actions) ...[
+              const SizedBox(width: HollowSpacing.sm),
+              a,
+            ],
+          ],
+        ),
+        if (secondary != null) ...[
+          const SizedBox(height: HollowSpacing.xs),
+          secondary!,
+        ],
+      ],
+    );
+    return SettingsRow(
+      title: title,
+      subtitle: subtitle,
+      wideTrailing: true,
+      trailing: SettingsDensity.touchOf(context)
+          ? controls
+          : SizedBox(width: _kFieldWidth, child: controls),
+    );
+  }
+}
+
+/// True when anything the Advanced fold holds differs from its default, so
+/// the fold opens on what someone set.
+bool networkAdvancedChanged(WidgetRef ref) =>
+    ref.watch(gifApiKeyProvider).isNotEmpty ||
+    ref.watch(gifProxyUrlProvider) != kDefaultGifProxyUrl ||
+    ref.watch(embedProxyUrlProvider).isNotEmpty;
+
+class NetworkAdvancedSettings extends ConsumerWidget {
+  const NetworkAdvancedSettings({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SettingsAdvanced(
+      initiallyOpen: networkAdvancedChanged(ref),
+      children: const [KlipyKeyRows(), GifProxyRow(), SocialPreviewProxyRow()],
+    );
+  }
+}
+
+/// The user's own KLIPY key (direct mode), and in direct mode the hosts GIF
+/// images may load from.
+class KlipyKeyRows extends ConsumerStatefulWidget {
+  const KlipyKeyRows({super.key});
+
+  @override
+  ConsumerState<KlipyKeyRows> createState() => _KlipyKeyRowsState();
+}
+
+class _KlipyKeyRowsState extends ConsumerState<KlipyKeyRows> {
+  late final TextEditingController _keyController;
+  late final TextEditingController _hostsController;
   bool _keyBusy = false;
   bool _hostsBusy = false;
-  bool _expanded = false;
   bool _keyVisible = false;
 
   @override
+  void initState() {
+    super.initState();
+    _keyController = TextEditingController(text: ref.read(gifApiKeyProvider));
+    _hostsController =
+        TextEditingController(text: ref.read(gifMediaHostsProvider).join(', '));
+    // Re-read what the last searches refused whenever these rows appear, so
+    // the blocked host hints are current.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.invalidate(gifBlockedHostsProvider);
+    });
+  }
+
+  @override
   void dispose() {
-    _controller.dispose();
     _keyController.dispose();
     _hostsController.dispose();
     super.dispose();
-  }
-
-  Future<void> _save(String value) async {
-    setState(() => _busy = true);
-    try {
-      await ref.read(gifProxyUrlProvider.notifier).setUrl(value);
-      if (!mounted) return;
-      _controller.text = ref.read(gifProxyUrlProvider);
-      HollowToast.show(context, 'GIF proxy updated');
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Invalid proxy URL: must be https://',
-          type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
   }
 
   Future<void> _saveKey(String value) async {
@@ -336,10 +691,11 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
           context,
           value.trim().isEmpty
               ? 'Back to the Hollow proxy'
-              : 'Using your own Klipy key');
-    } catch (e) {
+              : 'Using your own KLIPY key',
+          type: HollowToastType.success);
+    } catch (_) {
       if (!mounted) return;
-      HollowToast.show(context, 'That does not look like a Klipy API key',
+      HollowToast.show(context, 'That does not look like a KLIPY API key',
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _keyBusy = false);
@@ -352,8 +708,9 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
       await ref.read(gifMediaHostsProvider.notifier).setHosts(hosts);
       if (!mounted) return;
       _hostsController.text = ref.read(gifMediaHostsProvider).join(', ');
-      HollowToast.show(context, 'Allowed media hosts updated');
-    } catch (e) {
+      HollowToast.show(context, 'Allowed media hosts updated',
+          type: HollowToastType.success);
+    } catch (_) {
       if (!mounted) return;
       HollowToast.show(context, 'That is not a valid host name',
           type: HollowToastType.error);
@@ -362,264 +719,263 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
     }
   }
 
-  Widget _caption(HollowTheme hollow, String text) => Text(
-        text,
-        style: HollowTypography.caption
-            .copyWith(color: hollow.textSecondary, fontSize: 11),
-      );
-
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final current = ref.watch(gifProxyUrlProvider);
     final apiKey = ref.watch(gifApiKeyProvider);
     final direct = ref.watch(gifDirectModeProvider);
-    final rating = ref.watch(gifRatingProvider);
-    final ratings =
-        ref.watch(gifRatingsProvider).valueOrNull ?? const [kDefaultGifRating];
     final hosts = ref.watch(gifMediaHostsProvider);
-    if (!_hydrated) {
-      _controller.text = current;
-      _keyController.text = apiKey;
-      _hostsController.text = hosts.join(', ');
-      _hydrated = true;
-      _expanded = current != kDefaultGifProxyUrl || apiKey.isNotEmpty;
-    }
-
-    return SettingsCard(
-      title: 'GIF Search',
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        _caption(
-          hollow,
-          direct
-              ? 'Searches go straight to KLIPY with your own API key, so '
-                  'KLIPY sees your IP address and your searches. Message '
-                  'recipients still make no web requests. A picked GIF is '
-                  're-encoded and sent as encrypted bytes either way.'
-              : 'GIF search goes through Hollow\'s no-log proxy: the '
-                  'provider never sees who searches, and message recipients '
-                  'make no web requests at all.',
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        const SettingsFieldLabel(label: 'Content rating'),
-        const SizedBox(height: HollowSpacing.xs),
-        TriStateSegment<String>(
-          value: ratings.contains(rating) ? rating : ratings.first,
-          options: [for (final r in ratings) (r, r.toUpperCase())], // design-ignore: rating acronyms (PG, R)
-          onChanged: (r) => ref.read(gifRatingProvider.notifier).setRating(r),
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        _caption(
-          hollow,
-          'Applies to search and trending. Servers that are not marked NSFW '
-          'cap results at PG-13 regardless of this setting.',
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        SettingsToggleRow(
-          icon: LucideIcons.play,
-          label: 'Play GIFs automatically',
-          subtitle: 'Animate every GIF on screen in the picker. Turn this off '
-              'to load still frames instead and use less data. On desktop, '
-              'hovering a GIF still plays it.',
-          value: ref.watch(gifAutoplayProvider),
-          onChanged: (v) =>
-              ref.read(gifAutoplayProvider.notifier).setEnabled(v),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            compact: true,
-            icon: Icon(
-              _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-              size: 14,
+        _FieldRow(
+          title: 'Your own KLIPY key',
+          subtitle: "Optional. Your key talks to KLIPY directly instead of "
+              "Hollow's no-log proxy, with your own rate limit, but KLIPY then "
+              'sees your IP address and every search. Keys at '
+              'klipy.com/developers.',
+          field: HollowTextField(
+            controller: _keyController,
+            hintText: 'Paste your KLIPY API key',
+            isDense: true,
+            obscureText: !_keyVisible,
+            onChanged: (_) => setState(() {}),
+            trailing: HollowIconButton(
+              icon: _keyVisible ? LucideIcons.eyeOff : LucideIcons.eye,
+              label: _keyVisible ? 'Hide API key' : 'Show API key',
+              onPressed: () => setState(() => _keyVisible = !_keyVisible),
             ),
-            onPressed: () {
-              setState(() => _expanded = !_expanded);
-              // Re-read what the last searches were refused, so the blocked
-              // host hints are current whenever the section opens.
-              if (_expanded) ref.invalidate(gifBlockedHostsProvider);
-            },
-            child: const Text('Advanced (own API key, self-hosting)'),
           ),
-        ),
-        if (_expanded) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          const SettingsFieldLabel(label: 'Your own KLIPY API key'),
-          const SizedBox(height: HollowSpacing.xs),
-          _caption(
-            hollow,
-            'Optional. With your own key the app talks to KLIPY directly and '
-            'skips Hollow\'s proxy: your own rate limit, no dependency on '
-            'our server. It is not more private: KLIPY sees your IP and '
-            'every search under one key, where the shared proxy shows them '
-            'one server and a random id per request. Get a key at '
-            'klipy.com/developers.',
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          Row(
-            children: [
-              Expanded(
-                child: HollowTextField(
-                  controller: _keyController,
-                  hintText: 'Paste your KLIPY API key',
-                  isDense: true,
-                  obscureText: !_keyVisible,
-                  onChanged: (_) => setState(() {}),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              HollowButton.ghost(
-                compact: true,
-                semanticLabel:
-                    _keyVisible ? 'Hide API key' : 'Show API key',
-                icon: Icon(
-                    _keyVisible ? LucideIcons.eyeOff : LucideIcons.eye,
-                    size: 14),
-                onPressed: () => setState(() => _keyVisible = !_keyVisible),
-                child: const SizedBox.shrink(),
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              HollowButton.outline(
-                compact: true,
-                onPressed: _keyBusy || _keyController.text.trim() == apiKey
-                    ? null
-                    : () => _saveKey(_keyController.text),
-                loading: _keyBusy,
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-          if (apiKey.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.xs),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: HollowButton.ghost(
-                compact: true,
-                icon: const Icon(LucideIcons.rotateCcw, size: 14),
-                onPressed: _keyBusy
-                    ? null
-                    : () {
-                        _keyController.clear();
-                        _saveKey('');
-                      },
-                child: const Text('Remove key (back to the Hollow proxy)'),
-              ),
+          actions: [
+            HollowButton.outline(
+              compact: true,
+              loading: _keyBusy,
+              onPressed: _keyController.text.trim() == apiKey
+                  ? null
+                  : () => _saveKey(_keyController.text),
+              child: const Text('Save'),
             ),
           ],
-          if (direct) ...[
-            const SizedBox(height: HollowSpacing.md),
-            const SettingsFieldLabel(label: 'Allowed media hosts'),
-            const SizedBox(height: HollowSpacing.xs),
-            _caption(
-              hollow,
-              'Comma-separated. Direct mode only: the app refuses to load GIF '
-              'images from any other host, so a KLIPY CDN change can be fixed '
-              'here without waiting for an app update. Subdomains are '
-              'included.',
-            ),
-            const SizedBox(height: HollowSpacing.xs),
-            Row(
-              children: [
-                Expanded(
-                  child: HollowTextField(
-                    controller: _hostsController,
-                    hintText: hosts.join(', '),
-                    isDense: true,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                HollowButton.outline(
+          secondary: apiKey.isEmpty
+              ? null
+              : HollowButton.ghost(
                   compact: true,
-                  onPressed: _hostsBusy ||
-                          _hostsController.text.trim() == hosts.join(', ')
+                  onPressed: _keyBusy
                       ? null
-                      : () => _saveHosts(_hostsController.text.split(',')),
-                  loading: _hostsBusy,
-                  child: const Text('Save'),
+                      : () {
+                          _keyController.clear();
+                          _saveKey('');
+                        },
+                  child: const Text('Remove key'),
                 ),
-              ],
+        ),
+        if (direct) ...[
+          _FieldRow(
+            title: 'Allowed media hosts',
+            subtitle: 'GIF images load only from these, subdomains included',
+            field: HollowTextField(
+              controller: _hostsController,
+              hintText: hosts.join(', '),
+              isDense: true,
+              onChanged: (_) => setState(() {}),
             ),
-            ...ref.watch(gifBlockedHostsProvider).maybeWhen(
-                  data: (blocked) => [
-                    for (final host
-                        in blocked.where((h) => !hosts.contains(h))) ...[
-                      const SizedBox(height: HollowSpacing.xs),
-                      Row(
-                        children: [
-                          Icon(LucideIcons.shieldAlert,
-                              size: 13, color: hollow.textTertiary),
-                          const SizedBox(width: HollowSpacing.xs),
-                          Expanded(
-                            child: Text(
-                              'Blocked images from $host',
-                              style: HollowTypography.caption.copyWith(
-                                  color: hollow.textTertiary, fontSize: 11),
-                            ),
-                          ),
-                          HollowButton.ghost(
-                            compact: true,
-                            onPressed: _hostsBusy
-                                ? null
-                                : () => _saveHosts([...hosts, host]),
-                            child: const Text('Allow'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                  orElse: () => const <Widget>[],
-                ),
-          ],
-          const SizedBox(height: HollowSpacing.md),
-          const SettingsFieldLabel(label: 'Self-hosted proxy'),
-          const SizedBox(height: HollowSpacing.xs),
-          _caption(
-            hollow,
-            'Only if you run your own copy of the gifs/ endpoint. Ignored '
-            'while an API key above is set.',
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          Row(
-            children: [
-              Expanded(
-                child: HollowTextField(
-                  controller: _controller,
-                  hintText: kDefaultGifProxyUrl,
-                  isDense: true,
-                  onChanged: (_) => setState(() {}),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
+            actions: [
               HollowButton.outline(
                 compact: true,
-                onPressed: _busy || _controller.text.trim() == current
+                loading: _hostsBusy,
+                onPressed: _hostsController.text.trim() == hosts.join(', ')
                     ? null
-                    : () => _save(_controller.text),
-                loading: _busy,
+                    : () => _saveHosts(_hostsController.text.split(',')),
                 child: const Text('Save'),
               ),
             ],
           ),
-          if (current != kDefaultGifProxyUrl) ...[
-            const SizedBox(height: HollowSpacing.xs),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: HollowButton.ghost(
-                compact: true,
-                icon: const Icon(LucideIcons.rotateCcw, size: 14),
-                onPressed: _busy ? null : () => _save(''),
-                child: const Text('Reset to default'),
+          ...ref.watch(gifBlockedHostsProvider).maybeWhen(
+                data: (blocked) => [
+                  for (final host in blocked.where((h) => !hosts.contains(h)))
+                    SettingsRow(
+                      title: host,
+                      subtitle: 'Images from here were blocked',
+                      trailing: HollowButton.outline(
+                        compact: true,
+                        onPressed: _hostsBusy
+                            ? null
+                            : () => _saveHosts([...hosts, host]),
+                        child: const Text('Allow'),
+                      ),
+                    ),
+                ],
+                orElse: () => const <Widget>[],
               ),
-            ),
-          ],
         ],
       ],
     );
   }
 }
 
+/// A self-hosted copy of the `gifs/` endpoint.
+class GifProxyRow extends ConsumerStatefulWidget {
+  const GifProxyRow({super.key});
+
+  @override
+  ConsumerState<GifProxyRow> createState() => _GifProxyRowState();
+}
+
+class _GifProxyRowState extends ConsumerState<GifProxyRow> {
+  late final TextEditingController _controller;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: ref.read(gifProxyUrlProvider));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save(String value) async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(gifProxyUrlProvider.notifier).setUrl(value);
+      if (!mounted) return;
+      _controller.text = ref.read(gifProxyUrlProvider);
+      HollowToast.show(context, 'GIF proxy updated',
+          type: HollowToastType.success);
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'The proxy address must start with https://',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final current = ref.watch(gifProxyUrlProvider);
+    return _FieldRow(
+      title: 'GIF proxy',
+      subtitle: 'Your own copy of the GIF endpoint. Ignored while a key is set.',
+      field: HollowTextField(
+        controller: _controller,
+        hintText: kDefaultGifProxyUrl,
+        isDense: true,
+        onChanged: (_) => setState(() {}),
+      ),
+      actions: [
+        HollowButton.outline(
+          compact: true,
+          loading: _busy,
+          onPressed: _controller.text.trim() == current
+              ? null
+              : () => _save(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
+      secondary: current == kDefaultGifProxyUrl
+          ? null
+          : HollowButton.ghost(
+              compact: true,
+              onPressed: _busy ? null : () => _save(''),
+              child: const Text('Reset to default'),
+            ),
+    );
+  }
+}
+
+/// The optional hop in front of the public API that reads X and TikTok posts.
+/// Every other link is fetched directly, proxy or not.
+class SocialPreviewProxyRow extends ConsumerStatefulWidget {
+  const SocialPreviewProxyRow({super.key});
+
+  @override
+  ConsumerState<SocialPreviewProxyRow> createState() =>
+      _SocialPreviewProxyRowState();
+}
+
+class _SocialPreviewProxyRowState extends ConsumerState<SocialPreviewProxyRow> {
+  late final TextEditingController _controller;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: ref.read(embedProxyUrlProvider));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save(String value) async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(embedProxyUrlProvider.notifier).setUrl(value);
+      if (!mounted) return;
+      _controller.text = ref.read(embedProxyUrlProvider);
+      HollowToast.show(
+          context,
+          value.trim().isEmpty
+              ? 'Social lookups go direct again'
+              : 'Social lookups go through your proxy',
+          type: HollowToastType.success);
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'The proxy address must start with https://',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final proxy = ref.watch(embedProxyUrlProvider);
+    return _FieldRow(
+      title: 'Social preview proxy',
+      subtitle: 'Optional, empty is normal. X and TikTok cards go through a '
+          'public read-only service; point this at your own to put a hop in '
+          'between.',
+      field: HollowTextField(
+        controller: _controller,
+        hintText: 'https://embed.example.com',
+        isDense: true,
+        onChanged: (_) => setState(() {}),
+      ),
+      actions: [
+        HollowButton.outline(
+          compact: true,
+          loading: _busy,
+          onPressed: _controller.text.trim() == proxy
+              ? null
+              : () => _save(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
+      secondary: proxy.isEmpty
+          ? null
+          : HollowButton.ghost(
+              compact: true,
+              onPressed: _busy
+                  ? null
+                  : () {
+                      _controller.clear();
+                      _save('');
+                    },
+              child: const Text('Remove'),
+            ),
+    );
+  }
+}
+
+// Hidden: the current REALITY transport is non-functional. Kept, widget and
+// Rust side, for a future transport attempt; it would join the Advanced fold.
 /// Anti-censorship (VLESS+REALITY) proxy card, for users behind DPI
 /// censorship: the relay connection is tunnelled through a local `shoes`
 /// REALITY client so the traffic looks like ordinary HTTPS. Enabling or editing
@@ -820,174 +1176,3 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
     );
   }
 }
-
-/// Link previews (issue #45): the master switch, plus the optional proxy for
-/// social-post lookups. Shared by desktop and mobile settings.
-class LinkPreviewSettingsCard extends ConsumerStatefulWidget {
-  const LinkPreviewSettingsCard({super.key});
-
-  @override
-  ConsumerState<LinkPreviewSettingsCard> createState() =>
-      _LinkPreviewSettingsCardState();
-}
-
-class _LinkPreviewSettingsCardState
-    extends ConsumerState<LinkPreviewSettingsCard> {
-  final _proxyController = TextEditingController();
-  bool _hydrated = false;
-  bool _busy = false;
-  bool _proxyBusy = false;
-  bool _expanded = false;
-
-  @override
-  void dispose() {
-    _proxyController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _setEnabled(bool enabled) async {
-    setState(() => _busy = true);
-    try {
-      await ref.read(linkPreviewsEnabledProvider.notifier).setEnabled(enabled);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Could not save that setting',
-          type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _saveProxy(String value) async {
-    setState(() => _proxyBusy = true);
-    try {
-      await ref.read(embedProxyUrlProvider.notifier).setUrl(value);
-      if (!mounted) return;
-      _proxyController.text = ref.read(embedProxyUrlProvider);
-      HollowToast.show(
-          context,
-          value.trim().isEmpty
-              ? 'Social lookups go direct again'
-              : 'Social lookups go through your proxy');
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Invalid proxy URL: must be https://',
-          type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _proxyBusy = false);
-    }
-  }
-
-  Widget _caption(HollowTheme hollow, String text) => Text(
-        text,
-        style: HollowTypography.caption
-            .copyWith(color: hollow.textSecondary, fontSize: 11),
-      );
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final enabled = ref.watch(linkPreviewsEnabledProvider);
-    final proxy = ref.watch(embedProxyUrlProvider);
-    if (!_hydrated) {
-      _proxyController.text = proxy;
-      _hydrated = true;
-      _expanded = proxy.isNotEmpty;
-    }
-
-    return SettingsCard(
-      title: 'Link Previews',
-      children: [
-        _caption(
-          hollow,
-          'When you paste a link, your device fetches its title and image and '
-          'sends them WITH the message. People who receive it make no web '
-          'requests at all: the card is bytes that travelled in the message.',
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        SettingsToggleRow(
-          icon: LucideIcons.link,
-          label: 'Fetch previews for links you send',
-          subtitle: 'Turn this off and your device never touches a pasted '
-              'link, so the site learns nothing. Cards other people attach '
-              'still show up.',
-          value: enabled,
-          // Swallow taps mid-save rather than disabling the row: the write is a
-          // single settings key and finishes in a frame or two.
-          onChanged: (v) {
-            if (!_busy) _setEnabled(v);
-          },
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            compact: true,
-            icon: Icon(
-              _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-              size: 14,
-            ),
-            onPressed: () => setState(() => _expanded = !_expanded),
-            child: const Text('Advanced (social preview proxy)'),
-          ),
-        ),
-        if (_expanded) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          const SettingsFieldLabel(label: 'Social preview proxy'),
-          const SizedBox(height: HollowSpacing.xs),
-          _caption(
-            hollow,
-            'Optional, and empty is the normal setting. X and TikTok links go '
-            'through a public read-only API so their cards show the post '
-            'instead of a login wall. That API reads the post itself, so X '
-            'never sees your address either way, but its operator does see '
-            'that someone looked the post up. Point this at a service of your '
-            'own to put a hop in between. Every other link is fetched '
-            'directly by your device, proxy or not.',
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          Row(
-            children: [
-              Expanded(
-                child: HollowTextField(
-                  controller: _proxyController,
-                  hintText: 'https://embed.example.com',
-                  isDense: true,
-                  onChanged: (_) => setState(() {}),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              HollowButton.outline(
-                compact: true,
-                onPressed:
-                    _proxyBusy || _proxyController.text.trim() == proxy
-                        ? null
-                        : () => _saveProxy(_proxyController.text),
-                loading: _proxyBusy,
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-          if (proxy.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.xs),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: HollowButton.ghost(
-                compact: true,
-                icon: const Icon(LucideIcons.rotateCcw, size: 14),
-                onPressed: _proxyBusy
-                    ? null
-                    : () {
-                        _proxyController.clear();
-                        _saveProxy('');
-                      },
-                child: const Text('Remove proxy (go direct)'),
-              ),
-            ),
-          ],
-        ],
-      ],
-    );
-  }
-}
-

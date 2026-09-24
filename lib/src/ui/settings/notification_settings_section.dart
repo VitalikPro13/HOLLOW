@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -11,47 +14,61 @@ import 'package:hollow/src/core/services/notification_permission.dart';
 import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/settings/notifications_tab.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Notifications category of Settings, desktop rail and mobile sub-page alike:
-/// whether the OS lets Hollow post at all, then every server and every muted
-/// conversation in one editable list.
+/// Settings > Notifications, desktop and phone alike: whether the OS lets
+/// Hollow post at all, then every server and every muted conversation.
 class NotificationSettingsView extends ConsumerWidget {
   const NotificationSettingsView({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return settingsCardList([
-      const _SystemNotificationsCard(),
-      if (UnifiedPushController.supported) const _PushDeliveryCard(),
-      const _ServersCard(),
-      const _MutedDmsCard(),
-    ]);
+    return SettingsPage(
+      title: 'Notifications',
+      children: [
+        const SettingsSection(children: [_SystemPermissionRow()]),
+        if (UnifiedPushController.supported) const _PushDeliverySection(),
+        const _ServersSection(),
+        const _MutedConversationsSection(),
+      ],
+    );
   }
 }
 
-/// OS permission status, with the two ways to change it and a real toast to
-/// prove the whole chain works.
-class _SystemNotificationsCard extends ConsumerStatefulWidget {
-  const _SystemNotificationsCard();
+bool get _isPhone => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
-  @override
-  ConsumerState<_SystemNotificationsCard> createState() =>
-      _SystemNotificationsCardState();
+String get _platformName {
+  if (kIsWeb) return 'your browser';
+  if (Platform.isWindows) return 'Windows';
+  if (Platform.isMacOS) return 'macOS';
+  if (Platform.isLinux) return 'Linux';
+  if (Platform.isAndroid) return 'Android';
+  if (Platform.isIOS) return 'iOS';
+  return 'your system';
 }
 
-class _SystemNotificationsCardState
-    extends ConsumerState<_SystemNotificationsCard> {
+/// OS permission: one quiet line while allowed, the detail and the ways to
+/// fix it when not.
+class _SystemPermissionRow extends ConsumerStatefulWidget {
+  const _SystemPermissionRow();
+
+  @override
+  ConsumerState<_SystemPermissionRow> createState() =>
+      _SystemPermissionRowState();
+}
+
+class _SystemPermissionRowState extends ConsumerState<_SystemPermissionRow> {
   NotificationPermissionInfo? _info;
   bool _loading = true;
 
@@ -164,97 +181,81 @@ class _SystemNotificationsCardState
       if (next && prev != true) _refresh();
     });
 
+    final title = _isPhone ? 'Notifications' : 'Desktop notifications';
     final info = _info;
+    if (_loading) {
+      return SettingsRow(title: title, subtitle: 'Checking with your system…');
+    }
     final state = info?.state ?? NotificationPermissionState.unknown;
-    final detail = _loading
-        ? 'Checking with your system…'
-        : info?.detail ??
-            'Hollow could not read the notification permission on this '
-                'device.';
 
-    return SettingsCard(
-      title: 'System Notifications',
-      children: [
-        Row(
-          children: [
-            StatusDot(
-              color: switch (state) {
-                NotificationPermissionState.granted => hollow.success,
-                NotificationPermissionState.denied => hollow.error,
-                NotificationPermissionState.unknown => hollow.textTertiary,
-              },
-              filled: state == NotificationPermissionState.granted,
-              semanticLabel: _statusLabel(state),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              _statusLabel(state),
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
+    if (state == NotificationPermissionState.granted) {
+      return SettingsRow(
+        title: title,
+        subtitleWidget: Text.rich(TextSpan(children: [
+          TextSpan(text: 'Allowed', style: TextStyle(color: hollow.success)),
+          TextSpan(text: ' by $_platformName'),
+        ])),
+        trailing: HollowButton.ghost(
+          compact: true,
+          onPressed: _busy != null ? null : _sendTest,
+          loading: _busy == 'test',
+          child: const Text('Send a test'),
         ),
-        const SizedBox(height: HollowSpacing.xs),
-        Text(
-          detail,
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textTertiary,
-            fontSize: 11,
-          ),
+      );
+    }
+
+    final blocked = state == NotificationPermissionState.denied;
+    final detail = info?.detail ??
+        'Hollow could not read the notification permission on this device.';
+    final canRequest = info != null && info.canRequest;
+    final canOpen = info != null && info.canOpenSettings;
+    return SettingsRow(
+      title: title,
+      subtitleWidget: Text.rich(TextSpan(children: [
+        TextSpan(
+          text: blocked ? 'Blocked' : 'Unknown',
+          style: TextStyle(color: blocked ? hollow.error : hollow.warning),
         ),
-        const SizedBox(height: HollowSpacing.md),
-        Wrap(
-          spacing: HollowSpacing.sm,
-          runSpacing: HollowSpacing.sm,
-          children: [
-            if (info != null &&
-                info.canRequest &&
-                state != NotificationPermissionState.granted)
-              HollowButton.filled(
-                onPressed: _busy != null ? null : _request,
-                loading: _busy == 'request',
-                icon: const Icon(LucideIcons.bellRing, size: 16),
-                child: const Text('Request permission'),
-              ),
-            if (info != null && info.canOpenSettings)
-              HollowButton.ghost(
-                onPressed: _busy != null ? null : _openSettings,
-                loading: _busy == 'open',
-                icon: const Icon(LucideIcons.externalLink, size: 16),
-                child: const Text('Open system settings'),
-              ),
-            HollowButton.ghost(
-              onPressed: _busy != null ? null : _sendTest,
-              loading: _busy == 'test',
-              icon: const Icon(LucideIcons.send, size: 16),
-              child: const Text('Send a test notification'),
+        TextSpan(text: '. $detail'),
+      ])),
+      wideTrailing: true,
+      trailing: !canRequest && !canOpen
+          ? null
+          : Wrap(
+              spacing: HollowSpacing.sm,
+              runSpacing: HollowSpacing.sm,
+              children: [
+                if (canRequest)
+                  HollowButton.filled(
+                    compact: true,
+                    onPressed: _busy != null ? null : _request,
+                    loading: _busy == 'request',
+                    child: const Text('Request permission'),
+                  ),
+                if (canOpen)
+                  HollowButton.ghost(
+                    compact: true,
+                    onPressed: _busy != null ? null : _openSettings,
+                    loading: _busy == 'open',
+                    child: const Text('Open system settings'),
+                  ),
+              ],
             ),
-          ],
-        ),
-      ],
     );
   }
-
-  static String _statusLabel(NotificationPermissionState state) =>
-      switch (state) {
-        NotificationPermissionState.granted => 'Allowed',
-        NotificationPermissionState.denied => 'Blocked',
-        NotificationPermissionState.unknown => 'Unknown',
-      };
 }
 
 /// Android: which push service wakes the phone, Google's or a UnifiedPush
 /// distributor the user installed.
-class _PushDeliveryCard extends ConsumerStatefulWidget {
-  const _PushDeliveryCard();
+class _PushDeliverySection extends ConsumerStatefulWidget {
+  const _PushDeliverySection();
 
   @override
-  ConsumerState<_PushDeliveryCard> createState() => _PushDeliveryCardState();
+  ConsumerState<_PushDeliverySection> createState() =>
+      _PushDeliverySectionState();
 }
 
-class _PushDeliveryCardState extends ConsumerState<_PushDeliveryCard> {
+class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
   static const _google = '';
 
   List<String> _distributors = const [];
@@ -312,46 +313,37 @@ class _PushDeliveryCardState extends ConsumerState<_PushDeliveryCard> {
         final selected = status.phase == UnifiedPushPhase.off
             ? _google
             : status.distributor ?? _google;
-        return SettingsCard(
-          title: 'Push Delivery',
+        final failed = status.phase == UnifiedPushPhase.failed;
+        return SettingsSection(
+          title: 'Push delivery',
+          subtitle: 'Wakes this phone for messages while Hollow is closed. '
+              'Messages stay encrypted either way.',
           children: [
-            Text(
-              'The service that wakes this phone when a message arrives '
-              'while Hollow is closed. Messages stay encrypted either way.',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textSecondary,
+            SettingsRow(
+              title: 'Wake-up service',
+              subtitleWidget: Text(
+                _busy != null
+                    ? 'Switching…'
+                    : _statusText(status, _distributors.isEmpty),
+                style: failed ? TextStyle(color: hollow.error) : null,
               ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Wrap(
-              spacing: HollowSpacing.sm,
-              runSpacing: HollowSpacing.sm,
-              children: [
-                HollowChip(
-                  label: 'Google',
-                  icon: LucideIcons.cloud,
-                  selected: selected == _google,
-                  onTap: () => _choose(_google),
-                ),
-                for (final d in _distributors)
+              wideTrailing: true,
+              trailing: Wrap(
+                spacing: HollowSpacing.sm,
+                runSpacing: HollowSpacing.sm,
+                children: [
                   HollowChip(
-                    label: distributorLabel(d),
-                    icon: LucideIcons.radioTower,
-                    selected: selected == d,
-                    onTap: () => _choose(d),
+                    label: 'Google',
+                    selected: selected == _google,
+                    onTap: () => _choose(_google),
                   ),
-              ],
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              _busy != null
-                  ? 'Switching…'
-                  : _statusText(status, _distributors.isEmpty),
-              style: HollowTypography.caption.copyWith(
-                color: status.phase == UnifiedPushPhase.failed
-                    ? hollow.error
-                    : hollow.textTertiary,
-                fontSize: 11,
+                  for (final d in _distributors)
+                    HollowChip(
+                      label: distributorLabel(d),
+                      selected: selected == d,
+                      onTap: () => _choose(d),
+                    ),
+                ],
               ),
             ),
           ],
@@ -387,33 +379,37 @@ class _PushDeliveryCardState extends ConsumerState<_PushDeliveryCard> {
 }
 
 /// Every joined server with its level, each expandable to its channels.
-class _ServersCard extends ConsumerWidget {
-  const _ServersCard();
+class _ServersSection extends ConsumerWidget {
+  const _ServersSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final servers = ref.watch(serverListProvider).values.toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
-    return SettingsCard(
+    return SettingsSection(
       title: 'Servers',
       children: [
         if (servers.isEmpty)
           const HollowEmptyState(
-              dense: true, title: 'You have not joined any servers')
+              dense: true, title: "You haven't joined a server yet")
         else
-          for (int i = 0; i < servers.length; i++) ...[
-            if (i > 0) const SizedBox(height: HollowSpacing.md),
+          for (final server in servers)
             _ServerNotificationRow(
-              key: ValueKey(servers[i].serverId),
-              serverId: servers[i].serverId,
-              name: servers[i].name,
+              key: ValueKey(server.serverId),
+              serverId: server.serverId,
+              name: server.name,
             ),
-          ],
       ],
     );
   }
 }
+
+const _levelLabels = {
+  NotificationLevel.all: 'All messages',
+  NotificationLevel.mentions: 'Mentions only',
+  NotificationLevel.nothing: 'Nothing',
+};
 
 class _ServerNotificationRow extends ConsumerStatefulWidget {
   final String serverId;
@@ -465,103 +461,87 @@ class _ServerNotificationRowState
     }
   }
 
+  void _openLevelMenu(BuildContext chipContext, NotificationLevel level) {
+    showHollowMenu(
+      context: chipContext,
+      // The chip sits at the row's trailing edge, so the menu opens
+      // right-aligned under it rather than over the next panel.
+      alignEnd: true,
+      anchor: overlayAnchorOf(chipContext,
+          localOffset: Offset(chipContext.size?.width ?? 0,
+              (chipContext.size?.height ?? 0) + HollowSpacing.xs)),
+      builder: (_, _) => [
+        for (final entry in _levelLabels.entries)
+          HollowMenuItem(
+            label: entry.value,
+            isChecked: entry.key == level,
+            onTap: () => _setLevel(entry.key),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
+    final touch = SettingsDensity.touchOf(context);
     final notif = ref.watch(notificationSettingsProvider);
     final level = notif.serverLevels[widget.serverId] ?? NotificationLevel.all;
+    final levelLabel = _levelLabels[level]!;
     final overrides = notif.channelOverrides.keys
         .where((k) => k.startsWith('${widget.serverId}:'))
         .length;
 
-    final chevron = HollowPressable(
-      onTap: () => setState(() => _expanded = !_expanded),
-      semanticLabel:
-          _expanded ? 'Hide channel overrides' : 'Show channel overrides',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.xs),
-      child: Icon(
-        _expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
-        size: 16,
-        color: hollow.textSecondary,
-      ),
-    );
-
-    final title = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          widget.name,
-          style: HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-            fontSize: 13,
+        SettingsRow(
+          leading: ServerAvatar(
+              serverId: widget.serverId, name: widget.name, size: 32),
+          title: widget.name,
+          subtitle: switch (overrides) {
+            0 => null,
+            1 => '1 channel set differently',
+            _ => '$overrides channels set differently',
+          },
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Builder(
+                builder: (chipContext) => HollowChip(
+                  label: levelLabel,
+                  trailingIcon: LucideIcons.chevronDown,
+                  semanticLabel:
+                      'Notifications for ${widget.name}, $levelLabel',
+                  onTap: () => _openLevelMenu(chipContext, level),
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              HollowIconButton(
+                icon: _expanded
+                    ? LucideIcons.chevronUp
+                    : LucideIcons.chevronDown,
+                label: 'Channels in ${widget.name}',
+                size: touch ? 44 : 32,
+                selected: _expanded,
+                onPressed: () => setState(() => _expanded = !_expanded),
+              ),
+            ],
           ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
         ),
-        if (overrides > 0)
-          Text(
-            overrides == 1 ? '1 override' : '$overrides overrides',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textTertiary,
-              fontSize: 10,
+        // Opening a list is switching what the region shows: instant.
+        if (_expanded)
+          Padding(
+            // Under the name, past the server's avatar.
+            padding: const EdgeInsets.only(
+                left: HollowSpacing.xxl + HollowSpacing.md,
+                bottom: HollowSpacing.sm),
+            child: _ChannelOverrideList(
+              serverId: widget.serverId,
+              onChanged: _setOverride,
             ),
           ),
       ],
-    );
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // The three chips need room for their labels, and that room grows with
-        // the OS text size; a card too narrow for them gets the compact
-        // segment instead of a squeezed, clipped row.
-        final textScale = MediaQuery.textScalerOf(context).scale(12) / 12;
-        final wide = constraints.maxWidth >= 380 * textScale;
-        final selector = wide
-            ? NotificationLevelSelector(value: level, onChanged: _setLevel)
-            : TriStateSegment<NotificationLevel>(
-                value: level,
-                options: const [
-                  (NotificationLevel.all, 'All'),
-                  (NotificationLevel.mentions, 'Mentions'),
-                  (NotificationLevel.nothing, 'Nothing'),
-                ],
-                onChanged: _setLevel,
-              );
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (wide)
-              Row(
-                children: [
-                  Expanded(child: title),
-                  const SizedBox(width: HollowSpacing.md),
-                  selector,
-                  const SizedBox(width: HollowSpacing.xs),
-                  chevron,
-                ],
-              )
-            else ...[
-              Row(
-                children: [
-                  Expanded(child: title),
-                  chevron,
-                ],
-              ),
-              const SizedBox(height: HollowSpacing.sm),
-              selector,
-            ],
-            if (_expanded) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              _ChannelOverrideList(
-                serverId: widget.serverId,
-                onChanged: _setOverride,
-              ),
-            ],
-          ],
-        );
-      },
     );
   }
 }
@@ -580,24 +560,13 @@ class _ChannelOverrideList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final notif = ref.watch(notificationSettingsProvider);
     final channels = ref.watch(serverChannelsProvider(serverId));
 
-    Widget note(String text) => Padding(
-          padding: const EdgeInsets.only(left: HollowSpacing.lg),
-          child: Text(
-            text,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textTertiary,
-              fontSize: 11,
-            ),
-          ),
-        );
-
     return channels.when(
-      loading: () => note('Loading channels…'),
-      error: (_, _) => note('Could not load this server\'s channels.'),
+      loading: () => const SettingsNote('Loading channels…'),
+      error: (_, _) =>
+          const SettingsNote("Could not load this server's channels."),
       data: (all) {
         // Only channels the local user can see: naming a restricted channel
         // here would leak that it exists.
@@ -606,49 +575,24 @@ class _ChannelOverrideList extends ConsumerWidget {
             if (c.meCanSee) c,
         ];
         if (visible.isEmpty) {
-          return const Padding(
-            padding: EdgeInsets.only(left: HollowSpacing.lg),
-            child: HollowEmptyState(
-                dense: true, title: 'No channels you can see'),
-          );
+          return const HollowEmptyState(
+              dense: true, title: 'No channels you can see');
         }
-
-        return Padding(
-          padding: const EdgeInsets.only(left: HollowSpacing.lg),
-          child: Column(
-            children: [
-              for (final channel in visible)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-                  child: Row(
-                    children: [
-                      Icon(LucideIcons.hash,
-                          size: 14, color: hollow.textSecondary),
-                      const SizedBox(width: HollowSpacing.xs),
-                      Expanded(
-                        child: Text(
-                          channel.name,
-                          style: HollowTypography.body.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 12,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      ChannelOverrideDropdown(
-                        value: notif.channelOverrides[
-                                '$serverId:${channel.channelId}'] ??
-                            ChannelNotificationLevel.inherit,
-                        onChanged: (level) =>
-                            onChanged(channel.channelId, level),
-                      ),
-                    ],
-                  ),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final channel in visible)
+              SettingsRow(
+                title: channel.name,
+                trailing: ChannelOverrideDropdown(
+                  value: notif.channelOverrides[
+                          '$serverId:${channel.channelId}'] ??
+                      ChannelNotificationLevel.inherit,
+                  onChanged: (level) => onChanged(channel.channelId, level),
                 ),
-            ],
-          ),
+              ),
+          ],
         );
       },
     );
@@ -656,8 +600,8 @@ class _ChannelOverrideList extends ConsumerWidget {
 }
 
 /// Conversations that are muted, and the one control that unmutes them.
-class _MutedDmsCard extends ConsumerWidget {
-  const _MutedDmsCard();
+class _MutedConversationsSection extends ConsumerWidget {
+  const _MutedConversationsSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -683,14 +627,14 @@ class _MutedDmsCard extends ConsumerWidget {
           .toLowerCase()
           .compareTo(displayNameFor(profiles, b).toLowerCase()));
 
-    return SettingsCard(
-      title: 'Muted Direct Messages',
+    return SettingsSection(
+      title: 'Muted conversations',
       children: [
         if (masters.isEmpty)
           const HollowEmptyState(dense: true, title: 'No muted conversations')
         else
           for (final master in masters)
-            _MutedDmRow(
+            _MutedConversationRow(
               key: ValueKey(master),
               master: master,
               storedKeys: grouped[master]!,
@@ -700,29 +644,37 @@ class _MutedDmsCard extends ConsumerWidget {
   }
 }
 
-class _MutedDmRow extends ConsumerStatefulWidget {
+class _MutedConversationRow extends ConsumerStatefulWidget {
   final String master;
   final List<String> storedKeys;
 
-  const _MutedDmRow({
+  const _MutedConversationRow({
     super.key,
     required this.master,
     required this.storedKeys,
   });
 
   @override
-  ConsumerState<_MutedDmRow> createState() => _MutedDmRowState();
+  ConsumerState<_MutedConversationRow> createState() =>
+      _MutedConversationRowState();
 }
 
-class _MutedDmRowState extends ConsumerState<_MutedDmRow> {
+class _MutedConversationRowState extends ConsumerState<_MutedConversationRow> {
   bool _busy = false;
 
-  Future<void> _unmute() async {
+  Future<void> _unmute(String name) async {
+    // The row leaves the list as soon as the mute clears, so the success
+    // toast cannot count on it still being mounted.
+    final overlay = Overlay.maybeOf(context);
     setState(() => _busy = true);
     try {
       final notifier = ref.read(notificationSettingsProvider.notifier);
       for (final key in widget.storedKeys) {
         await notifier.setDmEnabled(key, true);
+      }
+      if (overlay != null && overlay.mounted) {
+        HollowToast.show(overlay.context, 'Unmuted $name.',
+            type: HollowToastType.success, overlayState: overlay);
       }
     } catch (e) {
       if (!mounted) return;
@@ -738,35 +690,15 @@ class _MutedDmRowState extends ConsumerState<_MutedDmRow> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final name = displayNameFor(ref.watch(profileProvider), widget.master);
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-      child: Row(
-        children: [
-          HollowAvatar(peerId: widget.master, size: 28, semanticLabel: name),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              name,
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 13,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.ghost(
-            onPressed: _busy ? null : _unmute,
-            compact: true,
-            loading: _busy,
-            icon: const Icon(LucideIcons.bell, size: 14),
-            child: const Text('Unmute'),
-          ),
-        ],
+    return SettingsRow(
+      leading: HollowAvatar(peerId: widget.master, size: 32, semanticLabel: name),
+      title: name,
+      trailing: HollowButton.outline(
+        compact: true,
+        loading: _busy,
+        onPressed: () => _unmute(name),
+        child: const Text('Unmute'),
       ),
     );
   }

@@ -7,14 +7,30 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+/// Opens the proof checker as a dialog, the desktop Security page's entry.
+Future<void> showVerifyProofDialog(BuildContext context) {
+  return showHollowDialog<void>(
+    context: context,
+    builder: (ctx) => const HollowDialog(
+      title: 'Check a message proof',
+      width: 560,
+      showClose: true,
+      content: VerifyProofSection(),
+    ),
+  );
+}
+
 /// Verify a proof: paste or import a proof JSON and check it with the same
 /// Ed25519 verification as the Message Proof dialog. One implementation shared
-/// by the desktop Security category and the mobile Settings tab.
+/// by the desktop Security page and the mobile Settings tab.
 class VerifyProofSection extends StatefulWidget {
   const VerifyProofSection({super.key});
 
@@ -33,7 +49,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       final ctx = _resultKey.currentContext;
       if (ctx != null) {
         Scrollable.ensureVisible(ctx,
-            duration: const Duration(milliseconds: 200));
+            duration: HollowDurations.fast);
       }
     });
   }
@@ -143,8 +159,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
           ? 'hollow-msg2:$fields:$text'
           : 'hollow-msg3:$fields:$album:$text';
       if (reconstructed != canonicalPayload) {
-        fail('Payload mismatch: the message fields do not match the '
-            'canonical payload. The proof JSON may have been tampered with.\n\n'
+        fail('The message fields do not match the signed payload, so the '
+            'proof may have been tampered with.\n\n'
             'Expected: $canonicalPayload\n'
             'Got: $reconstructed');
         return;
@@ -192,7 +208,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     Map<String, dynamic>? sig,
   ) {
     if (message == null || sender == null || sig == null) {
-      return 'Invalid proof format: missing required fields.';
+      return 'This proof is missing required fields.';
     }
     final version = map['version'];
     final protocol = map['protocol'] as String?;
@@ -230,7 +246,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
   void _onVerifyPressed() {
     final text = _controller.text.trim();
     if (text.isEmpty) {
-      HollowToast.show(context, 'Paste a proof JSON first',
+      HollowToast.show(context, 'Paste a proof first',
           type: HollowToastType.info);
       return;
     }
@@ -242,47 +258,23 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     final hollow = HollowTheme.of(context);
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          'Paste a proof JSON or import a .json file to verify '
-          'that a message was authentically signed by its sender.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 12,
-          ),
+          'Paste a proof or import its .json file to check that the sender '
+          'really signed the message.',
+          style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.md),
-
-        Container(
-          width: double.infinity,
-          height: 120,
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
-          ),
-          child: TextField(
-            controller: _controller,
-            maxLines: null,
-            expands: true,
-            style: HollowTypography.mono.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 11,
-            ),
-            decoration: InputDecoration(
-              hintText: '{"version":1,"protocol":"hollow-proof-v1",...}',
-              hintStyle: HollowTypography.mono.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.4),
-                fontSize: 11,
-              ),
-              contentPadding: const EdgeInsets.all(HollowSpacing.sm),
-              border: InputBorder.none,
-            ),
-          ),
+        HollowTextField(
+          controller: _controller,
+          minLines: 5,
+          maxLines: 5,
+          hintText: 'Paste a proof here',
+          style: HollowTypography.monoSmall.copyWith(color: hollow.textPrimary),
         ),
         const SizedBox(height: HollowSpacing.md),
-
         Row(
           children: [
             HollowButton.ghost(
@@ -294,12 +286,10 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
             HollowButton.filled(
               onPressed: _onVerifyPressed,
               loading: _verifying,
-              icon: const Icon(LucideIcons.shieldCheck, size: 16),
               child: const Text('Verify'),
             ),
           ],
         ),
-
         if (_result != null) ...[
           const SizedBox(height: HollowSpacing.lg),
           KeyedSubtree(key: _resultKey, child: _buildResult(hollow)),
@@ -314,32 +304,26 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     return _buildVerdictResult(hollow, r);
   }
 
-  Widget _buildErrorResult(HollowTheme hollow, String error) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.error.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.error.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        children: [
-          Icon(LucideIcons.shieldAlert, size: 16, color: hollow.error),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              error,
-              style: HollowTypography.body.copyWith(
-                color: hollow.error,
-                fontSize: 13,
-              ),
-            ),
+  Widget _status(HollowTheme hollow, bool ok, String text) {
+    final color = ok ? hollow.success : hollow.error;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(ok ? LucideIcons.shieldCheck : LucideIcons.shieldAlert,
+            size: 16, color: color),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: SelectableText(
+            text,
+            style: HollowTypography.label.copyWith(color: color),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
+
+  Widget _buildErrorResult(HollowTheme hollow, String error) =>
+      _status(hollow, false, error);
 
   /// Human-readable label for the proof's context type.
   static String _contextLabelFor(String? contextType) {
@@ -349,72 +333,37 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
   }
 
   Widget _buildVerdictResult(HollowTheme hollow, _ProofResult r) {
-    final bgColor = r.valid
-        ? hollow.accent.withValues(alpha: 0.08)
-        : hollow.error.withValues(alpha: 0.08);
-    final borderColor = r.valid
-        ? hollow.accent.withValues(alpha: 0.3)
-        : hollow.error.withValues(alpha: 0.3);
-    final statusColor = r.valid ? hollow.accent : hollow.error;
-    final statusIcon =
-        r.valid ? LucideIcons.shieldCheck : LucideIcons.shieldAlert;
-    final statusText = r.valid ? 'Verified' : 'Invalid signature';
-
     final timestamp = r.timestampMs != null && r.timestampMs! > 0
         ? DateTime.fromMillisecondsSinceEpoch(r.timestampMs!)
         : null;
     final contextLabel = _contextLabelFor(r.contextType);
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: borderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(statusIcon, size: 16, color: statusColor),
-              const SizedBox(width: HollowSpacing.sm),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _status(hollow, r.valid, r.valid ? 'Verified' : 'Invalid signature'),
+        const SizedBox(height: HollowSpacing.md),
+        if (r.text != null && r.text!.isNotEmpty) ..._messageBlock(hollow, r),
+        if (r.senderPeerId != null) ..._senderBlock(hollow, r),
+        Wrap(
+          spacing: HollowSpacing.md,
+          children: [
+            if (contextLabel.isNotEmpty)
               Text(
-                statusText,
-                style: HollowTypography.label.copyWith(
-                  color: statusColor,
-                  fontWeight: FontWeight.w600,
-                ),
+                contextLabel,
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary),
               ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-
-          if (r.text != null && r.text!.isNotEmpty) ..._messageBlock(hollow, r),
-
-          if (r.senderPeerId != null) ..._senderBlock(hollow, r),
-
-          Row(
-            children: [
-              if (contextLabel.isNotEmpty) ...[
-                Text(
-                  contextLabel,
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
-                const SizedBox(width: HollowSpacing.md),
-              ],
-              if (timestamp != null)
-                Text(
-                  timestamp.toUtc().toIso8601String(),
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
-            ],
-          ),
-        ],
-      ),
+            if (timestamp != null)
+              Text(
+                timestamp.toUtc().toIso8601String(),
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary),
+              ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -422,24 +371,13 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     return [
       const SettingsFieldLabel(label: 'Message'),
       const SizedBox(height: HollowSpacing.xs),
-      Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(HollowSpacing.sm),
-        decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-        ),
-        child: Text(
-          r.text!.length > 300 ? '${r.text!.substring(0, 300)}...' : r.text!,
-          style: HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-            fontSize: 13,
-          ),
-          maxLines: 4,
-          overflow: TextOverflow.ellipsis,
-        ),
+      Text(
+        r.text!.length > 300 ? '${r.text!.substring(0, 300)}...' : r.text!,
+        style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
       ),
-      const SizedBox(height: HollowSpacing.sm),
+      const SizedBox(height: HollowSpacing.md),
     ];
   }
 
@@ -449,13 +387,10 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       const SizedBox(height: HollowSpacing.xs),
       SelectableText(
         r.senderPeerId!,
-        style: HollowTypography.mono.copyWith(
-          color: hollow.textPrimary,
-          fontSize: 11,
-        ),
+        style: HollowTypography.monoSmall.copyWith(color: hollow.textPrimary),
         maxLines: 1,
       ),
-      const SizedBox(height: HollowSpacing.sm),
+      const SizedBox(height: HollowSpacing.md),
     ];
   }
 }

@@ -3,27 +3,37 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
+import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Settings > Network: the service notice and the relay's live load.
-class RelayHealthCard extends StatelessWidget {
-  const RelayHealthCard({super.key});
+/// Settings > Network's "Relay health": the relay's live load, and the service
+/// notice when there is one. Folded, so the page stays quiet until asked.
+class RelayHealthRow extends ConsumerWidget {
+  const RelayHealthRow({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return const SettingsCard(
-      title: 'Relay Health',
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notice =
+        ref.watch(statusProvider.select((s) => s.status.level)) !=
+            StatusLevel.operational;
+    return SettingsExpandRow(
+      title: 'Relay health',
+      subtitle: 'Load and bandwidth right now',
+      // A live notice is trouble, and trouble is never folded away.
+      initiallyOpen: notice,
       children: [
-        HomeStatusCard(),
-        SizedBox(height: HollowSpacing.md),
-        RelayLoadBars(),
+        if (notice) ...[
+          const HomeStatusCard(),
+          const SizedBox(height: HollowSpacing.md),
+        ],
+        const RelayLoadBars(),
       ],
     );
   }
@@ -165,4 +175,18 @@ class _RelayLoadBarsState extends ConsumerState<RelayLoadBars> {
       ],
     );
   }
+}
+
+/// How busy the relay is, in a word: the busier of its memory and its
+/// bandwidth. Null while no recent reading exists, so nothing is guessed.
+enum RelayLoad { low, normal, high }
+
+RelayLoad? relayLoadOf(RelayStats stats) {
+  if (!stats.isFresh || stats.memTotalKb <= 0) return null;
+  final busiest = stats.memUsagePercent > stats.bandwidthUsagePercent
+      ? stats.memUsagePercent
+      : stats.bandwidthUsagePercent;
+  if (busiest >= 0.85) return RelayLoad.high;
+  if (busiest >= 0.5) return RelayLoad.normal;
+  return RelayLoad.low;
 }

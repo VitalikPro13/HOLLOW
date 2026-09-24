@@ -149,6 +149,13 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
     }
   }
 
+  /// Drops [item] from Your art on this install. Rethrows for the call site's
+  /// toast.
+  Future<void> remove(OwnedItem item) async {
+    await network_api.removeOwnedArt(itemId: item.itemId);
+    await reload();
+  }
+
   /// Put [kinds] of [item] on my profile.
   ///
   /// Rethrows so the call site can toast a real failure.

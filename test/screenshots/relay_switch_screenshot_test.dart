@@ -18,7 +18,7 @@ import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/ui/settings/network_section.dart';
 
 /// Screenshot harness for the self-hosting relay surfaces: the switch dialog
-/// each invite type shows, the pre-dial TURN warning, the no-TURN chip on the
+/// each invite type shows, the pre-dial TURN warning, the no-TURN note on the
 /// active relay row, and the Join card's relay line.
 ///
 /// Output dir: $HOLLOW_SHOT_DIR, falling back to build/ui_screenshots.
@@ -260,50 +260,44 @@ void main() {
     expect(find.text('Always relay calls needs a TURN server'), findsNothing);
   });
 
-  testWidgets('settings relay rows carry the no-TURN chip', (tester) async {
-    final controller = TextEditingController();
-    addTearDown(controller.dispose);
+  testWidgets('settings relay rows carry the no-TURN note', (tester) async {
     await pumpHost(
       tester,
-      NetworkSettingsView(
-        selectedRelay: current,
-        initialRelay: current,
-        showAddRelay: false,
-        newRelayController: controller,
-        onSelectRelay: (_) {},
-        onRemoveRelay: (_) {},
-        onShowAddRelay: () {},
-        onSubmitAddRelay: () {},
-        onCancelAddRelay: () {},
-        onApplyRestart: () {},
-      ),
+      const SingleChildScrollView(child: RelaySettingsSection()),
       extra: overrides(turn: false),
     );
+    await tester.tap(find.text('Change'));
+    await tester.pumpAndSettle();
     // Only the ACTIVE row is marked: the other saved relay said nothing.
-    expect(find.text('No TURN server'), findsOneWidget);
+    expect(find.textContaining('No TURN: calls need a direct route',
+            findRichText: true),
+        findsOneWidget);
     await capture(tester, 'relay_row_no_turn');
   });
 
-  testWidgets('no chip while the relay never said', (tester) async {
-    final controller = TextEditingController();
-    addTearDown(controller.dispose);
+  testWidgets('no note while the relay never said', (tester) async {
     await pumpHost(
       tester,
-      NetworkSettingsView(
-        selectedRelay: current,
-        initialRelay: current,
-        showAddRelay: false,
-        newRelayController: controller,
-        onSelectRelay: (_) {},
-        onRemoveRelay: (_) {},
-        onShowAddRelay: () {},
-        onSubmitAddRelay: () {},
-        onCancelAddRelay: () {},
-        onApplyRestart: () {},
-      ),
+      const SingleChildScrollView(child: RelaySettingsSection()),
       extra: overrides(),
     );
-    expect(find.text('No TURN server'), findsNothing);
+    await tester.tap(find.text('Change'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('No TURN', findRichText: true), findsNothing);
+  });
+
+  testWidgets('picking another relay offers the restart', (tester) async {
+    await pumpHost(
+      tester,
+      const SingleChildScrollView(child: RelaySettingsSection()),
+      extra: overrides(),
+    );
+    expect(find.text('Switch and restart'), findsNothing);
+    await tester.tap(find.text('Change'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(other));
+    await tester.pumpAndSettle();
+    expect(find.text('Switch and restart'), findsOneWidget);
   });
 
   testWidgets('the compact chip mobile uses', (tester) async {

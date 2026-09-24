@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -8,13 +7,12 @@ import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shared scaffolding for the Settings surfaces, desktop and mobile. One
@@ -88,9 +86,10 @@ class SettingsFieldLabel extends StatelessWidget {
   }
 }
 
-/// Reusable toggle row: icon + label (+ optional subtitle) + HollowToggle.
+/// A switch row, drawn as the kit's [SettingsSwitchRow].
 class SettingsToggleRow extends StatelessWidget {
-  final IconData icon;
+  @Deprecated('Rows carry no icon')
+  final IconData? icon;
   final String label;
   final String? subtitle;
   final bool value;
@@ -98,7 +97,7 @@ class SettingsToggleRow extends StatelessWidget {
 
   const SettingsToggleRow({
     super.key,
-    required this.icon,
+    this.icon,
     required this.label,
     required this.value,
     required this.onChanged,
@@ -107,82 +106,20 @@ class SettingsToggleRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: subtitle != null
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      label,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    Text(
-                      subtitle!,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                )
-              : Text(
-                  label,
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textPrimary),
-                ),
-        ),
-        HollowToggle(
-            value: value, onChanged: onChanged, semanticLabel: label),
-      ],
+    return SettingsSwitchRow(
+      title: label,
+      subtitle: subtitle,
+      value: value,
+      onChanged: onChanged,
     );
   }
 }
 
-/// A row of equal-width chips for a small set of mutually exclusive options.
-/// Selection is the chip state, never a solid accent fill.
-class TriStateSegment<T> extends StatelessWidget {
-  final T value;
-  final List<(T, String)> options;
-  final ValueChanged<T> onChanged;
-
-  const TriStateSegment({
-    super.key,
-    required this.value,
-    required this.options,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        for (final (i, (opt, label)) in options.indexed) ...[
-          if (i > 0) const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: HollowChip(
-              label: label,
-              selected: opt == value,
-              expand: true,
-              onTap: () => onChanged(opt),
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-/// Labeled slider block: header, themed slider and a min/max caption row.
-/// Callers supply the computed value, range and display labels.
+/// A slider row, drawn as the kit's [SettingsSliderRow] with [label] as its
+/// readout. [minLabel] and [maxLabel] are no longer drawn.
 class SettingsLabeledSlider extends StatelessWidget {
-  final IconData icon;
+  @Deprecated('Rows carry no icon')
+  final IconData? icon;
   final String title;
   final String subtitle;
   final double value;
@@ -190,13 +127,13 @@ class SettingsLabeledSlider extends StatelessWidget {
   final double max;
   final int divisions;
   final String label;
-  final String minLabel;
-  final String maxLabel;
+  final String? minLabel;
+  final String? maxLabel;
   final ValueChanged<double> onChanged;
 
   const SettingsLabeledSlider({
     super.key,
-    required this.icon,
+    this.icon,
     required this.title,
     required this.subtitle,
     required this.value,
@@ -204,70 +141,30 @@ class SettingsLabeledSlider extends StatelessWidget {
     required this.max,
     required this.divisions,
     required this.label,
-    required this.minLabel,
-    required this.maxLabel,
+    this.minLabel,
+    this.maxLabel,
     required this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(icon, size: 16, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary)),
-                  Text(
-                    subtitle,
-                    style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 10),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        HollowSlider(
-          value: value,
-          min: min,
-          max: max,
-          divisions: divisions,
-          label: label,
-          onChanged: onChanged,
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(minLabel,
-                  style: HollowTypography.micro
-                      .copyWith(color: hollow.textSecondary)),
-              Text(maxLabel,
-                  style: HollowTypography.micro
-                      .copyWith(color: hollow.textSecondary)),
-            ],
-          ),
-        ),
-      ],
+    return SettingsSliderRow(
+      title: title,
+      subtitle: subtitle,
+      value: value,
+      min: min,
+      max: max,
+      divisions: divisions,
+      valueLabel: label,
+      onChanged: onChanged,
     );
   }
 }
 
-// Display size (issue #20), shared by the desktop Accessibility category and
-// the mobile Accessibility tab so the two cannot drift apart.
+// Display size (issue #20), shared by the desktop Accessibility page and the
+// mobile Accessibility tab so the two cannot drift apart.
 
-/// Interface scale ("zoom") slider: text, icons and spacing together.
+/// Interface scale ("zoom"): text, icons and spacing together.
 ///
 /// Committed on RELEASE, not on every drag tick, because this control lives
 /// inside the UI it resizes and a live commit moves the track out from under
@@ -286,28 +183,22 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final saved = ref.watch(uiScaleProvider);
-    final shown = _dragValue ?? saved;
-    final min = uiScaleMin;
-    final max = uiScaleMax;
     // A window too small for the chosen scale gets a reduced one, so the
     // controls that undo it stay reachable. Saying so keeps a slider that stops
     // mattering past a point from reading as broken.
     final info = UiScaleInfo.maybeOf(context);
     final clampedTo = info != null && info.isClamped ? info.effective : null;
 
-    return _ScaleSliderBlock(
-      hollow: hollow,
-      icon: LucideIcons.scaling,
-      title: 'Interface scale',
+    return _ScaleRow(
+      title: 'Interface',
       subtitle: clampedTo != null
           ? 'Limited to ${scalePercentLabel(clampedTo)} by this window size. '
               'Enlarge the window for more'
-          : 'Text, icons and spacing (applies when you release)',
-      value: shown,
-      min: min,
-      max: max,
+          : 'Text, icons and spacing together',
+      value: _dragValue ?? saved,
+      min: uiScaleMin,
+      max: uiScaleMax,
       isDefault: (saved - kUiScaleDefault).abs() < 0.001,
       onReset: () => ref.read(uiScaleProvider.notifier).reset(),
       onChangeStart: (v) => setState(() => _dragValue = v),
@@ -327,31 +218,22 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
   }
 }
 
-/// Chat text size slider: message text and the composer only, on top of the
+/// Chat text size: message text and the composer only, on top of the
 /// interface scale. Live, with a worked example underneath, because nothing it
 /// resizes is on screen while Settings is open.
-class ChatTextScaleControl extends ConsumerStatefulWidget {
+class ChatTextScaleControl extends ConsumerWidget {
   const ChatTextScaleControl({super.key});
 
   @override
-  ConsumerState<ChatTextScaleControl> createState() =>
-      _ChatTextScaleControlState();
-}
-
-class _ChatTextScaleControlState extends ConsumerState<ChatTextScaleControl> {
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
+  Widget build(BuildContext context, WidgetRef ref) {
     final value = ref.watch(chatTextScaleProvider);
-
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        _ScaleSliderBlock(
-          hollow: hollow,
-          icon: LucideIcons.aLargeSmall,
-          title: 'Chat text size',
-          subtitle: 'Message text and the box you type in',
+        _ScaleRow(
+          title: 'Chat text',
+          subtitle: 'Messages and the box you type in',
           value: value,
           min: kChatTextScaleMin,
           max: kChatTextScaleMax,
@@ -360,8 +242,8 @@ class _ChatTextScaleControlState extends ConsumerState<ChatTextScaleControl> {
           onChanged: (v) =>
               ref.read(chatTextScaleProvider.notifier).setScale(v),
         ),
+        _ChatTextPreview(factor: value),
         const SizedBox(height: HollowSpacing.sm),
-        _ChatTextPreview(hollow: hollow, factor: value),
       ],
     );
   }
@@ -369,21 +251,19 @@ class _ChatTextScaleControlState extends ConsumerState<ChatTextScaleControl> {
 
 /// A worked sample of one message row at the chosen chat text size.
 class _ChatTextPreview extends StatelessWidget {
-  final HollowTheme hollow;
   final double factor;
 
-  const _ChatTextPreview({required this.hollow, required this.factor});
+  const _ChatTextPreview({required this.factor});
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     final mq = MediaQuery.of(context);
     return Container(
-      width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.background.withValues(alpha: 0.5),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: MediaQuery(
         data: mq.copyWith(
@@ -414,7 +294,7 @@ class _ChatTextPreview extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: HollowSpacing.xxs),
             Text(
               'This is how your messages will look.',
               style: HollowTypography.body.copyWith(color: hollow.textPrimary),
@@ -427,20 +307,17 @@ class _ChatTextPreview extends StatelessWidget {
 }
 
 /// Side-panel zoom (issue #54): the server strip, channel list and member list,
-/// without touching the chat. Live, because all three are visible behind the
-/// Settings dialog.
+/// without touching the chat. Live, because all three stay on screen beside
+/// Settings.
 class PanelScaleControl extends ConsumerWidget {
   const PanelScaleControl({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final value = ref.watch(panelScaleProvider);
-    return _ScaleSliderBlock(
-      hollow: hollow,
-      icon: LucideIcons.panelsLeftRight,
-      title: 'Side panel size',
-      subtitle: 'Icons and names in the server, channel and member lists',
+    return _ScaleRow(
+      title: 'Side panels',
+      subtitle: 'Server, channel and member lists',
       value: value,
       min: kPanelScaleMin,
       max: kPanelScaleMax,
@@ -451,11 +328,9 @@ class PanelScaleControl extends ConsumerWidget {
   }
 }
 
-/// Shared skeleton for both scale sliders: header with a live percentage badge
-/// and a Reset action, the slider, and min/max captions.
-class _ScaleSliderBlock extends StatelessWidget {
-  final HollowTheme hollow;
-  final IconData icon;
+/// The kit's slider row plus a reset. The reset keeps its slot while hidden,
+/// so the track never shifts under a drag that leaves the default.
+class _ScaleRow extends StatelessWidget {
   final String title;
   final String subtitle;
   final double value;
@@ -467,9 +342,7 @@ class _ScaleSliderBlock extends StatelessWidget {
   final ValueChanged<double> onChanged;
   final ValueChanged<double>? onChangeEnd;
 
-  const _ScaleSliderBlock({
-    required this.hollow,
-    required this.icon,
+  const _ScaleRow({
     required this.title,
     required this.subtitle,
     required this.value,
@@ -484,109 +357,80 @@ class _ScaleSliderBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(icon, size: 16, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary)),
-                  Text(
-                    subtitle,
-                    style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 10),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              scalePercentLabel(value),
-              style: HollowTypography.mono.copyWith(
-                color: hollow.accentText,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            if (!isDefault) ...[
-              const SizedBox(width: HollowSpacing.xs),
-              HollowPressable(
-                semanticLabel: 'Reset $title',
-                onTap: onReset,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(HollowSpacing.xxs + 2),
-                child: Icon(LucideIcons.rotateCcw,
-                    size: 14, color: hollow.textSecondary),
-              ),
-            ],
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        HollowSlider(
-          value: value.clamp(min, max),
-          min: min,
-          max: max,
-          divisions: scaleDivisions(min, max),
-          label: scalePercentLabel(value),
-          semanticFormatterCallback: scalePercentLabel,
-          onChangeStart: onChangeStart,
-          onChanged: onChanged,
-          onChangeEnd: onChangeEnd,
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(scalePercentLabel(min),
-                  style: HollowTypography.micro
-                      .copyWith(color: hollow.textSecondary)),
-              Text(scalePercentLabel(max),
-                  style: HollowTypography.micro
-                      .copyWith(color: hollow.textSecondary)),
-            ],
-          ),
-        ),
-      ],
+    // The phone tab still hosts these without a density, so a narrow column
+    // stacks the slider under the title the way a touch page does.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final touch = SettingsDensity.touchOf(context) ||
+            constraints.maxWidth < _kStackBelowWidth;
+        return SettingsDensity(touch: touch, child: _row(context, touch));
+      },
     );
   }
-}
 
-/// Square accent colour preview box. Size and radius differ between desktop and
-/// mobile, so they are passed in.
-class AccentHuePreviewBox extends StatelessWidget {
-  final double hue;
-  final double size;
-  final double radius;
-
-  const AccentHuePreviewBox({
-    super.key,
-    required this.hue,
-    required this.size,
-    required this.radius,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: accentFromHue(hue),
-        borderRadius: BorderRadius.circular(radius),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.2),
+  Widget _row(BuildContext context, bool touch) {
+    final hollow = HollowTheme.of(context);
+    final label = scalePercentLabel(value);
+    final slider = HollowSlider(
+      value: value.clamp(min, max),
+      min: min,
+      max: max,
+      divisions: scaleDivisions(min, max),
+      label: label,
+      semanticFormatterCallback: scalePercentLabel,
+      onChangeStart: onChangeStart,
+      onChanged: onChanged,
+      onChangeEnd: onChangeEnd,
+    );
+    final readout = SizedBox(
+      width: _kReadoutWidth,
+      child: Text(
+        label,
+        textAlign: TextAlign.right,
+        style: HollowTypography.monoSmall.copyWith(
+          color: hollow.textSecondary,
+          fontFeatures: const [FontFeature.tabularFigures()],
         ),
+      ),
+    );
+    final reset = Visibility(
+      visible: !isDefault,
+      maintainSize: true,
+      maintainAnimation: true,
+      maintainState: true,
+      child: HollowIconButton(
+        icon: LucideIcons.rotateCcw,
+        label: 'Reset $title to default',
+        size: touch ? 44 : 32,
+        onPressed: isDefault ? null : onReset,
+      ),
+    );
+    final controls = [
+      if (touch)
+        Expanded(child: slider)
+      else
+        SizedBox(width: _kSliderWidth, child: slider),
+      readout,
+      const SizedBox(width: HollowSpacing.xs),
+      reset,
+    ];
+    return SettingsRow(
+      title: title,
+      subtitle: subtitle,
+      wideTrailing: true,
+      trailing: Row(
+        mainAxisSize: touch ? MainAxisSize.max : MainAxisSize.min,
+        children: controls,
       ),
     );
   }
 }
+
+const double _kSliderWidth = 200;
+const double _kReadoutWidth = 48;
+
+/// Narrower than this, a trailing slider leaves the title too little room.
+const double _kStackBelowWidth = 480;
 
 /// Rainbow hue slider for the accent colour pickers. Track and thumb sizing
 /// differ between the two surfaces, so they are passed in.
@@ -641,9 +485,8 @@ class AmbientBackgroundToggle extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final on = ref.watch(ambientBackgroundProvider).valueOrNull ?? false;
-    return SettingsToggleRow(
-      icon: LucideIcons.sparkles,
-      label: 'Ambient background',
+    return SettingsSwitchRow(
+      title: 'Ambient light',
       subtitle: 'Slow drifting light behind your chats',
       value: on,
       onChanged: (v) => ref
@@ -660,34 +503,21 @@ class MessageDisplayPicker extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final display = ref.watch(messageDisplayProvider);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Message display',
-          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-        ),
-        Text(
-          display == MessageDisplay.cozy
-              ? 'Cozy: avatars, messages grouped under a name'
-              : 'Compact: one line per message, no avatars',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        TriStateSegment<MessageDisplay>(
-          value: display,
-          options: const [
-            (MessageDisplay.cozy, 'Cozy'),
-            (MessageDisplay.compact, 'Compact'),
-          ],
-          onChanged: (d) => ref
-              .read(messageDisplayProvider.notifier)
-              .set(d)
-              .catchError((_) {}),
-        ),
+    return SettingsChoiceRow<MessageDisplay>(
+      title: 'Messages',
+      subtitle: display == MessageDisplay.cozy
+          ? 'Cozy: avatars, grouped under a name'
+          : 'Compact: one line per message, no avatars',
+      value: display,
+      options: const [
+        (MessageDisplay.cozy, 'Cozy'),
+        (MessageDisplay.compact, 'Compact'),
       ],
+      onChanged: (d) => ref
+          .read(messageDisplayProvider.notifier)
+          .set(d)
+          .catchError((_) {}),
     );
   }
 }

@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/linux_pulse_capture.dart';
@@ -20,250 +21,43 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
-import 'package:hollow/src/ui/components/hollow_slider.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:record/record.dart' as rec;
 import 'package:win32audio/win32audio.dart' as win32audio;
 
-/// Audio & Video category of the desktop Settings dialog: device selection,
-/// mic gain + Voice Enhancement chain controls, mic test, and ringtone.
-class AudioVideoSettingsView extends StatelessWidget {
+/// Settings > Audio & Video: devices, the voice chain, the microphone test,
+/// push to talk and sounds.
+class AudioVideoSettingsView extends ConsumerStatefulWidget {
   const AudioVideoSettingsView({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return settingsCardList([
-      const SettingsCard(
-        title: 'Devices',
-        children: [_AudioDeviceSettings()],
-      ),
-      // Hotkeys need a keyboard, so desktop only; mobile transmits on voice
-      // activity (issue #38).
-      if (!Platform.isAndroid && !Platform.isIOS)
-        const SettingsCard(
-          title: 'Voice',
-          children: [_VoiceInputSettings()],
-        ),
-    ]);
-  }
-}
-
-/// Voice input mode (Voice Activity / Push-to-Talk) + call hotkeys.
-class _VoiceInputSettings extends ConsumerStatefulWidget {
-  const _VoiceInputSettings();
-
-  @override
-  ConsumerState<_VoiceInputSettings> createState() =>
-      _VoiceInputSettingsState();
-}
-
-class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
-  @override
-  void initState() {
-    super.initState();
-    // These providers may have cached defaults from before storage was ready,
-    // so re-read from disk whenever the card opens.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      ref.invalidate(voiceInputModeProvider);
-      ref.invalidate(pttKeybindProvider);
-      ref.invalidate(muteKeybindProvider);
-      ref.invalidate(deafenKeybindProvider);
-      ref.invalidate(pttReleaseDelayProvider);
-    });
-  }
-
-
-  Widget _keybindRow(
-    HollowTheme hollow, {
-    required IconData icon,
-    required String label,
-    required String serialized,
-    required ValueChanged<String> onChanged,
-    required String semanticLabel,
-  }) {
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Text(
-            label,
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-        ),
-        KeybindCaptureField(
-          serialized: serialized,
-          onChanged: onChanged,
-          semanticLabel: semanticLabel,
-        ),
-      ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final mode = ref.watch(voiceInputModeProvider).valueOrNull ??
-        kVoiceInputActivity;
-    final isPtt = mode == kVoiceInputPtt;
-    final pttBind =
-        ref.watch(pttKeybindProvider).valueOrNull ?? 'ctrl+space';
-    final muteBind =
-        ref.watch(muteKeybindProvider).valueOrNull ?? 'ctrl+shift+m';
-    final deafenBind =
-        ref.watch(deafenKeybindProvider).valueOrNull ?? 'ctrl+shift+d';
-    final releaseMs = ref.watch(pttReleaseDelayProvider).valueOrNull ??
-        kPttReleaseDefaultMs;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Selection state = chips, never filled buttons.
-        Row(
-          children: [
-            Text(
-              'Input mode',
-              style: HollowTypography.bodySmall.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            HollowChip(
-              label: 'Voice activity',
-              hint: 'always on',
-              selected: !isPtt,
-              onTap: () => ref
-                  .read(voiceInputModeProvider.notifier)
-                  .setMode(kVoiceInputActivity),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowChip(
-              label: 'Push to talk',
-              hint: 'hold a key',
-              selected: isPtt,
-              onTap: () => ref
-                  .read(voiceInputModeProvider.notifier)
-                  .setMode(kVoiceInputPtt),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        AnimatedOpacity(
-          duration: const Duration(milliseconds: 150),
-          opacity: isPtt ? 1.0 : 0.4,
-          child: IgnorePointer(
-            ignoring: !isPtt,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _keybindRow(
-                  hollow,
-                  icon: LucideIcons.mic,
-                  label: 'Push to talk (hold)',
-                  serialized: pttBind,
-                  onChanged: (v) =>
-                      ref.read(pttKeybindProvider.notifier).setBinding(v),
-                  semanticLabel: 'Set push-to-talk key',
-                ),
-                const SizedBox(height: HollowSpacing.xs),
-                Row(
-                  children: [
-                    Icon(LucideIcons.timer,
-                        size: 14, color: hollow.textSecondary),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Text(
-                      'Release delay',
-                      style: HollowTypography.bodySmall.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.md),
-                    Expanded(
-                      child: HollowSlider(
-                        value: releaseMs.toDouble().clamp(0, 1000),
-                        min: 0,
-                        max: 1000,
-                        divisions: 20,
-                        onChanged: (v) => ref
-                              .read(pttReleaseDelayProvider.notifier)
-                              .setDelay(v.round()),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 52,
-                      child: Text(
-                        '$releaseMs ms',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.accentText,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        textAlign: TextAlign.right,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        _keybindRow(
-          hollow,
-          icon: LucideIcons.micOff,
-          label: 'Toggle mute',
-          serialized: muteBind,
-          onChanged: (v) =>
-              ref.read(muteKeybindProvider.notifier).setBinding(v),
-          semanticLabel: 'Set mute toggle hotkey',
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        _keybindRow(
-          hollow,
-          icon: LucideIcons.headphoneOff,
-          label: 'Toggle deafen',
-          serialized: deafenBind,
-          onChanged: (v) =>
-              ref.read(deafenKeybindProvider.notifier).setBinding(v),
-          semanticLabel: 'Set deafen toggle hotkey',
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          'Hotkeys are active while you are in a call. They work '
-          'system-wide on Windows and Linux (X11); on macOS and Wayland '
-          'they work while Hollow is focused. Ctrl+Shift+M now toggles '
-          'mute. The member panel moved to Ctrl+Shift+P.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textTertiary,
-            fontSize: 11,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Audio device selection + mic test for the System tab.
-class _AudioDeviceSettings extends ConsumerStatefulWidget {
-  const _AudioDeviceSettings();
-
-  @override
-  ConsumerState<_AudioDeviceSettings> createState() =>
-      _AudioDeviceSettingsState();
+  ConsumerState<AudioVideoSettingsView> createState() =>
+      _AudioVideoSettingsViewState();
 }
 
 /// Uniform shape for audio device listings, wrapping either a
 /// `win32audio.AudioDevice` or a `webrtc.MediaDeviceInfo`.
 typedef _AudioDeviceInfo = ({String id, String name, bool isActive});
 
-class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
+const double _kDeviceFieldWidth = 260;
+const double _kCompactSliderWidth = 120;
+const double _kCompactReadoutWidth = 40;
+
+/// Hotkeys need a keyboard, so push to talk is desktop only; mobile transmits
+/// on voice activity (issue #38).
+bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
+
+class _AudioVideoSettingsViewState
+    extends ConsumerState<AudioVideoSettingsView> {
   List<_AudioDeviceInfo> _audioInputs = [];
   List<_AudioDeviceInfo> _audioOutputs = [];
   List<webrtc.MediaDeviceInfo> _cameras = [];
@@ -297,7 +91,23 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   @override
   void initState() {
     super.initState();
+    // A phone routes audio itself (earpiece, speaker, headset) and picks its
+    // camera in the call, so it lists no devices here.
+    if (!_isDesktop) {
+      _loading = false;
+      return;
+    }
     _loadDevices();
+    // These providers may have cached defaults from before storage was ready,
+    // so re-read from disk whenever the page opens.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.invalidate(voiceInputModeProvider);
+      ref.invalidate(pttKeybindProvider);
+      ref.invalidate(muteKeybindProvider);
+      ref.invalidate(deafenKeybindProvider);
+      ref.invalidate(pttReleaseDelayProvider);
+    });
   }
 
   @override
@@ -672,7 +482,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
       // Under ~100 ms of audio: the capture never really ran.
       HollowToast.show(
           context,
-          'No audio arrived from $deviceLabel. Check the Input device '
+          'No audio arrived from $deviceLabel. Check the microphone '
           'selected above.',
           type: HollowToastType.error);
       return;
@@ -801,544 +611,413 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
   }
 
+  void _reloadDevices() {
+    setState(() => _loading = true);
+    _loadDevices();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final selectedInput = ref.watch(audioInputDeviceProvider).valueOrNull;
+    final touch = SettingsDensity.touchOf(context);
 
-    if (_loading) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: HollowSpacing.md),
-        child: Text(
-          'Loading devices...',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-          ),
-        ),
-      );
-    }
+    final aiNs = ref.watch(noiseSuppressAiProvider).valueOrNull ?? false;
+    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+    final dynMode = ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+    final autoLevel = enhance && dynMode;
+    final gain = ref.watch(micGainProvider).valueOrNull ?? kMicGainDefault;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final engineState = ref.watch(noiseSuppressEngineProvider);
+    final engine = engineState.valueOrNull ?? kNoiseSuppressEngineRnnoise;
+    final strengthState = ref.watch(voiceEnhanceStrengthProvider);
+    final strength = strengthState.valueOrNull ?? kEnhanceStrengthDefault;
+    final releaseState = _isDesktop ? ref.watch(pttReleaseDelayProvider) : null;
+    final releaseMs = releaseState?.valueOrNull ?? kPttReleaseDefaultMs;
+    final isPtt = _isDesktop &&
+        (ref.watch(voiceInputModeProvider).valueOrNull ??
+                kVoiceInputActivity) ==
+            kVoiceInputPtt;
+
+    // Keyed on the load so a fold built from the placeholder defaults is
+    // rebuilt once the stored values arrive.
+    final advancedLoaded = engineState.hasValue &&
+        strengthState.hasValue &&
+        (releaseState?.hasValue ?? true);
+    final advancedChanged = (_isDesktop && engine != kNoiseSuppressEngineRnnoise) ||
+        strength != kEnhanceStrengthDefault ||
+        releaseMs != kPttReleaseDefaultMs;
+
+    return SettingsPage(
+      title: 'Audio & Video',
       children: [
-        _buildMicrophoneRow(hollow, selectedInput),
-        const SizedBox(height: HollowSpacing.sm),
-
-        // Locked while Dynamic mode auto-levels.
-        _buildMicGainSlider(hollow),
-        Padding(
-          padding: const EdgeInsets.only(left: 30, top: 4),
-          child: Text(
-            'Boosts your outgoing voice (applies live during calls). '
-            'A limiter prevents clipping.',
-            style:
-                HollowTypography.caption.copyWith(color: hollow.textSecondary),
+        if (_isDesktop)
+          SettingsSection(
+            title: 'Microphone',
+            children: [
+              _buildMicrophoneRow(touch),
+              _buildMicTestRow(),
+              if (_micTesting || _micRendering || _micTestReviewing)
+                _buildMicTestPanel(),
+            ],
           ),
-        ),
-        const SizedBox(height: HollowSpacing.md),
-
-        _buildEnhanceToggle(),
-        const SizedBox(height: HollowSpacing.sm),
-
-        _buildDynamicToggle(),
-        const SizedBox(height: HollowSpacing.xs),
-
-        // Compressor makeup gain; locked in Dynamic.
-        _buildStrengthSlider(hollow),
-        const SizedBox(height: HollowSpacing.sm),
-
-        // Head of the capture chain.
-        _buildNoiseSuppressAiToggle(),
-        const SizedBox(height: HollowSpacing.md),
-
-        _buildSpeakerRow(hollow),
-        const SizedBox(height: HollowSpacing.md),
-
-        if (_cameras.isNotEmpty) _buildCameraRow(hollow),
-        if (_cameras.isNotEmpty) const SizedBox(height: HollowSpacing.md),
-
-        _buildQualityRow(hollow),
-        const SizedBox(height: HollowSpacing.md),
-
-        _buildMicTestRow(hollow),
-        if (_micTesting || _micTestReviewing)
-          Padding(
-            padding: const EdgeInsets.only(left: 22, top: 4),
-            child: Text(
-              _micTesting
-                  ? 'Recording through your full voice processing. Speak a '
-                      'sentence, then press Stop (auto-stops at 10s).'
-                  : 'Play it back to hear exactly what others hear in a call '
-                      '(noise suppression, enhancement and gain included).',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textTertiary,
-                fontSize: 10,
-              ),
-            ),
-          ),
-        const SizedBox(height: HollowSpacing.xs),
-
-        Row(
+        SettingsSection(
+          title: 'Voice',
           children: [
-            Icon(LucideIcons.refreshCw, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.ghost(
-              onPressed: () {
-                setState(() => _loading = true);
-                _loadDevices();
-              },
-              compact: true,
-              child: const Text('Refresh devices'),
+            SettingsSwitchRow(
+              title: 'Noise suppression',
+              subtitle: 'Removes keyboard, fan and background noise from your '
+                  'mic. Switches on instantly, even mid-call.',
+              value: aiNs,
+              onChanged: (v) =>
+                  ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
+            ),
+            SettingsSwitchRow(
+              title: 'Voice enhancement',
+              subtitle: 'Studio EQ and a compressor for a fuller, louder '
+                  'voice. Switches live mid-call.',
+              value: enhance,
+              onChanged: (v) =>
+                  ref.read(voiceEnhanceProvider.notifier).setEnabled(v),
+            ),
+            SettingsSwitchRow(
+              title: 'Automatic level',
+              subtitle: 'Keeps balancing your mic level, so any microphone '
+                  'lands at the same natural loudness.',
+              value: autoLevel,
+              onChanged: enhance
+                  ? (v) => ref
+                      .read(voiceEnhanceDynamicProvider.notifier)
+                      .setEnabled(v)
+                  : null,
+            ),
+            SettingsSliderRow(
+              title: 'Gain',
+              subtitle: autoLevel
+                  ? 'Set by Automatic level'
+                  : 'Boosts your voice. A limiter stops clipping.',
+              value: gain,
+              min: kMicGainMin,
+              max: kMicGainMax,
+              divisions: 83,
+              valueLabel: autoLevel
+                  ? 'Auto'
+                  : '${(gain / kMicGainDisplayUnit * 100).round()}%',
+              onChanged: autoLevel
+                  ? null
+                  : (v) => ref.read(micGainProvider.notifier).setGain(v),
             ),
           ],
         ),
-        const SizedBox(height: HollowSpacing.lg),
-
-        Row(
+        SettingsSection(
+          title: _isDesktop ? 'Speaker and camera' : 'Calls',
           children: [
-            Icon(LucideIcons.bellRing, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Ringtone',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
-              ),
+            if (_isDesktop) _buildSpeakerRow(touch),
+            if (_cameras.isNotEmpty) _buildCameraRow(touch),
+            SettingsChoiceRow<AudioQualityPreset>(
+              title: 'Call quality',
+              subtitle: _qualityLine(ref.watch(audioQualityProvider).valueOrNull ??
+                  AudioQualityPreset.voice),
+              value: ref.watch(audioQualityProvider).valueOrNull ??
+                  AudioQualityPreset.voice,
+              options: [
+                for (final p in AudioQualityPreset.values) (p, p.label),
+              ],
+              onChanged: (p) =>
+                  ref.read(audioQualityProvider.notifier).setPreset(p),
             ),
           ],
         ),
-        const SizedBox(height: HollowSpacing.sm),
-        _buildRingtoneFileRow(hollow),
-        const SizedBox(height: HollowSpacing.sm),
-
-        _buildRingtoneVolumeRow(hollow),
-        const SizedBox(height: HollowSpacing.xs),
-
-        Text(
-          'Ringtone plays for up to 30 seconds during incoming calls, and '
-          'while you wait for someone to pick up.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary.withValues(alpha: 0.6),
-            fontSize: 10,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.lg),
-
-        // Sound effects (issue #55)
-        Row(
+        if (_isDesktop) _buildTalkingSection(isPtt),
+        SettingsSection(
+          title: 'Sounds',
           children: [
-            Icon(LucideIcons.music, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Sound Effects',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
-              ),
-            ),
+            _buildRingtoneRow(touch),
+            _buildSoundEffectsRow(touch),
           ],
         ),
-        const SizedBox(height: HollowSpacing.sm),
-        SettingsToggleRow(
-          icon: LucideIcons.volume2,
-          label: 'Play sound effects',
-          subtitle: 'Voice channel joins and leaves, screen shares, mute, '
-              'notifications',
-          value: ref.watch(soundEffectsEnabledProvider),
-          onChanged: (v) {
-            ref.read(soundEffectsEnabledProvider.notifier).setEnabled(v);
-            // Confirm the new setting with the sound it just enabled.
-            if (v) SoundService.instance.play(HollowSound.notification);
-          },
+        SettingsAdvanced(
+          key: ValueKey('audio-advanced-$advancedLoaded'),
+          initiallyOpen: advancedChanged,
+          children: [
+            // RNNoise runs everywhere; DeepFilterNet3 costs a slow first load
+            // and roughly 10x the CPU. Switching mid-call needs no
+            // renegotiation.
+            if (aiNs && _isDesktop)
+              SettingsChoiceRow<String>(
+                title: 'Noise suppression engine',
+                subtitle: 'DeepFilterNet3 is stronger and heavier',
+                value: engine,
+                options: const [
+                  (kNoiseSuppressEngineRnnoise, 'RNNoise'),
+                  (kNoiseSuppressEngineDfn3, 'DeepFilterNet3'),
+                ],
+                onChanged: (v) =>
+                    ref.read(noiseSuppressEngineProvider.notifier).setEngine(v),
+              ),
+            SettingsSliderRow(
+              title: 'Enhancement strength',
+              subtitle: !enhance
+                  ? 'Needs voice enhancement'
+                  : dynMode
+                      ? 'Set by Automatic level'
+                      : 'How much the enhancement lifts your voice',
+              value: strength,
+              min: kEnhanceStrengthMin,
+              max: kEnhanceStrengthMax,
+              divisions: 30,
+              valueLabel: autoLevel ? 'Auto' : '${strength.round()}%',
+              onChanged: (!enhance || dynMode)
+                  ? null
+                  : (v) => ref
+                      .read(voiceEnhanceStrengthProvider.notifier)
+                      .setStrength(v),
+            ),
+            if (_isDesktop)
+              SettingsSliderRow(
+                title: 'Push-to-talk release',
+                subtitle: isPtt
+                    ? 'How long the mic stays open after you let go'
+                    : 'Only used with push to talk',
+                value: releaseMs.toDouble(),
+                min: 0,
+                max: 1000,
+                divisions: 20,
+                valueLabel: '$releaseMs ms',
+                onChanged: isPtt
+                    ? (v) => ref
+                        .read(pttReleaseDelayProvider.notifier)
+                        .setDelay(v.round())
+                    : null,
+              ),
+          ],
         ),
-        const SizedBox(height: HollowSpacing.sm),
-        _buildSoundEffectsVolumeRow(hollow),
       ],
     );
   }
 
-  Widget _buildSoundEffectsVolumeRow(HollowTheme hollow) {
-    final enabled = ref.watch(soundEffectsEnabledProvider);
-    final value = ref.watch(soundEffectsVolumeProvider);
-    return Opacity(
-      opacity: enabled ? 1.0 : 0.4,
-      child: Row(
-        children: [
-          Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Text(
-            'Volume',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: HollowSlider(
-              value: value,
-              onChanged: enabled
-                    ? (v) =>
-                        ref.read(soundEffectsVolumeProvider.notifier).setVolume(v)
-                    : null,
-              // Preview on release only; a sound per drag frame is a
-                // machine-gun.
-                onChangeEnd: enabled
-                    ? (_) => SoundService.instance.play(HollowSound.joinVoice)
-                    : null,
-            ),
-          ),
-          SizedBox(
-            width: 32,
-            child: Text(
-              '${(value * 100).round()}%',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
-              ),
-              textAlign: TextAlign.right,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMicrophoneRow(HollowTheme hollow, String? selectedInput) {
-    return _buildDeviceRow(
-      hollow: hollow,
-      icon: LucideIcons.mic,
-      label: 'Microphone',
-      items: _audioInputs
-          .map((d) => DropdownMenuItem<String?>(
-                value: d.id,
-                child: Text(
-                  d.name.isNotEmpty
-                      ? d.name
-                      : 'Device ${d.id.substring(0, 8.clamp(0, d.id.length))}',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ))
-          .toList(),
-      selectedValue: _resolveInputValue(selectedInput),
-      onChanged: (deviceId) {
-        if (deviceId != null) {
-          ref.read(audioInputDeviceProvider.notifier).setDevice(deviceId);
-        }
-      },
-    );
-  }
-
-  Widget _buildSpeakerRow(HollowTheme hollow) {
-    final selectedOutput = ref.watch(audioOutputDeviceProvider).valueOrNull;
-    return _buildDeviceRow(
-      hollow: hollow,
-      icon: LucideIcons.volume2,
-      label: 'Speaker',
-      items: _audioOutputs
-          .map((d) => DropdownMenuItem<String?>(
-                value: d.id,
-                child: Text(
-                  d.name.isNotEmpty
-                      ? d.name
-                      : 'Device ${d.id.substring(0, 8.clamp(0, d.id.length))}',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ))
-          .toList(),
-      selectedValue: _resolveOutputValue(selectedOutput),
-      onChanged: (deviceId) {
-        if (deviceId != null) {
-          ref.read(audioOutputDeviceProvider.notifier).setDevice(deviceId);
-          webrtc.Helper.selectAudioOutput(deviceId).catchError((e) {
-            debugPrint('[HOLLOW] selectAudioOutput failed: $e');
-          });
-        }
-      },
-    );
-  }
-
-  Widget _buildCameraRow(HollowTheme hollow) {
-    final selectedCamera = ref.watch(cameraDeviceProvider).valueOrNull;
-    return _buildDeviceRow(
-      hollow: hollow,
-      icon: LucideIcons.camera,
-      label: 'Camera',
-      items: _cameras
-          .map((d) => DropdownMenuItem<String?>(
-                value: d.deviceId,
-                child: Text(
-                  d.label.isNotEmpty
-                      ? d.label
-                      : 'Camera ${d.deviceId.substring(0, d.deviceId.length.clamp(0, 8))}',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ))
-          .toList(),
-      selectedValue: _resolveCameraValue(selectedCamera),
-      onChanged: (deviceId) {
-        if (deviceId != null) {
-          ref.read(cameraDeviceProvider.notifier).setDevice(deviceId);
-        }
-      },
-    );
-  }
-
-  Widget _buildQualityRow(HollowTheme hollow) {
-    return _buildDeviceRow(
-      hollow: hollow,
-      icon: LucideIcons.sliders,
-      label: 'Audio quality',
-      items: AudioQualityPreset.values
-          .map((p) => DropdownMenuItem<String?>(
-                value: p.name,
-                child: Text(
-                  '${p.label} (${p.bitrate ~/ 1000} kbps${p.stereo ? ' stereo' : ' mono'})',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ))
-          .toList(),
-      selectedValue: ref.watch(audioQualityProvider).valueOrNull?.name ??
-          AudioQualityPreset.voice.name,
-      onChanged: (value) {
-        if (value != null) {
-          final preset = AudioQualityPreset.values.firstWhere(
-            (p) => p.name == value,
-            orElse: () => AudioQualityPreset.voice,
-          );
-          ref.read(audioQualityProvider.notifier).setPreset(preset);
-        }
-      },
-    );
-  }
-
-
-  Widget _buildMicGainSlider(HollowTheme hollow) {
-    final gain = ref.watch(micGainProvider).valueOrNull ?? kMicGainDefault;
-    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
-    final dynMode = ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
-    final locked = enhance && dynMode;
-    return AnimatedOpacity(
-      duration: const Duration(milliseconds: 150),
-      opacity: locked ? 0.4 : 1.0,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 30),
-        child: Row(
-          children: [
-            Icon(LucideIcons.volume1, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Gain',
-              style: HollowTypography.bodySmall.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            Expanded(
-              child: HollowSlider(
-                value: gain.clamp(kMicGainMin, kMicGainMax),
-                min: kMicGainMin,
-                max: kMicGainMax,
-                divisions: 83,
-                onChanged: locked
-                      ? null
-                      : (v) => ref.read(micGainProvider.notifier).setGain(v),
-              ),
-            ),
-            SizedBox(
-              width: 40,
-              child: Text(
-                locked
-                    ? 'Auto'
-                    : '${(gain / kMicGainDisplayUnit * 100).round()}%',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w600,
-                ),
-                textAlign: TextAlign.right,
-              ),
-            ),
+  Widget _buildTalkingSection(bool isPtt) {
+    final pttBind = ref.watch(pttKeybindProvider).valueOrNull ?? 'ctrl+space';
+    return SettingsSection(
+      title: 'Talking',
+      children: [
+        SettingsChoiceRow<String>(
+          title: 'Send my voice',
+          subtitle: isPtt
+              ? 'Only while you hold the key'
+              : 'Whenever the mic hears you speak',
+          value: isPtt ? kVoiceInputPtt : kVoiceInputActivity,
+          options: const [
+            (kVoiceInputActivity, 'When I talk'),
+            (kVoiceInputPtt, 'While I hold a key'),
           ],
+          onChanged: (m) =>
+              ref.read(voiceInputModeProvider.notifier).setMode(m),
         ),
-      ),
-    );
-  }
-
-  Widget _buildEnhanceToggle() {
-    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
-    return Padding(
-      padding: const EdgeInsets.only(left: 30),
-      child: SettingsToggleRow(
-        icon: LucideIcons.sparkles,
-        label: 'Voice enhancement',
-        subtitle: 'Studio EQ + compressor for a fuller, louder voice. '
-            'Switches live mid-call.',
-        value: enhance,
-        onChanged: (v) => ref.read(voiceEnhanceProvider.notifier).setEnabled(v),
-      ),
-    );
-  }
-
-  Widget _buildNoiseSuppressAiToggle() {
-    final enabled = ref.watch(noiseSuppressAiProvider).valueOrNull ?? false;
-    return Padding(
-      padding: const EdgeInsets.only(left: 30),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SettingsToggleRow(
-            icon: LucideIcons.brainCircuit,
-            label: 'AI noise suppression',
-            subtitle: 'Removes keyboard, fan and background noise. '
-                'Engages instantly; switches live mid-call.',
-            value: enabled,
-            onChanged: (v) =>
-                ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
-          ),
-          if (enabled) ...[
-            const SizedBox(height: HollowSpacing.xs),
-            _buildNoiseSuppressEngineRow(),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// Advanced engine picker, shown only while AI NS is on. RNNoise is the
-  /// default that runs everywhere; DeepFilterNet3 costs a slow first load and
-  /// roughly 10x the CPU. Switching mid-call swaps the engine with no
-  /// renegotiation.
-  Widget _buildNoiseSuppressEngineRow() {
-    final hollow = HollowTheme.of(context);
-    final engine = ref.watch(noiseSuppressEngineProvider).valueOrNull ??
-        kNoiseSuppressEngineRnnoise;
-    return Padding(
-      padding: const EdgeInsets.only(left: 26),
-      child: Row(
-        children: [
-          Text(
-            'Engine',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.md),
-          HollowChip(
-            label: 'RNNoise',
-            hint: 'light, instant',
-            selected: engine == kNoiseSuppressEngineRnnoise,
-            onTap: () => ref
-                .read(noiseSuppressEngineProvider.notifier)
-                .setEngine(kNoiseSuppressEngineRnnoise),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowChip(
-            label: 'DeepFilterNet3',
-            hint: 'stronger, heavy',
-            selected: engine == kNoiseSuppressEngineDfn3,
-            onTap: () => ref
-                .read(noiseSuppressEngineProvider.notifier)
-                .setEngine(kNoiseSuppressEngineDfn3),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDynamicToggle() {
-    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
-    final dynMode = ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
-    return Padding(
-      padding: const EdgeInsets.only(left: 30),
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 150),
-        opacity: enhance ? 1.0 : 0.4,
-        child: SettingsToggleRow(
-          icon: LucideIcons.audioWaveform,
-          label: 'Dynamic mode',
-          subtitle: 'Continuously balances your mic level for you. '
-              'Any microphone lands at the same natural loudness.',
-          value: dynMode && enhance,
-          onChanged: enhance
-              ? (v) =>
-                  ref.read(voiceEnhanceDynamicProvider.notifier).setEnabled(v)
-              : (_) {},
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStrengthSlider(HollowTheme hollow) {
-    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
-    final dynMode = ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
-    final locked = !enhance || dynMode;
-    final strength = ref.watch(voiceEnhanceStrengthProvider).valueOrNull ??
-        kEnhanceStrengthDefault;
-    return AnimatedOpacity(
-      duration: const Duration(milliseconds: 150),
-      opacity: locked ? 0.4 : 1.0,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 30),
-        child: Row(
-          children: [
-            Icon(LucideIcons.gauge, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Strength',
-              style: HollowTypography.bodySmall.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            Expanded(
-              child: HollowSlider(
-                value:
-                      strength.clamp(kEnhanceStrengthMin, kEnhanceStrengthMax),
-                min: kEnhanceStrengthMin,
-                max: kEnhanceStrengthMax,
-                divisions: 30,
-                onChanged: locked
-                      ? null
-                      : (v) => ref
-                          .read(voiceEnhanceStrengthProvider.notifier)
-                          .setStrength(v),
-              ),
-            ),
-            SizedBox(
-              width: 40,
-              child: Text(
-                enhance && dynMode ? 'Auto' : '${strength.round()}%',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w600,
+        if (isPtt)
+          SettingsRow(
+            title: 'Push-to-talk key',
+            subtitleWidget: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                const Text('Mute and deafen keys live in '),
+                HollowTextLink(
+                  'Shortcuts',
+                  onTap: () => ref
+                      .read(settingsCategoryProvider.notifier)
+                      .state = SettingsCategory.shortcuts,
                 ),
-                textAlign: TextAlign.right,
-              ),
+              ],
             ),
-          ],
-        ),
-      ),
+            trailing: KeybindCaptureField(
+              serialized: pttBind,
+              onChanged: (v) =>
+                  ref.read(pttKeybindProvider.notifier).setBinding(v),
+              semanticLabel: 'Set push-to-talk key',
+            ),
+          ),
+      ],
     );
   }
 
-  Widget _buildMicTestRow(HollowTheme hollow) {
-    if (_micRendering) {
+  /// A device picker on the trailing edge; full width under the title on a
+  /// phone.
+  Widget _deviceControl(bool touch, Widget field, {Widget? before}) {
+    if (touch) {
       return Row(
         children: [
-          Icon(LucideIcons.loaderCircle, size: 14, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Text(
-            'Applying voice processing…',
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
+          if (before != null) ...[
+            before,
+            const SizedBox(width: HollowSpacing.xs),
+          ],
+          Expanded(child: field),
         ],
       );
     }
-    if (_micTestReviewing) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (before != null) ...[
+          before,
+          const SizedBox(width: HollowSpacing.xs),
+        ],
+        SizedBox(width: _kDeviceFieldWidth, child: field),
+      ],
+    );
+  }
+
+  static String _deviceName(String name, String id, String fallback) =>
+      name.isNotEmpty
+          ? name
+          : '$fallback ${id.substring(0, id.length.clamp(0, 8))}';
+
+  Widget _buildMicrophoneRow(bool touch) {
+    final selectedInput = ref.watch(audioInputDeviceProvider).valueOrNull;
+    return SettingsRow(
+      title: 'Microphone',
+      subtitle: _loading
+          ? 'Looking for devices'
+          : _audioInputs.isEmpty
+              ? 'No microphone found'
+              : null,
+      wideTrailing: true,
+      trailing: _deviceControl(
+        touch,
+        _buildDropdown(
+          items: [
+            for (final d in _audioInputs)
+              DropdownMenuItem<String?>(
+                value: d.id,
+                child: Text(
+                  _deviceName(d.name, d.id, 'Device'),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+          selectedValue: _resolveInputValue(selectedInput),
+          onChanged: (deviceId) {
+            if (deviceId != null) {
+              ref.read(audioInputDeviceProvider.notifier).setDevice(deviceId);
+            }
+          },
+        ),
+        before: HollowIconButton(
+          icon: LucideIcons.refreshCw,
+          label: 'Look for devices again',
+          size: touch ? 44 : 32,
+          onPressed: _loading ? null : _reloadDevices,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSpeakerRow(bool touch) {
+    final selectedOutput = ref.watch(audioOutputDeviceProvider).valueOrNull;
+    return SettingsRow(
+      title: 'Speaker',
+      subtitle:
+          !_loading && _audioOutputs.isEmpty ? 'No speaker found' : null,
+      wideTrailing: true,
+      trailing: _deviceControl(
+        touch,
+        _buildDropdown(
+          items: [
+            for (final d in _audioOutputs)
+              DropdownMenuItem<String?>(
+                value: d.id,
+                child: Text(
+                  _deviceName(d.name, d.id, 'Device'),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+          selectedValue: _resolveOutputValue(selectedOutput),
+          onChanged: (deviceId) {
+            if (deviceId != null) {
+              ref.read(audioOutputDeviceProvider.notifier).setDevice(deviceId);
+              webrtc.Helper.selectAudioOutput(deviceId).catchError((e) {
+                debugPrint('[HOLLOW] selectAudioOutput failed: $e');
+              });
+            }
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraRow(bool touch) {
+    final selectedCamera = ref.watch(cameraDeviceProvider).valueOrNull;
+    return SettingsRow(
+      title: 'Camera',
+      wideTrailing: true,
+      trailing: _deviceControl(
+        touch,
+        _buildDropdown(
+          items: [
+            for (final d in _cameras)
+              DropdownMenuItem<String?>(
+                value: d.deviceId,
+                child: Text(
+                  _deviceName(d.label, d.deviceId, 'Camera'),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+          selectedValue: _resolveCameraValue(selectedCamera),
+          onChanged: (deviceId) {
+            if (deviceId != null) {
+              ref.read(cameraDeviceProvider.notifier).setDevice(deviceId);
+            }
+          },
+        ),
+      ),
+    );
+  }
+
+  /// The row stays put; the later steps of the test open under it.
+  Widget _buildMicTestRow() {
+    final idle = !_micTesting && !_micRendering && !_micTestReviewing;
+    return SettingsRow(
+      title: 'Hear yourself',
+      subtitle: 'Record a sentence and play back exactly what others hear',
+      trailing: idle
+          ? HollowButton.outline(
+              onPressed: _startMicTest,
+              compact: true,
+              child: const Text('Test microphone'),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildMicTestPanel() {
+    final hollow = HollowTheme.of(context);
+    final lineStyle =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
+
+    if (_micRendering) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+        child: Row(
+          children: [
+            const HollowSpinner(),
+            const SizedBox(width: HollowSpacing.sm),
+            Text('Applying voice processing', style: lineStyle),
+          ],
+        ),
+      );
+    }
+
+    final String line;
+    final List<Widget> actions;
+    if (_micTesting) {
+      line = 'Recording. Speak a sentence, then stop (10 seconds at most).';
+      actions = [
+        HollowButton.outline(
+          onPressed: _finishMicRecording,
+          compact: true,
+          child: const Text('Stop and review'),
+        ),
+      ];
+    } else {
       Widget playButton(String label, String? path) {
         final active = path != null && _micPlayingPath == path;
         return HollowButton.ghost(
@@ -1352,55 +1031,194 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         );
       }
 
-      return Row(
+      line = 'Processed is what others hear in a call.';
+      actions = [
+        playButton('Play processed', _micProcessedOk ? _micTestRecPath : null),
+        playButton('Play raw', _micTestRawPath),
+        HollowButton.ghost(
+          onPressed: _startMicTest,
+          compact: true,
+          child: const Text('Re-record'),
+        ),
+        HollowButton.ghost(
+          onPressed: () async {
+            await _stopMicTestPlayback();
+            _discardMicTestRecording();
+          },
+          compact: true,
+          child: const Text('Done'),
+        ),
+      ];
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(LucideIcons.play, size: 14, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          playButton(
-              'Play processed', _micProcessedOk ? _micTestRecPath : null),
-          const SizedBox(width: HollowSpacing.sm),
-          playButton('Play raw', _micTestRawPath),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.ghost(
-            onPressed: _startMicTest,
-            compact: true,
-            child: const Text('Re-record'),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.ghost(
-            onPressed: () async {
-              await _stopMicTestPlayback();
-              _discardMicTestRecording();
-            },
-            compact: true,
-            child: const Text('Done'),
+          Text(line, style: lineStyle),
+          const SizedBox(height: HollowSpacing.sm),
+          Wrap(
+            spacing: HollowSpacing.sm,
+            runSpacing: HollowSpacing.sm,
+            children: actions,
           ),
         ],
-      );
+      ),
+    );
+  }
+
+  /// A small volume slider and its readout, for a row whose main control is
+  /// something else.
+  Widget _compactVolume({
+    required bool touch,
+    required String semanticLabel,
+    required double value,
+    required ValueChanged<double>? onChanged,
+    ValueChanged<double>? onChangeStart,
+    ValueChanged<double>? onChangeEnd,
+  }) {
+    final hollow = HollowTheme.of(context);
+    final slider = Semantics(
+      label: semanticLabel,
+      child: HollowSlider(
+        value: value.clamp(0.0, 1.0),
+        onChanged: onChanged,
+        onChangeStart: onChangeStart,
+        onChangeEnd: onChangeEnd,
+      ),
+    );
+    final readout = SizedBox(
+      width: _kCompactReadoutWidth,
+      child: Text(
+        '${(value * 100).round()}%',
+        textAlign: TextAlign.right,
+        style: HollowTypography.monoSmall.copyWith(
+          color: hollow.textSecondary,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
+    if (touch) {
+      return Row(children: [Expanded(child: slider), readout]);
     }
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          _micTesting ? LucideIcons.micOff : LucideIcons.mic,
-          size: 14,
-          color: hollow.textSecondary,
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        HollowButton.ghost(
-          onPressed: _micTesting ? _finishMicRecording : _startMicTest,
-          compact: true,
-          child: Text(_micTesting ? 'Stop & review' : 'Test microphone'),
-        ),
-        if (_micTesting) ...[
-          const SizedBox(width: HollowSpacing.md),
-          Text(
-            'Recording…',
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-        ],
+        SizedBox(width: _kCompactSliderWidth, child: slider),
+        readout,
       ],
+    );
+  }
+
+  Widget _buildRingtoneRow(bool touch) {
+    final ringtonePath = ref.watch(ringtonePathProvider).valueOrNull;
+    final fileName = ringtonePath?.split(RegExp(r'[\\/]')).last;
+    final volume = ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5;
+
+    final buttons = <Widget>[
+      HollowButton.ghost(
+        onPressed: _pickRingtoneFile,
+        compact: true,
+        child: const Text('Change'),
+      ),
+      if (ringtonePath != null) ...[
+        HollowButton.ghost(
+          onPressed: () => _showRingtoneClipEditor(context, ref, ringtonePath),
+          compact: true,
+          child: const Text('Trim'),
+        ),
+        HollowIconButton(
+          icon: LucideIcons.x,
+          label: 'Remove ringtone',
+          size: touch ? 44 : 32,
+          onPressed: () =>
+              ref.read(ringtonePathProvider.notifier).setPath(null),
+        ),
+      ],
+    ];
+    final volumeControl = _compactVolume(
+      touch: touch,
+      semanticLabel: 'Ringtone volume',
+      value: volume,
+      onChangeStart: (v) => _startRingtonePreview(v),
+      onChanged: (v) {
+        ref.read(ringtoneVolumeProvider.notifier).setVolume(v);
+        _ringtonePreview?.setVolume(v);
+      },
+      onChangeEnd: (_) => _stopRingtonePreview(),
+    );
+
+    return SettingsRow(
+      title: 'Ringtone',
+      subtitle: fileName ?? 'Default ringtone',
+      wideTrailing: true,
+      trailing: touch
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Wrap(
+                  spacing: HollowSpacing.sm,
+                  runSpacing: HollowSpacing.sm,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: buttons,
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+                volumeControl,
+              ],
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < buttons.length; i++) ...[
+                  if (i > 0) const SizedBox(width: HollowSpacing.sm),
+                  buttons[i],
+                ],
+                const SizedBox(width: HollowSpacing.lg),
+                volumeControl,
+              ],
+            ),
+    );
+  }
+
+  Widget _buildSoundEffectsRow(bool touch) {
+    final enabled = ref.watch(soundEffectsEnabledProvider);
+    final volume = ref.watch(soundEffectsVolumeProvider);
+    final volumeControl = _compactVolume(
+      touch: touch,
+      semanticLabel: 'Sound effects volume',
+      value: volume,
+      onChanged: enabled
+          ? (v) => ref.read(soundEffectsVolumeProvider.notifier).setVolume(v)
+          : null,
+      // Preview on release only; a sound per drag frame is a machine-gun.
+      onChangeEnd: enabled
+          ? (_) => SoundService.instance.play(HollowSound.joinVoice)
+          : null,
+    );
+    final toggle = HollowToggle(
+      value: enabled,
+      semanticLabel: 'Sound effects',
+      onChanged: (v) {
+        ref.read(soundEffectsEnabledProvider.notifier).setEnabled(v);
+        // Confirm the new setting with the sound it just enabled.
+        if (v) SoundService.instance.play(HollowSound.notification);
+      },
+    );
+    return SettingsRow(
+      title: 'Sound effects',
+      subtitle: 'Joins, leaves, mute and notifications',
+      wideTrailing: true,
+      trailing: Row(
+        mainAxisSize: touch ? MainAxisSize.max : MainAxisSize.min,
+        children: [
+          if (touch) Expanded(child: volumeControl) else volumeControl,
+          const SizedBox(width: HollowSpacing.lg),
+          toggle,
+        ],
+      ),
     );
   }
 
@@ -1429,102 +1247,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
   }
 
-  Widget _buildRingtoneFileRow(HollowTheme hollow) {
-    final ringtonePath = ref.watch(ringtonePathProvider).valueOrNull;
-    final fileName = ringtonePath?.split(RegExp(r'[\\/]')).last;
-
-    return Row(
-      children: [
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.sm,
-              vertical: HollowSpacing.xs + 2,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
-            ),
-            child: Text(
-              fileName ?? 'Default ringtone',
-              style: HollowTypography.caption.copyWith(
-                color: fileName != null
-                    ? hollow.textPrimary
-                    : hollow.textSecondary,
-                fontSize: 12,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        HollowButton.ghost(
-          onPressed: _pickRingtoneFile,
-          compact: true,
-          child: const Text('Browse'),
-        ),
-        if (ringtonePath != null) ...[
-          const SizedBox(width: HollowSpacing.xs),
-          HollowButton.ghost(
-            onPressed: () =>
-                _showRingtoneClipEditor(context, ref, ringtonePath),
-            compact: true,
-            child: const Text('Trim'),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowButton.ghost(
-            onPressed: () {
-              ref.read(ringtonePathProvider.notifier).setPath(null);
-            },
-            compact: true,
-            semanticLabel: 'Remove ringtone',
-            child: Icon(LucideIcons.x, size: 14, color: hollow.textSecondary),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildRingtoneVolumeRow(HollowTheme hollow) {
-    return Row(
-      children: [
-        Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(
-          'Volume',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 11,
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: HollowSlider(
-            value: ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5,
-            onChangeStart: (v) => _startRingtonePreview(v),
-            onChanged: (v) {
-                ref.read(ringtoneVolumeProvider.notifier).setVolume(v);
-                _ringtonePreview?.setVolume(v);
-              },
-            onChangeEnd: (_) => _stopRingtonePreview(),
-          ),
-        ),
-        SizedBox(
-          width: 32,
-          child: Text(
-            '${((ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5) * 100).round()}%',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-            ),
-            textAlign: TextAlign.right,
-          ),
-        ),
-      ],
-    );
-  }
-
   String? _resolveInputValue(String? savedId) {
     if (savedId == null || _audioInputs.isEmpty) return null;
     if (_audioInputs.any((d) => d.id == savedId)) return savedId;
@@ -1545,55 +1267,43 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     return _cameras.first.deviceId;
   }
 
-  Widget _buildDeviceRow({
-    required HollowTheme hollow,
-    required IconData icon,
-    required String label,
+  Widget _buildDropdown({
     required List<DropdownMenuItem<String?>> items,
     required String? selectedValue,
     required void Function(String?) onChanged,
   }) {
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        SizedBox(
-          width: 80,
-          child: Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 12,
-            ),
+    final hollow = HollowTheme.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 32),
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
+      decoration: BoxDecoration(
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String?>(
+          value: selectedValue,
+          isExpanded: true,
+          dropdownColor: hollow.overlay,
+          style: HollowTypography.bodySmall.copyWith(
+            color: hollow.textPrimary,
           ),
+          icon: Icon(LucideIcons.chevronDown,
+              size: 14, color: hollow.textSecondary),
+          items: items,
+          onChanged: onChanged,
         ),
-        Expanded(
-          child: Container(
-            constraints: const BoxConstraints(minHeight: 32),
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
-            ),
-            child: DropdownButtonHideUnderline(
-              child: DropdownButton<String?>(
-                value: selectedValue,
-                isExpanded: true,
-                dropdownColor: hollow.overlay,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 12,
-                ),
-                icon: Icon(LucideIcons.chevronDown,
-                    size: 14, color: hollow.textSecondary),
-                items: items,
-                onChanged: onChanged,
-              ),
-            ),
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
+
+/// What each call quality sends, so the choice is more than a name.
+String _qualityLine(AudioQualityPreset p) => switch (p) {
+      AudioQualityPreset.voice => '96 kbps mono. Clear speech, light on data.',
+      AudioQualityPreset.music =>
+        '128 kbps stereo. For playing music or instruments into a call.',
+      AudioQualityPreset.hifi =>
+        '256 kbps stereo. Close to lossless, uses the most data.',
+    };

@@ -81,11 +81,8 @@ void main() {
         ),
       );
 
-      expect(
-        find.textContaining('A duress code needs password protection'),
-        findsOneWidget,
-      );
-      expect(find.text('Set a duress code'), findsNothing);
+      expect(find.text('Needs a password first'), findsOneWidget);
+      expect(find.text('Set up'), findsNothing);
     });
 
     testWidgets('the unavailable copy names password protection whatever the '
@@ -104,10 +101,7 @@ void main() {
 
       // A silent unlock still re-prompts at an app lock, so there is only one
       // missing piece left to name.
-      expect(
-        find.textContaining('A duress code needs password protection'),
-        findsOneWidget,
-      );
+      expect(find.text('Needs a password first'), findsOneWidget);
     });
 
     testWidgets('a surface that re-unlocks a running app carries all three '
@@ -124,7 +118,7 @@ void main() {
         protectionStatus: protection(hasPassword: true),
       );
 
-      await tester.tap(find.text('Set a duress code'));
+      await tester.tap(find.text('Set up'));
       await tester.pumpAndSettle();
 
       // A duress code on this device alone is legitimate, so all three stay.
@@ -164,10 +158,10 @@ void main() {
         protectionStatus: protection(hasPassword: true),
       );
 
-      expect(find.textContaining('it destroys this device only'), findsOneWidget);
-
-      await tester.tap(find.text('Set a duress code'));
+      await tester.tap(find.text('Set up'));
       await tester.pumpAndSettle();
+
+      expect(find.textContaining('it destroys this device only'), findsOneWidget);
 
       expect(find.text('This device'), findsNothing);
       expect(find.text('This device and unlink it'), findsNothing);
@@ -196,10 +190,13 @@ void main() {
         protectionStatus: protection(hasPassword: true),
       );
 
-      expect(find.text('Duress code set'), findsOneWidget);
-      expect(find.text('Change code'), findsOneWidget);
+      expect(find.text('Duress code'), findsOneWidget);
+      expect(find.text('Change'), findsOneWidget);
       expect(find.text('Remove'), findsOneWidget);
-      expect(find.textContaining('every device'), findsOneWidget);
+      expect(
+        find.text('Deletes your data on every device and tells your friends.'),
+        findsOneWidget,
+      );
     });
   });
 
@@ -208,12 +205,10 @@ void main() {
         (tester) async {
       await pumpCard(tester, const AccountDangerZoneCard());
 
-      expect(find.text('Unlink and destroy this device'), findsOneWidget);
-      expect(find.text('Destroy my identity everywhere'), findsOneWidget);
-      // The Profile tab's Erase owns erasing this device alone.
-      expect(find.text("Destroy this device's data"), findsNothing);
+      expect(find.text('Destroy device'), findsOneWidget);
+      expect(find.text('Destroy identity'), findsOneWidget);
 
-      await tester.tap(find.text('Destroy my identity everywhere'));
+      await tester.tap(find.text('Destroy identity'));
       await tester.pumpAndSettle();
 
       expect(find.text('This device'), findsNothing);
@@ -227,7 +222,7 @@ void main() {
     testWidgets('gates Destroy on the typed word', (tester) async {
       await pumpCard(tester, const AccountDangerZoneCard());
 
-      await tester.tap(find.text('Destroy my identity everywhere'));
+      await tester.tap(find.text('Destroy identity'));
       await tester.pumpAndSettle();
 
       final destroy = find.widgetWithText(HollowButton, 'Destroy');

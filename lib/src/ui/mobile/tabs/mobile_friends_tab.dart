@@ -1,30 +1,30 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
-import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
-import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
-import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileFriendsTab extends ConsumerStatefulWidget {
@@ -55,7 +55,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
   @override
   Widget build(BuildContext context) {
     final friends = ref.watch(friendsProvider);
-    final online = ref.watch(onlineIdentitiesProvider);
     ref.watch(profileProvider);
     final favourites = ref.watch(favouriteFriendsProvider);
     final links = ref.watch(deviceLinkProvider);
@@ -75,6 +74,8 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         outgoing.add(f);
       }
     }
+    incoming.sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
+    outgoing.sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
 
     // Resolved device to master first, so a favourite saved under a device id
     // still matches its collapsed friend row.
@@ -86,31 +87,24 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     bool isFav(String peerId) => favMasters.contains(peerId);
 
     final favFriends = <FriendInfo>[];
-    final onlineFriends = <FriendInfo>[];
-    final offlineFriends = <FriendInfo>[];
+    final otherFriends = <FriendInfo>[];
 
     for (final f in accepted) {
       final name = _resolvedName(f.peerId);
-      if (_searchQuery.isNotEmpty && !name.toLowerCase().contains(_searchQuery)) continue;
-
+      if (_searchQuery.isNotEmpty &&
+          !name.toLowerCase().contains(_searchQuery)) {
+        continue;
+      }
       if (isFav(f.peerId)) {
         favFriends.add(f);
-      } else if (online.contains(f.peerId)) {
-        onlineFriends.add(f);
       } else {
-        offlineFriends.add(f);
+        otherFriends.add(f);
       }
     }
 
     favFriends.sort((a, b) => favRank(a.peerId).compareTo(favRank(b.peerId)));
 
-    int sortByName(FriendInfo a, FriendInfo b) =>
-        _resolvedName(a.peerId)
-            .compareTo(_resolvedName(b.peerId));
-    onlineFriends.sort(sortByName);
-    offlineFriends.sort(sortByName);
-
-    final hasPending = incoming.isNotEmpty || outgoing.isNotEmpty;
+    final showRequests = _searchQuery.isEmpty;
 
     return CustomScrollView(
       slivers: [
@@ -123,77 +117,83 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
               children: [
                 HollowTextField(
                   controller: _searchController,
-                  hintText: 'Search friends...',
+                  hintText: 'Search friends',
                   prefixIcon: const Icon(LucideIcons.search, size: 16),
                   isDense: true,
                 ),
                 const SizedBox(height: HollowSpacing.sm),
                 HollowButton.outline(
-                  onPressed: () => _showAddFriendDialog(context, ref),
+                  onPressed: () => showMobileAddFriendSheet(context),
                   icon: const Icon(LucideIcons.userPlus, size: 16),
                   expand: true,
-                  child: const Text('Add Friend'),
+                  child: const Text('Add friend'),
                 ),
               ],
             ),
           ),
         ),
 
-        if (hasPending && _searchQuery.isEmpty) ...[
-          _sectionHeaderSliver('Requests', incoming.length + outgoing.length),
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, index) {
-                if (index < incoming.length) {
-                  return _PendingRow(peerId: incoming[index].peerId, isIncoming: true);
-                }
-                return _PendingRow(peerId: outgoing[index - incoming.length].peerId, isIncoming: false);
-              },
-              childCount: incoming.length + outgoing.length,
+        if (showRequests && incoming.isNotEmpty) ...[
+          _sectionHeaderSliver('Received', incoming.length),
+          SliverList.builder(
+            itemCount: incoming.length,
+            itemBuilder: (context, index) => _PendingRow(
+              key: ValueKey('in:${incoming[index].peerId}'),
+              request: incoming[index],
+              isIncoming: true,
+            ),
+          ),
+        ],
+
+        if (showRequests && outgoing.isNotEmpty) ...[
+          _sectionHeaderSliver('Sent', outgoing.length),
+          SliverList.builder(
+            itemCount: outgoing.length,
+            itemBuilder: (context, index) => _PendingRow(
+              key: ValueKey('out:${outgoing[index].peerId}'),
+              request: outgoing[index],
+              isIncoming: false,
             ),
           ),
         ],
 
         if (favFriends.isNotEmpty) ...[
           _sectionHeaderSliver('Favourites', favFriends.length),
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, index) => _FriendRow(
-                peerId: favFriends[index].peerId,
-                isFavourite: true,
-              ),
-              childCount: favFriends.length,
+          SliverList.builder(
+            itemCount: favFriends.length,
+            itemBuilder: (context, index) => _FriendRow(
+              key: ValueKey(favFriends[index].peerId),
+              peerId: favFriends[index].peerId,
+              isFavourite: true,
             ),
           ),
         ],
 
-        if (onlineFriends.isNotEmpty) ...[
-          _sectionHeaderSliver('Online', onlineFriends.length),
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, index) => _FriendRow(peerId: onlineFriends[index].peerId),
-              childCount: onlineFriends.length,
+        if (otherFriends.isNotEmpty) ...[
+          _sectionHeaderSliver('All friends', otherFriends.length),
+          SliverList.builder(
+            itemCount: otherFriends.length,
+            itemBuilder: (context, index) => _FriendRow(
+              key: ValueKey(otherFriends[index].peerId),
+              peerId: otherFriends[index].peerId,
             ),
           ),
         ],
 
-        if (offlineFriends.isNotEmpty) ...[
-          _sectionHeaderSliver('Offline', offlineFriends.length),
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, index) => _FriendRow(peerId: offlineFriends[index].peerId),
-              childCount: offlineFriends.length,
-            ),
-          ),
-        ],
-
-        if (accepted.isEmpty && !hasPending)
+        if (accepted.isEmpty && incoming.isEmpty && outgoing.isEmpty)
           const SliverToBoxAdapter(
             child: HollowEmptyState(
               glyph: LucideIcons.users,
               title: 'No friends yet',
-              description: 'Add a friend by their peer ID.',
+              description: 'Add someone by their ID or nickname.',
             ),
+          )
+        else if (accepted.isNotEmpty &&
+            _searchQuery.isNotEmpty &&
+            favFriends.isEmpty &&
+            otherFriends.isEmpty)
+          const SliverToBoxAdapter(
+            child: HollowEmptyState(title: 'No friends match'),
           ),
 
         const SliverPadding(padding: EdgeInsets.only(bottom: HollowSpacing.xl)),
@@ -206,9 +206,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     final profiles = ref.read(profileProvider);
     return nicknames[peerId] ?? displayNameFor(profiles, peerId);
   }
-
-  void _showAddFriendDialog(BuildContext context, WidgetRef ref) =>
-      showMobileAddFriendSheet(context);
 }
 
 /// The phone's add-friend sheet: a peer id or nickname, then the request.
@@ -223,102 +220,79 @@ void showMobileAddFriendSheet(BuildContext context) {
 Widget _sectionHeaderSliver(String title, int count) => SliverToBoxAdapter(
       child: Padding(
         padding: const EdgeInsets.only(
-          left: HollowSpacing.lg, right: HollowSpacing.lg, top: HollowSpacing.sm,
+          left: HollowSpacing.lg, right: HollowSpacing.lg, top: HollowSpacing.md,
         ),
         child: HollowSectionHeader(title, count: '$count', dense: true),
       ),
     );
 
+void _openChat(BuildContext context, WidgetRef ref, String peerId) {
+  ref.read(selectedPeerProvider.notifier).state = peerId;
+  Navigator.of(context, rootNavigator: true).push(
+    hollowMobileRoute(
+      settings: const RouteSettings(name: MobileChatRoute.routeName),
+      builder: (_) => MobileChatRoute(peerId: peerId),
+    ),
+  ).then((_) {
+    // Guarded: a notification tap may have replaced this chat already.
+    if (ref.read(selectedPeerProvider) == peerId) {
+      ref.read(selectedPeerProvider.notifier).state = null;
+    }
+  });
+}
+
 class _FriendRow extends ConsumerWidget {
   final String peerId;
   final bool isFavourite;
 
-  const _FriendRow({required this.peerId, this.isFavourite = false});
+  const _FriendRow({super.key, required this.peerId, this.isFavourite = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
+    final profile = ref.watch(profileProvider.select((p) => p[peerId]));
     final localNicknames = ref.watch(localNicknameProvider);
     final isOnline = identityIsOnline(ref, peerId);
-    final localNick = localNicknames[peerId];
-    final name = localNick ?? displayNameFor(profiles, peerId);
+    final name = localNicknames[peerId] ?? displayNameForPeer(profile, peerId);
+    final status = profile?.status.trim() ?? '';
+    final line = isOnline && status.isNotEmpty
+        ? status
+        : (isOnline ? 'Online' : 'Offline');
 
     return HollowPressable(
-      onTap: () {
-        ref.read(selectedPeerProvider.notifier).state = peerId;
-        Navigator.of(context, rootNavigator: true).push(
-          hollowMobileRoute(
-            settings: const RouteSettings(name: MobileChatRoute.routeName),
-            builder: (_) => MobileChatRoute(peerId: peerId),
-          ),
-        ).then((_) {
-          // Guarded: a notification tap may have replaced this chat already.
-          if (ref.read(selectedPeerProvider) == peerId) {
-            ref.read(selectedPeerProvider.notifier).state = null;
-          }
-        });
-      },
+      onTap: () => _openChat(context, ref, peerId),
       onLongPress: () => _showActions(context, ref),
       subtle: true,
+      semanticButton: false,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.lg, vertical: HollowSpacing.md,
       ),
       child: Row(
         children: [
-          SizedBox(
-            width: 40, height: 40,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                HollowAvatar(peerId: peerId, size: 40),
-                Positioned(
-                  right: 0, bottom: 0,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: hollow.background, shape: BoxShape.circle,
-                    ),
-                    padding: const EdgeInsets.all(1.5),
-                    child: StatusDot(
-                      color: isOnline ? hollow.success : hollow.textSecondary,
-                      size: 10, 
-                      filled: isOnline,
-                      semanticLabel: isOnline ? 'Online' : 'Offline',
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          PresenceAvatar(
+            peerId: peerId,
+            size: 40,
+            online: isOnline,
+            ring: hollow.background,
           ),
           const SizedBox(width: HollowSpacing.md),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    if (isFavourite)
-                      Padding(
-                        padding: const EdgeInsets.only(right: HollowSpacing.xs),
-                        child: Icon(LucideIcons.star, size: 14, color: hollow.warning),
-                      ),
-                    Flexible(
-                      child: Text(name,
-                          style: HollowTypography.body.copyWith(
-                            color: hollow.textPrimary, fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                Text(name,
+                    style: HollowTypography.bodyTouch.copyWith(
+                      color:
+                          isOnline ? hollow.textPrimary : hollow.textSecondary,
                     ),
-                  ],
-                ),
-                Text(isOnline ? 'Online' : 'Offline',
-                    style: HollowTypography.bodySmall.copyWith(
-                      color: isOnline ? hollow.success : hollow.textSecondary,
-                    )),
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                Text(line,
+                    style: HollowTypography.bodySmall
+                        .copyWith(color: hollow.textTertiary),
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
               ],
             ),
           ),
-          Icon(LucideIcons.messageCircle, size: 18, color: hollow.textSecondary),
         ],
       ),
     );
@@ -338,9 +312,9 @@ class _FriendRow extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(name, style: HollowTypography.body.copyWith(
-              color: hollow.textPrimary, fontWeight: FontWeight.w600,
-            )),
+            Text(name,
+                style: HollowTypography.subheading
+                    .copyWith(color: hollow.textPrimary)),
             const SizedBox(height: HollowSpacing.md),
             const HollowDivider(),
 
@@ -349,25 +323,13 @@ class _FriendRow extends ConsumerWidget {
               label: 'Message',
               onTap: () {
                 Navigator.pop(context);
-                ref.read(selectedPeerProvider.notifier).state = peerId;
-                Navigator.of(context, rootNavigator: true).push(
-                  hollowMobileRoute(
-                    settings:
-                        const RouteSettings(name: MobileChatRoute.routeName),
-                    builder: (_) => MobileChatRoute(peerId: peerId),
-                  ),
-                ).then((_) {
-                  // Guarded: a notification tap may have replaced this chat.
-                  if (ref.read(selectedPeerProvider) == peerId) {
-                    ref.read(selectedPeerProvider.notifier).state = null;
-                  }
-                });
+                _openChat(context, ref, peerId);
               },
             ),
 
             _ActionRow(
               icon: LucideIcons.user,
-              label: 'View Profile',
+              label: 'View profile',
               onTap: () {
                 Navigator.pop(context);
                 showMobileProfileSheet(context, peerId: peerId);
@@ -376,7 +338,7 @@ class _FriendRow extends ConsumerWidget {
 
             _ActionRow(
               icon: isFav ? LucideIcons.starOff : LucideIcons.star,
-              label: isFav ? 'Unfavourite' : 'Favourite',
+              label: isFav ? 'Remove from favourites' : 'Add to favourites',
               onTap: () {
                 Navigator.pop(context);
                 ref.read(favouriteFriendsProvider.notifier).toggle(peerId);
@@ -385,7 +347,9 @@ class _FriendRow extends ConsumerWidget {
 
             _ActionRow(
               icon: LucideIcons.tag,
-              label: localNicknames[peerId] != null ? 'Edit Nickname' : 'Set Nickname',
+              label: localNicknames[peerId] != null
+                  ? 'Edit nickname'
+                  : 'Set a nickname',
               onTap: () {
                 Navigator.pop(context);
                 _showNicknameDialog(context, ref);
@@ -396,7 +360,7 @@ class _FriendRow extends ConsumerWidget {
 
             _ActionRow(
               icon: LucideIcons.userMinus,
-              label: 'Remove Friend',
+              label: 'Remove friend',
               color: hollow.error,
               onTap: () {
                 Navigator.pop(context);
@@ -467,8 +431,9 @@ class _FriendRow extends ConsumerWidget {
       BuildContext context, WidgetRef ref, String name) async {
     final confirmed = await showHollowConfirm(
       context: context,
-      title: 'Remove friend',
-      message: 'Remove $name from your friends?',
+      title: 'Remove $name?',
+      message: "You will both drop off each other's friend list. Your "
+          'conversation stays on this device.',
       confirmLabel: 'Remove',
       destructive: true,
     );
@@ -518,120 +483,150 @@ class _ActionRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: c),
+          Icon(icon, size: 20, color: c),
           const SizedBox(width: HollowSpacing.md),
-          Text(label, style: HollowTypography.body.copyWith(color: c)),
+          Text(label, style: HollowTypography.bodyTouch.copyWith(color: c)),
         ],
       ),
     );
   }
 }
 
-class _PendingRow extends ConsumerWidget {
-  final String peerId;
+/// A request waiting on an answer: Decline and Accept when it came to us,
+/// Cancel request when we sent it.
+class _PendingRow extends ConsumerStatefulWidget {
+  final FriendInfo request;
   final bool isIncoming;
 
-  const _PendingRow({required this.peerId, required this.isIncoming});
+  const _PendingRow({
+    super.key,
+    required this.request,
+    required this.isIncoming,
+  });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_PendingRow> createState() => _PendingRowState();
+}
+
+class _PendingRowState extends ConsumerState<_PendingRow> {
+  /// The answer in flight, if any, whose button shows loading.
+  String? _busy;
+
+  Future<void> _answer(String which, Future<void> Function() action,
+      String failure, {String? success}) async {
+    if (_busy != null) return;
+    setState(() => _busy = which);
+    try {
+      await action();
+      if (success != null && mounted) {
+        HollowToast.show(context, success, type: HollowToastType.success);
+      }
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, failure, type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
-    final name = displayNameFor(profiles, peerId);
+    final peerId = widget.request.peerId;
+    // DISPLAY only: a request added by nickname can be keyed under a device id
+    // until the re-key lands. Answers still target the raw id.
+    final displayId = ref.watch(deviceLinkProvider).identityOf(peerId);
+    final profile = ref.watch(profileProvider.select((p) => p[displayId]));
+    ref.watch(localNicknameProvider);
+    final chosen = chosenNameForPeer(profile, displayId);
+    final at = DateTime.fromMillisecondsSinceEpoch(widget.request.requestedAt);
+    final friends = ref.read(friendsProvider.notifier);
+
+    final actions = <Widget>[
+      if (widget.isIncoming) ...[
+        HollowButton.ghost(
+          semanticLabel: 'Decline friend request',
+          loading: _busy == 'decline',
+          onPressed: () => _answer('decline',
+              () => friends.rejectRequest(peerId),
+              'Could not decline request'),
+          child: const Text('Decline'),
+        ),
+        HollowButton.outline(
+          semanticLabel: 'Accept friend request',
+          loading: _busy == 'accept',
+          onPressed: () => _answer('accept',
+              () => friends.acceptRequest(peerId),
+              'Could not accept request',
+              success: 'Friend request accepted'),
+          child: const Text('Accept'),
+        ),
+      ] else
+        HollowButton.ghost(
+          semanticLabel: 'Cancel friend request',
+          loading: _busy == 'cancel',
+          onPressed: () => _answer('cancel',
+              () => friends.rejectRequest(peerId),
+              'Could not cancel request'),
+          child: const Text('Cancel request'),
+        ),
+    ];
+    final info = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(chosen ?? displayId,
+            style: (chosen != null
+                    ? HollowTypography.bodyTouch
+                    : HollowTypography.mono)
+                .copyWith(color: hollow.textPrimary),
+            maxLines: 1, overflow: TextOverflow.ellipsis),
+        Text(
+            widget.isIncoming
+                ? receivedRequestLabel(at)
+                : sentRequestLabel(at),
+            style: HollowTypography.bodySmall
+                .copyWith(color: hollow.textTertiary),
+            maxLines: 1, overflow: TextOverflow.ellipsis),
+      ],
+    );
+    // Larger Text: the buttons cannot share a phone's line with the name, so
+    // they wrap under it.
+    final stacked = MediaQuery.textScalerOf(context).scale(10) > 13;
 
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm,
       ),
       child: Row(
+        crossAxisAlignment:
+            stacked ? CrossAxisAlignment.start : CrossAxisAlignment.center,
         children: [
-          HollowAvatar(peerId: peerId, size: 40),
+          HollowAvatar(peerId: displayId, size: 40),
           const SizedBox(width: HollowSpacing.md),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(name,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary, fontWeight: FontWeight.w500,
-                    ),
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
-                Text(isIncoming ? 'Wants to be friends' : 'Request sent',
-                    style: HollowTypography.bodySmall.copyWith(
-                      color: hollow.textSecondary,
-                    )),
-                // An outgoing request survives both people being offline: it
-                // waits in the recipient's mailbox until their next boot.
-                if (!isIncoming)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      "They'll get this the next time they're online, "
-                      "even if you've gone offline by then.",
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        height: 1.3,
+            child: stacked
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      info,
+                      const SizedBox(height: HollowSpacing.sm),
+                      Wrap(
+                        spacing: HollowSpacing.sm,
+                        runSpacing: HollowSpacing.sm,
+                        children: actions,
                       ),
-                    ),
-                  ),
-              ],
-            ),
+                    ],
+                  )
+                : info,
           ),
-          if (isIncoming) ...[
-            HollowPressable(
-              onTap: () async {
-                try {
-                  await ref.read(friendsProvider.notifier).acceptRequest(peerId);
-                  if (context.mounted) {
-                    HollowToast.show(context, 'Friend request accepted',
-                        type: HollowToastType.success);
-                  }
-                } catch (_) {
-                  if (context.mounted) {
-                    HollowToast.show(context, 'Could not accept request',
-                        type: HollowToastType.error);
-                  }
-                }
-              },
-              semanticLabel: 'Accept friend request',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              child: Icon(LucideIcons.check, size: 20, color: hollow.success),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            HollowPressable(
-              onTap: () async {
-                try {
-                  await ref.read(friendsProvider.notifier).rejectRequest(peerId);
-                } catch (_) {
-                  if (context.mounted) {
-                    HollowToast.show(context, 'Could not decline request',
-                        type: HollowToastType.error);
-                  }
-                }
-              },
-              semanticLabel: 'Decline friend request',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              child: Icon(LucideIcons.x, size: 20, color: hollow.error),
-            ),
-          ] else
-            HollowPressable(
-              onTap: () async {
-                try {
-                  await ref.read(friendsProvider.notifier).rejectRequest(peerId);
-                } catch (_) {
-                  if (context.mounted) {
-                    HollowToast.show(context, 'Could not cancel request',
-                        type: HollowToastType.error);
-                  }
-                }
-              },
-              semanticLabel: 'Cancel friend request',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),
-            ),
+          if (!stacked) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            for (var i = 0; i < actions.length; i++) ...[
+              if (i > 0) const SizedBox(width: HollowSpacing.sm),
+              actions[i],
+            ],
+          ],
         ],
       ),
     );
@@ -647,15 +642,11 @@ class _AddFriendSheet extends ConsumerStatefulWidget {
 
 class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
   final _inputController = TextEditingController();
-  final _nicknameClaimController = TextEditingController();
   bool _sending = false;
-
-  static bool _isPeerId(String input) => input.startsWith('12D3KooW');
 
   @override
   void dispose() {
     _inputController.dispose();
-    _nicknameClaimController.dispose();
     super.dispose();
   }
 
@@ -664,39 +655,27 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     if (input.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
-      if (_isPeerId(input)) {
-        await ref.read(friendsProvider.notifier).sendRequest(input);
-      } else {
-        await network_api.sendFriendRequestByNickname(nickname: input);
-      }
+      await sendFriendRequestTo(ref, input);
       if (mounted) {
         Navigator.of(context).pop();
         HollowToast.show(
           context,
-          _isPeerId(input) ? 'Friend request sent' : 'Looking up nickname...',
+          isPeerIdInput(input) ? 'Friend request sent' : 'Looking up nickname...',
           type: HollowToastType.success,
         );
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Failed to send request',
+        HollowToast.show(context, 'Could not send request',
             type: HollowToastType.error);
         setState(() => _sending = false);
       }
     }
   }
 
-  void _claimNickname() {
-    final nickname = _nicknameClaimController.text.trim().toLowerCase();
-    if (nickname.isEmpty) return;
-    ref.read(temporaryNicknameProvider.notifier).claim(nickname);
-    _nicknameClaimController.clear();
-  }
-
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final nicknameState = ref.watch(temporaryNicknameProvider);
     final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return Padding(
@@ -714,176 +693,35 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Add Friend',
+                  'Add friend',
                   style: HollowTypography.heading
                       .copyWith(color: hollow.textPrimary),
                 ),
-                const SizedBox(height: HollowSpacing.xs),
-                Text(
-                  "Enter your friend's peer ID or temporary nickname.",
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
                 const SizedBox(height: HollowSpacing.lg),
-                TextField(
+                const SettingsFieldLabel(label: 'Peer ID or nickname'),
+                const SizedBox(height: HollowSpacing.sm),
+                HollowTextField(
                   controller: _inputController,
+                  hintText: kAddFriendHint,
                   autofocus: true,
-                  style: HollowTypography.mono.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 12,
-                  ),
-                  decoration: InputDecoration(
-                    hintText: 'Peer ID or nickname...',
-                    hintStyle: HollowTypography.mono.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 12,
-                    ),
-                    filled: true,
-                    fillColor: hollow.elevated,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.md,
-                      vertical: HollowSpacing.md,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      borderSide: BorderSide(color: hollow.border),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      borderSide: BorderSide(color: hollow.border),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      borderSide: BorderSide(color: hollow.accent),
-                    ),
-                  ),
+                  style: HollowTypography.mono
+                      .copyWith(color: hollow.textPrimary),
                   onSubmitted: (_) => _send(),
                 ),
+                const SizedBox(height: HollowSpacing.sm),
+                Text(kAddFriendNote,
+                    style: HollowTypography.bodySmall
+                        .copyWith(color: hollow.textSecondary)),
                 const SizedBox(height: HollowSpacing.md),
                 // Directly under the input, with no competing buttons between.
                 HollowButton.filled(
                   onPressed: _send,
                   loading: _sending,
                   expand: true,
-                  icon: const Icon(LucideIcons.userPlus, size: 16),
-                  child: const Text('Send Friend Request'),
+                  child: const Text('Send request'),
                 ),
-
                 const SizedBox(height: HollowSpacing.xl),
-
-                // Claiming a nickname is the reverse direction, so it is boxed
-                // off from the add-friend flow above.
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(HollowSpacing.md),
-                  decoration: BoxDecoration(
-                    color: hollow.elevated,
-                    borderRadius: BorderRadius.circular(hollow.radiusLg),
-                    border: Border.all(
-                        color: hollow.border.withValues(alpha: 0.6)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(LucideIcons.atSign,
-                              size: 14, color: hollow.textSecondary),
-                          const SizedBox(width: HollowSpacing.xs),
-                          Text(
-                            'Want them to add you instead?',
-                            style: HollowTypography.bodySmall.copyWith(
-                              color: hollow.textPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: HollowSpacing.xs),
-                      Text(
-                        'Claim a temporary nickname and share it. Friends '
-                        'can use it instead of your full peer ID. It resets '
-                        'when you go offline.',
-                        style: HollowTypography.caption
-                            .copyWith(color: hollow.textSecondary),
-                      ),
-                      const SizedBox(height: HollowSpacing.md),
-                      if (nicknameState.status == NicknameStatus.claimed)
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: HollowSpacing.md,
-                                  vertical: HollowSpacing.sm,
-                                ),
-                                decoration: BoxDecoration(
-                                  color:
-                                      hollow.accent.withValues(alpha: 0.12),
-                                  borderRadius:
-                                      BorderRadius.circular(hollow.radiusMd),
-                                  border: Border.all(
-                                      color: hollow.accent
-                                          .withValues(alpha: 0.3)),
-                                ),
-                                child: Text(
-                                  nicknameState.nickname ?? '',
-                                  style: HollowTypography.mono.copyWith(
-                                    color: hollow.accent,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: HollowSpacing.sm),
-                            HollowButton.ghost(
-                              compact: true,
-                              onPressed: () => ref
-                                  .read(temporaryNicknameProvider.notifier)
-                                  .release(),
-                              child: const Text('Release'),
-                            ),
-                          ],
-                        )
-                      else
-                        Row(
-                          children: [
-                            Expanded(
-                              child: HollowTextField(
-                                controller: _nicknameClaimController,
-                                hintText: '3-20 chars...',
-                                style: HollowTypography.mono.copyWith(
-                                  color: hollow.textPrimary,
-                                  fontSize: 12,
-                                ),
-                                onSubmitted: (_) => _claimNickname(),
-                              ),
-                            ),
-                            const SizedBox(width: HollowSpacing.sm),
-                            HollowButton.outline(
-                              onPressed: _claimNickname,
-                              loading: nicknameState.status ==
-                                  NicknameStatus.claiming,
-                              child: const Text('Claim'),
-                            ),
-                          ],
-                        ),
-                      if (nicknameState.status == NicknameStatus.failed &&
-                          nicknameState.error != null) ...[
-                        const SizedBox(height: HollowSpacing.sm),
-                        Text(
-                          nicknameState.error == 'taken'
-                              ? 'That nickname is already taken'
-                              : nicknameState.error == 'invalid'
-                                  ? 'Nickname must be 3-20 chars: lowercase letters, numbers, underscores'
-                                  : 'Failed to claim nickname',
-                          style: HollowTypography.caption
-                              .copyWith(color: hollow.error),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+                const HowOthersAddYou(),
               ],
             ),
           ),

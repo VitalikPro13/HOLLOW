@@ -1,720 +1,89 @@
-# UserSettingsDialog — Application Settings
-
-Source: `lib/src/ui/dialogs/user_settings_dialog.dart` (~740-line shell) + per-category sections in `lib/src/ui/settings/`
-
-**SPLIT 2026-07-15 (Sonar epic close):** the former 6,406-line monolith is now 19 files. The dialog file keeps `showUserSettingsDialog` (toggle), the `_SettingsCategory` enum + search metadata, the rail/search shell, and the dialog-scoped state that must survive category switches (profile edit state, relay selection + Apply & Restart). Category bodies are imported widgets: `profile_section.dart`, `appearance_section.dart`, `accessibility_section.dart`, `network_section.dart`, `storage_settings_cards.dart`, `audio_section.dart`, `shortcuts_section.dart`, `security_section.dart` (incl. `askPassphraseDialog`), `devices_section.dart`, `backup_section.dart`, `updates_section.dart`, `about_section.dart`. Shared with mobile (`mobile_settings_tab.dart` adopted them, −990 lines): `settings_shared.dart` (SettingsCard/SettingsFieldLabel/ToggleRow/TriStateSegment/LabeledSlider/AccentHue widgets/shortenPeerId), `verify_proof_section.dart`, `device_management_shared.dart`, `blocked_users_shared.dart`, `about_shared.dart`, plus `components/selector_pill.dart`. Everything below describes behavior, which is unchanged — section names map 1:1 to the new files.
-
-Formerly the largest UI file in the project. **Redesigned 2026-06-21** from a fixed 680×540 dialog with 5 lopsided tabs into a responsive (~920×680, 90% of window) dialog with a **searchable side rail of 10 focused categories** and **card-based content**. Opened via `showUserSettingsDialog()`, which acts as a toggle (re-calling while open closes the dialog).
-
-**Auto-save model (the key behavioral change):** the old global Save/Cancel footer is GONE. Every setting now applies immediately on change (most already did — accent, background, image quality, audio devices, and all of Security were always immediate; the redesign converted the remaining 8 deferred toggles to match). **Profile is the one exception** — it keeps its own explicit "Save Profile" button (text fields + cropped images benefit from a single commit); the button is disabled and reads "Saved" until an edit dirties it. There is no accent-revert-on-cancel anymore (accent persists live, consistent with everything else).
-
----
-
-## Entry Point and Toggle Behavior
-
-`showUserSettingsDialog(BuildContext context, {bool openSystemTab, bool openUpdatesTab, bool toggle = true})` is the public entry — no `WidgetRef` since issue #50 (reads via `ProviderScope.containerOf(context)`, so the tray menu can call it with the `hollowNavigatorKey` context). A module-level `bool _settingsDialogOpen` tracks whether the dialog is currently showing. If already open, calling this function pops the existing dialog (toggle behavior); `toggle: false` (tray path) makes it a no-op instead. On open, it reads the current profile (display name, status, aboutMe) from `profileProvider` and creates `TextEditingController`s for each. The `initialTab` parameter deep-links: `openUpdatesTab`→Updates, `openSystemTab`→Appearance (the old "System" tab's first split-off), else Profile.
-
-Helper: `_bannerColorFromId(String id)` generates a deterministic HSL color from a peer ID's hash code, shifted 40 degrees from the avatar hue, used as fallback banner gradient.
-
----
-
-## Category Navigation System
-
-`enum _SettingsCategory { profile, appearance, accessibility, notifications, network, storage, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
-
-The old monolithic "System" tab (8 sections) split into **Appearance / Network / Files & Storage / Audio & Video / Shortcuts**; the old "Security" tab (7 sections) split into **Security / Devices / Backup**.
-
-### Files & Storage category (Storage Manager, 2026-06-22)
-
-The former separate `files` + `storage` categories are merged into one `storage` category labelled **"Files & Storage"** (`_storageCards`). Cards: **Usage** (the storage dashboard), **Cache Limits** (auto-download threshold + downloaded-files cap + vault-cache cap sliders), **Media** (image quality), **Data Location**. Mobile twin: a single `_StorageTab` (the old `_FilesTab` was removed) reached from one "Files & Storage" nav tile.
-
-The dashboard widgets live in `lib/src/ui/settings/storage_section.dart` (shared desktop+mobile): `StorageBreakdownView` renders a modern summary header — big "Storage used" total + a segmented proportional usage bar (Downloads = accent, Vault cache = warning, Held shards = success) + a legend, a "⋯" `_CleanupMenu` (ghost icon button opening `showHollowMenu` right-aligned, each row with its size as the trailing text: "Clear all downloads" / "Clear vault cache" / "Clear unused emotes & GIFs"; held shards intentionally absent — read-only, deleting them hurts group availability), then `HollowSectionHeader('By conversation', count:, dense: true)` over a per-conversation/server list of `_ContextRow`s (avatar/channel icon, name, "size · N files", hover-reveal red trash for scoped clear). Backed by `storage_provider.dart` (`storageBreakdownProvider`, warmed by `warmStorageBreakdown` when Settings opens and kept a minute past its last listener so the tab paints its figures on the first frame, + `storageActionsProvider`) and `filesCacheCapProvider` in `settings_provider.dart`. FFI: `get_storage_breakdown`, `clear_all_file_bytes`, `clear_file_bytes_for_context`, `clear_vault_cache`, `evict_files_cache`, `enforce_storage_caps` (api/storage.rs). Caps are ENFORCED after each download via `enforce_storage_caps` in `event_provider`'s `FileCompleted` handler (both sliders were no-op before). Clearing bytes keeps the signed FileHeader rows so messages render as re-downloadable cards.
-
-The 188px-wide left rail has: "Settings" heading, a `HollowTextField` **search filter** (updates `_searchQuery`, filters via `_filteredCategories`), then a scrolling `ListView` of `_TabItem`s for the matching categories. If the active category gets filtered out mid-type, `activeForContent` falls back to the first match so the content area never goes blank. The content area is a `Stack`: `_buildCategoryContent()` + a floating top-right X close button (`Positioned`, no tooltip).
-
-`_buildCategoryContent()` dispatches via a Dart 3 `switch`: Profile → `_buildProfileTab()`; Appearance/Network/Files/Audio/Shortcuts → `_cardList(_xxxCards())` (lists of `SettingsCard`); Security/Devices/Backup/Updates/About → standalone widgets (`_SecurityTab`, `_DevicesCategory`, `_BackupCategory`, `_UpdatesTab`, `_AboutTab`). Content padding is `fromLTRB(xl, 44, xl, xl)` — the 44px top clears the floating X.
-
-### SettingsCard
-The visual unit of the redesign (`settings_shared.dart`). `StatelessWidget` with `title` + `children`. An `elevated`-filled `radiusLg` container (no border, no hairline) whose title renders through the shared `HollowSectionHeader(title)`, written as-is (Title Case, no uppercase, no tracking). Categories are short stacks of these instead of one undifferentiated scroll.
-
-### SettingsFieldLabel
-`settings_shared.dart`. The label above ONE input ("Display name", "Content rating", "Image quality"): `HollowTypography.label` in `textSecondary`, no spacing of its own. A group of fields gets a `HollowSectionHeader` instead.
-
-### TriStateSegment<T>
-`settings_shared.dart`. A `Row` of equal-width `HollowChip`s (`expand: true`, `sm` gaps) for a small set of mutually exclusive options; selection is the chip's `selected` state, never a solid accent fill. Used for Reduce Motion, the Window layout picker, notification levels on narrow rows, and the mobile twins.
-
-### _TabItem
-Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool), `onTap` (VoidCallback). Renders a `HollowPressable` with `subtle: true`, icon + label in a Row. Active state: icon uses `hollow.accent`, label uses `hollow.textPrimary` with `FontWeight.w600`. Inactive: icon and label use `hollow.textSecondary`.
-
----
-
-## Dialog Chrome and Layout
-
-`_UserSettingsContent` is a `ConsumerStatefulWidget`. The dialog container: `ConstrainedBox` sized responsively — `maxWidth = min(screenW*0.9, 920)`, `maxHeight = min(screenH*0.86, 680)`, and the minimums YIELD to those maxima — `minHeight = min(420, dialogHeight)`, `minWidth = min(360, dialogWidth)`. **The `min(...)` is load-bearing:** `BoxConstraints` normalises a min that exceeds the max UP, so the old flat `minHeight: 420` made the dialog taller than a short viewport and centre-clipped its close button off screen — the interface-scale lockout of 2026-07-26 (see `project_display_scaling`). Decorated with `hollow.elevated` at 0.96 alpha, accent-tinted border, 24px blur shadow, `clipBehavior: antiAlias`. Structure is a single `Row`: 188px rail column (header + search + category list) | 1px divider | expanded content `Stack` (cards + floating X). No footer — there is no global Save/Cancel.
-
----
-
-## State Management (Auto-Save)
-
-`_UserSettingsContentState` no longer holds `_pending*`/`_initial*`/`_*Initialized` fields for the toggles — those were removed when the deferred-save model was dropped. Toggle/slider cards read provider values directly (`ref.watch(...).valueOrNull`) and write via the notifier in `onChanged` (e.g. dark mode, dock mode, animations, invisible, minimize-to-tray, auto-download threshold, cache cap). The state class now only tracks: `_activeTab` (`_SettingsCategory`), `_searchController`/`_searchQuery`, relay selection (`_initialRelayDomain`/`_selectedRelay`/`_showAddRelay`/`_newRelayController`), `_profileDirty` (+ the avatar/banner/live-name fields for the Profile preview). `_saveProfile()` commits the profile and clears `_profileDirty`; it does NOT close the dialog.
-
-Reduce Motion (formerly "Disable Animations") moved out of Appearance into the new **Accessibility** category (2026-06-24) as a tri-state Auto/On/Off segmented control (`TriStateSegment`), writing `reduceMotionProvider.notifier.setMode()` → `ReduceMotionController` (which owns both motion statics + ticker; see `services_media_storage.md`). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
-
-**Accessibility category** (`_SettingsCategory.accessibility`, between Appearance and Network; icon `LucideIcons.accessibility`): three cards — **Display Size**, **Motion** (Reduce Motion tri-state, "Auto follows your system setting") and **Transparency** (Reduce Transparency toggle → `reduceTransparencyProvider`, which drops dialog glass blur to sigma 0 via a `reduceTransparencyFlag` ValueNotifier mirror read in `hollow_dialog.dart`, and skips the background-image panel-opacity override in `app.dart`).
-
-**Display Size card** (issue #20, 2026-07-26) holds `InterfaceScaleControl` + `ChatTextScaleControl` from `settings_shared.dart` — ONE implementation shared with the mobile Accessibility tab — plus a footnote naming the OS setting they stack on and the Ctrl +/−/0 shortcuts. Interface Scale is a whole-app zoom (`UiScale`) and commits on slider RELEASE, because it resizes the dialog it lives in and a live commit would move the track out from under the pointer; keyboard adjustment (no drag) commits immediately. Chat Text Size is a text-only multiplier and commits live, with a sample message row underneath rendered at the chosen size. When the window is too small for the chosen zoom the subtitle says what it was limited to (read from `UiScaleInfo`). High Contrast is the only a11y item still unbuilt.
-
-### Legacy (pre-2026-06-21) deferred-save fields — REMOVED:
-
-### Pending state fields:
-- `_pendingDarkMode` (bool) — from `themeModeProvider`
-- `_pendingMinimizeToTray` (bool) — from `minimizeToTrayProvider` (async)
-- `_pendingProxy` (bool) — from `proxyEnabledProvider` (async)
-- `_pendingDockMode` (bool) — from `layoutModeProvider` (async), true = dock, false = classic
-- `_pendingDisableAnimations` (bool) — from `disableAnimationsProvider` (async)
-- `_pendingInvisible` (bool) — from `invisibleModeProvider` (sync)
-- `_pendingAutoDownloadThreshold` (int, MB) — from `autoDownloadThresholdProvider` (async), default 169
-- `_pendingCacheCap` (int, MB) — from `vaultCacheCapProvider` (async), default 1024
-- `_initialAccentHue` (double) — from `accentHueProvider`
-- `_pendingAvatarBytes` / `_pendingBannerBytes` (Uint8List?) — null = no change, empty = clear
-- `_pendingFrameId` (String?) + `_frameChanged` (bool) — avatar frame (issue #54): not-changed = no change, `''` = clear, else the frame ID. Only the ID is pending; an uploaded frame's blob is stored content-addressed by `processAndStoreAvatarFrame` the moment it is picked (an unreferenced blob just gets evicted, so nothing leaks if Save is never pressed)
-- `_avatarChanged` / `_bannerChanged` (bool) — whether user modified the image
-- `_liveDisplayName` / `_liveStatus` (String) — updated on every keystroke via `_onFieldChanged()` listener for live preview
-
-### _onSave() — what happens on Save:
-1. Applies `themeModeProvider` to dark/light based on `_pendingDarkMode`.
-2. If minimize-to-tray changed, calls `minimizeToTrayProvider.notifier.setEnabled()`.
-3. If proxy changed, calls `proxyEnabledProvider.notifier.setEnabled()`.
-4. If layout mode changed, calls `layoutModeProvider.notifier.setMode()`.
-5. If auto-download threshold changed, calls `autoDownloadThresholdProvider.notifier.setThreshold()`.
-6. If cache cap changed, calls `vaultCacheCapProvider.notifier.setCap()`.
-7. If disable-animations changed, calls `disableAnimationsProvider.notifier.setEnabled()`, updates `HollowDurations.animationsDisabled` and `SharedTickers.instance.disabled`. If disabling, pauses shared tickers. If enabling, starts and resumes them.
-8. If invisible mode changed, calls `invisibleModeProvider.notifier.setInvisible()`.
-9. Calls `profileProvider.notifier.updateMyProfile()` with display name, status, aboutMe, and optionally avatar/banner bytes.
-10. Pops the dialog.
-11. If proxy changed, shows `_RestartPrompt` dialog.
-
----
-
-## Profile Tab
-
-Built by `_buildProfileTab(HollowTheme hollow)`. Layout is a `SingleChildScrollView` with a two-column Row at top, then a divider, then a Connections section, the Save button, and (desktop-only, below a divider so it can't read as part of the deferred-commit form) the **Profiles block** (issue #47).
-
-### Profiles block (`ProfileLocationsCard`, profile_locations_card.dart)
-
-Switch/erase separate identities, each in its own data folder. Rows come from the SHARED `listProfileRows(registry)` in `core/hollow_data_dir.dart` (the welcome screen renders the same list, so the two cannot drift): **Default** (OS data root), **Portable folder** (`hollow_data` next to the exe — ALWAYS listed; if missing shows "Not created yet…" and hides Erase; switching creates it), and custom entries from `profiles.json` (Rename/Remove). Icons are chosen per surface, not carried in the row. Header = `HollowSectionHeader('Profiles on This Computer', subtitle: <description>, action: busy spinner)`. Rows have no border; the active row = accent icon + `HollowBadge('Active', kind: accent)`; active detection compares against `runningProfileRoot()` (env override included). Switch = confirm dialog → pin path in registry (even for Default — the pin must beat portable folder auto-detection) → `relaunchApp()`. "Add Profile Folder" (FilePicker) refuses non-empty non-Hollow folders; picking the portable folder redirects to its row. Card copy warns the OS-keychain protection holds ONE identity per computer (fixed Credential Manager slot). Desktop-only — no mobile twin (sandboxed roots; iOS NSE opens one fixed App Group DB path). See memory `project_profile_switcher_issue47`.
-
-**Erase routes.** Running profile → `stashPendingWipe()` + `relaunchApp()` (in-process SQLCipher deletes fail on Windows while the node holds handles); offline profile → recursive delete guarded by an in-use check on that profile's `hollow.lock` (`SingleInstanceLock.heldByAnotherProcess`: a non-blocking kernel-lock probe first, the pid + process-name check only where the filesystem has no locks; a pid equal to our own is never another instance, since every flatpak launch is pid 2, issue #69) and a looks-like-Hollow-data check (`identity.key`/`messages.db`/etc. or empty), keeping `profiles.json` + `*.lock`.
-
-**Erase is gated on the TARGET profile's own protection** (2026-08-21). `_eraseChallengeFor(row)` reads that profile's `identity.key` through two path-taking FFI — `identity_protection_status_at(dataDir)` and `verify_identity_password_at(dataDir, password)` — because `getIdentityProtectionStatus()` only ever describes the RUNNING root, and the profile being erased is by definition not the one this process unlocked. Ladder:
-
-| what the file says | `_EraseChallenge` | what the dialog asks |
-|---|---|---|
-| plaintext, or no identity file | `none` | nothing extra |
-| password flag set | `password` | the password, verified by FFI |
-| keychain-only AND this machine can unwrap it | `none` | nothing (it unlocks silently at launch anyway) |
-| keychain-only and NOT unwrappable here | `name` | type the profile name |
-| status call threw | `name` | type the profile name (fails closed) |
-
-`_EraseProfileDialog` is a StatefulWidget so verification happens INSIDE the dialog: the danger button stays disabled until the field is non-empty, shows "Checking…" during the FFI, and a wrong password sets `errorText` ("Wrong password.") without closing. The Navigator is captured before the await (BuildContext async-gap rule). NOTE for probe scenarios: the dialog TITLE and its confirm button are both "Erase profile" — scope taps to `dialog > type:HollowButton > text:Erase profile`.
-
-### Left Column: Profile Preview Card (200px wide)
-A live-updating miniature profile card showing how the user's profile will appear.
-
-**Banner area** (70px tall): Shows `_pendingBannerBytes` if `_bannerChanged`, else saved `profileProvider` banner. Uses `AnimatedGifImage` for GIF support. Falls back to deterministic gradient from `_bannerColorFromId()`.
-
-**Image rows** are Avatar / Banner / **Frame**, each `_ImageRow(label, icon, onPick, onClear)` — Frame uses `LucideIcons.frame` so it does not read as a third image slot. Frame opens `showAvatarFramePicker` (`ui/dialogs/avatar_frame_picker.dart`): a live 72px preview of the current pick, 12 named built-in colours plus the user's own accent hue, and an Upload button. Selection is a CHECK BADGE with a neutral tile border, never a tinted border — a coloured ring is the frame's own language, and the accent-hued frame would render an accent border invisible. The preview avatar takes `frameId:` so it shows the PENDING pick, not what is saved. Mobile parity: an "Avatar frame" button in the mobile profile tab opening the same picker.
-
-**Avatar** (56px): `HollowAvatar` with 3px surface-colored border. Offset -28px to overlap the banner. Shows pending avatar if changed, else saved avatar. `animate: true` for GIF avatars.
-
-**Display name**: `previewName` = live text if non-empty, else `displayNameFor()` fallback. Styled as 14px bold subheading.
-
-**Status**: Shown only if non-empty. 10px italic caption, textSecondary color.
-
-**About Me**: Shown only if non-empty. "About me" label (`micro`, w600, textSecondary) + 10px caption, max 3 lines.
-
-**Peer ID footer**: Last 8 chars of peer ID in 8px mono, with tiny copy icon, at 0.35 alpha.
-
-### Image Management Rows (below preview card)
-Two `_ImageRow` widgets for Avatar and Banner. Each checks whether an image currently exists (pending or saved) to determine whether the trash/clear button is enabled.
-
-`_ImageRow` — Stateless widget. Shows a pressable label with image icon (accent-colored), a 1px divider line, and a trash icon. Trash uses `AnimatedOpacity` at 0.25 when no image exists, 1.0 when clearable. Trash icon colored `hollow.error` when active.
-
-### Avatar Picking Flow (`_pickAvatar()`) — optimistic staging (2026-07-16)
-1. Opens `FilePicker.platform.pickFiles(type: FileType.image)`.
-2. GIF check: if `.gif`, skips crop. Max 1MB, stores raw bytes directly (bumps `_avatarPickGen` so a late crop-processing result can't clobber it).
-3. Non-GIF: opens `showImageCropDialog()` with 1:1 aspect ratio, "Crop Avatar" title.
-4. **Cropped PNG bytes are staged IMMEDIATELY** (`_pendingAvatarBytes = cropped`, `_avatarChanged = true`, `_avatarBusy = true`) — the preview updates instantly. `network_api.processAvatar(rawBytes:)` (Rust WebP encode) runs in a tracked, never-throwing future (`_avatarProcessing`); success swaps in the processed WebP, failure REVERTS to the captured prior bytes + error toast. Every completion is generation-guarded (`_avatarPickGen`).
-5. While `_avatarBusy`, a `HollowSpinner()` overlays the preview avatar (passed to `ProfileSection` as `avatarProcessing`).
-
-`_clearAvatar()`: Sets `_pendingAvatarBytes` to empty `Uint8List(0)` (the CLEAR sentinel), `_avatarChanged = true`, bumps the generation.
-
-### Banner Picking Flow (`_pickBanner()`)
-Same as avatar but: GIF max 2MB, crop aspect ratio 3.0 (3:1), processes via `network_api.processBanner()`, tracked in `_bannerProcessing`/`_bannerPickGen`/`_bannerBusy`.
-
-### Save (`_saveProfile()`)
-Reentry-guarded by `_savingProfile` (button shows "Saving..." and disables). **AWAITS `_avatarProcessing`/`_bannerProcessing` before reading staged bytes** — a Save tapped mid-processing waits for the final WebP instead of committing half-staged state (on mobile this used to silently drop the new image). Wrapped in try/catch: `updateMyProfile` now RETHROWS (profile_provider), so failure shows an error toast and KEEPS the dirty flags (retryable). Note: the FFI resolves when the command is QUEUED — no end-to-end ack. Mobile `_ProfileTabState` (mobile_settings_tab.dart) mirrors this whole pattern.
-
-### Right Column: Edit Fields
-Three `HollowTextField` inputs stacked vertically:
-- **DISPLAY NAME** — `_FieldLabel` + text field, hintText "Enter a display name", autofocus, maxLength 32.
-- **STATUS** — hintText "What are you up to?", maxLength 48.
-- **ABOUT ME** — hintText "Tell us about yourself", maxLines 3, maxLength 128. `onChanged` calls `setState()` to update the preview card.
-
-### Connections Section
-Separated by 1px divider + spacing. Header: `_FieldLabel(label: 'CONNECTIONS')`.
-
-**_TwitchConnectionRow** — `ConsumerStatefulWidget`. On init, calls `_checkConnection()` which queries `twitch_api.twitchIsConnected()`, `twitchGetUserId()`, `twitchGetUsername()`. Shows:
-- Twitch icon (purple #9146FF) from `SimpleIcons.twitch`.
-- "Twitch" label + status subtitle ("Connected as {username}" or "Connect to join Twitch-verified servers").
-- Connected: ghost "Disconnect" button. Calls `twitch_api.twitchDisconnect()`.
-- Not connected: outline "Connect" button. Calls `_connect()` which opens `showTwitchDeviceCodeDialog()`. On success callback, iterates all servers with `twitch_verification_enabled == 'true'` and sets the Twitch username via `crdt_api.setTwitchUsername()`.
-
----
-
-## Categories split from the old "System" tab
-
-The old `_buildSystemTab()` is gone. Its sections now live in per-category card builders, all returning `List<Widget>` of `SettingsCard`s:
-
-- **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (Window layout picker, + minimize-to-tray and open-profiles-expanded on desktop), Presence card (appear invisible). All apply immediately.
-- **Network** (`_networkCards`): Relay card — relay list (`_buildRelayRow`), add-relay field (`_buildAddRelayField`), and "Apply & Restart" when the selection differs from the active relay.
-- **Files & Storage** (`_filesCards`): Downloads card (`_buildAutoDownloadSlider`), Cache card (`_buildCacheCapSlider`), Data Location card (`_buildDataLocation` + open-folder), Media card (`_ImageQualitySelector`). Sliders read/write providers directly.
-- **Audio & Video** (`_audioCards`): Devices card wrapping `_AudioDeviceSettings`.
-- **Shortcuts** (`ShortcutsSettingsView` in `settings/shortcuts_section.dart`, rebindable 2026-08-04): General / Voice / Chat Input cards where EVERY row is editable in place (`KeybindCaptureField` + reset-to-default arrow when overridden). General + formatting rows edit `appShortcutsProvider` (bare typable triggers refused with a toast — they'd fire while typing); the Voice trio edits the SAME `pttKeybindProvider`/`muteKeybindProvider`/`deafenKeybindProvider` as Audio & Video (one source of truth). Enter/Shift+Enter stay fixed. Stateful with the post-frame provider invalidate (bootstrap-not-build trap).
-
-The sub-widgets (`_AccentColorPicker`, `_BackgroundPicker`, `_AudioDeviceSettings`, `_ImageQualitySelector`, `_ShortcutRow`, `_ToggleRow`) are unchanged and documented below.
-
-### Appearance → Layout card: the Window layout picker (issue #58)
-
-The Layout card's first control is a labelled `TriStateSegment<LayoutMode>` (from `settings_shared.dart`), NOT a toggle: an icon + "Window layout" title with a subtitle that describes the ACTIVE mode ("Dock: friends strip on top, dock bar at the bottom" / "Classic: server strip, channels, chat, members"), then a two-option segment (Dock / Classic). A one-way "Dock Mode" on/off switch gave no hint that what you land in when you turn it off is the familiar Discord/Slack shell.
-
-`onChanged` closes any open split view (`splitViewProvider.notifier.closeSplit()`) BEFORE calling `layoutModeProvider.notifier.setMode(m)` when the target is Classic: Classic has no split view, so leaving a split open would strand the right pane invisibly until the user switched back. Reads `ref.watch(layoutModeProvider)` directly (the provider is a synchronous `Notifier` loaded in `_bootstrap`; see `providers_event_settings.md`).
-
-### Label capitalization (repo-wide convention)
-
-**Sentence case** for anything that reads as an instruction or a value: control labels and their subtitles, shortcut and action names (`AppShortcut` display names: "Open settings", "Toggle member panel", "Zoom interface in"), button labels ("Refresh devices", "Test microphone", "Play processed"), option values and chips ("Voice activity", "Push to talk"), dialog titles, and `FilePicker(dialogTitle:)` ("Select ringtone", "Export backup", "Import server template").
-
-**Title Case is retained** where the text names a container or a proper noun: `SettingsCard(title:)` and other `HollowSectionHeader` titles ("Theme", "Background", "Layout", "Identity Backup", "Link a Device"; a few newer cards such as "Active grants" and "Temporary channel access" read as sentence case), role permission names (`roles_tab.dart` / `mobile_roles_route.dart`: "Manage Channels", "Kick Members"), document titles, and proper nouns and acronyms (Hollow, Twitch, GIF, MLS, TURN).
-
-Rule of thumb when adding UI text: if it is a thing the user acts on, sentence case; if it is the name of a box the things live in, Title Case. Titles are written as they should read: no `toUpperCase()`, no `letterSpacing` eyebrows anywhere.
-
-### (Legacy) System Tab sections — for reference
-
-Built by `_buildSystemTab(HollowTheme hollow)`. A `SingleChildScrollView` with sections: Appearance, Layout, System, Files, Media, Voice & Video, Keyboard Shortcuts.
-
-### APPEARANCE Section
-
-**Dark Mode toggle** — `_ToggleRow` with moon/sun icon (dynamic based on state). Toggles `_pendingDarkMode`.
-
-**Accent Color picker** — `_AccentColorPicker` widget (documented below).
-
-**Background picker** — `_BackgroundPicker` widget (documented below).
-
-### LAYOUT Section
-
-**Dock Mode toggle** — `_ToggleRow` with `LucideIcons.layoutDashboard`. Subtitle: "Bottom bar with friends strip". Toggles `_pendingDockMode`.
-
-(Reduce Motion moved to the Accessibility category — see "State Management" above. No longer in the Appearance Layout section.)
-
-### SYSTEM Section
-
-**Appear Invisible toggle** — `_ToggleRow` with `LucideIcons.eyeOff`. Subtitle: "Show as offline to other users". Toggles `_pendingInvisible`.
-
-**Minimize to Tray toggle** — Only shown on desktop (`Platform.isWindows || Platform.isLinux || Platform.isMacOS`). `_ToggleRow` with `LucideIcons.minimize2`. Toggles `_pendingMinimizeToTray`.
-
-### FILES Section
-
-**Auto-Download Threshold** — Icon + label ("Auto-Download Threshold") + dynamic subtitle showing current MB value. Below: a `Slider` with range 34 MB to 2048 MB (2 GB), 50 divisions. Styled with accent color track and 6px thumb. Range labels "34 MB" and "2 GB" below the slider.
-
-**Cache Size Limit** — Icon `LucideIcons.hardDrive` + label + subtitle showing GB value and explanation ("server file downloads are evicted when cache exceeds this"). Slider range 256 MB to 10240 MB (10 GB), 40 divisions. Label dynamically shows GB when >= 1024. Range labels "256 MB" and "10 GB".
-
-### MEDIA Section
-
-**Image Quality** — `_ImageQualitySelector` widget (documented below).
-
-### VOICE & VIDEO Section
-
-**Audio/Video devices** — `_AudioDeviceSettings` widget (documented below).
-
-### KEYBOARD SHORTCUTS Section
-
-Two sub-sections of `_ShortcutRow` widgets:
-
-**General shortcuts:**
-| Label | Shortcut |
-|---|---|
-| Open Settings | Ctrl + , |
-| Toggle Member Panel | Ctrl + Shift + M |
-| Quick Search | Ctrl + K |
-| Toggle Split View | Ctrl + Shift + \ |
-| Focus Left Pane | Ctrl + 1 |
-| Focus Right Pane | Ctrl + 2 |
-
-**CHAT INPUT sub-section** (9px dimmed label):
-| Label | Shortcut |
-|---|---|
-| Send Message | Enter |
-| New Line | Shift + Enter |
-| Bold | Ctrl + B |
-| Italic | Ctrl + I |
-| Code | Ctrl + E |
-| Strikethrough | Ctrl + Shift + X |
-| Spoiler | Ctrl + Shift + S |
-
-### _ShortcutRow
-Stateless. Label on left (12px body, textSecondary), `HollowKeyCombo` on right.
-
-### HollowKeyCombo
-`components/hollow_key_combo.dart`, shared with `keybind_capture_field.dart`: splits the display string on " + " and renders one mono `HollowBadge` per key with `textTertiary` "+" separators.
-
----
-
-## _AccentColorPicker
-
-`ConsumerStatefulWidget` in the System tab's Appearance section.
-
-**Label row**: Palette icon + "Accent Color" text + 18x18 color preview square showing `accentFromHue(currentHue)`.
-
-**Hue slider**: Full rainbow gradient rendered by `_RainbowSliderTrackShape`. Range 0-359 (hue degrees). 14px track height, 9px white thumb, no overlay. `_RainbowSliderTrackShape` extends `SliderTrackShape`, paints a `LinearGradient` of 13 HSL colors (every 30 degrees) with rounded corners (7px radius). Changes are applied live to `accentHueProvider.notifier.setHue()` (preview updates immediately; reverted on Cancel).
-
-**Preset swatches**: A `Wrap` of `_ColorSwatch` widgets:
-- First: "Default" swatch at `defaultAccentHue`, always shown.
-- Saved presets from `accentPresetsProvider` — each has right-click to remove (`onSecondaryTapUp`).
-- If current hue is not already a preset and differs from default, a "+" button to save current hue as a new preset.
-
-### _ColorSwatch
-22x22 rounded square filled with `accentFromHue(hue)`. Selected state: 2px white border. Non-selected: 1px white at 0.15 alpha. Wrapped in `HollowTooltip` showing label or "Right-click to remove". Click selects, right-click removes.
-
----
-
-## _BackgroundPicker
-
-`ConsumerWidget` in the System tab's Appearance section. Watches `backgroundProvider`.
-
-**Label row**: Image icon + "Background" text + buttons on right. If no background: "Set Image" ghost button. If background exists: "Change" + "Remove" ghost buttons.
-
-**Set/Change flow**: Opens `FilePicker.platform.pickFiles(type: FileType.image)`, reads raw bytes, opens `showImageCropDialog()` with 16:9 aspect ratio ("Crop Background"). Cropped bytes stored via `backgroundProvider.notifier.setImage()`.
-
-**Remove**: Calls `backgroundProvider.notifier.clearImage()`.
-
-**Darken slider** (only shown when background exists): "Darken" label + slider range 0.4 to 1.0 (panel opacity). Accent-colored track, 7px white thumb. Current percentage shown as text. Updates `backgroundProvider.notifier.setOpacity()` live.
-
----
-
-## _ImageQualitySelector
-
-`ConsumerWidget` in the System tab's Media section. Watches `imageQualityProvider`.
-
-Displays "Image Quality" label, a description from `current.description`, and a row of pill chips for each `ImageQuality.values` entry. Each pill is an `AnimatedContainer` (150ms) that toggles between accent-highlighted (selected) and surface (unselected) with border changes. Tapping calls `imageQualityProvider.notifier.setQuality(q)`.
-
-Below the pills: explanatory text "Images and GIFs are converted to WebP to save bandwidth and storage. Receivers can still save them as PNG, JPG, etc."
-
----
-
-## _AudioDeviceSettings
-
-`ConsumerStatefulWidget` in the System tab's Voice & Video section. The most complex sub-widget with device enumeration, mic testing, ringtone management.
-
-### State fields:
-- `_audioInputs` — `List<win32audio.AudioDevice>` (microphones via win32audio)
-- `_audioOutputs` — `List<win32audio.AudioDevice>` (speakers via win32audio)
-- `_cameras` — `List<webrtc.MediaDeviceInfo>` (cameras via flutter_webrtc)
-- `_loading` (bool), `_micTesting`/`_micRendering`/`_micTestReviewing` (mic-test phase bools), `_micRecorder` (rec.AudioRecorder?), `_micPulse` (LinuxPulseCapture?), `_micChunkSub`/`_micPcmBuf` (raw PCM collection), `_micTestRawPath`/`_micTestRecPath` (raw/processed WAVs), `_micProcessedOk`, `_micTestPlayer`/`_micPlayingPath` (A/B playback), `_micTestCapTimer` (10 s cap), `_micTestPeakDb` (log-only), `_ringtonePreview` (AudioPlayer?)
-
-### Device Enumeration (`_loadDevices()`) — per-platform audio backend
-1. **Windows** audio inputs/outputs via `win32audio.Audio.enumDevices(AudioDeviceType.input/output)`.
-2. **macOS** audio via a native CoreAudio method channel `hollowMacAudioDevices` (the pinned WebRTC-SDK returns empty `audioDeviceModule` lists on macOS).
-3. **Linux** audio via a native **libpulse** method channel `hollowLinuxAudioDevices` (fork: `packages/flutter_webrtc/linux/hollow_pulse_devices.{cc,h}`, dispatched in `common/cpp/src/flutter_webrtc.cc` behind `#ifdef __linux__`). Needed because the prebuilt libwebrtc Linux AudioDeviceModule reports **0 devices** on pipewire-pulse systems (falls back to `AudioDeviceDummy`), so `enumerateDevices()` returns no `audioinput`/`audiooutput` entries even though the V4L2 camera path works. Returns `{"input":[{id,name,isDefault}],"output":[...]}` (same shape as macOS). Build dep: `libpulse-dev`.
-4. **Cameras (all platforms)** via `webrtc.navigator.mediaDevices.enumerateDevices()`, filtered to `videoinput`.
-5. Auto-selects system active device (`isActive == true`) if user hasn't chosen one yet for each category.
-
-> Note: on Linux, device SELECTION (`sourceId`) is currently a no-op in the prebuilt ADM (its `RecordingDevices()` returns 0, so the C++ selection loop never runs) — the enum shim fixes the picker UI, but capture uses libwebrtc's default device. A distorted Linux mic is usually a HARDWARE issue first (check `amixer -c N sget Capture` for a maxed/+30dB analog gain clipping the ADC) — not code.
-
-### Resolve functions
-- `_resolveInputValue(String? savedId)` — validates saved ID exists in device list, falls back to active device, then first device.
-- `_resolveOutputValue(String? savedId)` — same pattern for outputs.
-- `_resolveCameraValue(String? savedId)` — validates against camera list, falls back to first camera.
-
-### Device Rows (4 dropdowns)
-All use `_buildDeviceRow()` — a Row with icon (14px), label (80px fixed width), and an `Expanded` dropdown. Dropdown: 32px height, styled with `hollow.elevated` background, border, chevron-down icon.
-
-**Microphone** — `LucideIcons.mic`, items from `_audioInputs`. Value stored via `audioInputDeviceProvider.notifier.setDevice()`.
-
-**Mic Gain** — Slider (83 divisions) indented below the Microphone row, with a caption line. Reads/writes `micGainProvider` (linear multiplier clamped `kMicGainMin`=0.68 / `kMicGainMax`=4.0, key `mic_gain_v2`; **default 1.0 = "50%"**). Display: `(gain / kMicGainDisplayUnit(2.0) * 100)%` → 34%–200%. With Voice Enhancement ON the gain is the chain's input TRIM (2.0 = unity at "100%"); OFF = the legacy flat makeup gain + −3 dBFS limiter. **Dims + disables + shows "Auto" while Dynamic mode is on.** Drives `Helper.setCaptureGain()` (NOT `setVolume`, which only scales remote tracks), live mid-call.
-
-**Voice enhancement** — `_ToggleRow` (`LucideIcons.sparkles`) for `voiceEnhanceProvider` (default ON): the fork's native capture chain (Audition EQ → −18 dBFS 3:1 compressor → −1 dBFS limiter, `FlutterCaptureGainProcessor`), live mid-call A/B. Below it **Dynamic mode** (`LucideIcons.audioWaveform` `_ToggleRow`, `voiceEnhanceDynamicProvider`, default ON) — the auto-level servo: a speech-gated RMS meter converges any mic to the calibrated golden level; locks both sliders to "Auto". Below that **Strength** (`LucideIcons.gauge` slider row, `voiceEnhanceStrengthProvider`, 0–150% default 30%, 30 divisions) = the chain's compressor makeup (+3.6 dB at 30%); dimmed/locked while Dynamic is on or enhancement is off. (The 2026-06-28 adaptive DSP chain crackled and was reverted; this STATIC chain + the frame-rate Dynamic trim servo is what shipped 2026-07-02, device-verified.)
-
-**Speaker** — `LucideIcons.volume2`, items from `_audioOutputs`. On change, also calls `webrtc.Helper.selectAudioOutput(deviceId)` to apply immediately to WebRTC.
-
-**Camera** — `LucideIcons.camera`, only shown if cameras detected. Items from `_cameras`. Stored via `cameraDeviceProvider.notifier.setDevice()`.
-
-**Audio Quality** — `LucideIcons.sliders`. Items from `AudioQualityPreset.values`, each showing label + bitrate + mono/stereo info. Stored via `audioQualityProvider.notifier.setPreset()`.
-
-### Mic Test — record RAW → offline-render → A/B review (FINAL design 2026-08-05, issue #40)
-Phases: idle → recording (`_micTesting`, 10 s cap, "Stop & Review" button + "Recording…" label — deliberately NO level meter and NO "nearly silent" toast; the chunk-RMS levels didn't track reliably in the field, peakDb is `[MIC-TEST]`-log-only) → rendering ("Applying voice processing…") → review (Play Processed / Play Raw / Re-record / Done).
-
-`_startMicTest()` — **no WebRTC session anywhere** (the 2026-07-31 loopback-PC design was replaced after a six-round field saga: the APM ran session-dependent shapes — 16 kHz paths, AEC-reference effects — that never matched real calls; full ledger in memory `project_mic_test_record_review`). Refuses while a call/VC is live (second mic handle). Captures raw PCM16 48 kHz mono via the `record` package's `startStream` (stored input id as `rec.InputDevice`; on failure retries the system default, logged), `LinuxPulseCapture` on Linux (never `record` there — parecord). Chunks buffer in RAM; Dart writes the raw WAV (`_wavFromPcm16`).
-
-`_finishMicRecording()` — stops capture, writes `mic_test_<ms>_raw.wav` under `$hollowDataDir/temp`, then calls `Helper.renderVoiceWav` (`hollowRenderVoiceWav` → `RenderVoiceWavOffline` in `flutter_capture_gain_processor.cc`): a FRESH `FlutterCaptureGainProcessor` instance configured from the user's live settings (gain/enhance/strength/dynamic + AI-NS via a cached per-process offline DFN handle) processes the file in 10 ms frames — bit-exact call DSP, no interference with a live call's process-global chain. Renderer is common/cpp (Win+Linux); **macOS mirror pending** (clean error toast + raw playback until then). Empty take (< ~100 ms of bytes) → device-NAMED "No audio arrived from …" toast. Both WAVs deleted on Done/re-record/dispose.
-
-### Refresh Devices
-`LucideIcons.refreshCw` icon + "Refresh Devices" ghost button. Sets loading and re-runs `_loadDevices()`.
-
-### Ringtone Settings
-**Ringtone selector row**: Bell icon + "Ringtone" label. Below: file name display (styled container; shows **"Default ringtone"** when no custom path — the bundled `assets/sounds/default_ringtone.wav` plays then, issue #39) + "Browse" ghost button + conditional "Trim" and "X" (clear → back to the bundled default) buttons.
-
-Browse: `FilePicker.platform.pickFiles()` with extensions `['mp3', 'wav', 'ogg', 'flac', 'm4a']`. On selection, stores path via `ringtonePathProvider.notifier.setPath()`, resets clip to 0..30s, probes duration with `AudioPlayer` and caches via `ringtoneDurationProvider`.
-
-Trim: Opens `_RingtoneClipEditorDialog(filePath:)` (custom files only — the bundled default is not trimmable).
-
-Clear (X button): Sets ringtone path to null (= use the bundled default).
-
-**Ringtone volume slider**: Volume icon + "Volume" label + slider (0.0-1.0) + percentage text. On `onChangeStart`, starts ringtone preview playback (loop mode). On `onChanged`, updates `ringtoneVolumeProvider` and preview player volume. On `onChangeEnd`, stops preview.
-
-`_startRingtonePreview(double volume)`: Plays the custom file (`DeviceFileSource`) when set and on disk, else the bundled default (`AssetSource('sounds/default_ringtone.wav')`) — loop mode at the given volume.
-
-`_stopRingtonePreview()`: Stops and disposes the preview player.
-
-**Info label**: "Ringtone plays for up to 30 seconds during incoming calls, and while you wait for someone to pick up." (The second clause is literal: the outgoing-call ringback plays the bundled ringtone at this same volume; see `SoundService.startRingback` in `services_media_storage.md`.)
-
-### Sound Effects block (issue #55)
-
-Sits at the bottom of the same card, under the ringtone rows: a `LucideIcons.music` + "Sound Effects" sub-header, then
-
-- **"Play sound effects"** `SettingsToggleRow` (`LucideIcons.volume2`, subtitle "Voice channel joins and leaves, screen shares, mute, notifications") → `soundEffectsEnabledProvider.notifier.setEnabled()`. Turning it ON plays `HollowSound.notification` immediately, confirming the setting with the sound it just enabled.
-- **Volume row** (`_buildSoundEffectsVolumeRow`): icon + "Volume" + `Slider` + percentage, wrapped in `Opacity(0.4)` with `onChanged: null` while the toggle is off. `onChanged` writes `soundEffectsVolumeProvider`; the preview (`HollowSound.joinVoice`) fires on **`onChangeEnd` only**, because a sound per drag frame would be a machine-gun.
-
-Mobile twin: `_SoundEffectsControls` under a `HollowSectionHeader('Sound Effects')` in `mobile_settings_tab.dart`, same providers and same preview-on-release behaviour.
-
----
-
-## RingtoneClipEditorDialog (Shared)
-
-**File:** `lib/src/ui/dialogs/ringtone_clip_editor_dialog.dart` (extracted from `user_settings_dialog.dart`)
-**Entry point:** `showRingtoneClipEditor(BuildContext context, String filePath)` — opens via `showHollowDialog`.
-
-`ConsumerStatefulWidget`. A `HollowDialog` with title "Trim Ringtone" for selecting a clip range within an audio file. Used by both desktop (System tab) and mobile (Settings > System > Ringtone > Trim button).
-
-**Redesigned (2026-06)** to fix two issues: action buttons clipped off-screen on small iPhones, and imprecise trimming on long tracks (a single full-track RangeSlider gave ~0.75s/pixel on a 5-min file). The clipping fix is partly in `HollowDialog` itself (it now caps `maxHeight` to the screen so the Flexible scroll region clamps and the sticky action bar stays visible — benefits every dialog).
-
-### State:
-- `_player` (AudioPlayer?), `_totalDuration` (double, seconds, default 60), `_start` / `_end` (double, seconds), `_currentPos` (double), `_isPlaying` (bool), `_loaded` (bool), `_posSub` (StreamSubscription?), `_bars` (List<double> — deterministic pseudo-waveform seeded from the file path hash; no PCM decode, just visual context for the selection window).
-
-### Initialization (`_loadDuration()`)
-Reads saved `ringtoneStartProvider` and `ringtoneEndProvider` values. Uses cached duration from `ringtoneDurationProvider`. Clamps end to total duration, ensures start < end, enforces the 30s max clip (`_kMaxClip`).
-
-### UI Layout
-- **File info**: File name + total duration formatted as mm:ss.x.
-- **`_WaveformSelector`**: a scrubbable waveform strip (64 bars via `_WaveformPainter`) with two draggable handles for start/end and a draggable middle to pan the whole window. Bars inside the selection are accent-colored, outside are border-colored; a playhead line shows during preview. Replaces the old single full-track `RangeSlider`.
-- **Numeric start/end with ±nudge** (`_NudgeField`): start (left) and end (right) shown as mm:ss.x with − / + buttons (0.5s steps) flanking each — frame-accurate adjustment, reliable on tiny screens. Clip duration shown center (accent).
-- **Move-window row** (`_StepButton`): ±1s / ±5s chevrons to shift the whole selection window, preserving its length (handy on long tracks).
-- **Playback progress** (only during playback): `LinearProgressIndicator` showing position within the selected clip range.
-- Helpers `_setStart`/`_setEnd`/`_nudgeWindow` keep `start < end` and clip ≤ `_kMaxClip` (30s).
-
-### Playback
-`_startPreview()`: Creates AudioPlayer, sets volume from `ringtoneVolumeProvider`, plays file, seeks to `_start`. Listens to `onPositionChanged` — updates `_currentPos`, loops back to start if position exceeds `_end`.
-
-`_stopPreview()`: Cancels subscription, stops and disposes player.
-
-### Actions
-Laid out as a single full-width `Row` (so Preview sits on the LEFT, Cancel/Save on the right — a bare `HollowDialog` actions Wrap right-aligns everything):
-- **Preview/Stop** (ghost button, left): Play/square icon, starts or stops preview.
-- **Cancel** (ghost button, right): Closes dialog without saving.
-- **Save** (filled button, right): Writes `_start` and `_end` to `ringtoneStartProvider` and `ringtoneEndProvider`, stops preview, closes dialog.
-
----
-
-## Security / Devices / Backup categories (split from the old Security tab)
-
-The old `_SecurityTab` (which held App Lock, Device Protection, Recovery Phrase, Account Backup, Your Devices, Multi-Device, Verify a Proof) split into three categories:
-
-- **`_SecurityTab`** (Security category) — now just **App Lock + Device Protection + Recovery Phrase + Verify a Proof** (the proof verifier moved here, at the bottom, per 2026-06-21 feedback). Still a `StatefulWidget`.
-- **`_DevicesCategory`** (`ConsumerStatefulWidget`) — Your Devices card (`_DevicesSection`), Link a Device card (`showDeviceLinkDialog`), Maintenance card (`_resetDeviceLists` → `network_api.resetDeviceLists()`). Each in a `SettingsCard`.
-- **`_BackupCategory`** (`StatefulWidget`) — "Identity Backup" card only (`_includeVault`/`_includeFiles` checkboxes + `_exportBackup`). Renamed from "Account Backup" 2026-07-02: ALL user-facing "account" copy is now "identity" (welcome dialog "Create New Identity", device-list strings, help lessons; Twitch-account references untouched).
-
-The passphrase prompt is now a **top-level** `askPassphraseDialog(context, title, {confirm, buttonLabel})` shared by App Lock and Identity Backup (was a private method on `_SecurityTabState`).
-
-### Security category (`_SecurityTab`)
-
-`SecurityTab`, a `ConsumerStatefulWidget` (`security_section.dart`).
-
-### State:
-- `_revealed` (bool) — whether mnemonic is shown
-- `_loading` (bool) — loading mnemonic from storage
-- `_includeVault` / `_includeFiles` (bool) — backup checkboxes
-- `_mnemonic` (String?) — the 24-word recovery phrase
-- `_error` (String?) — load error
-
-### App Lock Section
-
-**Protection status state**: `_hasPassword`, `_hasOsKeychain`, `_osKeychainAvailable`, `_protectionLoading` — loaded via `identity_api.getIdentityProtectionStatus()` in `initState` (`_loadProtectionStatus`). After that first await it calls `ref.invalidate(identityProtectionProvider)` so the duress card never lags this tab; the invalidate must stay past the await, because `initState` also runs this method and an invalidate there asserts.
-
-**No password set**: Description text about setting password to encrypt identity. "Set Password" filled button calls `_enablePassword()` which opens `_askPassphrase()` dialog then calls `identity_api.enablePasswordProtection(password, requireOnLaunch: true)`.
-
-**Password active** (flags=0x01 or 0x03):
-- Green shieldCheck icon + "Password protection active" status text.
-- **"Ask for password on launch" toggle** (only shown when `_osKeychainAvailable`): `HollowToggle` with value `!_hasOsKeychain`. When ON (default, flags=0x01) — password prompt on every launch. When OFF (flags=0x03) — password-derived key cached in OS keychain via `identity_api.setRequirePasswordOnLaunch()`, app opens silently but identity file is still encrypted.
-- Change Password / Remove Password ghost buttons.
-
-**Methods**: `_enablePassword()`, `_changePassword()`, `_removePassword()`, `_toggleRequireOnLaunch(bool)`.
-
-### DEVICE PROTECTION Section
-
-Only shown when `!_hasPassword && _osKeychainAvailable`. Standalone device-level encryption (flags=0x02) using Windows Credential Manager + DPAPI fallback (or macOS Keychain).
-
-- **Active state**: Green monitor icon + "Device protection active" + "Remove Device Protection" ghost button.
-- **Inactive state**: Description text + "Enable Device Protection" outline button.
-- **Warning**: Orange alertTriangle icon — "Windows may lose device credentials after OS reinstalls or admin password resets. Always keep your 24-word recovery phrase backed up."
-
-**Methods**: `_enableOsKeychain()`, `_disableOsKeychain()`.
-
-**Recovery tip**: Info icon + "Forgot your password? You can recover with your 24-word recovery phrase."
-
-### Recovery Phrase Section
-
-**Loading state**: `HollowSpinner.medium()`.
-
-**Error state**: Red error text "Failed to load mnemonic: {error}".
-
-**No mnemonic stored**: Shows explanation text + a `HollowTextField` (300px wide) with hint "Enter 24-word recovery phrase". On submit: validates exactly 24 space-separated words, calls `storage_api.saveMnemonic()`, shows success toast.
-
-**Mnemonic exists**:
-- **Container**: Full width, padded, background colored. Border changes to warning amber when revealed.
-- **Hidden state**: Center text "Hidden for security" at 0.5 alpha.
-- **Revealed state**: `_buildWordGrid()` — splits mnemonic into words, renders in 4 columns x 6 rows. Each word: `RichText` with number prefix (e.g. "01. ") in dim mono + word in normal mono (11px).
-- **Reveal/Hide button**: Ghost button with eye/eyeOff icon, toggles `_revealed`.
-- **Copy button** (only shown when revealed): Ghost button with copy icon, copies mnemonic to clipboard, shows success toast.
-- **Warning**: AlertTriangle icon (warning color) + "Anyone with these words can access your identity. Never share them." (11px caption, warning color).
-
-### YOUR DEVICES Section (`_DevicesSection` / `_DeviceRow`)
-
-`_DevicesSection` (a `ConsumerStatefulWidget`) lists every device linked to this account, sourced from `myDevicesProvider` (which derives from `deviceLinkProvider` — the Dart mirror of the Rust resolver — inverted against this device's master). `<= 1` device → a "Only this device is linked…" hint. Otherwise active devices render first, with offline/ghost devices behind a "Show all (N offline)" toggle (`_showAll`).
-
-**`initState` refresh (critical):** posts a frame callback that calls `deviceLinkProvider.refresh()` + `deviceLabelProvider.refresh()` + `ref.invalidate(localDevicePeerIdProvider)`. Without this, the list rendered empty/stale after an app restart — `deviceLinkProvider` is only warmed once at event-stream start (races node readiness) and on `DeviceListUpdated` network events, with no live listener while Settings is closed. The data was always persisted in the DB; only the Dart mirror was stale. The mobile twin (`mobile_settings_tab.dart:_DevicesSectionMobile`) does the same.
-
-**`_DeviceRow`** (per device): smartphone icon + label (or shortened peer id) + "This device" badge for the running device + `online`/`offline` subtitle. Action buttons (other devices only, hidden for "This device"):
-- **Sync from this device** (`LucideIcons.refreshCw`, teal when online) → `_syncFrom()`. Confirm dialog ("Pull servers and friends FROM this device onto THIS device… only adds what's missing, nothing removed, messages unaffected; must be online") → FFI `network_api.requestStateSync(sourceDeviceId: device.peerId)`. The tapped device is the SOURCE, this device is the DESTINATION. The source responds (`SiblingStateSyncRequest` handler in swarm.rs) by re-announcing all its servers (drives the destination's join flow → `ServerJoined` → list refresh) + re-sharing its friends. Servers + friends only, not messages. The deterministic escape hatch for when automatic sibling sync didn't converge.
-- **Rename** (`pencil`) → `_rename()` → `deviceLabelProvider.setLabel()` (local label, `device_labels` table).
-- **Remove** (`trash2`, error color) → `_remove()` → confirm → `network_api.revokeDevice()` (Step 7 revocation).
-
-### ACCOUNT BACKUP Section
-
-Description: "Exports your identity, profile, servers, friends, and messages."
-
-**Include vault checkbox**: Custom 18x18 checkbox (accent filled when checked, check icon) + "Include vault shard data" label. `GestureDetector` toggles `_includeVault`.
-
-**Include files checkbox**: Same pattern, toggles `_includeFiles`, label "Include downloaded files".
-
-**Export Backup button**: Filled button with download icon. Flow (`_exportBackup()`):
-1. Opens `_askPassphrase()` dialog with title "Set Backup Passphrase" and confirmation field.
-2. Opens `FilePicker.platform.saveFile()` with filename "hollow-backup.hollow", extension filter `.hollow`.
-3. Calls `storage_api.exportBackup(outputPath, includeVault, includeFiles, passphrase)`.
-4. Shows success toast with file size in MB, or error toast on failure.
-
-### _askPassphrase() dialog
-A `showHollowDialog` with a 360px container. Shows title, passphrase `HollowTextField` (obscured, autofocused), optional confirmation field (when `confirm: true`). Cancel returns null. Encrypt button validates non-empty, matches confirmation if required, returns passphrase string.
-
-### Verify a Proof Section
-
-`_VerifyProofSection` — `StatefulWidget`. Allows pasting or importing a proof JSON to verify Ed25519 message signatures.
-
-**Description text**: "Paste a proof JSON or import a .json file to verify that a message was authentically signed by its sender."
-
-**Input area**: 120px tall `TextField` (monospace 11px, expandable, no border decoration) in a bordered container. Hint shows example JSON structure.
-
-**Buttons**: "Import File" ghost button (opens `.json` file picker) + "Verify" filled button (or "Verifying..." while processing).
-
-**Verification flow (`_verify()`):**
-1. Parses JSON, extracts `message`, `sender`, `context`, `signature` objects.
-2. Validates `version == 2`, `protocol == "hollow-proof-v2"`, `algorithm == "Ed25519"`. **A `version: 1` proof is REFUSED with an explanatory message (0.8.5)** — its canonical payload covered the text only, so a v1 proof whose reply_to / file_id / order_us / link preview were rewritten would reconstruct cleanly and verify.
-3. Validates required fields: peerId, publicKeyB64, signatureB64, canonicalPayload.
-4. Reconstructs the canonical payload from individual fields (`hollow-msg2:{type}:{contextId}:{peerId}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}`, or `hollow-msg3:...:{lp_digest}:{album}:{text}` when the proof's `message.album` is present, refusing a non-UUID album; the one place the grammar is dual-defined) and compares against the embedded `canonical_payload` — catches field tampering.
-5. Calls `network_api.verifyMessageProof()` (Rust FFI Ed25519 verification).
-6. Scrolls result into view via `Scrollable.ensureVisible()`.
-
-**Result display (`_buildResult()`):**
-- **Error**: Red container with shieldAlert icon + error message.
-- **Valid/Invalid**: Accent (valid) or red (invalid) container. Shows a "Verified" or "Invalid signature" badge with shield icon. Below: "Message" (`SettingsFieldLabel`; text, max 300 chars, 4 lines), "Sender" (`SettingsFieldLabel`; selectable mono peer ID), context type + UTC ISO 8601 timestamp.
-
-### _ProofResult
-Data class: `valid` (bool), `error` (String?), `text`, `timestampMs`, `messageId`, `senderPeerId`, `contextType`, `contextId`.
-
----
-
-## Updates Tab (_UpdatesTab)
-
-`ConsumerStatefulWidget`. Auto-checks for updates on first frame (if idle or errored).
-
-### Header
-"Updates" heading + version badge chip showing `v{currentVersion}` in accent color on accent-tinted background.
-
-### Check for Updates button
-Filled button with refreshCw/loader icon. Disabled while checking. Calls `updaterProvider.notifier.checkForUpdates()`.
-
-### Error State
-Red container with alertCircle icon + error message text. Shown when `UpdateStatus.error` and `state.error != null`.
-
-### Download Progress
-Shown during `UpdateStatus.downloading` or `UpdateStatus.extracting`. Styled container with:
-- Header: archive/download icon + "Extracting/Downloading v{version}..." text.
-- Cancel button (X icon) — only during downloading, calls `notifier.cancelDownload()`.
-- `LinearProgressIndicator`: determinate during download (`state.downloadProgress`), indeterminate during extraction.
-- Bytes counter: "X MB / Y MB" using `_formatBytes()` helper (B/KB/MB formatting).
-
-### Ready to Install
-Shown when `UpdateStatus.readyToInstall`. Accent-tinted container with checkCircle icon + "Ready to install v{version}". "Install & Restart" filled button calls `notifier.installAndRestart()`. Subtitle: "Hollow will close and relaunch automatically."
-
-### Version List
-Shown when manifest is loaded. `HollowSectionHeader('Versions')` + list of `_VersionCard` widgets for each version in the manifest.
-
-### _VersionCard
-Stateless. Props: `version` (VersionInfo), `isCurrent`, `isLatest`, `isDownloading`, `onInstall` (nullable).
-
-Container styled with accent tint when current, surface otherwise. Shows:
-- Version number (bold) + "Latest" badge (accent pill) if latest + "Installed" badge (gray pill) if current.
-- Date text.
-- Release notes (max 2 lines, ellipsis).
-- "Install" outline button on right — only shown when `onInstall != null` (not current version, and updater is idle/errored).
-
-### Empty State
-When no manifest and idle: centered text "Press 'Check for Updates' to see available versions."
-
-### Version downgrade capability
-The version list shows ALL versions from the manifest, not just newer ones. Any non-current version has an "Install" button, allowing downgrade to older versions.
-
----
-
-## About Tab (_AboutTab)
-
-`StatelessWidget`. A `SingleChildScrollView` with sections separated by 0.5-alpha dividers.
-
-### App Identity
-Row: 72x72 rounded app logo (`assets/hollow_logo_rounded.png`) + Column with "Hollow" (24px heading), "Beta Version" (accent, bold), "by AnonListen" (caption).
-
-### Contact Section
-- **Email**: Ghost button "feedback@anonlisten.com" with mail icon. Copies to clipboard on tap.
-- **Website**: Ghost button "anonlisten.com" with globe icon. Opens in external browser.
-
-### Follow & Support Section
-Header: `_aboutShimmerLabel('Follow', 'Support', hollow)` — "Follow" and "Support" in `subheading` with a plain `HollowDivider` (in an `Expanded`) between them.
-
-Icon row with the Follow group, a divider, then the Support group:
-
-**Follow icons (left):**
-- YouTube (SimpleIcons.youtube, red) -> youtube.com/@Anon_Listen
-- X (SimpleIcons.x, textPrimary) -> x.com/Anon_Listen
-- Twitch (SimpleIcons.twitch, purple) -> twitch.tv/AnonListen
-- Kick (SimpleIcons.kick) -> kick.com/AnonListen
-
-**Divider** between the groups.
-
-**Support icons (right):**
-- Patreon (SimpleIcons.patreon, textPrimary) -> patreon.com/AnonListen
-- Ko-Fi (SimpleIcons.kofi) -> ko-fi.com/AnonListen
-
-### _BrandIcon
-`StatefulWidget`. Hover state: elevated background (no scale: hover never moves layout), icon color transitions from textSecondary to brand color. Uses `HollowTooltip` for platform name. Click opens URL externally.
-
-### _KickBotIcon
-Variant with custom green color (#C0FF00). Same hover pattern. Uses `assets/kickbot-logo.svg`.
-
-### Legal Section
-- **Privacy Policy**: Ghost button with shield icon. Opens `_showLegalDocument()` with `legal/PRIVACY_POLICY.md`.
-- **Terms of Use**: Ghost button with scroll icon. Opens `_showLegalDocument()` with `legal/TERMS_OF_USE.md`.
-- **Open-Source Licenses**: Ghost button with fileText icon. Opens Flutter's built-in `showLicensePage()` with app name "Hollow", version "Beta", and 48x48 rounded logo.
-
-### _showLegalDocument()
-Top-level function. Loads markdown from asset bundle, strips the `# Title` heading. Opens a 640x520 `showHollowDialog` with:
-- Header: title text + X close button.
-- 1px divider.
-- Body: `Markdown` widget (selectable, custom styled). Links open externally. Custom `MarkdownStyleSheet` with Hollow typography, accent-colored links, 12px block spacing.
-
----
-
-## SettingsToggleRow
-
-Reusable `StatelessWidget` in `settings_shared.dart` for toggle settings. Props: `icon`, `label`, `subtitle` (optional), `value`, `onChanged`. Layout: icon (16px) + Expanded column (label + optional subtitle in 10px caption) + `HollowToggle`.
-
----
-
-## Group and field labels
-
-Group titles inside a category use the shared `HollowSectionHeader` (`dense: true` for a sub-group); a label above a single input uses `SettingsFieldLabel` (see above). There is no private section-label class in the settings files.
-
----
-
-## _RestartPrompt
-
-`ConsumerWidget`. Shown after proxy setting changes. 340px max-width dialog with:
-- Rotate icon (32px, accent).
-- "Restart Required" heading.
-- "The proxy setting requires a restart to take effect." body.
-- "Restart Later" ghost button (closes dialog).
-- "Restart Now" filled button: calls `network_api.notifyShutdown()`, waits 200ms, spawns a new detached process of the current executable, waits 100ms, calls `exit(0)`.
-
----
-
-## TwitchDeviceCodeDialog (Shared)
-
-**File:** `lib/src/ui/dialogs/twitch_device_code_dialog.dart` (extracted from `user_settings_dialog.dart`)
-**Entry point:** `showTwitchDeviceCodeDialog(BuildContext context, {VoidCallback? onSuccess})` — opens via `showHollowDialog`.
-
-`TwitchDeviceCodeDialog` — `StatefulWidget`. State: `_userCode`, `_verificationUri`, `_error`, `_polling`, `_done`. Used by both desktop (Settings > Profile > Twitch > Connect) and mobile (Settings > Profile > Twitch > Connect).
-
-### Flow:
-1. `initState()` calls `_startFlow()`.
-2. `_startFlow()`: Calls `twitch_api.twitchStartDeviceFlow()`, gets user code + verification URI + device code + interval.
-3. Starts `_pollForToken(deviceCode, intervalSecs)`: Calls `twitch_api.twitchPollForToken()` which blocks until authorized or error.
-4. On success: sets `_done = true`, calls `onSuccess` callback, auto-closes after 1200ms via `Navigator.of(context, rootNavigator: true).pop()`.
-5. "Open Twitch" button uses `LaunchMode.externalApplication` to open system browser (not in-app webview).
-
-### UI States:
-- **Loading** (no code yet): 20x20 spinner.
-- **Code displayed**: "Enter this code on Twitch:" + large user code (24px heading, tappable to copy) in accent-bordered container with copy icon. Below: polling spinner + "Waiting for authorization..." if polling.
-- **Success**: Green checkCircle + "Twitch connected!" in accent.
-- **Error**: Red alertCircle + error text.
-
-### Actions:
-- Error: "Close" ghost button.
-- Success: Empty (auto-closes).
-- Normal: "Cancel" ghost button + "Open Twitch" filled button (with Twitch icon, opens verification URI externally).
-
----
-
-## Provider Dependencies Summary
-
-Providers read/watched by this dialog:
-- `identityProvider` — local peer ID
-- `profileProvider` — current profile data (display name, status, aboutMe, avatar, banner)
-- `themeModeProvider` — dark/light mode
-- `minimizeToTrayProvider` — async, tray minimize toggle
-- `proxyEnabledProvider` — async, proxy toggle
-- `layoutModeProvider` — sync, dock/classic layout (loaded in `_bootstrap`, not in `build()`)
-- `reduceMotionProvider` — async, tri-state Auto/On/Off reduce-motion (replaced `disableAnimationsProvider`)
-- `reduceTransparencyProvider` — async, reduce-transparency toggle
-- `invisibleModeProvider` — sync, invisible status
-- `autoDownloadThresholdProvider` — async, file auto-download MB threshold
-- `vaultCacheCapProvider` — async, vault cache MB cap
-- `accentHueProvider` — accent color hue (0-359)
-- `accentPresetsProvider` — saved preset hues
-- `backgroundProvider` — background image + panel opacity
-- `imageQualityProvider` — async, WebP quality tier
-- `audioInputDeviceProvider` — async, saved mic device ID
-- `audioOutputDeviceProvider` — async, saved speaker device ID
-- `cameraDeviceProvider` — async, saved camera device ID
-- `audioQualityProvider` — async, audio quality preset
-- `ringtonePathProvider` — async, ringtone file path
-- `ringtoneVolumeProvider` — async, ringtone volume (0.0-1.0), also drives the outgoing ringback
-- `soundEffectsEnabledProvider` / `soundEffectsVolumeProvider`: sync, UI sound pack toggle + volume
-- `ringtoneStartProvider` / `ringtoneEndProvider` — async, clip range in seconds
-- `ringtoneDurationProvider` — async, cached total duration
-- `updaterProvider` — update state machine (status, manifest, progress, versions)
-- `serverListProvider` — for Twitch badge propagation
-
-## Notifications category (2026-09-11)
-
-`NotificationSettingsView` (`lib/src/ui/settings/notification_settings_section.dart`), the SAME widget the mobile settings tile pushes inside `_SettingsSubPage`. Three cards:
-
-- **System Notifications:** `StatusDot` (filled only when granted) + Allowed/Blocked/Unknown, the platform `detail` sentence, then ghost "Request permission" (only when `canRequest` and not granted), ghost "Open system settings" (only when `canOpenSettings`), filled "Send a test notification". Status comes from `checkNotificationPermission()` in `lib/src/core/services/notification_permission.dart`, loaded on init, re-checked when the window regains focus and after each action. Every button shows a spinner while busy and toasts on failure.
-- **Servers:** one row per `serverListProvider` entry (`ValueKey(serverId)`), level via the public `NotificationLevelSelector` (from `notifications_tab.dart`) on wide rows or `TriStateSegment<NotificationLevel>` under 380 logical px × text scale; a labelled chevron expands the row to `serverChannelsProvider(serverId)` (filtered `meCanSee`) with `ChannelOverrideDropdown` per channel. Channels load only while expanded. Collapsed rows show "N overrides" from a prefix scan of `channelOverrides`.
-- **Muted Direct Messages:** every `dmEnabled == false` key collapsed through `deviceLinkProvider.identityOf`, `HollowAvatar` + display name + ghost "Unmute" that writes every raw key behind the row plus the master.
+# Settings — the place (desktop) and the Settings tab (phone)
+
+Rebuilt 2026-09-24 (design language session 16). The old `UserSettingsDialog`
+(`dialogs/user_settings_dialog.dart`, a 920x680 modal) is **deleted**. Settings is now a
+centre PLACE on desktop and the same page widgets pushed as sub-routes on the phone.
+
+## Opening and closing (desktop)
+
+- `ShellTab.settings` in `core/providers/shell_tab.dart`, flag `settingsTabOpenProvider`
+  (`core/providers/settings_place_provider.dart`), written ONLY by `setShellTab()`.
+- Open with `openSettings(read, {SettingsCategory? category})`; toggle with
+  `toggleSettings(read)`. Callers: the dock gear (`bottom_bar.dart`, which carries the
+  `NavSelectionMark` while open; `_Places` excludes settings from the Places mark/fold),
+  Classic's `UserBar` gear (`selected` while open), Ctrl+, (`hollow_shell.dart`, toggles),
+  the tray (`tray_service.dart`, opens, never toggles), Home's `editProfile` /
+  `openUpdate` (profile / about), the profile card's edit (`profile_card_body.dart`).
+- Unlike the other places it does NOT clear the selection, so closing (gear, Ctrl+,,
+  Escape, the X) returns to the conversation underneath. Every navigation site that calls
+  `setShellTab(null)` (servers, Home, DMs, notification taps) closes it too.
+- `settingsCategoryProvider` remembers the page across closes.
+- `hollow_shell.dart` renders `SettingsPlace` in place of the whole centre row: Dock mode
+  swaps the ClipRect row (sidebar + chat + member panel), Classic keeps the `ServerStrip`
+  and swaps the rest. Split view state survives underneath.
+
+## The place (`settings/settings_place.dart`)
+
+- Rail 240 (`kSettingsRailWidth`) on `surface`: "Settings" title on the rail's box edge
+  (12, where the search box and item fills start), the search field, then the groups from
+  `settings_catalog.dart` (Account: Profile, Security, Devices / App: Appearance,
+  Accessibility, Notifications, Audio & Video, Shortcuts / Connection and data: Network,
+  Files & Storage), a divider, About. `SettingsRailItem`: grey 16 icon, `label` text, 32
+  tall so all eleven fit a 768 px laptop; the active one is an `elevated` fill + textPrimary.
+- Page column: `kSettingsPageMaxWidth` 720, padding 32 left / 48 right, one
+  `SingleChildScrollView` owned by the host. The X (`Close settings (Esc)`) sits top right.
+- **Centred pair (layout C):** a `LayoutBuilder` computes `bleed` so the block from the rail's
+  box edge to the page column's end is centred; the bleed is painted `surface` (the rail
+  colour runs to the window's left edge) and the page's scroll area still reaches the right
+  edge. Below the pair's width bleed is 0 (the pair hugs the left edge). Design language 5.2.
+- Search: `kSettingsSearchIndex` (label, category, keywords) plus category names; results
+  replace the page; tapping one opens its page. Escape clears a search first, then closes.
+- `_UnsavedProfileBar`: floats at the column's foot on every page while
+  `profileDraftProvider.dirty`, ghost Reset + filled Save (loading, toasts).
+
+## The kit (`settings/settings_kit.dart`)
+
+One row for every page, desktop and phone:
+- `SettingsPage(title, intro, children)`: each child is ONE big section; a `HollowDivider`
+  with xl above and below separates each two (Vitalik 2026-09-24: spacing alone read as
+  clutter). Top-level sections drop their own top gap (`_SettingsTopLevel` marker); nested
+  ones keep xl.
+- `SettingsSection(title, subtitle, action, children)`, `SettingsRow(title, subtitle |
+  subtitleWidget, leading, trailing, wideTrailing, enabled, titleTrailing, monoTitle)`,
+  `SettingsSwitchRow`, `SettingsChoiceRow<T>` (chips; its subtitle describes the SELECTED
+  option), `SettingsSliderRow` (slider 200 + mono readout), `SettingsExpandRow` (reveals a
+  list), `SettingsAdvanced` (the one fold per page, open when something inside is
+  non-default), `SettingsNote`.
+- `SettingsDensity(touch: true)`: rows 56, wide controls stack under the title, the page
+  title hides (the phone's route bar names the page).
+- No cards and no row icons. `leading` only for the thing the row IS (avatar, server,
+  device tile). `SettingsCard` survives for Server settings until its own pass.
+
+## Pages (`settings/pages/*_page.dart`, via `settingsPageFor(category)`)
+
+- **Profile** (`pages/profile_page.dart`): Avatar / Banner / Frame rows (48 slot, banner
+  2.5:1), Display name (hint "Enter a display name"), Status, About me, and a 220 live
+  preview card (`ProfilePreviewCard`, above the rows on touch); Presence (Appear invisible);
+  Connections (Twitch); Your art (`OwnedArtPanel`: Wear / Worn, More > Remove from Your art
+  with a confirm, Rust `remove_owned_art` local only); Support marks
+  (`SupportMarksSection`: two toggles, marks, codes waiting). The last two are absent on
+  store builds. All edits live in `profileDraftProvider` (text controllers, staged
+  images with pick generations, frame), which survives leaving the page.
+- **Security**: App lock (desktop password or phone PIN/biometric), Recovery (phrase, backup
+  file export with its options inside the export dialog), Privacy, People (verified,
+  blocked as expand rows), Advanced (check a message proof, a dialog), Danger zone.
+- **Devices**: device rows (`titleTrailing` "This device" badge; others in a More menu),
+  Link another device (the page's filled), Advanced (sync check, reset the device list).
+- **Appearance**, **Accessibility**, **Notifications**, **Audio & Video** (call quality
+  spells out the bitrate), **Shortcuts** (desktop only), **Network** (relay row with Change,
+  Relay health expand, offline delivery, GIFs and previews, Advanced keys/proxies),
+  **Files & Storage** (usage, downloads, image quality, data folder + profiles, Advanced
+  caches), **About** (header, Updates incl. What's new and Earlier versions, contact with
+  hollow.anonlisten.com, legal).
+
+## Phone (`mobile/tabs/mobile_settings_tab.dart`)
+
+The tab lists the identity row, the same groups (Shortcuts omitted), About, then Help and
+the Shop, then the status/news/relay cards. Each row pushes `_SettingsSubPage` hosting
+`SettingsDensity(touch: true, settingsPageFor(c))`. Profile's route bar carries Reset +
+Save for the draft. Phone-only flows live in the shared pages behind platform checks.

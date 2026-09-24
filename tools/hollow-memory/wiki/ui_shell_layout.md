@@ -204,7 +204,7 @@ Active tab: `hollow.accent` + w600. Inactive: `hollow.textSecondary` + w400. Bad
 
 **MobileFriendsTab** (`ConsumerWidget`): Add Friend button, REQUESTS section (incoming with accept/reject, outgoing with cancel), FRIENDS section (sorted online-first, tap → push chat route).
 
-**MobileSettingsTab** (`ConsumerWidget`): Profile avatar + status, peer ID with tap-to-copy, Network status, About section. Uses ASOT-style section dividers.
+**MobileSettingsTab** (`ConsumerWidget`): the identity row, then the desktop rail's groups as rows, each pushing the SHARED page from `settingsPageFor()` under `SettingsDensity(touch: true)`; see `ui_user_settings.md`.
 
 **Chat navigation:** `MobileChatRoute` pushes onto root navigator (`Navigator.of(context, rootNavigator: true).push()`), so the bottom nav disappears. System back pops the route.
 
@@ -278,7 +278,7 @@ Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Regist
 
 | Shortcut (default) | Action |
 |---|---|
-| `Ctrl+,` | Open `UserSettingsDialog` |
+| `Ctrl+,` | Toggle the Settings place (`toggleSettings`) |
 | `Ctrl+Shift+P` | Toggle member panel (moved off `Ctrl+Shift+M` 2026-08-03 — that combo is now the mute-toggle voice hotkey, handled by `HotkeyController` in hotkey_provider.dart, active only while in a call, rebindable in Settings > Audio & Video > Voice or Settings > Shortcuts) |
 | `Ctrl+K` | Toggle channel search |
 | `Ctrl+Shift+\` | Toggle split view (dock mode only) |
@@ -309,7 +309,7 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
    **The Home dashboard is a DOCK surface and stays one.** Classic's centre pane is a blank slate that only ever shows what the left panels select; dropping the dock's Home tab into it makes the two layouts bleed into each other. The consequence is deliberate: everything that lives only on the dashboard, the Network column included, is Dock-only by design, and the answer for a Classic user who wants it is "switch to Dock", not "render the dock's Home tab inside Classic".
 7. `selectedPeerId != null` → `ChatPane` (keyed by peer ID)
 
-**Steps 1–4 (plus the Hollow Shop tab, `ShellTab.shop` / `shopTabOpenProvider`, checked after Conferences since 2026-09-02) are ONE exclusive selection spread across five booleans.** Because the first open tab wins, a navigation site that clears three of them leaves the fourth covering whatever it just selected — that was issue #28 (Conferences over a freshly selected server channel). Switch them ONLY through `setShellTab(ref.read, ShellTab.x)` / `setShellTab(ref.read, null)` (`lib/src/core/providers/shell_tab.dart`), which is the one place that knows the full list; watch `anyShellTabOpenProvider` for "something is covering the chat" (the Home button's selected state). A source-scan guard in `test/shell_tab_test.dart` fails if any file outside `shell_tab.dart` writes a `*TabOpenProvider.notifier`.
+**Steps 1–4 (plus the Hollow Shop tab, `ShellTab.shop` / `shopTabOpenProvider`, checked after Conferences since 2026-09-02, and Settings, `ShellTab.settings` / `settingsTabOpenProvider` since 2026-09-24, which replaces the whole centre row and keeps the selection underneath) are ONE exclusive selection spread across six booleans.** Because the first open tab wins, a navigation site that clears three of them leaves the fourth covering whatever it just selected — that was issue #28 (Conferences over a freshly selected server channel). Switch them ONLY through `setShellTab(ref.read, ShellTab.x)` / `setShellTab(ref.read, null)` (`lib/src/core/providers/shell_tab.dart`), which is the one place that knows the full list; watch `anyShellTabOpenProvider` for "something is covering the chat" (the Home button's selected state). A source-scan guard in `test/shell_tab_test.dart` fails if any file outside `shell_tab.dart` writes a `*TabOpenProvider.notifier`.
 
 ## Channel Sidebar Builder
 

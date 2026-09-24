@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Wire values of the destroy scope. They are persisted and read by Rust, so
@@ -63,8 +64,7 @@ const String _identityDelivery =
 /// signed for the rest of the identity.
 const String _localOnlyNote =
     'On a computer the code is typed at launch, so it destroys this device '
-    "only. The wider scopes live on a phone's App Lock and in the Danger zone "
-    'below.';
+    "only. The wider scopes live on a phone's App Lock and in the Danger zone.";
 
 /// A computer's app lock re-unlocks a running app, so the keys are in memory
 /// and a wider order can be signed there.
@@ -83,12 +83,21 @@ bool get _isMobile => Platform.isAndroid || Platform.isIOS;
 /// The running-app fact in the words of the device it is read on.
 String get _scopeNote => _isMobile ? _mobileScopeNote : _desktopScopeNote;
 
+/// One line under a set code saying what it destroys.
+String _setSummary(identity_api.DuressStatus status) => switch (status.scope) {
+      kDuressScopeDeviceRevoke =>
+        "Deletes this device's data and unlinks it from your identity.",
+      kDuressScopeIdentity => status.notifyFriends
+          ? 'Deletes your data on every device and tells your friends.'
+          : 'Deletes your data on every device.',
+      _ => "Deletes this device's data. Your other devices keep theirs.",
+    };
+
 /// Duress code: a second code typed at the unlock prompt that destroys data
-/// instead of unlocking.
+/// instead of unlocking. Renders as one settings row.
 ///
-/// Availability rides [identityProtectionProvider], the same answer the identity
-/// protection card above reloads, so turning a password on cannot leave this
-/// card stale.
+/// Availability rides [identityProtectionProvider], the same answer the
+/// password row reloads, so turning a password on cannot leave this row stale.
 ///
 /// [wideScopes] is false only where the code can never be typed into a RUNNING
 /// app: nothing can be signed for the rest of the identity at a cold launch.
@@ -103,133 +112,70 @@ class DuressCodeCard extends ConsumerStatefulWidget {
 }
 
 class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
+  static const _title = 'Duress code';
+
   bool _busy = false;
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final status = ref.watch(duressStatusProvider);
 
     return switch (status) {
-      AsyncData(:final value) => _body(hollow, value),
-      AsyncError() => Text(
-          "Couldn't read the duress code setting.",
-          style: HollowTypography.body
-              .copyWith(color: hollow.textSecondary, fontSize: 12),
+      AsyncData(:final value) => _row(value),
+      AsyncError() => const SettingsRow(
+          title: _title,
+          subtitle: "Couldn't read the duress code setting.",
         ),
-      _ => const Padding(
-          padding: EdgeInsets.all(HollowSpacing.sm),
-          child: HollowSpinner(),
-        ),
+      _ => const SettingsRow(title: _title, trailing: HollowSpinner()),
     };
   }
 
-  Widget _body(HollowTheme hollow, identity_api.DuressStatus status) {
+  Widget _row(identity_api.DuressStatus status) {
     if (!status.available) {
-      // The control for the missing piece is in the card directly above.
-      return Text(
-        'A duress code needs password protection. Turn it on above to use one.',
-        style: HollowTypography.body
-            .copyWith(color: hollow.textSecondary, fontSize: 12),
+      // The control for the missing piece is the password row above.
+      return const SettingsRow(
+        title: _title,
+        subtitle: 'Needs a password first',
+        enabled: false,
       );
     }
-
-    // A phone says it in the scope dialog instead, where the choice is made.
-    final scopeNote = widget.wideScopes
-        ? (_isMobile ? null : _desktopScopeNote)
-        : _localOnlyNote;
 
     if (!status.enabled) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'A second code you can type at the unlock prompt instead of your '
-            'password. It never opens Hollow. It deletes your data.',
-            style: HollowTypography.body
-                .copyWith(color: hollow.textSecondary, fontSize: 12),
-          ),
-          if (scopeNote != null) ...[
-            const SizedBox(height: HollowSpacing.xs),
-            Text(
-              scopeNote,
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary, fontSize: 11),
-            ),
-          ],
-          const SizedBox(height: HollowSpacing.md),
-          HollowButton.outline(
-            onPressed: _busy ? null : _setCode,
-            loading: _busy,
-            icon: const Icon(LucideIcons.shieldAlert, size: 16),
-            child: const Text('Set a duress code'),
-          ),
-        ],
+      return SettingsRow(
+        title: _title,
+        subtitle: widget.wideScopes
+            ? 'A second code that deletes your data instead of opening Hollow'
+            : 'A second code that deletes this device\'s data instead of '
+                'opening Hollow',
+        trailing: HollowButton.outline(
+          compact: true,
+          onPressed: _busy ? null : _setCode,
+          loading: _busy,
+          child: const Text('Set up'),
+        ),
       );
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(LucideIcons.shieldAlert, size: 16, color: hollow.warning),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              'Duress code set',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.warning, fontSize: 13),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        Text(
-          _scopeEffect(status.scope),
-          style: HollowTypography.caption
-              .copyWith(color: hollow.textSecondary, fontSize: 11),
-        ),
-        if (status.scope == kDuressScopeIdentity) ...[
-          const SizedBox(height: 2),
-          Text(
-            _identityDelivery,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary, fontSize: 11),
+    return SettingsRow(
+      title: _title,
+      subtitle: _setSummary(status),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HollowButton.ghost(
+            compact: true,
+            onPressed: _busy ? null : _setCode,
+            loading: _busy,
+            child: const Text('Change'),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.ghost(
+            compact: true,
+            onPressed: _busy ? null : _removeCode,
+            child: const Text('Remove'),
           ),
         ],
-        if (scopeNote != null) ...[
-          const SizedBox(height: 2),
-          Text(
-            scopeNote,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary, fontSize: 11),
-          ),
-        ],
-        if (status.scope == kDuressScopeIdentity && status.notifyFriends) ...[
-          const SizedBox(height: 2),
-          Text(
-            'Your friends are told this identity was destroyed.',
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary, fontSize: 11),
-          ),
-        ],
-        const SizedBox(height: HollowSpacing.md),
-        Row(
-          children: [
-            HollowButton.ghost(
-              onPressed: _busy ? null : _setCode,
-              loading: _busy,
-              icon: const Icon(LucideIcons.keyRound, size: 16),
-              child: const Text('Change code'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.ghost(
-              onPressed: _busy ? null : _removeCode,
-              icon: const Icon(LucideIcons.shieldOff, size: 16),
-              child: const Text('Remove'),
-            ),
-          ],
-        ),
-      ],
+      ),
     );
   }
 
@@ -299,8 +245,8 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
   }
 }
 
-/// Account-level destruction. Separate from the per-server danger zone: this
-/// one ends the identity, not a membership.
+/// Account-level destruction, as the Danger zone's two rows. Separate from the
+/// per-server danger zone: this one ends the identity, not a membership.
 class AccountDangerZoneCard extends ConsumerStatefulWidget {
   const AccountDangerZoneCard({super.key});
 
@@ -310,40 +256,40 @@ class AccountDangerZoneCard extends ConsumerStatefulWidget {
 }
 
 class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
-  bool _busy = false;
+  /// The scope whose destroy is running, or null. Both buttons wait on it.
+  String? _busyScope;
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
+    final busy = _busyScope != null;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'Deletes your messages, files and keys. Without your 24-word '
-          'recovery phrase this identity cannot be restored.',
-          style: HollowTypography.body
-              .copyWith(color: hollow.textSecondary, fontSize: 12),
+        SettingsRow(
+          title: 'Destroy this device',
+          subtitle: 'Unlinks this device from your identity and deletes your '
+              'messages, files and keys on it. Your other devices keep theirs.',
+          trailing: HollowButton.outline(
+            danger: true,
+            compact: true,
+            onPressed:
+                busy ? null : () => _destroy(kDuressScopeDeviceRevoke),
+            loading: _busyScope == kDuressScopeDeviceRevoke,
+            child: const Text('Destroy device'),
+          ),
         ),
-        const SizedBox(height: HollowSpacing.md),
-        Wrap(
-          spacing: HollowSpacing.sm,
-          runSpacing: HollowSpacing.sm,
-          children: [
-            HollowButton.outline(
-              danger: true,
-              onPressed: _busy ? null : () => _destroy(kDuressScopeDeviceRevoke),
-              loading: _busy,
-              icon: const Icon(LucideIcons.unlink, size: 16),
-              child: const Text('Unlink and destroy this device'),
-            ),
-            HollowButton.outline(
-              danger: true,
-              onPressed: _busy ? null : () => _destroy(kDuressScopeIdentity),
-              icon: const Icon(LucideIcons.userX, size: 16),
-              child: const Text('Destroy my identity everywhere'),
-            ),
-          ],
+        SettingsRow(
+          title: 'Destroy my identity everywhere',
+          subtitle: 'Every linked device wipes itself. Without the recovery '
+              "phrase it can't come back.",
+          trailing: HollowButton.outline(
+            danger: true,
+            compact: true,
+            onPressed: busy ? null : () => _destroy(kDuressScopeIdentity),
+            loading: _busyScope == kDuressScopeIdentity,
+            child: const Text('Destroy identity'),
+          ),
         ),
       ],
     );
@@ -356,7 +302,7 @@ class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
     );
     if (choice == null || !mounted) return;
 
-    setState(() => _busy = true);
+    setState(() => _busyScope = initialScope);
     try {
       await wipe_api.destroyWithScope(
         scope: choice.scope,
@@ -364,7 +310,7 @@ class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
       );
     } catch (e) {
       if (!mounted) return;
-      setState(() => _busy = false);
+      setState(() => _busyScope = null);
       HollowToast.show(context, 'Could not destroy the data: ${_reason(e)}',
           type: HollowToastType.error);
       return;
@@ -493,12 +439,19 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
               onNotifyFriends: (value) => setState(() => _notifyFriends = value),
               note: _scopeNote,
             )
-          else
+          else ...[
             Text(
               _scopeEffect(kDuressScopeDevice),
               style: HollowTypography.caption
                   .copyWith(color: hollow.textSecondary),
             ),
+            const SizedBox(height: HollowSpacing.xxs),
+            Text(
+              _localOnlyNote,
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.textSecondary),
+            ),
+          ],
           const SizedBox(height: HollowSpacing.lg),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,

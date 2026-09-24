@@ -1,231 +1,290 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_mark.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/version_egg_tap_target.dart';
 import 'package:hollow/src/ui/settings/about_shared.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/settings/updates_section.dart';
 
-/// About category of the desktop Settings dialog: app identity, contact,
-/// follow/support brand links, and legal documents.
+/// Settings > About: which Hollow this is, its updates, how to reach us, and
+/// the legal documents. The header stands in for the page title.
 class AboutTab extends ConsumerWidget {
   const AboutTab({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // One source of truth for the app version, shared with mobile About: the
-    // Rust APP_VERSION, never a string typed in twice.
+    // Rust's APP_VERSION is the one source, shared with mobile About.
     final appVersion = ref.watch(updaterProvider).currentVersion;
+    final secondary =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.only(bottom: HollowSpacing.xl),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Image.asset(
-                  'assets/hollow_logo_rounded.png',
-                  width: 72,
-                  height: 72,
-                ),
+    return SettingsPage(
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 56,
+              height: 56,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusLg),
               ),
-              const SizedBox(width: HollowSpacing.lg),
-              Column(
+              child: HollowMark(size: 28, color: hollow.accentText),
+            ),
+            const SizedBox(width: HollowSpacing.lg),
+            Expanded(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
                     'Hollow',
-                    style: HollowTypography.heading.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 24,
-                    ),
+                    style: HollowTypography.heading
+                        .copyWith(color: hollow.textPrimary),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Beta Version',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.accent,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'by AnonListen',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
+                  // Seven taps here wake the Hollow Shop; shared with mobile.
+                  VersionEggTapTarget(
+                    child: Text.rich(
+                      TextSpan(children: [
+                        TextSpan(
+                          text:
+                              'v${appVersion.isNotEmpty ? appVersion : 'unknown'}',
+                          style: HollowTypography.monoSmall
+                              .copyWith(color: hollow.textSecondary),
+                        ),
+                        const TextSpan(text: ' · beta · by AnonListen'),
+                      ]),
+                      style: secondary,
                     ),
                   ),
                 ],
               ),
-            ],
-          ),
-
-          const SizedBox(height: HollowSpacing.lg),
-
-          VersionEggTapTarget(
-            child: _aboutInfoRow(
-              'Version',
-              appVersion.isNotEmpty ? appVersion : 'unknown',
-              hollow,
             ),
-          ),
-
-          const SizedBox(height: HollowSpacing.md),
-          const HollowDivider(),
-          const SizedBox(height: HollowSpacing.lg),
-
-          const HollowSectionHeader('Contact'),
-          aboutLinkButton(
-            onPressed: () => copySupportEmail(context),
-            icon: LucideIcons.mail,
-            label: 'feedback@anonlisten.com',
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          aboutLinkButton(
-            onPressed: openAnonListenSite,
-            icon: LucideIcons.globe,
-            label: 'anonlisten.com',
-          ),
-
-          const SizedBox(height: HollowSpacing.lg),
-          const HollowDivider(),
-          const SizedBox(height: HollowSpacing.lg),
-
-          _aboutShimmerLabel('Follow', 'Support', hollow),
-          const SizedBox(height: HollowSpacing.md),
-
-          Row(
-            children: [
-              const _BrandIcon(
-                icon: BrandIcons.youtube,
-                color: BrandIconColors.youtube,
-                tooltip: 'YouTube',
-                url: 'https://youtube.com/@Anon_Listen',
+          ],
+        ),
+        const UpdatesTab(),
+        SettingsSection(
+          title: 'Contact',
+          children: [
+            SettingsRow(
+              title: 'Feedback',
+              subtitleWidget: Text(
+                kSupportEmail,
+                style: HollowTypography.monoSmall
+                    .copyWith(color: hollow.textSecondary),
               ),
-              const SizedBox(width: HollowSpacing.sm),
-              _BrandIcon(
-                icon: BrandIcons.x,
-                color: hollow.textPrimary,
-                tooltip: 'X',
-                url: 'https://x.com/Anon_Listen',
+              trailing: HollowButton.ghost(
+                compact: true,
+                onPressed: () => copySupportEmail(context),
+                semanticLabel: 'Copy the feedback email',
+                child: const Text('Copy'),
               ),
-              const SizedBox(width: HollowSpacing.sm),
-              const _BrandIcon(
-                icon: BrandIcons.twitch,
-                color: BrandIconColors.twitch,
-                tooltip: 'Twitch',
-                url: 'https://twitch.tv/AnonListen',
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              const _BrandIcon(
-                icon: BrandIcons.kick,
-                color: BrandIconColors.kick,
-                tooltip: 'Kick',
-                url: 'https://kick.com/AnonListen',
-              ),
-
-              const SizedBox(width: HollowSpacing.sm),
-              const Expanded(child: HollowDivider()),
-              const SizedBox(width: HollowSpacing.sm),
-
-              _BrandIcon(
-                icon: BrandIcons.patreon,
-                color: hollow.textPrimary,
-                tooltip: 'Patreon',
-                url: 'https://patreon.com/AnonListen',
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              const _BrandIcon(
-                icon: BrandIcons.kofi,
-                color: BrandIconColors.kofi,
-                tooltip: 'Ko-Fi',
-                url: 'https://ko-fi.com/AnonListen',
-              ),
-            ],
-          ),
-
-          const SizedBox(height: HollowSpacing.lg),
-          const HollowDivider(),
-          const SizedBox(height: HollowSpacing.lg),
-
-          const HollowSectionHeader('Legal'),
-          aboutLinkButton(
-            onPressed: () => _showLegalDocument(
-              context,
-              title: 'Privacy Policy',
-              assetPath: 'legal/PRIVACY_POLICY.md',
             ),
-            icon: LucideIcons.shield,
-            label: 'Privacy Policy',
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          aboutLinkButton(
-            onPressed: () => _showLegalDocument(
-              context,
-              title: 'Terms of Use',
-              assetPath: 'legal/TERMS_OF_USE.md',
+            const SettingsRow(
+              title: 'Website',
+              subtitle: 'hollow.anonlisten.com',
+              trailing: HollowButton.ghost(
+                compact: true,
+                onPressed: openHollowSite,
+                semanticLabel: 'Open hollow.anonlisten.com',
+                child: Text('Open'),
+              ),
             ),
-            icon: LucideIcons.scroll,
-            label: 'Terms of Use',
+            SettingsRow(
+              title: 'Follow and support',
+              subtitle: 'YouTube, X, Twitch, Kick, Patreon, Ko-fi',
+              wideTrailing: true,
+              trailing: Wrap(
+                spacing: HollowSpacing.xs,
+                runSpacing: HollowSpacing.xs,
+                children: [
+                  for (final (icon, name, url) in _socials)
+                    HollowIconButton(
+                      icon: icon,
+                      label: name,
+                      onPressed: () => launchBrandUrl(url),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        SettingsSection(
+          title: 'Legal',
+          children: [
+            SettingsRow(
+              title: 'Privacy policy, terms and licenses',
+              wideTrailing: true,
+              trailing: Wrap(
+                spacing: HollowSpacing.sm,
+                runSpacing: HollowSpacing.sm,
+                children: [
+                  HollowButton.ghost(
+                    compact: true,
+                    semanticLabel: 'Read the privacy policy',
+                    onPressed: () => _showLegalDocument(
+                      context,
+                      title: 'Privacy Policy',
+                      assetPath: 'legal/PRIVACY_POLICY.md',
+                    ),
+                    child: const Text('Privacy'),
+                  ),
+                  HollowButton.ghost(
+                    compact: true,
+                    semanticLabel: 'Read the terms of use',
+                    onPressed: () => _showLegalDocument(
+                      context,
+                      title: 'Terms of Use',
+                      assetPath: 'legal/TERMS_OF_USE.md',
+                    ),
+                    child: const Text('Terms'),
+                  ),
+                  HollowButton.ghost(
+                    compact: true,
+                    semanticLabel: 'Open-source licenses',
+                    onPressed: () => showHollowLicensesPage(context),
+                    child: const Text('Licenses'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        // iOS has no adb, so this file is the only way to pull logs off a
+        // test phone without a Mac.
+        if (Platform.isIOS)
+          const SettingsSection(
+            title: 'Diagnostics',
+            children: [_ExportDiagnosticsRow()],
           ),
-          const SizedBox(height: HollowSpacing.xs),
-          aboutLinkButton(
-            onPressed: () => showHollowLicensesPage(context),
-            icon: LucideIcons.fileText,
-            label: 'Open-Source Licenses',
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Label left, value right: the shape mobile About uses for its Info rows.
-  static Widget _aboutInfoRow(String label, String value, HollowTheme hollow) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-      child: Row(
-        children: [
-          Text(
-            label,
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
-          const Spacer(),
-          Text(
-            value,
-            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static Widget _aboutShimmerLabel(
-      String left, String right, HollowTheme hollow) {
-    final style =
-        HollowTypography.subheading.copyWith(color: hollow.textPrimary);
-    return Row(
-      children: [
-        Text(left, style: style),
-        const SizedBox(width: HollowSpacing.sm),
-        const Expanded(child: HollowDivider()),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(right, style: style),
       ],
     );
   }
 }
+
+class _ExportDiagnosticsRow extends StatefulWidget {
+  const _ExportDiagnosticsRow();
+
+  @override
+  State<_ExportDiagnosticsRow> createState() => _ExportDiagnosticsRowState();
+}
+
+class _ExportDiagnosticsRowState extends State<_ExportDiagnosticsRow> {
+  bool _busy = false;
+
+  Future<void> _export() async {
+    setState(() => _busy = true);
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(_collectDiagnostics()));
+      final saved = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export debug logs',
+        fileName: 'hollow_diagnostics.txt',
+        bytes: bytes, // required on iOS and Android
+      );
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        saved == null ? 'Export cancelled' : 'Diagnostics exported',
+        type: saved == null ? HollowToastType.info : HollowToastType.success,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Export failed: $e',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsRow(
+      title: 'Debug logs',
+      subtitle: 'Push diagnostics and the recent log, in one file',
+      trailing: HollowButton.outline(
+        compact: true,
+        loading: _busy,
+        onPressed: _export,
+        child: const Text('Export'),
+      ),
+    );
+  }
+}
+
+/// The push diagnostics and the tails of the debug and crash logs, as text.
+String _collectDiagnostics() {
+  final buf = StringBuffer();
+  buf.writeln('=== Hollow Diagnostics ===');
+  buf.writeln('Exported: ${DateTime.now().toIso8601String()}');
+  buf.writeln('Data dir: $hollowDataDir');
+  buf.writeln();
+  // The App Group container is the parent of the (migrated) data dir.
+  final container = Directory(hollowDataDir).parent.path;
+  void appendFile(String label, String path, {int tailBytes = 0}) {
+    buf.writeln('----- $label ($path) -----');
+    try {
+      final f = File(path);
+      if (f.existsSync()) {
+        if (tailBytes > 0 && f.lengthSync() > tailBytes) {
+          final raf = f.openSync();
+          try {
+            raf.setPositionSync(f.lengthSync() - tailBytes);
+            buf.writeln('(tail, last $tailBytes bytes)');
+            buf.writeln(
+                utf8.decode(raf.readSync(tailBytes), allowMalformed: true));
+          } finally {
+            raf.closeSync();
+          }
+        } else {
+          buf.writeln(f.readAsStringSync());
+        }
+      } else {
+        buf.writeln('(not found)');
+      }
+    } catch (e) {
+      buf.writeln('(read error: $e)');
+    }
+    buf.writeln();
+  }
+
+  appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
+  appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
+  appendFile('Dart push log', '$hollowDataDir/push_debug.log');
+  appendFile('Hollow debug log', '$hollowDataDir/hollow_debug.log',
+      tailBytes: 2 * 1024 * 1024);
+  appendFile('Hollow crash log', '$hollowDataDir/hollow_crash.log',
+      tailBytes: 512 * 1024);
+  return buf.toString();
+}
+
+/// Where AnonListen posts and takes support, in the order the row names them.
+const _socials = <(IconData, String, String)>[
+  (BrandIcons.youtube, 'YouTube', 'https://youtube.com/@Anon_Listen'),
+  (BrandIcons.x, 'X', 'https://x.com/Anon_Listen'),
+  (BrandIcons.twitch, 'Twitch', 'https://twitch.tv/AnonListen'),
+  (BrandIcons.kick, 'Kick', 'https://kick.com/AnonListen'),
+  (BrandIcons.patreon, 'Patreon', 'https://patreon.com/AnonListen'),
+  (BrandIcons.kofi, 'Ko-fi', 'https://ko-fi.com/AnonListen'),
+];
 
 void _showLegalDocument(
   BuildContext context, {
@@ -236,6 +295,11 @@ void _showLegalDocument(
   final body = await loadLegalMarkdownBody(assetPath);
 
   if (!context.mounted) return;
+
+  if (SettingsDensity.touchOf(context)) {
+    _showLegalSheet(context, hollow, title, body);
+    return;
+  }
 
   showHollowDialog(
     context: context,
@@ -278,80 +342,40 @@ void _showLegalDocument(
   );
 }
 
-/// Hover shell shared by the icon-font and SVG brand icons.
-class _BrandHoverBox extends StatefulWidget {
-  final String tooltip;
-  final String url;
-  final Widget Function(bool hovering, HollowTheme hollow) iconBuilder;
-
-  const _BrandHoverBox({
-    required this.tooltip,
-    required this.url,
-    required this.iconBuilder,
-  });
-
-  @override
-  State<_BrandHoverBox> createState() => _BrandHoverBoxState();
-}
-
-class _BrandHoverBoxState extends State<_BrandHoverBox> {
-  bool _hovering = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowTooltip(
-      message: widget.tooltip,
-      child: MouseRegion(
-        onEnter: (_) => setState(() => _hovering = true),
-        onExit: (_) => setState(() => _hovering = false),
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: () => launchBrandUrl(widget.url),
-          child: AnimatedContainer(
-            duration: HollowDurations.fast,
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              // Zero-alpha rest colour, not `Colors.transparent`: that is
-              // transparent BLACK, and the lerp flashes dark on hover.
-              color: _hovering
-                  ? hollow.elevated
-                  : hollow.elevated.withValues(alpha: 0.0),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
+/// A phone reads the document in a tall sheet it can drag away.
+void _showLegalSheet(
+    BuildContext context, HollowTheme hollow, String title, String body) {
+  showHollowSheet(
+    context: context,
+    scrollControlled: true,
+    handle: false,
+    builder: (_) => DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, scrollController) => Column(
+        children: [
+          const HollowSheetHandle(),
+          Padding(
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            child: Text(
+              title,
+              style:
+                  HollowTypography.subheading.copyWith(color: hollow.textPrimary),
             ),
-            child: widget.iconBuilder(_hovering, hollow),
           ),
-        ),
+          const HollowDivider(),
+          Expanded(
+            child: legalMarkdownView(
+              hollow,
+              body,
+              controller: scrollController,
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+            ),
+          ),
+        ],
       ),
-    );
-  }
-}
-
-class _BrandIcon extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final String tooltip;
-  final String url;
-
-  const _BrandIcon({
-    required this.icon,
-    required this.color,
-    required this.tooltip,
-    required this.url,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _BrandHoverBox(
-      tooltip: tooltip,
-      url: url,
-      iconBuilder: (hovering, hollow) => Icon(
-        icon,
-        size: 20,
-        semanticLabel: tooltip,
-        color: hovering ? color : hollow.textSecondary,
-      ),
-    );
-  }
+    ),
+  );
 }

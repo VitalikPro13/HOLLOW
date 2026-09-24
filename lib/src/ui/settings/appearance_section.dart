@@ -1,410 +1,337 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
-import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Appearance category of the desktop Settings dialog. Everything here
-/// auto-saves on change.
+/// Settings > Appearance. Everything saves on change.
 class AppearanceSettingsView extends ConsumerWidget {
   const AppearanceSettingsView({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final isDark = ref.watch(themeModeProvider) == ThemeMode.dark;
     final layoutMode = ref.watch(layoutModeProvider);
-    final invisible = ref.watch(invisibleModeProvider);
     final isDesktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
     final tray = ref.watch(minimizeToTrayProvider).valueOrNull ?? true;
     final cardStyle = ref.watch(profileCardStyleProvider);
-    return settingsCardList([
-      SettingsCard(
-        title: 'Theme',
-        children: [
-          SettingsToggleRow(
-            icon: isDark ? LucideIcons.moon : LucideIcons.sun,
-            label: 'Dark mode',
-            value: isDark,
-            onChanged: (v) => ref
-                .read(themeModeProvider.notifier)
-                .setMode(v ? ThemeMode.dark : ThemeMode.light),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          _AccentColorPicker(hollow: hollow),
-        ],
-      ),
-      SettingsCard(
-        title: 'Background',
-        children: [
-          _BackgroundPicker(hollow: hollow),
-          const SizedBox(height: HollowSpacing.md),
-          const AmbientBackgroundToggle(),
-        ],
-      ),
-      SettingsCard(
-        title: 'Layout',
-        children: [
-          // A two-way switch, not an on/off toggle: "Dock Mode off" gives no
-          // hint that what you land in is the familiar Discord-style shell.
-          Row(
+    final hasBackground = ref.watch(backgroundProvider).hasBackground;
+    return SettingsPage(
+      title: 'Appearance',
+      children: [
+        SettingsSection(
+          title: 'Theme',
+          children: [
+            SettingsChoiceRow<ThemeMode>(
+              title: 'Theme',
+              value: isDark ? ThemeMode.dark : ThemeMode.light,
+              options: const [
+                (ThemeMode.dark, 'Dark'),
+                (ThemeMode.light, 'Light'),
+              ],
+              onChanged: (m) => ref.read(themeModeProvider.notifier).setMode(m),
+            ),
+            const _AccentColorPicker(),
+            const _BackgroundImageRow(),
+            if (hasBackground) const _DarkenRow(),
+            const AmbientBackgroundToggle(),
+          ],
+        ),
+        SettingsSection(
+          title: isDesktop ? 'Layout' : 'Chat',
+          children: [
+            // A phone has one layout of its own.
+            if (isDesktop)
+              SettingsChoiceRow<LayoutMode>(
+                title: 'Window layout',
+                subtitle: layoutMode == LayoutMode.dock
+                    ? 'Dock: friends on top, servers at the bottom'
+                    : 'Classic: servers, channels, chat and members side by side',
+                value: layoutMode,
+                options: const [
+                  (LayoutMode.dock, 'Dock'),
+                  (LayoutMode.classic, 'Classic'),
+                ],
+                onChanged: (m) {
+                  // Classic has no split view, and leaving one open strands the
+                  // right pane invisibly until the user switches back.
+                  if (m == LayoutMode.classic) {
+                    ref.read(splitViewProvider.notifier).closeSplit();
+                  }
+                  ref.read(layoutModeProvider.notifier).setMode(m);
+                },
+              ),
+            const MessageDisplayPicker(),
+          ],
+        ),
+        if (isDesktop)
+          SettingsSection(
+            title: 'Window',
             children: [
-              Icon(LucideIcons.layoutDashboard,
-                  size: 16, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Window layout',
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    Text(
-                      layoutMode == LayoutMode.dock
-                          ? 'Dock: friends strip on top, dock bar at the bottom'
-                          : 'Classic: server strip, channels, chat, members',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
+              SettingsSwitchRow(
+                title: 'Keep running when closed',
+                subtitle: 'Closing the window leaves Hollow in the tray',
+                value: tray,
+                onChanged: (v) =>
+                    ref.read(minimizeToTrayProvider.notifier).setEnabled(v),
+              ),
+              // Issue #54: one click can go straight to the full profile
+              // instead of the small card with an expand button on it.
+              SettingsSwitchRow(
+                title: 'Open full profiles',
+                subtitle: 'Clicking a name opens the whole profile, not the card',
+                value: cardStyle == ProfileCardStyle.expanded,
+                onChanged: (v) => ref
+                    .read(profileCardStyleProvider.notifier)
+                    .setStyle(v
+                        ? ProfileCardStyle.expanded
+                        : ProfileCardStyle.compact),
               ),
             ],
           ),
-          const SizedBox(height: HollowSpacing.md),
-          TriStateSegment<LayoutMode>(
-            value: layoutMode,
-            options: const [
-              (LayoutMode.dock, 'Dock'),
-              (LayoutMode.classic, 'Classic'),
-            ],
-            onChanged: (m) {
-              // Classic has no split view, and leaving one open strands the
-              // right pane invisibly until the user switches back.
-              if (m == LayoutMode.classic) {
-                ref.read(splitViewProvider.notifier).closeSplit();
-              }
-              ref.read(layoutModeProvider.notifier).setMode(m);
-            },
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          const MessageDisplayPicker(),
-          if (isDesktop) ...[
-            const SizedBox(height: HollowSpacing.md),
-            SettingsToggleRow(
-              icon: LucideIcons.minimize2,
-              label: 'Minimize to tray',
-              subtitle: 'Keep running in the background when closed',
-              value: tray,
-              onChanged: (v) =>
-                  ref.read(minimizeToTrayProvider.notifier).setEnabled(v),
-            ),
-          ],
-          if (isDesktop) ...[
-            const SizedBox(height: HollowSpacing.md),
-            // Issue #54: one click can go straight to the full profile instead
-            // of the small card with an expand button on it.
-            SettingsToggleRow(
-              icon: LucideIcons.idCard,
-              label: 'Open profiles expanded',
-              subtitle: 'Clicking a user opens the full profile, not the card',
-              value: cardStyle == ProfileCardStyle.expanded,
-              onChanged: (v) => ref
-                  .read(profileCardStyleProvider.notifier)
-                  .setStyle(v
-                      ? ProfileCardStyle.expanded
-                      : ProfileCardStyle.compact),
-            ),
-          ],
-        ],
-      ),
-      SettingsCard(
-        title: 'Presence',
-        children: [
-          SettingsToggleRow(
-            icon: LucideIcons.eyeOff,
-            label: 'Appear invisible',
-            subtitle: 'Show as offline to other users',
-            value: invisible,
-            onChanged: (v) =>
-                ref.read(invisibleModeProvider.notifier).setInvisible(v),
-          ),
-        ],
-      ),
-    ]);
+      ],
+    );
   }
 }
 
-/// Background image picker + panel opacity slider.
-class _BackgroundPicker extends ConsumerWidget {
-  final HollowTheme hollow;
-  const _BackgroundPicker({required this.hollow});
+/// The name of the image picked this session. The provider keeps only the
+/// bytes, so after a restart the row says "Custom image" instead.
+final _pickedBackgroundName = StateProvider<String?>((ref) => null);
 
-  Future<void> _pickBackground(BuildContext context, WidgetRef ref) async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.image);
-    if (result == null || result.files.isEmpty) return;
-    final path = result.files.single.path;
-    if (path == null) return;
-    final raw = await File(path).readAsBytes();
-    if (!context.mounted) return;
-    final cropped = await showImageCropDialog(
-      context: context,
-      imageBytes: raw,
-      aspectRatio: 16.0 / 9.0,
-      title: 'Crop background',
-    );
-    if (cropped != null) {
-      ref.read(backgroundProvider.notifier).setImage(cropped);
+class _BackgroundImageRow extends ConsumerStatefulWidget {
+  const _BackgroundImageRow();
+
+  @override
+  ConsumerState<_BackgroundImageRow> createState() =>
+      _BackgroundImageRowState();
+}
+
+class _BackgroundImageRowState extends ConsumerState<_BackgroundImageRow> {
+  bool _picking = false;
+
+  Future<void> _pick() async {
+    setState(() => _picking = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(type: FileType.image);
+      final file = result?.files.singleOrNull;
+      if (file == null) return;
+      final raw = await file.xFile.readAsBytes();
+      if (!mounted) return;
+      // A phone's background stands upright and crops on a full-screen route.
+      final phone = Platform.isAndroid || Platform.isIOS;
+      final crop = phone ? showMobileImageCrop : showImageCropDialog;
+      final cropped = await crop(
+        context: context,
+        imageBytes: raw,
+        aspectRatio: phone ? 9.0 / 16.0 : 16.0 / 9.0,
+        title: 'Crop background',
+      );
+      if (cropped != null) {
+        await ref.read(backgroundProvider.notifier).setImage(cropped);
+        ref.read(_pickedBackgroundName.notifier).state = file.name;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        'Could not open that image: $e',
+        type: HollowToastType.error,
+      );
+    } finally {
+      if (mounted) setState(() => _picking = false);
     }
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final bg = ref.watch(backgroundProvider);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(LucideIcons.image, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Background',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 13,
-              ),
-            ),
-            const Spacer(),
-            HollowButton.ghost(
-              onPressed: () => _pickBackground(context, ref),
-              compact: true,
-              child: Text(bg.hasBackground ? 'Change' : 'Set image'),
-            ),
-            if (bg.hasBackground) ...[
-              const SizedBox(width: HollowSpacing.xs),
-              HollowButton.ghost(
-                onPressed: () =>
-                    ref.read(backgroundProvider.notifier).clearImage(),
-                compact: true,
-                child: const Text('Remove'),
-              ),
-            ],
-          ],
-        ),
-
-        if (bg.hasBackground) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          Row(
-            children: [
-              Text(
-                'Darken',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: SizedBox(
-                  height: 20,
-                  child: HollowSlider(
-                    value: bg.panelOpacity,
-                    min: 0.4,
-                    max: 1.0,
-                    onChanged: (value) {
-                        ref.read(backgroundProvider.notifier).setOpacity(value);
-                      },
-                  ),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                '${(bg.panelOpacity * 100).round()}%',
-                style: HollowTypography.mono.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 10,
-                ),
-              ),
-            ],
+  Widget build(BuildContext context) {
+    final has = ref.watch(backgroundProvider).hasBackground;
+    final name = ref.watch(_pickedBackgroundName);
+    return SettingsRow(
+      title: 'Background image',
+      subtitle: has ? (name ?? 'Custom image') : 'None',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HollowButton.outline(
+            compact: true,
+            loading: _picking,
+            onPressed: _pick,
+            child: Text(has ? 'Change' : 'Choose'),
           ),
+          if (has) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            HollowButton.ghost(
+              compact: true,
+              onPressed: () {
+                ref.read(_pickedBackgroundName.notifier).state = null;
+                ref.read(backgroundProvider.notifier).clearImage();
+              },
+              child: const Text('Remove'),
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 }
 
-/// Accent color picker — hue slider + preset swatches.
-class _AccentColorPicker extends ConsumerStatefulWidget {
-  final HollowTheme hollow;
-
-  const _AccentColorPicker({required this.hollow});
+class _DarkenRow extends ConsumerWidget {
+  const _DarkenRow();
 
   @override
-  ConsumerState<_AccentColorPicker> createState() => _AccentColorPickerState();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final opacity = ref.watch(backgroundProvider).panelOpacity;
+    return SettingsSliderRow(
+      title: 'Darken',
+      subtitle: 'How much the panels cover the image',
+      value: opacity,
+      min: 0.4,
+      max: 1.0,
+      valueLabel: '${(opacity * 100).round()}%',
+      onChanged: (v) => ref.read(backgroundProvider.notifier).setOpacity(v),
+    );
+  }
 }
 
-class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
+/// The hue bar and saved swatches. Too wide for a trailing edge, so it sits
+/// under its title on every density.
+class _AccentColorPicker extends ConsumerWidget {
+  const _AccentColorPicker();
 
   @override
-  Widget build(BuildContext context) {
-    final hollow = widget.hollow;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final touch = SettingsDensity.touchOf(context);
     final currentHue = ref.watch(accentHueProvider);
     final presets = ref.watch(accentPresetsProvider);
+    final swatch = touch ? 36.0 : 24.0;
+    final unsaved = !presets.any((h) => (h - currentHue).abs() < 1) &&
+        (currentHue - defaultAccentHue).abs() > 1;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Row(
-          children: [
-            Icon(LucideIcons.palette, size: 14, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Accent color',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 13,
-              ),
-            ),
-            const Spacer(),
-            AccentHuePreviewBox(hue: currentHue, size: 18, radius: 4),
-          ],
+        const SettingsRow(
+          title: 'Accent color',
+          subtitle: 'Any hue on the bar, or one you saved',
         ),
-        const SizedBox(height: HollowSpacing.sm),
-
         AccentHueSliderRow(
           hue: currentHue,
-          height: 24,
-          trackHeight: 14,
-          thumbRadius: 9,
-          onChanged: (value) {
-            ref.read(accentHueProvider.notifier).setHue(value);
-          },
+          height: swatch,
+          trackHeight: 12,
+          thumbRadius: 8,
+          onChanged: (value) =>
+              ref.read(accentHueProvider.notifier).setHue(value),
         ),
-
         const SizedBox(height: HollowSpacing.sm),
-
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            _ColorSwatch(
-              hue: defaultAccentHue,
-              isSelected: (currentHue - defaultAccentHue).abs() < 1,
-              label: 'Default',
-              onTap: () =>
-                  ref.read(accentHueProvider.notifier).setHue(defaultAccentHue),
-              hollow: hollow,
-            ),
-            for (final hue in presets)
+        Padding(
+          padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+          child: Wrap(
+            spacing: HollowSpacing.sm,
+            runSpacing: HollowSpacing.sm,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
               _ColorSwatch(
-                hue: hue,
-                isSelected: (currentHue - hue).abs() < 1,
-                onTap: () =>
-                    ref.read(accentHueProvider.notifier).setHue(hue),
-                onRemove: () =>
-                    ref.read(accentPresetsProvider.notifier).removePreset(hue),
-                hollow: hollow,
-              ),
-            if (!presets.any((h) => (h - currentHue).abs() < 1) &&
-                (currentHue - defaultAccentHue).abs() > 1)
-              GestureDetector(
+                hue: defaultAccentHue,
+                size: swatch,
+                isSelected: (currentHue - defaultAccentHue).abs() < 1,
+                label: 'Default',
                 onTap: () => ref
-                    .read(accentPresetsProvider.notifier)
-                    .addPreset(currentHue),
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Container(
-                    width: 22,
-                    height: 22,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(
-                        color: hollow.textSecondary.withValues(alpha: 0.4),
-                        style: BorderStyle.solid,
-                      ),
-                    ),
-                    child: Icon(
-                      LucideIcons.plus,
-                      size: 12,
-                      semanticLabel: 'Save color preset',
-                      color: hollow.textSecondary,
-                    ),
-                  ),
-                ),
+                    .read(accentHueProvider.notifier)
+                    .setHue(defaultAccentHue),
               ),
-          ],
+              for (final hue in presets)
+                _ColorSwatch(
+                  hue: hue,
+                  size: swatch,
+                  isSelected: (currentHue - hue).abs() < 1,
+                  onTap: () =>
+                      ref.read(accentHueProvider.notifier).setHue(hue),
+                  onRemove: () => ref
+                      .read(accentPresetsProvider.notifier)
+                      .removePreset(hue),
+                ),
+              if (unsaved)
+                HollowIconButton(
+                  icon: LucideIcons.plus,
+                  label: 'Save this color',
+                  size: touch ? 44 : 32,
+                  onPressed: () => ref
+                      .read(accentPresetsProvider.notifier)
+                      .addPreset(currentHue),
+                ),
+            ],
+          ),
         ),
       ],
     );
   }
 }
 
-/// A small color swatch for preset selection.
+/// One accent swatch. A saved one is removed by right-click or long-press.
 class _ColorSwatch extends StatelessWidget {
   final double hue;
+  final double size;
   final bool isSelected;
   final String? label;
   final VoidCallback onTap;
   final VoidCallback? onRemove;
-  final HollowTheme hollow;
 
   const _ColorSwatch({
     required this.hue,
+    required this.size,
     required this.isSelected,
     this.label,
     required this.onTap,
     this.onRemove,
-    required this.hollow,
   });
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final radius = BorderRadius.circular(hollow.radiusXs);
     return HollowFocusRing(
       onActivate: onTap,
-      borderRadius: BorderRadius.circular(4),
+      borderRadius: radius,
       child: Semantics(
         button: true,
-        label: label ?? 'Accent color',
+        selected: isSelected,
+        label: label ?? 'Saved accent color',
         child: GestureDetector(
           onTap: onTap,
           onSecondaryTapUp: onRemove != null ? (_) => onRemove!() : null,
+          onLongPress: onRemove,
           child: MouseRegion(
             cursor: SystemMouseCursors.click,
             child: HollowTooltip(
               message: label ?? 'Right-click to remove',
               child: Container(
-                width: 22,
-                height: 22,
+                width: size,
+                height: size,
                 decoration: BoxDecoration(
                   color: accentFromHue(hue),
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: radius,
                   border: Border.all(
-                    color: isSelected
-                        ? Colors.white
-                        : Colors.white.withValues(alpha: 0.15),
+                    color: isSelected ? hollow.textPrimary : hollow.border,
                     width: isSelected ? 2 : 1,
                   ),
                 ),

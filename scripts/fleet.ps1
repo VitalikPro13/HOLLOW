@@ -607,9 +607,9 @@ function Invoke-Steps($steps, $label, $alwaysSoft = $false) {
 # The mobile shell's version of the same walk. Three things differ, each of
 # which cost a run to find (2026-09-05): there is no `Connected` text anywhere,
 # so the node coming up is read from the connection provider; the profile row
-# in Settings is labelled by its subtitle, not "Profile"; and typing the name
-# raises the software keyboard, which pushes "Save profile" off screen, so the
-# page is scrolled before the tap. Back is a button, not Escape.
+# in Settings is labelled by its subtitle, not "Profile"; and the Save sits in
+# the Profile page's top bar, above the software keyboard. Back is a button,
+# not Escape.
 $onboardStepsMobile = @(
     @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
     @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
@@ -618,13 +618,12 @@ $onboardStepsMobile = @(
     @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
     @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 },
     @{ op = 'tap'; target = 'semantics:Settings'; index = 0; frames = 40 },
-    @{ op = 'wait_for'; target = 'text:Name, status, avatar & banner'; timeout_ms = 20000 },
-    @{ op = 'tap'; target = 'text:Name, status, avatar & banner'; index = 0; frames = 40 },
-    @{ op = 'wait_for'; target = 'hint:Display name'; timeout_ms = 20000 },
-    @{ op = 'enter_text'; target = 'hint:Display name'; value = 'probe-${PEER}' },
-    @{ op = 'scroll'; target = 'hint:Display name'; dy = -500 },
-    @{ op = 'wait_for'; target = 'text:Save profile'; timeout_ms = 10000 },
-    @{ op = 'tap'; target = 'text:Save profile'; index = 0; frames = 40 },
+    @{ op = 'wait_for'; target = 'text:Name, status, avatar and banner'; timeout_ms = 20000 },
+    @{ op = 'tap'; target = 'text:Name, status, avatar and banner'; index = 0; frames = 40 },
+    @{ op = 'wait_for'; target = 'hint:Enter a display name'; timeout_ms = 20000 },
+    @{ op = 'enter_text'; target = 'hint:Enter a display name'; value = 'probe-${PEER}' },
+    @{ op = 'wait_for'; target = 'text:Save'; timeout_ms = 10000 },
+    @{ op = 'tap'; target = 'text:Save'; index = 0; frames = 40 },
     @{ op = 'wait'; ms = 2500 },
     @{ op = 'tap'; target = 'semantics:Back'; index = 0; frames = 40; soft = $true },
     @{ op = 'wait_for'; target = 'text:probe-${PEER}'; timeout_ms = 20000 },
@@ -650,7 +649,8 @@ $onboardSteps = @(
     @{ op = 'tap'; target = 'text:Profile'; index = 0 },
     @{ op = 'wait_for'; target = 'hint:Enter a display name'; timeout_ms = 20000 },
     @{ op = 'enter_text'; target = 'hint:Enter a display name'; value = 'probe-${PEER}' },
-    @{ op = 'tap'; target = 'text:Save profile'; index = 0 },
+    @{ op = 'wait_for'; target = 'text:You have unsaved profile changes'; timeout_ms = 10000 },
+    @{ op = 'tap'; target = 'text:Save'; index = 0 },
     @{ op = 'wait'; ms = 2500 },
     @{ op = 'key'; value = 'escape' },
     @{ op = 'wait_for'; target = 'text:probe-${PEER}'; timeout_ms = 20000 },

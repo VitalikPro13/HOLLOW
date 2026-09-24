@@ -39,13 +39,13 @@
   {
    "peer": "b",
    "op": "tap",
-   "target": "text:Add Friend",
+   "target": "text:Add friend",
    "index": 0
   },
   {
    "peer": "b",
    "op": "enter_text",
-   "target": "hint:Peer ID or nickname...",
+   "target": "hint:Paste an ID, or type a nickname",
    "value": "${PEER_A}"
   },
   {
@@ -57,7 +57,7 @@
   {
    "peer": "b",
    "op": "tap",
-   "target": "text:Send Friend Request",
+   "target": "text:Send request",
    "index": 0
   },
   {
@@ -582,7 +582,7 @@
   {
    "peer": "a",
    "op": "scroll",
-   "target": "text:Your Devices",
+   "target": "text:Your devices",
    "dy": -700,
    "soft": true
   },
@@ -638,7 +638,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:View Profile",
+   "target": "text:View profile",
    "index": 0
   },
   {

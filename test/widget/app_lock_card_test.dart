@@ -1,6 +1,6 @@
-// Settings > Security, the desktop App lock card.
+// Settings > Security, the "Lock after" row.
 //
-// What is pinned here is what a wrong build would silently get wrong: the card
+// What is pinned here is what a wrong build would silently get wrong: the row
 // refusing to offer a lock there is no password to lift, and a chip actually
 // writing the span it names.
 import 'package:flutter/material.dart';
@@ -61,16 +61,11 @@ void main() {
     return ProviderScope.containerOf(tester.element(find.byType(AppLockCard)));
   }
 
-  group('app lock card', () {
-    testWidgets('with no password it points at password protection',
-        (tester) async {
+  group('lock after row', () {
+    testWidgets('with no password it offers no lock at all', (tester) async {
       await pumpCard(tester, hasPassword: false);
 
-      expect(
-        find.text(
-            'Set a password above to lock Hollow.'),
-        findsOneWidget,
-      );
+      expect(find.text('Lock after'), findsNothing);
       expect(find.text('Lock now'), findsNothing);
       expect(find.text('Off'), findsNothing);
     });
@@ -84,7 +79,7 @@ void main() {
             reason: 'span $minutes');
       }
       expect(find.text('Lock now'), findsOneWidget);
-      expect(find.textContaining('Ctrl + Shift + L'), findsOneWidget);
+      expect(find.text('Ctrl + Shift + L locks it now'), findsOneWidget);
       // Off by default: nobody gets locked out by an upgrade.
       expect(container.read(lockAfterMinutesProvider), 0);
     });

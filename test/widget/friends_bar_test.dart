@@ -151,4 +151,61 @@ void main() {
     expect(find.text('Bob'), findsOneWidget);
     expect(find.text('No friends yet'), findsNothing);
   });
+
+  group('Friends Manager', () {
+    Future<void> openManager(WidgetTester tester, {FriendsManagerTab? tab,
+        List<String> favourites = const []}) async {
+      await _pumpBar(tester, favourites: favourites);
+      tester.view.physicalSize = const Size(1280, 800);
+      showFriendsManager(
+          tester.element(find.byType(FriendsBar)), tab: tab);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('opens on Friends with three sentence-case tabs',
+        (tester) async {
+      await openManager(tester);
+      expect(find.text('Requests'), findsOneWidget);
+      expect(find.text('Add friend'), findsOneWidget);
+      expect(find.text('Incoming'), findsNothing);
+      expect(find.text('Favourites'), findsNothing,
+          reason: 'no favourites set, so no Favourites section');
+      expect(find.text('All friends'), findsOneWidget);
+      expect(find.text('Search friends'), findsOneWidget);
+    });
+
+    testWidgets('favourites sit above all friends, never twice',
+        (tester) async {
+      await openManager(tester, favourites: [kFriendPeerId2]);
+      expect(find.text('Favourites'), findsOneWidget);
+      expect(tester.getTopLeft(find.text('Favourites')).dy,
+          lessThan(tester.getTopLeft(find.text('All friends')).dy));
+      final dialog = find.byType(ReorderableListView);
+      expect(find.descendant(of: dialog, matching: find.text('Bob')),
+          findsOneWidget);
+      expect(find.descendant(of: dialog, matching: find.text('alice')),
+          findsNothing);
+    });
+
+    testWidgets('a received request answers with Decline then Accept',
+        (tester) async {
+      await openManager(tester, tab: FriendsManagerTab.requests);
+      expect(find.text('Received'), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp('Accept friend request')),
+          findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp('Reject friend request')),
+          findsOneWidget);
+      expect(tester.getTopLeft(find.text('Decline')).dx,
+          lessThan(tester.getTopLeft(find.text('Accept')).dx),
+          reason: 'the primary answer is last');
+    });
+
+    testWidgets('Add friend has one filled Send request', (tester) async {
+      await openManager(tester, tab: FriendsManagerTab.add);
+      expect(find.text('Paste an ID, or type a nickname'), findsOneWidget);
+      expect(find.text('Send request'), findsOneWidget);
+      expect(find.text('How others add you'), findsOneWidget);
+      expect(find.text('Claim'), findsOneWidget);
+    });
+  });
 }

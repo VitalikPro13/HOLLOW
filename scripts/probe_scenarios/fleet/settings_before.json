@@ -1,0 +1,486 @@
+{
+ "_": [
+  "Settings and the Friends Manager, every page, on two FRESH throwaway peers",
+  "(b sends a a request; a accepts). The 'before' pass for session 16.",
+  "run: powershell -File scripts\fleet.ps1 -Scenario settings_before -Peers a,b"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "s-f-add"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Requests",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "s-f-outgoing"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Needs Attention",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-f-incoming"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Friends",
+   "index": 1
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-f-friends"
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "text:probe-b",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-f-friends-hover"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-01-profile"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Appearance",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-02-appearance"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accessibility",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-03-accessibility"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Notifications",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-04-notifications"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Network",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-05-network"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Files & Storage",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-06-storage"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & Video",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-07-audio"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Shortcuts",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-08-shortcuts"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-09-security"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Devices",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-10-devices"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Backup",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-11-backup"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Updates",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-12-updates"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:About",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-13-about"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Call Privacy",
+   "dy": -700,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-09b-security-lower"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & Video",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Microphone",
+   "dy": -700,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-07b-audio-lower"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-20-profile-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  }
+ ]
+}

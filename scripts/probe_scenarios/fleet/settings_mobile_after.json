@@ -1,0 +1,703 @@
+{
+ "_": [
+  "Session 16 phone pass on the mini's simulators: the Friends tab (b befriends a) and every Settings page.",
+  "run (on the mini): pwsh scripts/fleet.ps1 -Scenario settings_mobile_after -Peers a,b"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "mf-01-friends-empty"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "mf-02-add"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:${PEER_A}",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "mf-03-sent"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:probe-b wants to be your friend",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Accept friend request",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "mf-04-request"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "mf-05-friends"
+  },
+  {
+   "peer": "a",
+   "op": "long_press",
+   "target": "text:probe-b",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "mf-06-friend-sheet",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap_at",
+   "x": 195,
+   "y": 120,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-00-list"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-00b-list-lower"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": 1200,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Name, status, avatar and banner",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-01-profile",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-01b-profile",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-02-security",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-02b-security",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Devices",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-03-devices",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-03b-devices",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Appearance",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-04-appearance",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-04b-appearance",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accessibility",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-05-accessibility",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-05b-accessibility",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Notifications",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-06-notifications",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-06b-notifications",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & Video",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-07-audio",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-07b-audio",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Network",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-08-network",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-08b-network",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Files & Storage",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-09-storage",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-09b-storage",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:About",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-10-about",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "index": 0,
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ms-10b-about",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  }
+ ]
+}

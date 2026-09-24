@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
@@ -33,7 +34,6 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -495,9 +495,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
   }
 
   void _openUserSettings() {
-    final navContext = Navigator.of(context, rootNavigator: true).context;
     widget.dismissHost();
-    showUserSettingsDialog(navContext);
+    openSettings(ref.read, category: SettingsCategory.profile);
   }
 
   void _openNicknameDialog(String? localNick) {

@@ -1,11 +1,12 @@
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
-import 'package:hollow/src/core/providers/profile_anim_provider.dart';
-import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
+import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/twitch_provider.dart';
@@ -15,494 +16,177 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
-import 'package:hollow/src/ui/settings/profile_locations_card.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
-import 'package:hollow/src/ui/shop/owned_art_panel.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 
-/// Profile category of the desktop Settings dialog, the one category with a
-/// deferred commit rather than auto-save. The edit state lives on the dialog so
-/// it survives switching categories; this widget renders it and reports
-/// interactions back through callbacks.
+/// Pieces of Settings > Profile that stand on their own: the live preview of
+/// the profile card and the Twitch connection row.
 
-/// Deterministic banner color from peer ID (shifted hue from avatar).
-Color _bannerColorFromId(String id) {
-  final hash = id.hashCode;
-  final hue = ((hash % 360).abs() + 40) % 360;
+/// Deterministic banner colour from a peer id, a hue shifted from the avatar's.
+Color profileBannerColorFor(String id) {
+  final hue = ((id.hashCode % 360).abs() + 40) % 360;
   return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }
 
-class ProfileSection extends ConsumerWidget {
-  final String localPeerId;
-  final TextEditingController displayNameController;
-  final TextEditingController statusController;
-  final TextEditingController aboutMeController;
-  final String liveDisplayName;
-  final String liveStatus;
-  final Uint8List? pendingAvatarBytes;
-  final Uint8List? pendingBannerBytes;
-  final bool avatarChanged;
-  final bool bannerChanged;
-  final bool profileDirty;
-  final bool savingProfile;
-  final bool avatarProcessing;
-  final bool bannerProcessing;
+/// The banner others see: the pending one while the draft holds one, else the
+/// saved banner (its animation first).
+Uint8List? watchDraftBanner(WidgetRef ref, String peerId) {
+  final draft = ref.watch(profileDraftProvider);
+  if (draft.bannerChanged) return draft.bannerBytes;
+  return watchAnimatedBanner(ref, peerId) ??
+      ref.watch(bannerProvider(peerId)).valueOrNull;
+}
 
-  /// Pending avatar frame ID (issue #54): null = unchanged, '' = cleared.
-  final String? pendingFrameId;
-  final bool frameChanged;
+/// Exactly what others see on the profile card, live as the draft changes.
+class ProfilePreviewCard extends ConsumerWidget {
+  final String peerId;
 
-  final VoidCallback onPickAvatar;
-  final VoidCallback onClearAvatar;
-  final VoidCallback onPickBanner;
-  final VoidCallback onClearBanner;
-  final VoidCallback onPickFrame;
-  final VoidCallback onClearFrame;
-  final VoidCallback onSaveProfile;
-  final VoidCallback onAboutMeChanged;
+  const ProfilePreviewCard({super.key, required this.peerId});
 
-  const ProfileSection({
-    super.key,
-    required this.localPeerId,
-    required this.displayNameController,
-    required this.statusController,
-    required this.aboutMeController,
-    required this.liveDisplayName,
-    required this.liveStatus,
-    required this.pendingAvatarBytes,
-    required this.pendingBannerBytes,
-    required this.avatarChanged,
-    required this.bannerChanged,
-    required this.profileDirty,
-    required this.savingProfile,
-    required this.avatarProcessing,
-    required this.bannerProcessing,
-    required this.pendingFrameId,
-    required this.frameChanged,
-    required this.onPickAvatar,
-    required this.onClearAvatar,
-    required this.onPickBanner,
-    required this.onClearBanner,
-    required this.onPickFrame,
-    required this.onClearFrame,
-    required this.onSaveProfile,
-    required this.onAboutMeChanged,
-  });
+  static const double width = 220;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    final draft = ref.watch(profileDraftProvider);
+    final notifier = ref.read(profileDraftProvider.notifier);
+    final saved = ref.watch(profileProvider.select((p) => p[peerId]));
 
-    return SingleChildScrollView(
-      key: const ValueKey('profile'),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                width: 200,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _buildPreviewCard(hollow, ref),
-                    const SizedBox(height: HollowSpacing.md),
-                    _buildAvatarRow(hollow, ref),
-                    const SizedBox(height: HollowSpacing.xs),
-                    _buildBannerRow(hollow, ref),
-                    const SizedBox(height: HollowSpacing.xs),
-                    _buildFrameRow(hollow, ref),
-                  ],
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.lg),
-              Expanded(child: _buildEditFields()),
-            ],
-          ),
-
-          const SizedBox(height: HollowSpacing.xl),
-          Container(height: 1, color: hollow.border),
-          const SizedBox(height: HollowSpacing.xl),
-
-          const HollowSectionHeader('Connections'),
-          TwitchConnectionRow(hollow: hollow),
-
-          // Text fields and cropped images benefit from a single commit, unlike
-          // the auto-saving toggles in the other categories.
-          const SizedBox(height: HollowSpacing.xl),
-          Align(
-            alignment: Alignment.centerRight,
-            child: HollowButton.filled(
-              onPressed: profileDirty ? onSaveProfile : null,
-              loading: savingProfile,
-              icon: const Icon(LucideIcons.check, size: 16),
-              child: Text(profileDirty ? 'Save profile' : 'Saved'),
-            ),
-          ),
-
-          // Below the Save commit (issue #47) so it cannot read as part of the
-          // deferred edit form: switch and erase are immediate. Desktop-only.
-          const SizedBox(height: HollowSpacing.xl),
-          Container(height: 1, color: hollow.border),
-          const SizedBox(height: HollowSpacing.xl),
-          const ProfileLocationsCard(),
-
-          // Last, below the profile switcher: a library rather than part of the
-          // deferred edit form, and wearing something saves immediately.
-          const SizedBox(height: HollowSpacing.xl),
-          Container(height: 1, color: hollow.border),
-          const SizedBox(height: HollowSpacing.lg),
-          const OwnedArtPanel(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPreviewCard(HollowTheme hollow, WidgetRef ref) {
     return Container(
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildPreviewBanner(hollow, ref),
+          _PreviewBanner(peerId: peerId, busy: draft.bannerBusy),
           Transform.translate(
-            offset: const Offset(0, -28),
+            offset: const Offset(0, -HollowSpacing.xl),
             child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
+              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+              child: ListenableBuilder(
+                listenable: Listenable.merge(
+                    [notifier.displayName, notifier.status, notifier.aboutMe]),
+                builder: (context, _) {
+                  final name = notifier.displayName.text.trim();
+                  final status = notifier.status.text.trim();
+                  final about = notifier.aboutMe.text.trim();
+                  return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Stack(
+                        children: [
+                          DecoratedBox(
+                            decoration: BoxDecoration(
+                              borderRadius:
+                                  BorderRadius.circular(hollow.radiusLg),
+                              border: Border.all(
+                                  color: hollow.elevated,
+                                  width: HollowSpacing.xs),
+                            ),
+                            child: HollowAvatar(
+                              peerId: peerId,
+                              size: 56,
+                              imageBytes:
+                                  draft.avatarChanged ? draft.avatarBytes : null,
+                              frameId: draft.effectiveFrame,
+                              animate: true,
+                            ),
+                          ),
+                          if (draft.avatarBusy)
+                            const Positioned(
+                              right: 0,
+                              bottom: 0,
+                              child: HollowSpinner(),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: HollowSpacing.xs),
+                      Text(
+                        name.isNotEmpty
+                            ? name
+                            : displayNameForPeer(saved, peerId),
+                        style: HollowTypography.subheading
+                            .copyWith(color: hollow.textPrimary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (status.isNotEmpty) ...[
+                        const SizedBox(height: HollowSpacing.xxs),
+                        Text(
+                          status,
+                          style: HollowTypography.bodySmall
+                              .copyWith(color: hollow.textSecondary),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      if (about.isNotEmpty) ...[
+                        const SizedBox(height: HollowSpacing.md),
+                        Text(
+                          about,
+                          style: HollowTypography.bodySmall
+                              .copyWith(color: hollow.textPrimary),
+                          maxLines: 5,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ],
+                  );
+                },
               ),
-              child: _buildPreviewIdentity(hollow, ref),
             ),
           ),
         ],
       ),
     );
   }
+}
 
-  Widget _buildPreviewBanner(HollowTheme hollow, WidgetRef ref) {
-    final bannerColor = _bannerColorFromId(localPeerId);
-    // The preview column's 200 width over 2.5, the one ratio every user banner
-    // surface, the cropper and Rust's 1200x480 storage share.
-    const bannerHeight = 80.0;
-    final fallback = Container(
-      height: bannerHeight,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [bannerColor, bannerColor.withValues(alpha: 0.7)],
-        ),
-      ),
+class _PreviewBanner extends ConsumerWidget {
+  final String peerId;
+  final bool busy;
+
+  const _PreviewBanner({required this.peerId, required this.busy});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The card's width over 2.5, the ratio every user banner surface, the
+    // cropper and Rust's 1200x480 storage share.
+    const height = ProfilePreviewCard.width / 2.5;
+    final fallback = ColoredBox(
+      color: profileBannerColorFor(peerId),
+      child: const SizedBox(height: height, width: double.infinity),
     );
-    final savedBanner = watchAnimatedBanner(ref, localPeerId) ??
-        ref.watch(bannerProvider(localPeerId)).valueOrNull;
-    final displayBanner = bannerChanged ? pendingBannerBytes : savedBanner;
+    final bytes = watchDraftBanner(ref, peerId);
     Widget banner = fallback;
-    if (displayBanner != null && displayBanner.isNotEmpty) {
+    if (bytes != null && bytes.isNotEmpty) {
       banner = SizedBox(
-        height: bannerHeight,
+        height: height,
         width: double.infinity,
         child: AnimatedGifImage(
-          bytes: displayBanner,
-          height: bannerHeight,
+          bytes: bytes,
+          height: height,
           width: double.infinity,
           fit: BoxFit.cover,
           errorWidget: fallback,
         ),
       );
     }
-    if (!bannerProcessing) return banner;
+    if (!busy) return banner;
     return Stack(
       children: [
         banner,
         const Positioned(
-          top: HollowSpacing.xs,
-          right: HollowSpacing.xs,
+          top: HollowSpacing.sm,
+          right: HollowSpacing.sm,
           child: HollowSpinner(),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPreviewIdentity(HollowTheme hollow, WidgetRef ref) {
-    final previewName = liveDisplayName.trim().isNotEmpty
-        ? liveDisplayName.trim()
-        : displayNameForPeer(
-            ref.watch(profileProvider.select((p) => p[localPeerId])),
-            localPeerId);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Stack(
-          children: [
-            Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-                border: Border.all(
-                  color: hollow.elevated,
-                  width: 3,
-                ),
-              ),
-              child: HollowAvatar(
-                peerId: localPeerId,
-                size: 56,
-                imageBytes: avatarChanged ? pendingAvatarBytes : null,
-                frameId: frameChanged ? (pendingFrameId ?? '') : null,
-                animate: true,
-              ),
-            ),
-            if (avatarProcessing)
-              const Positioned(
-                right: 0,
-                bottom: 0,
-                child: HollowSpinner(),
-              ),
-          ],
-        ),
-
-        const SizedBox(height: HollowSpacing.xs),
-
-        Text(
-          previewName,
-          style: HollowTypography.subheading.copyWith(
-            color: hollow.textPrimary,
-            fontWeight: FontWeight.w700,
-            fontSize: 14,
-          ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-        ),
-
-        if (liveStatus.trim().isNotEmpty) ...[
-          const SizedBox(height: HollowSpacing.xxs),
-          Text(
-            liveStatus.trim(),
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 10,
-              fontStyle: FontStyle.italic,
-            ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-          ),
-        ],
-
-        const SizedBox(height: HollowSpacing.sm),
-        Container(height: 1, color: hollow.border),
-
-        if (aboutMeController.text.trim().isNotEmpty) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'About me',
-            style: HollowTypography.micro.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.xxs),
-          Text(
-            aboutMeController.text.trim(),
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 10,
-            ),
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-          ),
-        ],
-
-        const SizedBox(height: HollowSpacing.sm),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              LucideIcons.copy,
-              size: 8,
-              color: hollow.textSecondary.withValues(alpha: 0.35),
-            ),
-            const SizedBox(width: 3),
-            Text(
-              localPeerId.length > 16
-                  ? localPeerId.substring(localPeerId.length - 8)
-                  : localPeerId,
-              style: HollowTypography.monoSmall.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.35),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildAvatarRow(HollowTheme hollow, WidgetRef ref) {
-    final savedAvatar = ref.watch(avatarProvider)[localPeerId];
-    // An ANIMATED avatar counts even when the still cache is cold: HollowAvatar
-    // paints the rail blob and never asks for the still, so `avatarProvider`
-    // stays empty for the people who most obviously have one.
-    final savedAnimated = isProfileAnimHash(ref.watch(
-        profileProvider.select((p) => p[localPeerId]?.avatarAnim ?? '')));
-    final hasAvatar = avatarChanged
-        ? (pendingAvatarBytes != null && pendingAvatarBytes!.isNotEmpty)
-        : (savedAnimated || (savedAvatar != null && savedAvatar.isNotEmpty));
-    return _ImageRow(
-      label: 'Avatar',
-      onPick: onPickAvatar,
-      onClear: hasAvatar ? onClearAvatar : null,
-      hollow: hollow,
-    );
-  }
-
-  Widget _buildBannerRow(HollowTheme hollow, WidgetRef ref) {
-    final savedBanner = watchAnimatedBanner(ref, localPeerId) ??
-        ref.watch(bannerProvider(localPeerId)).valueOrNull;
-    final hasBanner = bannerChanged
-        ? (pendingBannerBytes != null && pendingBannerBytes!.isNotEmpty)
-        : (savedBanner != null && savedBanner.isNotEmpty);
-    return _ImageRow(
-      label: 'Banner',
-      onPick: onPickBanner,
-      onClear: hasBanner ? onClearBanner : null,
-      hollow: hollow,
-    );
-  }
-
-  /// Avatar frame (issue #54). Reads the SAVED frame when nothing is pending,
-  /// so Clear only appears when there is a frame to clear.
-  Widget _buildFrameRow(HollowTheme hollow, WidgetRef ref) {
-    final saved = ref.watch(
-        profileProvider.select((p) => p[localPeerId]?.avatarFrame ?? ''));
-    final current = frameChanged ? (pendingFrameId ?? '') : saved;
-    return _ImageRow(
-      label: 'Frame',
-      icon: LucideIcons.frame,
-      onPick: onPickFrame,
-      onClear: current.isNotEmpty ? onClearFrame : null,
-      hollow: hollow,
-    );
-  }
-
-  Widget _buildEditFields() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SettingsFieldLabel(label: 'Display name'),
-        const SizedBox(height: HollowSpacing.xs),
-        HollowTextField(
-          controller: displayNameController,
-          hintText: 'Enter a display name',
-          autofocus: true,
-          maxLength: 32,
-        ),
-
-        const SizedBox(height: HollowSpacing.lg),
-
-        const SettingsFieldLabel(label: 'Status'),
-        const SizedBox(height: HollowSpacing.xs),
-        HollowTextField(
-          controller: statusController,
-          hintText: 'What are you up to?',
-          maxLength: 48,
-        ),
-
-        const SizedBox(height: HollowSpacing.lg),
-
-        const SettingsFieldLabel(label: 'About me'),
-        const SizedBox(height: HollowSpacing.xs),
-        HollowTextField(
-          controller: aboutMeController,
-          hintText: 'Tell us about yourself',
-          maxLines: 3,
-          maxLength: 128,
-          onChanged: (_) => onAboutMeChanged(),
-        ),
-      ],
-    );
-  }
-}
-
-/// Image row: "Avatar -------- [trash]" or "Banner -------- [trash]"
-class _ImageRow extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final VoidCallback onPick;
-  final VoidCallback? onClear;
-  final HollowTheme hollow;
-
-  const _ImageRow({
-    required this.label,
-    this.icon = LucideIcons.image,
-    required this.onPick,
-    this.onClear,
-    required this.hollow,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        HollowPressable(
-          onTap: onPick,
-          subtle: true,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm,
-            vertical: HollowSpacing.xxs,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 12, color: hollow.accent),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.accent,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        Expanded(
-          child: Container(
-            height: 1,
-            color: hollow.border,
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        AnimatedOpacity(
-          opacity: onClear != null ? 1.0 : 0.25,
-          duration: const Duration(milliseconds: 150),
-          child: HollowPressable(
-            onTap: onClear,
-            subtle: true,
-            padding: const EdgeInsets.all(HollowSpacing.xxs + 1),
-            semanticLabel: 'Remove $label',
-            child: Icon(
-              LucideIcons.trash2,
-              size: 13,
-              color: onClear != null ? hollow.error : hollow.textSecondary,
-            ),
-          ),
         ),
       ],
     );
@@ -523,13 +207,17 @@ class TwitchConnectionRow extends ConsumerStatefulWidget {
       _TwitchConnectionRowState();
 }
 
+enum _TwitchBusy { none, verify, disconnect }
+
 class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
   bool _connected = false;
   String? _userId;
   String? _username;
   bool _loading = true;
+
   /// A verify or a disconnect is in flight; both talk to the shop.
-  bool _busy = false;
+  _TwitchBusy _busy = _TwitchBusy.none;
+
   /// The login on our verified credential, or null when we hold none: what the
   /// purple chip draws, rather than merely whether a token exists.
   String? _verifiedLogin;
@@ -572,14 +260,14 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
   /// Every outcome is visible: a spinner, a toast carrying the shop's own
   /// sentence on a refusal, and the login on the row when it lands.
   Future<void> _verifyAccount() async {
-    if (_busy) return;
-    setState(() => _busy = true);
+    if (_busy != _TwitchBusy.none) return;
+    setState(() => _busy = _TwitchBusy.verify);
     try {
       final outcome = await ref.read(twitchFfiProvider).verifyOwner();
       if (!mounted) return;
       setState(() {
         _verifiedLogin = outcome.verified ? outcome.login : null;
-        _busy = false;
+        _busy = _TwitchBusy.none;
       });
       if (outcome.verified) {
         HollowToast.show(context, 'Twitch verified as ${outcome.login}',
@@ -589,7 +277,7 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
       }
     } catch (e) {
       if (!mounted) return;
-      setState(() => _busy = false);
+      setState(() => _busy = _TwitchBusy.none);
       HollowToast.show(context, 'Could not verify Twitch: $e',
           type: HollowToastType.error);
     }
@@ -610,8 +298,8 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
   }
 
   Future<void> _disconnect() async {
-    if (_busy) return;
-    setState(() => _busy = true);
+    if (_busy != _TwitchBusy.none) return;
+    setState(() => _busy = _TwitchBusy.disconnect);
     try {
       // Rust drops the credential and republishes BEFORE wiping the token: the
       // credential is a 90-day fact everyone verifies offline, so losing the
@@ -623,96 +311,81 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
           _userId = null;
           _username = null;
           _verifiedLogin = null;
-          _busy = false;
+          _busy = _TwitchBusy.none;
         });
         HollowToast.show(context, 'Twitch disconnected',
             type: HollowToastType.info);
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _busy = false);
+        setState(() => _busy = _TwitchBusy.none);
         HollowToast.show(context, 'Failed to disconnect: $e',
             type: HollowToastType.error);
       }
     }
   }
 
+  String? get _subtitle {
+    if (_loading) return null;
+    if (_verifiedLogin != null) return 'Verified as $_verifiedLogin';
+    if (_connected && (_username != null || _userId != null)) {
+      if (_username != null) {
+        return 'Connected as $_username, not verified yet';
+      }
+      final id = _userId!;
+      return 'Connected (ID: ${id.length > 12 ? '${id.substring(0, 12)}...' : id})';
+    }
+    return 'A verified mark on your name, and entry to Twitch-verified servers';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hollow = widget.hollow;
-
+    final busy = _busy != _TwitchBusy.none;
+    final Widget? trailing;
     if (_loading) {
-      return const SizedBox(height: 36);
-    }
-
-    return Row(
-      children: [
-        const Icon(BrandIcons.twitch, size: 18, color: Color(0xFF9146FF)),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Twitch',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textPrimary),
-              ),
-              if (_verifiedLogin != null)
-                Text(
-                  'Verified as $_verifiedLogin',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
-                  ),
-                )
-              else if (_connected && (_username != null || _userId != null))
-                Text(
-                  _username != null
-                      ? 'Connected as $_username, not verified yet'
-                      : 'Connected (ID: ${_userId!.length > 12 ? '${_userId!.substring(0, 12)}...' : _userId!})',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
-                  ),
-                )
-              else
-                Text(
-                  'Connect to wear a verified Twitch mark and join Twitch-verified servers',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
-                  ),
-                ),
-            ],
-          ),
-        ),
-        if (_busy)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            child: HollowSpinner(),
-          )
-        else if (_connected) ...[
+      trailing = null;
+    } else if (_connected) {
+      trailing = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
           // Connected but not verified: the mark is one press away, so offer it
           // rather than making them disconnect and start again.
-          if (_verifiedLogin == null)
+          if (_verifiedLogin == null) ...[
             HollowButton.outline(
-              onPressed: _verifyAccount,
+              onPressed: busy ? null : _verifyAccount,
+              loading: _busy == _TwitchBusy.verify,
               compact: true,
               child: const Text('Verify'),
             ),
+            const SizedBox(width: HollowSpacing.sm),
+          ],
           HollowButton.ghost(
-            onPressed: _disconnect,
+            onPressed: busy ? null : _disconnect,
+            loading: _busy == _TwitchBusy.disconnect,
             compact: true,
             child: const Text('Disconnect'),
           ),
-        ] else
-          HollowButton.outline(
-            onPressed: _connect,
-            compact: true,
-            child: const Text('Connect'),
-          ),
-      ],
+        ],
+      );
+    } else {
+      trailing = HollowButton.outline(
+        onPressed: _connect,
+        compact: true,
+        child: const Text('Connect'),
+      );
+    }
+
+    return SettingsRow(
+      title: 'Twitch',
+      subtitle: _subtitle,
+      leading: const SizedBox.square(
+        dimension: HollowSpacing.xl + HollowSpacing.sm,
+        child: Center(
+          child: Icon(BrandIcons.twitch,
+              size: 20, color: BrandIconColors.twitch),
+        ),
+      ),
+      trailing: trailing,
     );
   }
 }

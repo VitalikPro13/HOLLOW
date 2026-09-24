@@ -38,35 +38,41 @@ class StatBar extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Icon(icon, size: 12, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.xs),
-            // The label yields and the value does not: the number is what you
-            // came to read. Expanded rather than a Spacer, which claims the
-            // free space and leaves a long label and value nowhere to go.
-            Expanded(
-              child: Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
+        LayoutBuilder(builder: (context, constraints) {
+          return Row(
+            children: [
+              Icon(icon, size: 12, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.xs),
+              // The label yields and the value keeps the trailing edge: the
+              // number is what you came to read. At Larger Text on a phone the
+              // value is capped and fades rather than pushing past the card.
+              Expanded(
+                child: Text(
+                  label,
+                  style: HollowTypography.micro
+                      .copyWith(color: hollow.textSecondary),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
               ),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              value,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 10,
+              const SizedBox(width: HollowSpacing.xs),
+              ConstrainedBox(
+                constraints:
+                    BoxConstraints(maxWidth: constraints.maxWidth * 0.6),
+                child: Text(
+                  value,
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.fade,
+                  style: HollowTypography.micro.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          );
+        }),
         const SizedBox(height: 4),
         _ThresholdBar(hollow: hollow, progress: progress, color: barColor),
       ],

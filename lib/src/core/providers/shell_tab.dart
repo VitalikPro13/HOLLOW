@@ -2,17 +2,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 
 /// The full-screen views that take over the centre pane: Browse Public
-/// Channels, Share, Archive, Conferences, Hollow Shop.
+/// Channels, Share, Archive, Conferences, Hollow Shop, Settings.
 ///
 /// They are mutually exclusive but each keeps its own boolean provider, so
 /// every navigation site had to clear ALL of them and half never learned about
 /// Conferences (issue #28). [setShellTab] is now the ONE place that knows the
 /// full list: a new tab is added to the enum and to it, and every site follows.
-enum ShellTab { guest, share, archive, conference, shop }
+enum ShellTab { guest, share, archive, conference, shop, settings }
 
 /// `ref.read`, torn off either a [WidgetRef] or a provider [Ref] — the same
 /// helper has to serve widgets and notifiers.
@@ -26,6 +27,7 @@ void setShellTab(ProviderRead read, ShellTab? tab) {
   read(archiveTabOpenProvider.notifier).state = tab == ShellTab.archive;
   read(conferenceTabOpenProvider.notifier).state = tab == ShellTab.conference;
   read(shopTabOpenProvider.notifier).state = tab == ShellTab.shop;
+  read(settingsTabOpenProvider.notifier).state = tab == ShellTab.settings;
 }
 
 /// True when any centre tab is covering the chat area. Watch this instead of
@@ -37,7 +39,8 @@ final anyShellTabOpenProvider = Provider<bool>(
       ref.watch(shareTabOpenProvider) ||
       ref.watch(archiveTabOpenProvider) ||
       ref.watch(conferenceTabOpenProvider) ||
-      ref.watch(shopTabOpenProvider),
+      ref.watch(shopTabOpenProvider) ||
+      ref.watch(settingsTabOpenProvider),
 );
 
 /// Which centre tab is open, if any. They are exclusive, so at most one is.
@@ -47,5 +50,6 @@ final openShellTabProvider = Provider<ShellTab?>((ref) {
   if (ref.watch(archiveTabOpenProvider)) return ShellTab.archive;
   if (ref.watch(conferenceTabOpenProvider)) return ShellTab.conference;
   if (ref.watch(shopTabOpenProvider)) return ShellTab.shop;
+  if (ref.watch(settingsTabOpenProvider)) return ShellTab.settings;
   return null;
 });

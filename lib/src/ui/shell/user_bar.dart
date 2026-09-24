@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -20,7 +21,6 @@ import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Bottom bar in the channel sidebar, showing the local identity and status.
@@ -192,7 +192,8 @@ class UserBar extends ConsumerWidget {
           HollowIconButton(
             icon: LucideIcons.settings,
             label: 'Settings',
-            onPressed: () => showUserSettingsDialog(context),
+            selected: ref.watch(settingsTabOpenProvider),
+            onPressed: () => toggleSettings(ref.read),
           ),
           if (identity.mnemonic != null) ...[
             const SizedBox(width: HollowSpacing.xs),

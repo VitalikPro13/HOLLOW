@@ -45,7 +45,7 @@
 
     { "peer": "a", "op": "tap", "target": "semantics:Friends", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 1200 },
-    { "peer": "a", "op": "tap", "target": "text:Add Friend", "index": 0, "soft": true },
+    { "peer": "a", "op": "tap", "target": "text:Add friend", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 1200 },
     { "peer": "a", "op": "shot", "name": "m9-06-add-friend", "soft": true }
   ]

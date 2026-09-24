@@ -270,7 +270,13 @@ void main() {
         findsOneWidget,
         reason: 'a call to the shop is slow enough to need saying so',
       );
-      expect(find.widgetWithText(HollowButton, 'Verify'), findsNothing);
+      expect(
+        tester
+            .widget<HollowButton>(find.widgetWithText(HollowButton, 'Verify'))
+            .loading,
+        isTrue,
+        reason: 'the button that started the call is the one that spins',
+      );
 
       ffi.gate!.complete(const twitch_api.TwitchVerifyOutcome(
         verified: true,

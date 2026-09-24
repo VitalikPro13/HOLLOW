@@ -1,18 +1,19 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 
-/// Desktop app lock card: how long until the window locks itself, and a way to
+/// The "Lock after" row: how long until the window locks itself, and a way to
 /// lock it right now.
 ///
-/// [hasPassword] gates the whole card. Either protection mode qualifies, since
+/// [hasPassword] gates the whole row. Either protection mode qualifies, since
 /// both have a password the unlock prompt can take; with none there would be
 /// nothing to lift the lock with.
 class AppLockCard extends ConsumerWidget {
@@ -28,64 +29,49 @@ class AppLockCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-
-    if (!hasPassword) {
-      return Text(
-        'Set a password above to lock Hollow.',
-        style: HollowTypography.body
-            .copyWith(color: hollow.textSecondary, fontSize: 12),
-      );
-    }
+    if (!hasPassword) return const SizedBox.shrink();
 
     final minutes = ref.watch(lockAfterMinutesProvider);
     final binding = (ref.watch(appShortcutsProvider).valueOrNull ??
         kAppShortcutDefaults)[AppShortcut.lockNow]!;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Locks the window when you stop using it. Your app password opens '
-          'it again, and Hollow keeps running while it is locked, so messages '
-          'and calls still reach you.',
-          style: HollowTypography.body
-              .copyWith(color: hollow.textSecondary, fontSize: 12),
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        Text(
-          'Lock after',
-          style: HollowTypography.body
-              .copyWith(color: hollow.textPrimary, fontSize: 13),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Wrap(
-          spacing: HollowSpacing.sm,
-          runSpacing: HollowSpacing.sm,
-          children: [
-            for (final choice in kLockAfterChoices)
-              HollowChip(
-                label: labelFor(choice),
-                selected: minutes == choice,
-                onTap: () => ref
-                    .read(lockAfterMinutesProvider.notifier)
-                    .setMinutes(choice),
-              ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        HollowButton.outline(
-          onPressed: () => requestAppLock(ref, context),
-          icon: const Icon(LucideIcons.lock, size: 16),
-          child: const Text('Lock now'),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          'Shortcut: ${binding.display()}. Change it under Shortcuts.',
-          style: HollowTypography.caption
-              .copyWith(color: hollow.textSecondary, fontSize: 11),
-        ),
-      ],
+    // Lock now stays a button: the shortcut alone is invisible to anyone who
+    // never opens the Shortcuts page.
+    // A phone has no shortcut, and it also locks after time in the background.
+    final phone = Platform.isAndroid || Platform.isIOS;
+    return SettingsRow(
+      title: 'Lock after',
+      subtitle: phone
+          ? 'Also locks after ${kRelockAfterBackground.inSeconds} seconds '
+              'away from Hollow'
+          : '${binding.display()} locks it now',
+      wideTrailing: true,
+      trailing: Wrap(
+        spacing: HollowSpacing.sm,
+        runSpacing: HollowSpacing.sm,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final choice in kLockAfterChoices)
+            HollowChip(
+              label: labelFor(choice),
+              selected: minutes == choice,
+              onTap: () => ref
+                  .read(lockAfterMinutesProvider.notifier)
+                  .setMinutes(choice)
+                  .catchError((Object e) {
+                if (context.mounted) {
+                  HollowToast.show(context, 'Could not save the setting: $e',
+                      type: HollowToastType.error);
+                }
+              }),
+            ),
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => requestAppLock(ref, context),
+            child: const Text('Lock now'),
+          ),
+        ],
+      ),
     );
   }
 }

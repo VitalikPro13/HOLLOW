@@ -276,7 +276,9 @@ Already-settled surfaces: `showHollowMenu` via
 
 - The header holds **people**; the dock holds **you** (identity, connection,
   the call), **where you are** (Home, servers, places) and **tools**. Places
-  swap the centre through `setShellTab()`; tools open on top.
+  swap the centre through `setShellTab()`; tools open on top. Settings is a
+  place (`openSettings()`, the gear carries its mark) built from
+  `settings/settings_kit.dart`: sections, not cards; rows carry no icon.
 - **One** selection mark, `NavSelectionMark`, over whatever is active. Hover
   is a surface step only. Unread never changes a name's weight.
 - In Dock mode the title bar folds into the header: the window controls float

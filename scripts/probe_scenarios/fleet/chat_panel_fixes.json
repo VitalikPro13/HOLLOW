@@ -38,19 +38,19 @@
     {
       "peer": "b",
       "op": "tap",
-      "target": "text:Add Friend",
+      "target": "type:_FriendsManager > text:Add friend",
       "index": 0
     },
     {
       "peer": "b",
       "op": "enter_text",
-      "target": "hint:Peer ID or nickname...",
+      "target": "hint:Paste an ID, or type a nickname",
       "value": "${PEER_A}"
     },
     {
       "peer": "b",
       "op": "tap",
-      "target": "text:Send Request",
+      "target": "text:Send request",
       "index": 0
     },
     {

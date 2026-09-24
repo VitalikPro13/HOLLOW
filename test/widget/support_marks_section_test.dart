@@ -2,8 +2,8 @@
 /// the one irreversible thing they can do.
 ///
 /// What this pins: both toggles are on the panel, "Hide my support marks"
-/// asks Rust for exactly `true`, Remove asks first with a `.danger` confirm
-/// and only then forgets the credential, and an identity with no marks is
+/// asks Rust for exactly `true`, Remove (behind the row's More menu) asks
+/// first with a `.danger` confirm and only then forgets the credential, and an identity with no marks is
 /// told how to earn one rather than shown an empty space.
 library;
 
@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/shop/owned_art_panel.dart';
 
@@ -98,13 +99,20 @@ Future<_FakeSupportMarksFfi> _pump(
       child: MaterialApp(
         theme: HollowThemeData.dark(),
         home: const Scaffold(
-          body: SingleChildScrollView(child: OwnedArtPanel()),
+          body: SingleChildScrollView(child: SupportMarksSection()),
         ),
       ),
     ),
   );
   await tester.pump(const Duration(milliseconds: 300));
   return ffi;
+}
+
+/// Opens a mark's More menu, where Remove lives.
+Future<void> _openMore(WidgetTester tester) async {
+  await tester.tap(find.byWidgetPredicate(
+      (w) => w is HollowIconButton && w.label == 'More'));
+  await tester.pump(const Duration(milliseconds: 300));
 }
 
 Finder _toggle(String label) => find.byWidgetPredicate(
@@ -124,13 +132,9 @@ void main() {
 
     expect(find.text('Support marks'), findsOneWidget);
     expect(find.text('Hide my support marks'), findsOneWidget);
-    expect(
-      find.text(
-          'Show the mark next to my name in chats and member lists'),
-      findsOneWidget,
-    );
+    expect(find.text('Show the mark next to my name'), findsOneWidget);
     expect(_toggle('Hide my support marks'), findsOneWidget);
-    expect(_toggle('Show the support mark next to my name'), findsOneWidget);
+    expect(_toggle('Show the mark next to my name'), findsOneWidget);
 
     await tester.tap(_toggle('Hide my support marks'), warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 300));
@@ -144,6 +148,9 @@ void main() {
 
     expect(find.text('Gilded frame by Nadia'), findsOneWidget);
     expect(find.text('Redeemed 2026-09-02'), findsOneWidget);
+    expect(find.text('Remove'), findsNothing,
+        reason: 'an irreversible action waits behind the More menu');
+    await _openMore(tester);
     expect(find.text('Remove'), findsOneWidget);
   });
 
@@ -151,7 +158,10 @@ void main() {
       (tester) async {
     final ffi = await _pump(tester, creds: [_cred]);
 
+    await _openMore(tester);
     await tester.tap(find.text('Remove'), warnIfMissed: false);
+    // The menu runs its action a frame after it starts closing.
+    await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('Remove this mark?'), findsOneWidget);
@@ -164,8 +174,7 @@ void main() {
         (w) => w is HollowButton && w.variant == HollowButtonVariant.ghost);
     expect(cancel, findsWidgets);
 
-    // The confirm is destructive, so it is the one danger button on screen;
-    // the row's own Remove stays a ghost.
+    // The confirm is destructive, so it is the one danger button on screen.
     final confirm = find.byWidgetPredicate(
         (w) => w is HollowButton && w.variant == HollowButtonVariant.danger);
     expect(confirm, findsOneWidget);
@@ -183,7 +192,10 @@ void main() {
   testWidgets('Cancel leaves the mark alone', (tester) async {
     final ffi = await _pump(tester, creds: [_cred]);
 
+    await _openMore(tester);
     await tester.tap(find.text('Remove'), warnIfMissed: false);
+    // The menu runs its action a frame after it starts closing.
+    await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('Cancel'));
     await tester.pump(const Duration(milliseconds: 300));

@@ -16,28 +16,38 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// "Art you own": the packs this identity has imported, with one button per
-/// wearable kind, plus any support codes kept for later.
+/// The same slot as Settings > Profile's Avatar and Banner rows, so a piece of
+/// art looks here exactly as it does there.
+const double _kThumb = 48;
+
+/// A banner keeps its own 2.5:1 shape, as on the Profile's Banner row.
+const double _kBannerThumbHeight = _kThumb / 2.5;
+
+/// "Your art": the packs this identity has imported, one row per wearable
+/// kind, then the support marks they earned and any codes kept for later.
 ///
-/// Lives inside the profile settings on both shells, because that is where a
+/// A section of Settings > Profile on both shells, because that is where a
 /// person goes to change how they look. Absent entirely on store builds.
 class OwnedArtPanel extends ConsumerStatefulWidget {
-  /// Mobile spacing and typography; the desktop dialog is wider.
+  /// Touch sizing, for a phone host that does not set [SettingsDensity].
   final bool compact;
 
   const OwnedArtPanel({super.key, this.compact = false});
@@ -66,9 +76,6 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
       ));
       return;
     }
-    // The panel lives inside the settings dialog, which has to close before the
-    // centre tab underneath it can be seen.
-    Navigator.of(context).maybePop();
     openShopTab(ref.read);
   }
 
@@ -78,39 +85,16 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
 
     final hollow = HollowTheme.of(context);
     final items = ref.watch(ownedArtProvider);
-    final compact = widget.compact;
 
-    final importButton = HollowButton.outline(
-      onPressed: () => pickAndImportHollowpack(context, ref),
-      compact: true,
-      icon: const Icon(LucideIcons.packageOpen, size: 14),
-      child: const Text('Import a pack'),
-    );
-    final Widget header = compact
-        ? Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Art you own',
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ),
-              importButton,
-            ],
-          )
-        : HollowSectionHeader(
-            'Art You Own',
-            subtitle: 'or drop a .hollowpack here',
-            action: importButton,
-          );
-
-    final body = Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    Widget body = SettingsSection(
+      title: 'Your art',
+      subtitle: _isMobile ? null : 'Or drop a .hollowpack here',
+      action: HollowButton.ghost(
+        onPressed: () => pickAndImportHollowpack(context, ref),
+        compact: true,
+        child: const Text('Import a pack'),
+      ),
       children: [
-        header,
-        const SizedBox(height: HollowSpacing.xs),
         if (items.isEmpty)
           HollowEmptyState(
             dense: true,
@@ -125,15 +109,12 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
           )
         else
           for (final item in items)
-            Padding(
-              key: ValueKey(item.itemId),
-              padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-              child: _OwnedItemRow(item: item),
-            ),
-        const _KeptCodesSection(),
-        const _SupportMarksSection(),
+            for (final kind in item.kinds)
+              _OwnedItemRow(
+                  key: ValueKey('${item.itemId}/$kind'), item: item, kind: kind),
       ],
     );
+    if (widget.compact) body = SettingsDensity(touch: true, child: body);
 
     if (_isMobile) return body;
 
@@ -160,18 +141,10 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
                       borderRadius: BorderRadius.circular(hollow.radiusLg),
                       border: Border.all(color: hollow.accent, width: 2),
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(LucideIcons.packageOpen,
-                            size: 32, color: hollow.accent),
-                        const SizedBox(height: HollowSpacing.sm),
-                        Text(
-                          'Drop a .hollowpack to import',
-                          style: HollowTypography.body
-                              .copyWith(color: hollow.textPrimary),
-                        ),
-                      ],
+                    child: Text(
+                      'Drop a .hollowpack to import',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textPrimary),
                     ),
                   ),
                 ),
@@ -183,22 +156,24 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
   }
 }
 
+/// One wearable kind of one owned item.
 class _OwnedItemRow extends ConsumerStatefulWidget {
   final OwnedItem item;
+  final String kind;
 
-  const _OwnedItemRow({required this.item});
+  const _OwnedItemRow({super.key, required this.item, required this.kind});
 
   @override
   ConsumerState<_OwnedItemRow> createState() => _OwnedItemRowState();
 }
 
 class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
-  String? _busyKind;
+  bool _busy = false;
 
-  Future<void> _wear(String kind) async {
-    setState(() => _busyKind = kind);
+  Future<void> _wear() async {
+    setState(() => _busy = true);
     try {
-      await ref.read(ownedArtProvider.notifier).wear(widget.item, {kind});
+      await ref.read(ownedArtProvider.notifier).wear(widget.item, {widget.kind});
       if (!mounted) return;
       HollowToast.show(context, 'Wearing ${widget.item.title}',
           type: HollowToastType.success);
@@ -207,118 +182,115 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
       final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
       HollowToast.show(context, message, type: HollowToastType.error);
     } finally {
-      if (mounted) setState(() => _busyKind = null);
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _remove() async {
+    final item = widget.item;
+    final kinds = item.kinds.map(ownedRoleLabel).join(', ').toLowerCase();
+    final confirmed = await showHollowConfirm(
+      context: context,
+      title: 'Remove ${item.title}?',
+      message: 'Its $kinds leave Your art on this device. Anything you wear '
+          'now stays on until you change it. Import the pack again to get it '
+          'back.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    );
+    if (!confirmed || !mounted) return;
+    try {
+      await ref.read(ownedArtProvider.notifier).remove(item);
+      if (!mounted) return;
+      HollowToast.show(context, 'Removed ${item.title}',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Could not remove ${item.title}',
+          type: HollowToastType.error);
     }
   }
 
   Future<void> _openArtist() async {
-    final url = widget.item.artistUrl;
-    if (url.isEmpty) return;
-    final uri = Uri.tryParse(url);
+    final uri = Uri.tryParse(widget.item.artistUrl);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   /// Whether the profile is already wearing this kind of this item.
-  bool _isWorn(String kind, Set<String> worn) {
-    switch (kind) {
-      case 'frame':
-        final hash = widget.item.frameHash;
-        return hash != null && worn.contains(hash);
-      case 'avatar':
-        final anim = widget.item.avatarAnimHash;
-        final still = widget.item.avatarStillHash;
-        return (anim != null && worn.contains(anim)) ||
-            (still != null && worn.contains(still));
-      case 'banner':
-        final anim = widget.item.bannerAnimHash;
-        final still = widget.item.bannerStillHash;
-        return (anim != null && worn.contains(anim)) ||
-            (still != null && worn.contains(still));
-      default:
-        return false;
-    }
+  bool _isWorn(Set<String> worn) {
+    final item = widget.item;
+    bool has(String? hash) => hash != null && worn.contains(hash);
+    return switch (widget.kind) {
+      'frame' => has(item.frameHash),
+      'avatar' => has(item.avatarAnimHash) || has(item.avatarStillHash),
+      'banner' => has(item.bannerAnimHash) || has(item.bannerStillHash),
+      _ => false,
+    };
   }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final item = widget.item;
-    final worn = ref.watch(myWornHashesProvider);
+    final worn = _isWorn(ref.watch(myWornHashesProvider));
+    final kindLabel = ownedRoleLabel(widget.kind);
 
-    return Container(
-      padding: const EdgeInsets.all(HollowSpacing.sm),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _OwnedThumb(item: item),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+    return SettingsRow(
+      title: item.title,
+      subtitleWidget: item.artistUrl.isEmpty
+          ? Text('$kindLabel · by ${item.artistName}')
+          : Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text(
-                  item.title,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                if (item.artistUrl.isEmpty)
-                  Text(
-                    'by ${item.artistName}',
-                    style: HollowTypography.caption
-                        .copyWith(color: hollow.textSecondary),
-                  )
-                else
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: HollowPressable(
-                      onTap: _openArtist,
-                      semanticButton: false,
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: EdgeInsets.zero,
-                      child: Text(
-                        'by ${item.artistName}',
-                        style: HollowTypography.caption
-                            .copyWith(color: hollow.accentText),
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: HollowSpacing.xs),
-                Wrap(
-                  spacing: HollowSpacing.xs,
-                  runSpacing: HollowSpacing.xs,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    for (final kind in item.kinds) HollowBadge(kind),
-                    for (final kind in item.kinds)
-                      if (_isWorn(kind, worn))
-                        const HollowButton.ghost(
-                          onPressed: null,
-                          compact: true,
-                          icon: Icon(LucideIcons.circleCheck, size: 14),
-                          child: Text('Worn'),
-                        )
-                      else
-                        HollowButton.outline(
-                          onPressed:
-                              _busyKind == null ? () => _wear(kind) : null,
-                          compact: true,
-                          loading: _busyKind == kind,
-                          child: Text(wearKindLabel(kind)),
-                        ),
-                  ],
-                ),
+                Text('$kindLabel · '),
+                HollowTextLink('by ${item.artistName}', onTap: _openArtist),
               ],
+            ),
+      leading: _OwnedThumb(item: item, kind: widget.kind),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (worn)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+              child: Text(
+                'Worn',
+                style: HollowTypography.label
+                    .copyWith(color: hollow.textTertiary),
+              ),
+            )
+          else
+            HollowButton.outline(
+              onPressed: _wear,
+              compact: true,
+              loading: _busy,
+              semanticLabel: wearKindLabel(widget.kind),
+              child: const Text('Wear'),
+            ),
+          const SizedBox(width: HollowSpacing.xs),
+          Builder(
+            builder: (buttonContext) => HollowIconButton(
+              icon: LucideIcons.ellipsis,
+              label: 'More for ${item.title}',
+              tooltip: 'More',
+              onPressed: () => showHollowMenu(
+                context: buttonContext,
+                anchor: overlayAnchorOf(
+                  buttonContext,
+                  localOffset: Offset(buttonContext.size?.width ?? 0,
+                      (buttonContext.size?.height ?? 0) + HollowSpacing.xs),
+                ),
+                alignEnd: true,
+                builder: (_, _) => [
+                  HollowMenuItem(
+                    icon: LucideIcons.trash2,
+                    label: 'Remove from Your art',
+                    isDanger: true,
+                    onTap: _remove,
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -327,31 +299,30 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
   }
 }
 
-/// A 56px preview of what an item looks like when worn.
+/// What an item looks like when worn.
 class _OwnedThumb extends ConsumerWidget {
   final OwnedItem item;
+  final String kind;
 
-  const _OwnedThumb({required this.item});
+  const _OwnedThumb({required this.item, required this.kind});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final me = ref.watch(identityProvider.select((s) => s.peerId)) ?? '';
-    final kinds = item.kinds;
-    final kind = kinds.isEmpty ? '' : kinds.first;
 
-    Widget placeholder() => Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-        );
+    final placeholder = Container(
+      width: _kThumb,
+      height: _kThumb,
+      decoration: BoxDecoration(
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+      ),
+    );
 
     if (kind == 'frame') {
       final hash = item.frameHash;
-      if (hash == null) return placeholder();
+      if (hash == null) return placeholder;
       final bytes = ref.watch(railBytesProvider(hash)).valueOrNull;
       final seeded =
           ref.watch(avatarFrameProvider.select((m) => m.containsKey(hash)));
@@ -360,81 +331,77 @@ class _OwnedThumb extends ConsumerWidget {
         Future.microtask(() => frames.seed(hash, bytes));
       }
       // A frame is decoration painted in front of an avatar, so it needs a real
-      // face under it to be judged.
-      return HollowAvatar(peerId: me, size: 56, frameId: hash);
-    }
-
-    if (kind == 'avatar') {
-      final hash = item.avatarStillHash;
-      if (hash == null) return placeholder();
-      final bytes = ref.watch(railBytesProvider(hash)).valueOrNull;
-      if (bytes == null || bytes.isEmpty) return placeholder();
-      // An explicit override rather than the lazy self-fetch: these bytes are
-      // the PACK's, which is what the row is showing off.
-      return HollowAvatar(
-          peerId: me, size: 56, imageBytes: bytes, frameId: '');
-    }
-
-    if (kind == 'banner') {
-      final hash = item.bannerStillHash ?? item.bannerAnimHash;
-      if (hash == null) return placeholder();
-      final bytes = ref.watch(railBytesProvider(hash)).valueOrNull;
-      if (bytes == null || bytes.isEmpty) {
-        return SizedBox(
-          height: 56,
-          child: AspectRatio(aspectRatio: 2.5, child: placeholder()),
-        );
-      }
-      return SizedBox(
-        height: 56,
-        child: AspectRatio(
-          aspectRatio: 2.5,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            child: AnimatedGifImage(
-              bytes: bytes,
-              fit: BoxFit.cover,
-              animate: false,
-              errorWidget: placeholder(),
-            ),
+      // face under it to be judged. The art reaches past the avatar's edge, so
+      // the face is smaller than the slot and the whole frame stays in it.
+      return SizedBox.square(
+        dimension: _kThumb,
+        child: ClipRect(
+          child: Center(
+            child: HollowAvatar(
+                peerId: me, size: _kThumb - HollowSpacing.md, frameId: hash),
           ),
         ),
       );
     }
 
-    return placeholder();
+    if (kind == 'avatar') {
+      final hash = item.avatarStillHash;
+      if (hash == null) return placeholder;
+      final bytes = ref.watch(railBytesProvider(hash)).valueOrNull;
+      if (bytes == null || bytes.isEmpty) return placeholder;
+      // An explicit override rather than the lazy self-fetch: these bytes are
+      // the PACK's, which is what the row is showing off.
+      return HollowAvatar(
+          peerId: me, size: _kThumb, imageBytes: bytes, frameId: '');
+    }
+
+    if (kind == 'banner') {
+      final bannerPlaceholder = Container(
+        width: _kThumb,
+        height: _kBannerThumbHeight,
+        decoration: BoxDecoration(
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusXs),
+        ),
+      );
+      final hash = item.bannerStillHash ?? item.bannerAnimHash;
+      if (hash == null) return bannerPlaceholder;
+      final bytes = ref.watch(railBytesProvider(hash)).valueOrNull;
+      if (bytes == null || bytes.isEmpty) return bannerPlaceholder;
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
+        child: AnimatedGifImage(
+          bytes: bytes,
+          width: _kThumb,
+          height: _kBannerThumbHeight,
+          fit: BoxFit.cover,
+          animate: false,
+          errorWidget: bannerPlaceholder,
+        ),
+      );
+    }
+
+    return placeholder;
   }
 }
 
-class _KeptCodesSection extends ConsumerWidget {
-  const _KeptCodesSection();
+/// Codes that arrived by a receipt link and are not redeemed yet, folded
+/// behind one row. A code the shop no longer honours drops on lookup.
+class _KeptCodesRow extends ConsumerWidget {
+  const _KeptCodesRow();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final codes = ref.watch(shop.keptRedeemCodesProvider).valueOrNull;
     if (codes == null || codes.isEmpty) return const SizedBox.shrink();
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return SettingsExpandRow(
+      title: codes.length == 1 ? '1 code waiting' : '${codes.length} codes waiting',
+      subtitle:
+          'From a receipt link. Redeeming lights the mark and fetches the art.',
       children: [
-        const SizedBox(height: HollowSpacing.lg),
-        const HollowSectionHeader('Codes kept for later', dense: true),
-        Text(
-          'Codes that arrived by a receipt link and are not redeemed yet. '
-          'Redeem one to light its support mark and fetch the art; the '
-          'receipt email has it too. A code the shop no longer honours is '
-          'dropped the moment it is looked up.',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
         for (final kept in codes)
-          Padding(
-            key: ValueKey(kept.code),
-            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-            child: _KeptCodeRow(code: kept.code),
-          ),
+          _KeptCodeRow(key: ValueKey(kept.code), code: kept.code),
       ],
     );
   }
@@ -443,7 +410,7 @@ class _KeptCodesSection extends ConsumerWidget {
 class _KeptCodeRow extends ConsumerStatefulWidget {
   final String code;
 
-  const _KeptCodeRow({required this.code});
+  const _KeptCodeRow({super.key, required this.code});
 
   @override
   ConsumerState<_KeptCodeRow> createState() => _KeptCodeRowState();
@@ -457,7 +424,7 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
   String get code => widget.code;
 
   /// The code with every character but the dashes covered.
-  String get _masked => code.replaceAll(RegExp(r'[^-]'), '\u2022');
+  String get _masked => code.replaceAll(RegExp(r'[^-]'), '•');
 
   Future<void> _copy(BuildContext context) async {
     await Clipboard.setData(ClipboardData(text: code));
@@ -465,7 +432,7 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
     HollowToast.show(context, 'Code copied', type: HollowToastType.success);
   }
 
-  Future<void> _forget(BuildContext context, WidgetRef ref) async {
+  Future<void> _forget(BuildContext context) async {
     final confirmed = await showHollowConfirm(
       context: context,
       title: 'Forget this code?',
@@ -485,54 +452,68 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
     }
   }
 
+  void _openMenu(BuildContext buttonContext) {
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    showHollowMenu(
+      context: buttonContext,
+      anchor: overlayAnchorOf(buttonContext,
+          localOffset: Offset(box.size.width, box.size.height)),
+      alignEnd: true,
+      builder: (menuContext, _) => [
+        HollowMenuItem(
+          icon: LucideIcons.copy,
+          label: 'Copy code',
+          onTap: () => _copy(buttonContext),
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.trash2,
+          label: 'Forget code',
+          isDanger: true,
+          onTap: () => _forget(buttonContext),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            _revealed ? code : _masked,
-            style: HollowTypography.mono
-                .copyWith(color: hollow.textSecondary, fontSize: 11),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              _revealed ? code : _masked,
+              style: HollowTypography.monoSmall
+                  .copyWith(color: hollow.textSecondary),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        HollowPressable(
-          semanticLabel: _revealed ? 'Hide code' : 'Reveal code',
-          onTap: () => setState(() => _revealed = !_revealed),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          child: Icon(
-            _revealed ? LucideIcons.eyeOff : LucideIcons.eye,
-            size: 14,
-            color: hollow.textSecondary,
+          const SizedBox(width: HollowSpacing.sm),
+          HollowIconButton(
+            icon: _revealed ? LucideIcons.eyeOff : LucideIcons.eye,
+            label: _revealed ? 'Hide code' : 'Reveal code',
+            onPressed: () => setState(() => _revealed = !_revealed),
           ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        HollowButton.outline(
-          onPressed: () => showRedeemCodeDialog(context, code),
-          compact: true,
-          child: const Text('Redeem'),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        HollowPressable(
-          semanticLabel: 'Copy code',
-          onTap: () => _copy(context),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          child: Icon(LucideIcons.copy, size: 14, color: hollow.textSecondary),
-        ),
-        HollowPressable(
-          semanticLabel: 'Forget code',
-          onTap: () => _forget(context, ref),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          child: Icon(LucideIcons.trash2, size: 14, color: hollow.textSecondary),
-        ),
-      ],
+          const SizedBox(width: HollowSpacing.xs),
+          HollowButton.outline(
+            onPressed: () => showRedeemCodeDialog(context, code),
+            compact: true,
+            child: const Text('Redeem'),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          Builder(
+            builder: (buttonContext) => HollowIconButton(
+              icon: LucideIcons.ellipsis,
+              label: 'More',
+              onPressed: () => _openMenu(buttonContext),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -547,17 +528,18 @@ String supportCredLabel(shop.OwnSupportCred cred) {
   return 'a piece';
 }
 
-/// The credentials this identity holds and the two choices the holder makes
-/// about them: whether the mark sits next to their name, and whether it shows.
-class _SupportMarksSection extends ConsumerStatefulWidget {
-  const _SupportMarksSection();
+/// Settings > Profile's "Support marks" section: the marks this identity holds,
+/// the two choices about them (beside the name, hidden) and codes kept for
+/// later. Absent entirely on store builds, like Your art.
+class SupportMarksSection extends ConsumerStatefulWidget {
+  const SupportMarksSection({super.key});
 
   @override
-  ConsumerState<_SupportMarksSection> createState() =>
+  ConsumerState<SupportMarksSection> createState() =>
       _SupportMarksSectionState();
 }
 
-class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
+class _SupportMarksSectionState extends ConsumerState<SupportMarksSection> {
   bool _saving = false;
 
   /// Our profile card reads the row the republish just rewrote, so it has to be
@@ -602,108 +584,57 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
+    if (!ref.watch(shopAvailableProvider)) return const SizedBox.shrink();
     final creds = ref.watch(shop.ownSupportCredsProvider).valueOrNull ??
         const <shop.OwnSupportCred>[];
     final badge = ref.watch(shop.supportBadgeProvider).valueOrNull ?? true;
     final hidden =
         ref.watch(shop.supportMarksHiddenProvider).valueOrNull ?? false;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: HollowSpacing.lg),
-        const HollowSectionHeader('Support marks', dense: true),
-        Text(
-          'Each mark proves you bought the art, without the shop knowing it '
-          'was you. It shows on your profile card whether or not you wear '
-          'that art right now.',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        // Dimmed while hidden, because nothing it says is on screen then. Still
-        // usable, so the choice is ready when the marks come back.
-        AnimatedOpacity(
-          opacity: hidden ? 0.45 : 1.0,
-          duration: const Duration(milliseconds: 150),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Show the mark next to my name in chats and member lists',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowToggle(
-                value: badge,
-                onChanged: _saving ? null : _setBadge,
-                semanticLabel: 'Show the support mark next to my name',
-              ),
-            ],
+    return SettingsSection(
+        title: 'Support marks',
+        subtitle: 'Each mark proves you bought the art, without the shop '
+            'knowing it was you.',
+        children: [
+          // Greyed while hidden, because nothing it says is on screen then.
+          // Still usable, so the choice is ready when the marks come back.
+          SettingsRow(
+            title: 'Show the mark next to my name',
+            subtitle: 'In chats and member lists',
+            enabled: !hidden,
+            trailing: HollowToggle(
+              value: badge,
+              onChanged: _saving ? null : _setBadge,
+              semanticLabel: 'Show the mark next to my name',
+            ),
           ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Hide my support marks',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 13,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Nobody sees your marks while this is on, and they come '
-                    'back when you switch it off.',
-                    style: HollowTypography.caption
-                        .copyWith(color: hollow.textSecondary),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowToggle(
-              value: hidden,
-              onChanged: _saving ? null : _setHidden,
-              semanticLabel: 'Hide my support marks',
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        if (creds.isEmpty)
-          const HollowEmptyState(
-            dense: true,
-            title: 'No marks yet',
-            description: 'Redeem a code on the Shop tab to earn one.',
-          )
-        else
-          for (final cred in creds)
-            Padding(
-              key: ValueKey(cred.item),
-              padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-              child: _CredentialRow(cred: cred),
-            ),
-      ],
+          SettingsSwitchRow(
+            title: 'Hide my support marks',
+            subtitle: 'Nobody sees them until you switch this off',
+            value: hidden,
+            onChanged: _saving ? null : _setHidden,
+          ),
+          if (creds.isEmpty)
+            const HollowEmptyState(
+              dense: true,
+              title: 'No marks yet',
+              description: 'Redeem a code on the Shop tab to earn one.',
+            )
+          else
+            for (final cred in creds)
+              _CredentialRow(key: ValueKey(cred.item), cred: cred),
+          const _KeptCodesRow(),
+        ],
     );
   }
 }
 
-/// One held credential, with the one irreversible thing that can be done to it.
+/// One held credential, with the one irreversible thing that can be done to it
+/// kept behind its More menu.
 class _CredentialRow extends ConsumerStatefulWidget {
   final shop.OwnSupportCred cred;
 
-  const _CredentialRow({required this.cred});
+  const _CredentialRow({super.key, required this.cred});
 
   @override
   ConsumerState<_CredentialRow> createState() => _CredentialRowState();
@@ -762,47 +693,43 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final meta = _meta;
-    return Row(
-      children: [
-        Icon(LucideIcons.sparkles, size: 14, color: hollow.accentText),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                supportCredLabel(cred),
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 13,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              if (meta.isNotEmpty)
-                Text(
-                  meta,
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textTertiary, fontSize: 11),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        HollowButton.ghost(
-          onPressed: _busy ? null : _remove,
-          compact: true,
-          loading: _busy,
-          child: const Text('Remove'),
+  void _openMenu(BuildContext buttonContext) {
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    showHollowMenu(
+      context: buttonContext,
+      anchor: overlayAnchorOf(buttonContext,
+          localOffset: Offset(box.size.width, box.size.height)),
+      alignEnd: true,
+      builder: (menuContext, _) => [
+        HollowMenuItem(
+          icon: LucideIcons.trash2,
+          label: 'Remove',
+          isDanger: true,
+          onTap: _remove,
         ),
       ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = _meta;
+    return SettingsRow(
+      title: supportCredLabel(cred),
+      subtitle: meta.isEmpty ? null : meta,
+      trailing: _busy
+          ? const Padding(
+              padding: EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
+              child: HollowSpinner(),
+            )
+          : Builder(
+              builder: (buttonContext) => HollowIconButton(
+                icon: LucideIcons.ellipsis,
+                label: 'More',
+                onPressed: () => _openMenu(buttonContext),
+              ),
+            ),
     );
   }
 }

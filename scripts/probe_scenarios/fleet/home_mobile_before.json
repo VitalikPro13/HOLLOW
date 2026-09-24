@@ -15,10 +15,10 @@
     { "peer": "a", "op": "capture", "from": "provider", "key": "peerId", "as": "PEER_A" },
 
     { "peer": "b", "op": "tap", "target": "semantics:Friends", "index": 0 },
-    { "peer": "b", "op": "tap", "target": "text:Add Friend", "index": 0 },
-    { "peer": "b", "op": "enter_text", "target": "hint:Peer ID or nickname...", "value": "${PEER_A}" },
+    { "peer": "b", "op": "tap", "target": "text:Add friend", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Paste an ID, or type a nickname", "value": "${PEER_A}" },
     { "peer": "b", "op": "wait_for", "target": "text:${PEER_A}", "timeout_ms": 10000 },
-    { "peer": "b", "op": "tap", "target": "text:Send Friend Request", "index": 0 },
+    { "peer": "b", "op": "tap", "target": "text:Send request", "index": 0 },
 
     { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 60000 },
     { "peer": "a", "op": "wait", "ms": 1500 },

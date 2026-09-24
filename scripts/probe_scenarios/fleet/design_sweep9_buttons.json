@@ -265,7 +265,19 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Add relay",
+   "target": "text:Change",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Add a relay",
    "index": 0,
    "soft": true
   },
@@ -282,7 +294,7 @@
   {
    "peer": "a",
    "op": "scroll",
-   "target": "text:Offline Delivery",
+   "target": "text:While you're offline",
    "dy": -450,
    "soft": true
   },
@@ -299,7 +311,7 @@
   {
    "peer": "a",
    "op": "scroll",
-   "target": "text:GIF Search",
+   "target": "text:GIFs and link previews",
    "dy": -450,
    "soft": true
   },
@@ -316,7 +328,7 @@
   {
    "peer": "a",
    "op": "scroll",
-   "target": "text:Link Previews",
+   "target": "text:Previews for links I send",
    "dy": -450,
    "soft": true
   },
@@ -488,7 +500,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Add Friend",
+   "target": "type:_FriendsManager > text:Add friend",
    "index": 0,
    "soft": true
   },

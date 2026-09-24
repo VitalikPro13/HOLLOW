@@ -3474,6 +3474,16 @@ pub fn list_owned_art() -> Result<Vec<OwnedArt>, String> {
         .collect())
 }
 
+/// Removes one item from Your art on this install. Local only: nothing is sent.
+#[frb]
+pub fn remove_owned_art(item_id: String) -> Result<(), String> {
+    let store = super::storage::get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.delete_owned_art_item(&item_id)?;
+    Ok(())
+}
+
 /// One-shot migration for a profile authored BEFORE animated media moved to the
 /// asset rail, where the animation sat in `avatar`/`banner` as raw source bytes and
 /// rode every profile push. Converts ours in place and re-announces once.

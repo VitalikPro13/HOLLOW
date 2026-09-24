@@ -4191,6 +4191,15 @@ impl MessageStore {
         Ok(out)
     }
 
+    /// Forgets one imported item (every file of it). Its bytes leave the evictor's
+    /// keep-set, so they go the way of any cached asset unless something still wears
+    /// them; importing the pack again restores the item.
+    pub fn delete_owned_art_item(&self, item_id: &str) -> Result<usize, String> {
+        self.conn
+            .execute("DELETE FROM owned_art WHERE item_id = ?1", params![item_id])
+            .map_err(|e| format!("Failed to remove owned art: {e}"))
+    }
+
     /// The hash of every piece of shop art this install owns, feeding the evictor's
     /// keep-set: art somebody PAID for is never a cache entry, and there is no peer to
     /// re-pull it from.

@@ -99,7 +99,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
           duration: HollowDurations.fast,
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.xs,
-            vertical: 2,
+            vertical: HollowSpacing.xxs,
           ),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(hollow.radiusMd),
@@ -114,7 +114,6 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
                   'Press a key combo (Esc cancels)',
                   style: HollowTypography.caption.copyWith(
                     color: hollow.accentText,
-                    fontSize: 11,
                   ),
                 )
               : HollowKeyCombo(binding?.display() ?? 'Not set'),

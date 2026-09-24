@@ -67,15 +67,15 @@
   {"op": "wait", "ms": 1500},
   {"op": "tap", "target": "text:Files & Storage", "soft": true},
   {"op": "wait", "ms": 1500},
-  {"op": "tap", "target": "tooltip:Clean up", "index": 0, "soft": true},
+  {"op": "tap", "target": "text:Clean up", "index": 0, "soft": true},
   {"op": "wait", "ms": 800},
   {"op": "shot", "name": "s3b-08-cleanup-menu", "soft": true},
   {"op": "key", "value": "escape", "soft": true},
   {"op": "wait", "ms": 600},
-  {"op": "scroll", "target": "text:Storage used", "dy": -1200, "soft": true},
+  {"op": "scroll", "target": "text:By conversation", "dy": -1200, "soft": true},
   {"op": "wait", "ms": 800},
   {"op": "shot", "name": "s3b-09-storage-lower", "soft": true},
-  {"op": "scroll", "target": "text:Storage used", "dy": -1200, "soft": true},
+  {"op": "scroll", "target": "text:By conversation", "dy": -1200, "soft": true},
   {"op": "wait", "ms": 800},
   {"op": "shot", "name": "s3b-10-storage-bottom", "soft": true}
 ]

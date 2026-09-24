@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -15,18 +14,17 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
-import 'package:hollow/src/ui/components/overlay_anchor.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/components/server_avatar.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 
-/// Shared Storage Manager widgets for the desktop dialog and the mobile
-/// settings tab. Layout only: both read the same providers.
-
-/// Storage dashboard: a summary header with a cleanup menu, then the
-/// per-conversation list.
+/// The top of Settings > Files & Storage, shared with the phone's settings
+/// tab: what the space holds, a way to clean it up, and each conversation's
+/// share behind a fold.
 class StorageBreakdownView extends ConsumerWidget {
   const StorageBreakdownView({super.key});
 
@@ -37,30 +35,31 @@ class StorageBreakdownView extends ConsumerWidget {
 
     return async.when(
       loading: () => const Padding(
-        padding: EdgeInsets.all(24),
-        child: Center(child: HollowSpinner.large()),
+        padding: EdgeInsets.all(HollowSpacing.xl),
+        child: Center(child: HollowSpinner.medium()),
       ),
       error: (e, _) => Text('Could not read storage: $e',
-          style: HollowTypography.caption.copyWith(color: hollow.error)),
+          style: HollowTypography.bodySmall.copyWith(color: hollow.error)),
       data: (b) {
         final contexts = [...b.contexts]
           ..sort((a, c) => c.bytesDb.compareTo(a.bytesDb));
-
         return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
           children: [
             _SummaryHeader(breakdown: b),
-            if (contexts.isNotEmpty) ...[
-              const SizedBox(height: HollowSpacing.md),
-              HollowSectionHeader('By conversation',
-                  count: '${contexts.length}', dense: true),
-              for (final c in contexts) _ContextRow(usage: c),
-            ] else ...[
-              const SizedBox(height: HollowSpacing.md),
-              const HollowEmptyState(
-                  dense: true,
-                  title: 'No downloaded files are taking up space'),
-            ],
+            const SizedBox(height: HollowSpacing.md),
+            SettingsExpandRow(
+              title: 'By conversation',
+              subtitle: 'See what takes the space and clear one at a time',
+              children: contexts.isEmpty
+                  ? const [
+                      HollowEmptyState(
+                          dense: true,
+                          title: 'No downloaded files are taking up space'),
+                    ]
+                  : [for (final c in contexts) _ContextRow(usage: c)],
+            ),
           ],
         );
       },
@@ -68,7 +67,6 @@ class StorageBreakdownView extends ConsumerWidget {
   }
 }
 
-/// One legend/segment descriptor for the usage bar.
 class _UsageSegment {
   const _UsageSegment(this.label, this.bytes, this.color);
   final String label;
@@ -76,14 +74,13 @@ class _UsageSegment {
   final Color color;
 }
 
-/// The summary header: total, a proportional usage bar with a byte legend, and
-/// an overflow menu for the destructive clear actions.
-class _SummaryHeader extends ConsumerWidget {
+/// The total, the cleanup menu, and a bar with its legend.
+class _SummaryHeader extends StatelessWidget {
   const _SummaryHeader({required this.breakdown});
   final storage_api.StorageBreakdown breakdown;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final downloads = breakdown.totalDiskBytes.toInt();
     final cache = breakdown.vaultCacheBytes.toInt();
@@ -93,54 +90,58 @@ class _SummaryHeader extends ConsumerWidget {
 
     final segments = [
       _UsageSegment('Downloads', downloads, hollow.accent),
-      _UsageSegment('Vault cache', cache, hollow.warning),
-      _UsageSegment('Held shards', shards, hollow.success),
-      _UsageSegment('Emotes & GIFs', assets, hollow.accentMuted),
+      _UsageSegment('Vault', cache, hollow.warning),
+      _UsageSegment('Held for friends', shards, hollow.textSecondary),
+      _UsageSegment('Emotes and GIFs', assets, hollow.accentMuted),
     ];
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Storage used',
-                      style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary, fontSize: 11)),
-                  const SizedBox(height: 2),
-                  Text(formatBytes(total),
+        Padding(
+          padding: const EdgeInsets.only(top: HollowSpacing.lg),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text.rich(
+                  TextSpan(children: [
+                    TextSpan(
+                      text: formatBytes(total),
                       style: HollowTypography.heading.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w700)),
-                ],
+                        color: hollow.textPrimary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    TextSpan(
+                      text: ' used on this computer',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textSecondary),
+                    ),
+                  ]),
+                ),
               ),
-            ),
-            _CleanupMenu(downloads: downloads, cache: cache, assets: assets),
-          ],
+              const SizedBox(width: HollowSpacing.lg),
+              _CleanupButton(downloads: downloads, cache: cache, assets: assets),
+            ],
+          ),
         ),
-        const SizedBox(height: HollowSpacing.sm),
+        const SizedBox(height: HollowSpacing.md),
         _UsageBar(segments: segments, total: total),
         const SizedBox(height: HollowSpacing.sm),
         Wrap(
           spacing: HollowSpacing.md,
           runSpacing: HollowSpacing.xs,
-          children: [
-            for (final s in segments) _LegendEntry(segment: s),
-          ],
+          children: [for (final s in segments) _LegendEntry(segment: s)],
         ),
-        const SizedBox(height: HollowSpacing.sm),
         const _AtRestStatusLine(),
       ],
     );
   }
 }
 
-/// Whether the files on disk are encrypted yet, and how far the one-time sweep
-/// over an older version's plaintext has got.
+/// Shown only while files still need protecting: the one-time sweep over an
+/// older version's plaintext, or files it could not encrypt.
 class _AtRestStatusLine extends ConsumerWidget {
   const _AtRestStatusLine();
 
@@ -148,48 +149,45 @@ class _AtRestStatusLine extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final status = ref.watch(atRestStatusProvider).valueOrNull;
-    if (status == null) return const SizedBox.shrink();
+    if (status == null || (!status.running && status.failed == 0)) {
+      return const SizedBox.shrink();
+    }
 
     final String label;
     final Color color;
     if (status.running) {
       label = 'Protecting your files (${status.done} of ${status.total})';
       color = hollow.textSecondary;
-    } else if (status.failed > 0) {
+    } else {
       label = status.failed == 1
           ? '1 file is not protected yet. Hollow will try again the next time '
               'it starts.'
           : '${status.failed} files are not protected yet. Hollow will try '
               'again the next time it starts.';
       color = hollow.warning;
-    } else {
-      label = 'Protected';
-      color = hollow.textSecondary;
     }
 
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 1),
-          child: Icon(
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.sm),
+      child: Row(
+        children: [
+          Icon(
             status.failed > 0 ? LucideIcons.shieldAlert : LucideIcons.shield,
-            size: 12,
+            size: 14,
             color: color,
           ),
-        ),
-        const SizedBox(width: HollowSpacing.xs),
-        Expanded(
-          child: Text(label,
-              style: HollowTypography.caption
-                  .copyWith(color: color, fontSize: 11)),
-        ),
-      ],
+          const SizedBox(width: HollowSpacing.xs),
+          Expanded(
+            child: Text(label,
+                style: HollowTypography.bodySmall.copyWith(color: color)),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// Thin proportional bar showing how each storage class divides the total.
+/// How each kind of storage divides the total.
 class _UsageBar extends StatelessWidget {
   const _UsageBar({required this.segments, required this.total});
   final List<_UsageSegment> segments;
@@ -201,17 +199,15 @@ class _UsageBar extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(hollow.radiusXs),
       child: SizedBox(
-        height: 8,
+        height: HollowSpacing.sm,
         child: total <= 0
-            ? Container(color: hollow.border)
+            ? ColoredBox(color: hollow.border)
             : Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   for (final s in segments)
                     if (s.bytes > 0)
-                      Expanded(
-                        flex: s.bytes,
-                        child: Container(color: s.color),
-                      ),
+                      Expanded(flex: s.bytes, child: ColoredBox(color: s.color)),
                 ],
               ),
       ),
@@ -219,7 +215,6 @@ class _UsageBar extends StatelessWidget {
   }
 }
 
-/// One key of the usage bar: swatch, category, size.
 class _LegendEntry extends StatelessWidget {
   const _LegendEntry({required this.segment});
   final _UsageSegment segment;
@@ -246,17 +241,49 @@ class _LegendEntry extends StatelessWidget {
         Text(formatBytes(segment.bytes),
             style: HollowTypography.caption.copyWith(
                 color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
                 fontFeatures: const [FontFeature.tabularFigures()])),
       ],
     );
   }
 }
 
-/// Overflow menu for the destructive clear actions. Held shards are absent on
-/// purpose: they are read-only.
-class _CleanupMenu extends ConsumerWidget {
-  const _CleanupMenu(
+/// Under the trailing edge of the button that owns [context]; pair with
+/// `alignEnd`, since every storage menu hangs off the right of its row.
+Offset _below(BuildContext context) => overlayAnchorOf(
+      context,
+      localOffset: Offset(context.size?.width ?? 0,
+          (context.size?.height ?? 0) + HollowSpacing.xs),
+    );
+
+/// Asks, clears, then says how much it freed.
+Future<void> _confirmAndClear(
+  BuildContext context, {
+  required String title,
+  required String message,
+  required Future<int> Function() run,
+}) async {
+  final ok = await showHollowConfirm(
+    context: context,
+    title: title,
+    message: message,
+    confirmLabel: 'Clear',
+    destructive: true,
+  );
+  if (!ok) return;
+  final freed = await run();
+  if (!context.mounted) return;
+  if (freed > 0) {
+    HollowToast.show(context, 'Freed ${formatBytes(freed)}',
+        type: HollowToastType.success);
+  } else {
+    HollowToast.show(context, 'Nothing was cleared');
+  }
+}
+
+/// The destructive clears, each with its size. Held-for-friends shards are
+/// absent on purpose: they are not ours to drop.
+class _CleanupButton extends ConsumerWidget {
+  const _CleanupButton(
       {required this.downloads, required this.cache, required this.assets});
   final int downloads;
   final int cache;
@@ -267,102 +294,74 @@ class _CleanupMenu extends ConsumerWidget {
     final actions = ref.read(storageActionsProvider);
     final enabled = downloads > 0 || cache > 0 || assets > 0;
 
-    Future<void> clear(
-        String title, String body, Future<void> Function() run) async {
-      final ok = await showHollowConfirm(
-        context: context,
-        title: title,
-        message: body,
-        confirmLabel: 'Clear',
-        destructive: true,
-      );
-      if (ok) await run();
-    }
-
-    return HollowTooltip(
-      message: 'Clean up',
-      child: Builder(
-        builder: (buttonContext) => HollowButton.ghost(
-          compact: true,
-          semanticLabel: 'Cleanup options',
-          onPressed: !enabled
-              ? null
-              : () => showHollowMenu(
-                    context: buttonContext,
-                    anchor: _below(buttonContext),
-                    alignEnd: true,
-                    builder: (_, _) => [
-                      HollowMenuItem(
-                        icon: LucideIcons.download,
-                        label: 'Clear all downloads',
-                        trailing: formatBytes(downloads),
-                        enabled: downloads > 0,
-                        onTap: () => clear(
-                          'Clear all downloaded files?',
-                          'Deletes every downloaded file from disk. Messages '
-                              'stay, and files can be downloaded again from '
-                              'peers later.',
-                          actions.clearAllFileBytes,
-                        ),
+    return Builder(
+      builder: (buttonContext) => HollowButton.ghost(
+        compact: true,
+        onPressed: !enabled
+            ? null
+            : () => showHollowMenu(
+                  context: buttonContext,
+                  anchor: _below(buttonContext),
+                  alignEnd: true,
+                  builder: (_, _) => [
+                    HollowMenuItem(
+                      icon: LucideIcons.download,
+                      label: 'Clear all downloads',
+                      trailing: formatBytes(downloads),
+                      enabled: downloads > 0,
+                      onTap: () => _confirmAndClear(
+                        context,
+                        title: 'Clear all downloaded files?',
+                        message: 'Deletes every downloaded file from disk. '
+                            'Messages stay, and files can be downloaded again '
+                            'from peers later.',
+                        run: actions.clearAllFileBytes,
                       ),
-                      HollowMenuItem(
-                        icon: LucideIcons.hardDrive,
-                        label: 'Clear vault cache',
-                        trailing: formatBytes(cache),
-                        enabled: cache > 0,
-                        onTap: () => clear(
-                          'Clear vault cache?',
-                          'Deletes cached vault file/video playback data. This '
-                              'is pure cache and re-downloads on demand.',
-                          actions.clearVaultCache,
-                        ),
+                    ),
+                    HollowMenuItem(
+                      icon: LucideIcons.hardDrive,
+                      label: 'Clear vault cache',
+                      trailing: formatBytes(cache),
+                      enabled: cache > 0,
+                      onTap: () => _confirmAndClear(
+                        context,
+                        title: 'Clear vault cache?',
+                        message: 'Deletes cached vault files and videos. It is '
+                            'only a cache and downloads again when played.',
+                        run: actions.clearVaultCache,
                       ),
-                      HollowMenuItem(
-                        icon: LucideIcons.smile,
-                        label: 'Clear unused emotes & GIFs',
-                        trailing: formatBytes(assets),
-                        enabled: assets > 0,
-                        onTap: () => clear(
-                          'Clear unused emotes & GIFs?',
-                          'Deletes cached emote, sticker and GIF images that '
-                              'are not part of your personal set or any of '
-                              'your servers. They re-download from peers on '
-                              'demand.',
-                          actions.clearUnreferencedAssets,
-                        ),
+                    ),
+                    HollowMenuItem(
+                      icon: LucideIcons.smile,
+                      label: 'Clear unused emotes and GIFs',
+                      trailing: formatBytes(assets),
+                      enabled: assets > 0,
+                      onTap: () => _confirmAndClear(
+                        context,
+                        title: 'Clear unused emotes and GIFs?',
+                        message: 'Deletes cached emote, sticker and GIF images '
+                            'that are not in your personal set or any of your '
+                            'servers. They download again from peers when '
+                            'needed.',
+                        run: actions.clearUnreferencedAssets,
                       ),
-                    ],
-                  ),
-          child: const Icon(LucideIcons.ellipsis),
-        ),
+                    ),
+                  ],
+                ),
+        child: const Text('Clean up'),
       ),
     );
   }
 }
 
-/// Under the trigger's trailing edge: both storage menus hang off buttons at
-/// the right of their row, so they open right-aligned (pair with `alignEnd`).
-Offset _below(BuildContext context) => overlayAnchorOf(
-      context,
-      localOffset: Offset(context.size?.width ?? 0,
-          (context.size?.height ?? 0) + HollowSpacing.xs),
-    );
-
-class _ContextRow extends ConsumerStatefulWidget {
+/// One conversation's downloads: who or where, how much, its auto-download
+/// choice, and clearing it in the More menu.
+class _ContextRow extends ConsumerWidget {
   const _ContextRow({required this.usage});
   final storage_api.StorageContextUsage usage;
 
   @override
-  ConsumerState<_ContextRow> createState() => _ContextRowState();
-}
-
-class _ContextRowState extends ConsumerState<_ContextRow> {
-  bool _hovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final usage = widget.usage;
+  Widget build(BuildContext context, WidgetRef ref) {
     final isDm = usage.contextType == 'dm';
 
     String label;
@@ -371,7 +370,7 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
       final profile =
           ref.watch(profileProvider.select((m) => m[usage.contextId]));
       label = displayNameForPeer(profile, usage.contextId);
-      leading = HollowAvatar(peerId: usage.contextId, size: 30);
+      leading = HollowAvatar(peerId: usage.contextId, size: 32);
     } else {
       // context_id = "serverId:channelId"
       final parts = usage.contextId.split(':');
@@ -383,83 +382,61 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
           ? parts[1].substring(0, 6)
           : (parts.length > 1 ? parts[1] : '');
       label = channelShort.isEmpty ? serverName : '$serverName • #$channelShort';
-      leading = Container(
-        width: 30,
-        height: 30,
-        decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(color: hollow.border),
-        ),
-        alignment: Alignment.center,
-        child: Icon(LucideIcons.hash, size: 14, color: hollow.textSecondary),
-      );
+      leading = ServerAvatar(serverId: serverId, name: serverName, size: 32);
     }
+    final files = usage.fileCount == 1 ? '1 file' : '${usage.fileCount} files';
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: AnimatedContainer(
-        duration: HollowDurations.fast,
-        margin: const EdgeInsets.only(top: HollowSpacing.xs),
-        padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
-        decoration: BoxDecoration(
-          // Zero-alpha rest colour, not `Colors.transparent`: that is
-          // transparent BLACK, and the lerp flashes dark on hover.
-          color: _hovered
-              ? hollow.hover
-              : hollow.hover.withValues(alpha: 0.0),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-        ),
-        child: Row(
-          children: [
-            leading,
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label,
-                      overflow: TextOverflow.ellipsis,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary)),
-                  const SizedBox(height: 1),
-                  Text(
-                      '${formatBytes(usage.bytesDb.toInt())} · ${usage.fileCount} file${usage.fileCount == 1 ? '' : 's'}',
-                      style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary, fontSize: 11)),
+    return SettingsRow(
+      leading: leading,
+      title: label,
+      subtitle: '${formatBytes(usage.bytesDb.toInt())} · $files',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Channel rows map to their SERVER: one override per server.
+          _AutoDownloadOverrideButton(
+            contextKey: isDm
+                ? 'dm:${usage.contextId}'
+                : 'server:${usage.contextId.split(':').first}',
+            conversationLabel: label,
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          Builder(
+            builder: (buttonContext) => HollowIconButton(
+              icon: LucideIcons.ellipsis,
+              label: 'More for $label',
+              tooltip: 'More',
+              onPressed: () => showHollowMenu(
+                context: buttonContext,
+                anchor: _below(buttonContext),
+                alignEnd: true,
+                builder: (_, _) => [
+                  HollowMenuItem(
+                    icon: LucideIcons.trash2,
+                    label: 'Clear downloaded files',
+                    isDanger: true,
+                    onTap: () => _confirmAndClear(
+                      context,
+                      title: 'Clear "$label"?',
+                      message: 'Deletes the downloaded files for this '
+                          'conversation from disk. The messages stay, and '
+                          'files can be downloaded again later.',
+                      run: () => ref
+                          .read(storageActionsProvider)
+                          .clearContext(usage.contextType, usage.contextId),
+                    ),
+                  ),
                 ],
               ),
             ),
-            // Per-conversation auto-download override (issue #41). Channel rows
-            // map to their SERVER: one override per server, not per channel.
-            _AutoDownloadOverrideButton(
-              contextKey: isDm
-                  ? 'dm:${usage.contextId}'
-                  : 'server:${usage.contextId.split(':').first}',
-              conversationLabel: label,
-            ),
-            // Always tappable and always visible, so touch can reach it; hover
-            // only brightens it.
-            AnimatedOpacity(
-              opacity: _hovered ? 1 : 0.55,
-              duration: HollowDurations.fast,
-              child: _RowTrashButton(
-                label: label,
-                onConfirmed: () => ref
-                    .read(storageActionsProvider)
-                    .clearContext(usage.contextType, usage.contextId),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// Per-conversation auto-download override menu (issue #41). The state lives in
+/// Per-conversation auto-download override (issue #41). The state lives in
 /// [autoDownloadOverridesProvider] and is pushed to Rust on every change.
 class _AutoDownloadOverrideButton extends ConsumerWidget {
   const _AutoDownloadOverrideButton(
@@ -477,67 +454,33 @@ class _AutoDownloadOverrideButton extends ConsumerWidget {
     HollowMenuItem item(String label, bool? value) => HollowMenuItem(
           label: label,
           isChecked: override == value,
-          onTap: () => notifier.setOverride(contextKey, value),
+          onTap: () => notifier.setOverride(contextKey, value).catchError((_) {
+            if (context.mounted) {
+              HollowToast.show(context, 'Could not save that setting',
+                  type: HollowToastType.error);
+            }
+          }),
         );
 
-    return HollowTooltip(
-      message: 'Auto-download',
-      child: Builder(
-        builder: (buttonContext) => HollowPressable(
-          semanticLabel: 'Auto-download settings for $conversationLabel',
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          onTap: () => showHollowMenu(
-            context: buttonContext,
-            anchor: _below(buttonContext),
-                    alignEnd: true,
-            builder: (_, _) => [
-              const HollowMenuSection('Auto-download'),
-              item('Default', null),
-              item('Always on', true),
-              item('Off', false),
-            ],
-          ),
-          child: Icon(
-            override == false ? LucideIcons.cloudOff : LucideIcons.download,
-            size: 16,
-            // An override is a choice the user made, so it shows in the accent.
-            color: override == null ? hollow.textSecondary : hollow.accentText,
-          ),
+    return Builder(
+      builder: (buttonContext) => HollowIconButton(
+        icon: override == false ? LucideIcons.cloudOff : LucideIcons.download,
+        label: 'Auto-download for $conversationLabel',
+        tooltip: 'Auto-download',
+        // An override is a choice the user made, so it shows in the accent.
+        color: override == null ? null : hollow.accentText,
+        onPressed: () => showHollowMenu(
+          context: buttonContext,
+          anchor: _below(buttonContext),
+          alignEnd: true,
+          builder: (_, _) => [
+            const HollowMenuSection('Auto-download'),
+            item('Default', null),
+            item('Always on', true),
+            item('Off', false),
+          ],
         ),
       ),
-    );
-  }
-}
-
-class _RowTrashButton extends StatelessWidget {
-  const _RowTrashButton({required this.label, required this.onConfirmed});
-  final String label;
-  final Future<void> Function() onConfirmed;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    void handleTap() async {
-      final ok = await showHollowConfirm(
-        context: context,
-        title: 'Clear "$label"?',
-        message: 'Deletes the downloaded files for this conversation from '
-            'disk. The messages stay, and files can be downloaded again later.',
-        confirmLabel: 'Clear',
-        destructive: true,
-      );
-      if (ok) await onConfirmed();
-    }
-
-    // Never a Material InkWell: no ripple in Hollow, and the pressable already
-    // carries the focus ring and button semantics.
-    return HollowPressable(
-      onTap: handleTap,
-      semanticLabel: 'Delete files',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(6),
-      child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
     );
   }
 }

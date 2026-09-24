@@ -757,134 +757,33 @@ Simple label-value row with spaceBetween alignment.
 
 ---
 
-## UserSettingsDialog -- Full User Settings Panel
+## Settings is no longer a dialog (2026-09-24)
 
-**File:** `lib/src/ui/dialogs/user_settings_dialog.dart` (~740-line shell; split 2026-07-15 into per-category sections under `lib/src/ui/settings/` — see `ui_user_settings.md`)
-**Trigger:** Settings gear in user bar, Ctrl+, keyboard shortcut.
-**Entry point:** `showUserSettingsDialog(BuildContext context, {openSystemTab, openUpdatesTab, toggle})` — no `WidgetRef` since issue #50: providers are read via `ProviderScope.containerOf(context)`, so non-widget callers (tray menu via `hollowNavigatorKey` context) can open it. `toggle: false` makes a call while already open a no-op instead of closing it (tray path).
+`UserSettingsDialog` / `showUserSettingsDialog` are DELETED. Settings is a centre place opened
+with `openSettings()` / `toggleSettings()`; see `ui_user_settings.md`.
 
-### Toggle behavior
-- `_settingsDialogOpen` top-level bool prevents double-open; calling when open pops the dialog (toggle pattern)
-- Dialog completion resets the flag via `.then((_) => _settingsDialogOpen = false)`
+## Friends Manager -- `dialogs/friends_manager_dialog.dart` (2026-09-24)
 
-### Tab enum: `_SettingsTab`
-Values: `profile`, `system`, `security`, `updates`, `about`
+`showFriendsManager(context, {addFriend, tab})`, re-exported from `shell/friends_bar.dart`;
+`FriendsManagerTab { friends, requests, add }`. The header's add-friend button opens Requests
+while requests wait, else Add friend. The class stays `_FriendsManager` (fleet scenarios target
+`type:_FriendsManager`). `HollowDialogSurface` 520 wide on `overlay`; three tabs on the dialog's
+own surface with a 2 px accent bar under the open one (Friends shows its count, Requests a
+`HollowCountBadge` while requests wait).
 
-### Widget: `_UserSettingsContent` (ConsumerStatefulWidget)
+- **Friends:** search, then "Favourites" (reorderable in place; the drag handle shows on hover
+  and keyboard focus; visible positions are mapped to the stored list before `reorder`), then
+  "All friends". Rows: avatar with presence dot, name, status line or Online/Offline. Actions on
+  hover, focus, while the row's menu is open, and always on touch: Message, the favourite star,
+  More (Voice call, View profile, Set/Edit nickname, Remove friend behind a confirm, then
+  `removeFriendAndTidy`). Clicking a row opens the DM; right-click opens More.
+- **Requests:** "Received" (ghost Decline, outline Accept; semantic labels "Accept/Reject friend
+  request") and "Sent" (ghost "Cancel request").
+- **Add friend:** "Peer ID or nickname" field (hint "Paste an ID, or type a nickname") + filled
+  "Send request"; "How others add you" (`HowOthersAddYou`: your ID with Copy, the temporary
+  nickname claim). Shared helpers for the phone's Friends tab: `receivedRequestLabel`,
+  `sentRequestLabel`, `isPeerIdInput`, `sendFriendRequestTo`.
 
-**Constructor fields:**
-- `localPeerId`, `displayNameController`, `statusController`, `aboutMeController`
-- `initialTab` -- defaults to profile, overridden by `openSystemTab`/`openUpdatesTab` params
-
-**State fields (pending changes applied only on Save):**
-- `_liveDisplayName`, `_liveStatus` -- live preview values
-- `_pendingAvatarBytes`, `_pendingBannerBytes`, `_avatarChanged`, `_bannerChanged`
-- `_activeTab` -- current tab
-- `_pendingDarkMode`, `_pendingMinimizeToTray`, `_pendingProxy`, `_pendingDockMode`
-- `_pendingDisableAnimations`, `_pendingInvisible`
-- `_pendingAutoDownloadThreshold` (default 169 MB), `_pendingCacheCap` (default 1024 MB)
-- `_initialAccentHue` -- for cancel revert
-- Various `_*Initialized` bools to track async provider hydration
-
-**Layout (680x540, fixed height):**
-- "Settings" heading
-- Two-column: 140px tab rail (left) | vertical divider | content area (right)
-- Actions row: Cancel (ghost, reverts accent hue) + Save (filled)
-
-### Profile Tab (`_buildProfileTab`)
-
-**Left column (200px): Profile preview card + image controls**
-- Banner: `AnimatedGifImage` or gradient fallback (deterministic color from peer ID hash)
-- Avatar: `HollowAvatar` (56px) with 3px surface border, overlapping banner via `Transform.translate(offset: Offset(0, -28))`
-- Display name + status preview (live from controllers)
-- "About me" section (conditional)
-- Peer ID footer (last 8 chars, mono, tiny)
-- Below card: Avatar row (Change/Clear) + Banner row (Change/Clear) using `_ImageRow` widget
-
-**Right column: Edit fields**
-Each field sits under a `SettingsFieldLabel` (sentence case):
-- Display name: `HollowTextField` (autofocus, maxLength 32)
-- Status: `HollowTextField` (maxLength 48)
-- About me: `HollowTextField` (maxLines 3, maxLength 128)
-
-**Connections section:**
-- `_TwitchConnectionRow` -- shows Twitch connection status, connect/disconnect buttons
-
-**Avatar/Banner picking:**
-- `_pickAvatar()` -- `FilePicker` for image, GIFs skip crop (max 1MB), others go through `showImageCropDialog(aspectRatio: 1.0)`, then `network_api.processAvatar()`
-- `_pickBanner()` -- same pattern, GIFs max 2MB, crop aspect 3.0, then `network_api.processBanner()`
-
-### System Tab (`_buildSystemTab`)
-
-**Sections:**
-- APPEARANCE: Dark Mode toggle, `_AccentColorPicker` (rainbow hue slider + preset swatches), `_BackgroundPicker` (image selection with 16:9 crop + darken opacity slider)
-- LAYOUT: Dock Mode toggle (with subtitle) — Reduce Motion moved to the Accessibility category
-- ACCESSIBILITY (2026-06-24): Reduce Motion tri-state Auto/On/Off (`reduceMotionProvider`/`ReduceMotionController`), Reduce Transparency toggle (`reduceTransparencyProvider`)
-- SYSTEM: Appear Invisible toggle, Minimize to Tray toggle (desktop only)
-- FILES: Auto-Download Threshold slider (34 MB - 2 GB, 50 divisions), Cache Size Limit slider (256 MB - 10 GB, 40 divisions)
-- MEDIA: `_ImageQualitySelector` -- three pill chips for image quality tiers
-- VOICE & VIDEO: `_AudioDeviceSettings` -- microphone/speaker/camera dropdowns + mic test + audio quality preset + ringtone picker
-- KEYBOARD SHORTCUTS: display-only rows for all shortcuts (Ctrl+,, Ctrl+Shift+M, Ctrl+K, Ctrl+Shift+\, Ctrl+1, Ctrl+2, Enter, Shift+Enter, Ctrl+B, Ctrl+I, Ctrl+E, Ctrl+Shift+X, Ctrl+Shift+S)
-
-### Security Tab (`_SecurityTab`)
-
-**Sections:**
-- Recovery Phrase: loads mnemonic via `storage_api.getMnemonic()`, shows word grid (4 columns x 6 rows) when revealed, or "Hidden for security" when hidden. Reveal/Hide toggle + Copy button. Warning text. If no mnemonic stored, shows text field to enter 24 words.
-- ACCOUNT BACKUP: description, "Include vault shard data" checkbox, "Include downloaded files" checkbox, "Export Backup" button -> passphrase dialog (with confirm) -> `storage_api.exportBackup()`
-- Verify a Proof (`_VerifyProofSection`): paste JSON or import .json file, verify button calls `network_api.verifyMessageProof()` with full payload reconstruction and tamper detection. Shows VERIFIED/INVALID result with message text, sender, context, timestamp.
-
-### Updates Tab (`_UpdatesTab`)
-
-**Auto-checks on tab open** via `updaterProvider.notifier.checkForUpdates()`.
-
-**Sections:**
-- Header with current version badge
-- "Check for Updates" button
-- Error state display (conditional)
-- Download progress: linear progress bar + bytes counter, cancel button
-- Extracting state: indeterminate progress
-- Ready to install: "Install & Restart" button
-- Version list: `_VersionCard` widgets for each version in manifest, with current/latest badges, install button
-
-### About Tab (`_AboutTab`)
-
-**Layout:**
-- App logo (72px rounded) + "Hollow" / "Beta Version" / "by AnonListen"
-- Contact: feedback@anonlisten.com (copy) + anonlisten.com (launch)
-- Follow & Support: brand icons row (YouTube, X, TikTok, Twitch, Kick | divider | Patreon, Ko-Fi) -- each uses `_BrandIcon` or `_SvgBrandIcon` with hover scale animation + `HollowTooltip`
-- Legal: Privacy Policy, Terms of Use (both render markdown from `legal/` assets in a sub-dialog), Open-Source Licenses (Flutter's `showLicensePage`)
-
-### Key sub-widgets
-
-**`_AccentColorPicker`:** Rainbow hue slider (0-359) using custom `_RainbowSliderTrackShape`, preset swatches (Default teal + saved presets from `accentPresetsProvider`), add/remove preset via long-press.
-
-**`_BackgroundPicker`:** Set/Change/Remove buttons, opens image picker -> 16:9 crop dialog, darken opacity slider (0.4 - 1.0) when background is set.
-
-**`_AudioDeviceSettings`:** Enumerates devices via `win32audio.Audio.enumDevices()` (input/output) and `flutter_webrtc.navigator.mediaDevices.enumerateDevices()` (cameras). Dropdown rows for mic, speaker, camera, audio quality preset. Mic test = WebRTC loopback echo test (getUserMedia + local PC pair; audible self-monitor + `getCaptureLevel` meter — no `record` package). Ringtone picker: file selection + volume slider + trim button opening `_RingtoneClipEditorDialog`; unset = bundled default ringtone.
-
-**`_RingtoneClipEditorDialog`:** RangeSlider for start/end clip (max 30s), preview playback with progress bar, save persists to `ringtoneStartProvider`/`ringtoneEndProvider`.
-
-**`_TwitchConnectionRow`:** Shows connected Twitch username or "Connect Twitch Account" button, which opens `_TwitchDeviceCodeDialog` (device code flow identical to TwitchJoinDialog pattern). Disconnect button calls `twitch_api.twitchDisconnect()`.
-
-**`_RestartPrompt`:** Simple dialog shown after proxy setting change, with "Restart Now" button that calls `network_api.restartNode()`.
-
-**`_onSave()`:** Applies ALL pending changes atomically: theme mode, minimize to tray, proxy, layout mode, auto-download threshold, cache cap, animation toggle (including `SharedTickers` management), invisible mode, profile (display name, status, aboutMe, avatar, banner).
-
-### Providers read/written
-- `identityProvider`, `profileProvider`, `themeModeProvider`, `minimizeToTrayProvider`
-- `proxyEnabledProvider`, `layoutModeProvider`, `reduceMotionProvider`, `reduceTransparencyProvider`
-- `invisibleModeProvider`, `autoDownloadThresholdProvider`, `vaultCacheCapProvider`
-- `accentHueProvider`, `accentPresetsProvider`, `backgroundProvider`
-- `audioInputDeviceProvider`, `audioOutputDeviceProvider`, `cameraDeviceProvider`
-- `audioQualityProvider`, `imageQualityProvider`
-- `ringtonePathProvider`, `ringtoneVolumeProvider`, `ringtoneStartProvider`, `ringtoneEndProvider`, `ringtoneDurationProvider`
-- `updaterProvider`
-
-### FFI calls
-- `network_api.processAvatar(rawBytes:)`, `network_api.processBanner(rawBytes:)`
-- `storage_api.getMnemonic()`, `storage_api.saveMnemonic(mnemonic:)`, `storage_api.exportBackup(...)`
-- `network_api.verifyMessageProof(...)`, `network_api.restartNode()`
-- `twitch_api.twitchIsConnected()`, `twitch_api.twitchStartDeviceFlow()`, `twitch_api.twitchPollForToken(...)`, `twitch_api.twitchDisconnect()`
 
 ## Keyboard-Aware & Phone-Adaptive Dialogs (2026-06)
 

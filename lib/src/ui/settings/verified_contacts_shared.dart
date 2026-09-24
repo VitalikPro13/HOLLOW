@@ -7,30 +7,24 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Verified-contacts pieces shared by the desktop Security category and the
+/// Verified-contacts pieces shared by desktop Settings > Security and the
 /// mobile Security tab.
 ///
 /// Listing them is auditability: a verified badge is a claim the app makes on
 /// the user's behalf, so they must be able to see every claim in one place and
 /// withdraw any of them.
 
-/// Explainer shown above the list on both surfaces.
-Widget verifiedContactsIntro(HollowTheme hollow) {
-  return Text(
-    'You confirmed these contacts by comparing safety numbers in person or '
-    'over another trusted channel. Their number stays the same if they '
-    'reinstall or add a device. You are warned about new devices separately.',
-    style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-  );
-}
-
-/// One verified-contact row.
+/// One verified-contact row: View opens the safety number, the More menu
+/// withdraws the verification.
 class VerifiedContactRow extends ConsumerWidget {
   final String id;
   final double avatarSize;
@@ -43,76 +37,64 @@ class VerifiedContactRow extends ConsumerWidget {
     required this.shortId,
   });
 
+  Future<void> _unverify(BuildContext context, WidgetRef ref) async {
+    try {
+      await ref.read(verifiedPeersProvider.notifier).unverify(id);
+    } catch (_) {
+      if (context.mounted) {
+        HollowToast.show(context, "Couldn't remove verification",
+            type: HollowToastType.error);
+      }
+    }
+  }
+
+  void _openMenu(BuildContext buttonContext, WidgetRef ref) {
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    showHollowMenu(
+      context: buttonContext,
+      anchor: overlayAnchorOf(buttonContext,
+          localOffset: Offset(box.size.width, box.size.height)),
+      alignEnd: true,
+      builder: (menuContext, _) => [
+        HollowMenuItem(
+          label: 'Remove verification',
+          isDanger: true,
+          onTap: () => _unverify(buttonContext, ref),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
+    final name = displayNameForPeer(ref.watch(profileProvider)[id], id);
+    final touch = SettingsDensity.touchOf(context);
 
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
+    return SettingsRow(
+      leading: HollowAvatar(peerId: id, size: avatarSize),
+      title: name,
+      subtitleWidget: Text(
+        shortId,
+        style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
       ),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          HollowAvatar(peerId: id, size: avatarSize),
-          const SizedBox(width: HollowSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(LucideIcons.shieldCheck,
-                        size: 13, color: hollow.success),
-                    const SizedBox(width: HollowSpacing.xxs),
-                    Flexible(
-                      child: Text(
-                        displayNameForPeer(profiles[id], id),
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  shortId,
-                  style: HollowTypography.mono.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.ghost(
+          HollowButton.outline(
             compact: true,
             onPressed: () => showVerifyContactDialog(context, peerId: id),
             child: const Text('View'),
           ),
-          HollowButton.ghost(
-            compact: true,
-            onPressed: () async {
-              try {
-                await ref.read(verifiedPeersProvider.notifier).unverify(id);
-              } catch (_) {
-                if (context.mounted) {
-                  HollowToast.show(context, "Couldn't remove verification",
-                      type: HollowToastType.error);
-                }
-              }
-            },
-            child: const Text('Remove'),
+          const SizedBox(width: HollowSpacing.xs),
+          Builder(
+            builder: (buttonContext) => HollowIconButton(
+              icon: LucideIcons.ellipsis,
+              label: 'More for $name',
+              size: touch ? 44 : 32,
+              onPressed: () => _openMenu(buttonContext, ref),
+            ),
           ),
         ],
       ),
@@ -120,38 +102,33 @@ class VerifiedContactRow extends ConsumerWidget {
   }
 }
 
-/// The verified list inside a [SettingsCard], for desktop Security.
-class VerifiedContactsCard extends ConsumerWidget {
-  const VerifiedContactsCard({super.key});
+/// "Verified contacts": a count, and the list behind Show.
+class VerifiedContactsExpandRow extends ConsumerWidget {
+  const VerifiedContactsExpandRow({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final verified = ref.watch(verifiedPeersProvider).toList()..sort();
 
-    return SettingsCard(
-      title: 'Verified Contacts',
+    if (verified.isEmpty) {
+      return const SettingsRow(
+        title: 'Verified contacts',
+        subtitle: 'Nobody yet. Verify someone from their profile.',
+      );
+    }
+    final count =
+        verified.length == 1 ? '1 person' : '${verified.length} people';
+    return SettingsExpandRow(
+      title: 'Verified contacts',
+      subtitle: '$count, checked by safety number',
       children: [
-        if (verified.isEmpty)
-          const HollowEmptyState(
-            dense: true,
-            title: 'No verified contacts yet',
-            description: 'Open a contact\'s profile and choose '
-                '"Verify contact" to compare safety numbers.',
-          )
-        else ...[
-          verifiedContactsIntro(hollow),
-          const SizedBox(height: HollowSpacing.sm),
-          for (final id in verified)
-            Padding(
-              padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-              child: VerifiedContactRow(
-                id: id,
-                avatarSize: 32,
-                shortId: shortenPeerId(id),
-              ),
-            ),
-        ],
+        for (final id in verified)
+          VerifiedContactRow(
+            key: ValueKey(id),
+            id: id,
+            avatarSize: 32,
+            shortId: shortenPeerId(id),
+          ),
       ],
     );
   }

@@ -1,4 +1,4 @@
-/// "Art you own" (the Hollow Shop library inside profile settings).
+/// "Your art" (the Hollow Shop library inside Settings > Profile).
 ///
 /// Three things this pins: the panel lists an ITEM rather than the rail rows
 /// it is made of, a kind already on the profile reads "Worn" instead of
@@ -90,6 +90,7 @@ class _FakeOwnedArt extends OwnedArtNotifier {
   final List<OwnedItem> items;
   OwnedItem? wornItem;
   Set<String>? wornKinds;
+  OwnedItem? removed;
 
   @override
   List<OwnedItem> build() => items;
@@ -101,6 +102,11 @@ class _FakeOwnedArt extends OwnedArtNotifier {
   Future<void> wear(OwnedItem item, Set<String> kinds) async {
     wornItem = item;
     wornKinds = kinds;
+  }
+
+  @override
+  Future<void> remove(OwnedItem item) async {
+    removed = item;
   }
 }
 
@@ -143,7 +149,7 @@ void main() {
   testWidgets('lists owned items, and a worn kind says so', (tester) async {
     await _pumpPanel(tester);
 
-    expect(find.text('Art You Own'), findsOneWidget);
+    expect(find.text('Your art'), findsOneWidget);
     expect(find.text('Import a pack'), findsOneWidget);
 
     expect(find.text('Winter Frame'), findsOneWidget);
@@ -151,15 +157,15 @@ void main() {
 
     // The frame is already on the profile; the avatar is not.
     expect(find.text('Worn'), findsOneWidget);
-    expect(find.text('Wear frame'), findsNothing);
-    expect(find.text('Wear avatar'), findsOneWidget);
+    expect(find.text('Wear'), findsOneWidget);
+    expect(find.text('Avatar · by Ada'), findsOneWidget);
   });
 
-  testWidgets('Wear avatar asks for that item and that kind only',
+  testWidgets('Wear asks for that item and that kind only',
       (tester) async {
     final fake = await _pumpPanel(tester);
 
-    await tester.tap(find.text('Wear avatar'), warnIfMissed: false);
+    await tester.tap(find.text('Wear'), warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(fake.wornItem?.itemId, 'item-avatar');
@@ -167,6 +173,36 @@ void main() {
 
     // Let the success toast run its course: it schedules a Timer, and the
     // framework fails any test that leaves one pending.
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('Remove sits in More and asks first; Cancel keeps the item',
+      (tester) async {
+    final fake = await _pumpPanel(tester);
+
+    await tester.tap(find.bySemanticsLabel('More for Second Piece'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Remove from Your art'));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+    expect(find.text('Remove Second Piece?'), findsOneWidget);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(fake.removed, isNull);
+
+    await tester.tap(find.bySemanticsLabel('More for Second Piece'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Remove from Your art'));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+    await tester.tap(find.text('Remove').last);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(fake.removed?.itemId, 'item-avatar');
+
     await tester.pump(const Duration(seconds: 4));
     await tester.pump(const Duration(seconds: 1));
   });

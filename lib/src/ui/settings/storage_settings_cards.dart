@@ -5,54 +5,45 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
-import 'package:hollow/src/ui/settings/storage_section.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// Files & Storage category of the desktop Settings dialog: usage dashboard,
-/// cache limit sliders, media quality, and the on-disk data location.
-class StorageSettingsView extends StatelessWidget {
-  const StorageSettingsView({super.key});
+/// The rows of Settings > Files & Storage below its usage summary.
+
+/// A megabyte count as the sliders read it out.
+String _mbLabel(int mb) =>
+    mb >= 1024 ? '${(mb / 1024).toStringAsFixed(1)} GB' : '$mb MB';
+
+/// Every cap and threshold here saves as it moves; a failed write says so.
+void _save(BuildContext context, Future<void> write) {
+  write.catchError((_) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not save that setting',
+          type: HollowToastType.error);
+    }
+  });
+}
+
+class StorageDownloadsSection extends StatelessWidget {
+  const StorageDownloadsSection({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return settingsCardList(const [
-      SettingsCard(
-        title: 'Usage',
-        children: [StorageBreakdownView()],
-      ),
-      SettingsCard(
-        title: 'Cache Limits',
-        children: [
-          _AutoDownloadSlider(),
-          SizedBox(height: HollowSpacing.lg),
-          _FilesCacheCapSlider(),
-          SizedBox(height: HollowSpacing.lg),
-          _VaultCacheCapSlider(),
-          SizedBox(height: HollowSpacing.lg),
-          _AssetCacheCapSlider(),
-        ],
-      ),
-      SettingsCard(
-        title: 'Media',
-        children: [_ImageQualitySelector()],
-      ),
-      SettingsCard(
-        title: 'Data Location',
-        children: [_DataLocationRow()],
-      ),
-    ]);
+    return const SettingsSection(
+      title: 'Downloads',
+      children: [
+        _AutoDownloadSlider(),
+        _FilesCacheCapSlider(),
+        _ImageQualityRow(),
+      ],
+    );
   }
 }
 
-/// Auto-download threshold slider. Applies immediately.
 class _AutoDownloadSlider extends ConsumerWidget {
   const _AutoDownloadSlider();
 
@@ -61,172 +52,91 @@ class _AutoDownloadSlider extends ConsumerWidget {
     final threshold =
         ref.watch(autoDownloadThresholdProvider).valueOrNull ?? 169;
     final off = threshold == 0;
-    return SettingsLabeledSlider(
-      icon: LucideIcons.download,
-      title: 'Auto-download threshold',
-      subtitle: off
-          ? 'Off: files show a download button instead (voice messages still '
-              'play automatically)'
-          : 'Files up to $threshold MB auto-download',
+    return SettingsSliderRow(
+      title: 'Download automatically',
+      subtitle: 'Bigger files wait for a click. Voice messages always play.',
       value: off ? 0 : threshold.toDouble().clamp(34, 2048),
       min: 0,
       max: 2048,
       divisions: 50,
-      label: off ? 'Off' : '$threshold MB',
-      minLabel: 'Off',
-      maxLabel: '2 GB',
+      valueLabel: off ? 'Off' : _mbLabel(threshold),
       // Below the 34 MB direct-transfer cap the range has no meaning, so
       // anything dragged there snaps to Off.
-      onChanged: (value) => ref
-          .read(autoDownloadThresholdProvider.notifier)
-          .setThreshold(value.round() < 34 ? 0 : value.round()),
+      onChanged: (value) => _save(
+          context,
+          ref
+              .read(autoDownloadThresholdProvider.notifier)
+              .setThreshold(value.round() < 34 ? 0 : value.round())),
     );
   }
 }
 
-/// Downloaded-files cache cap slider. Enforced after each download completes
-/// and on "Evict now".
+/// Enforced after each download completes.
 class _FilesCacheCapSlider extends ConsumerWidget {
   const _FilesCacheCapSlider();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cap = ref.watch(filesCacheCapProvider).valueOrNull ?? 5120;
-    return SettingsLabeledSlider(
-      icon: LucideIcons.download,
-      title: 'Downloaded files limit',
-      subtitle:
-          '${(cap / 1024).toStringAsFixed(1)} GB: oldest downloaded files are evicted when this is exceeded (messages stay re-downloadable)',
+    return SettingsSliderRow(
+      title: 'Keep downloads up to',
+      subtitle: 'The oldest go first. They stay downloadable from the chat.',
       value: cap.toDouble().clamp(512, 51200),
       min: 512,
       max: 51200,
       divisions: 99,
-      label: '${(cap / 1024).toStringAsFixed(1)} GB',
-      minLabel: '512 MB',
-      maxLabel: '50 GB',
-      onChanged: (value) =>
-          ref.read(filesCacheCapProvider.notifier).setCap(value.round()),
+      valueLabel: _mbLabel(cap),
+      onChanged: (value) => _save(context,
+          ref.read(filesCacheCapProvider.notifier).setCap(value.round())),
     );
   }
 }
 
-/// Vault cache size cap slider. Applies immediately.
-class _VaultCacheCapSlider extends ConsumerWidget {
-  const _VaultCacheCapSlider();
+class _ImageQualityRow extends ConsumerWidget {
+  const _ImageQualityRow();
+
+  static String _label(ImageQuality q) => switch (q) {
+        ImageQuality.lossless => 'Lossless',
+        ImageQuality.balanced => 'Balanced',
+        ImageQuality.small => 'Small',
+      };
+
+  static String _description(ImageQuality q) => switch (q) {
+        ImageQuality.lossless =>
+          'Pixel-perfect (100%), for art, diagrams and screenshots.',
+        ImageQuality.balanced => 'At 50%, looks the same and is about 95% '
+            'smaller.',
+        ImageQuality.small => 'At 30%, strong compression for slow '
+            'connections.',
+      };
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cap = ref.watch(vaultCacheCapProvider).valueOrNull ?? 1024;
-    return SettingsLabeledSlider(
-      icon: LucideIcons.hardDrive,
-      title: 'Vault cache limit',
-      subtitle:
-          '${(cap / 1024).toStringAsFixed(1)} GB: cached vault video/file playback is evicted when this is exceeded',
-      value: cap.toDouble().clamp(256, 10240),
-      min: 256,
-      max: 10240,
-      divisions: 40,
-      label: cap >= 1024 ? '${(cap / 1024).toStringAsFixed(1)} GB' : '$cap MB',
-      minLabel: '256 MB',
-      maxLabel: '10 GB',
-      onChanged: (value) =>
-          ref.read(vaultCacheCapProvider.notifier).setCap(value.round()),
+    final current =
+        ref.watch(imageQualityProvider).valueOrNull ?? ImageQuality.balanced;
+    return SettingsChoiceRow<ImageQuality>(
+      title: 'Image quality',
+      subtitle: '${_description(current)} Sent as WebP; people can still '
+          'save them as PNG or JPG.',
+      value: current,
+      options: [for (final q in ImageQuality.values) (q, _label(q))],
+      onChanged: (q) =>
+          _save(context, ref.read(imageQualityProvider.notifier).setQuality(q)),
     );
   }
 }
 
-/// Asset blob cache cap slider, enforced whenever new asset bytes land. Assets
-/// still used by your personal set or a server are never evicted.
-class _AssetCacheCapSlider extends ConsumerWidget {
-  const _AssetCacheCapSlider();
+/// Where this profile's identity, database and files live. Desktop only.
+class DataFolderRow extends StatelessWidget {
+  const DataFolderRow({super.key});
 
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final cap = ref.watch(assetCacheCapProvider).valueOrNull ?? 512;
-    return SettingsLabeledSlider(
-      icon: LucideIcons.smile,
-      title: 'Emotes & GIFs limit',
-      subtitle: 'Past $cap MB, the emotes, stickers and GIFs added longest '
-          'ago are removed first. Ones your servers or personal set use are '
-          'always kept.',
-      value: cap.toDouble().clamp(64, 4096),
-      min: 64,
-      max: 4096,
-      divisions: 63,
-      label: cap >= 1024 ? '${(cap / 1024).toStringAsFixed(1)} GB' : '$cap MB',
-      minLabel: '64 MB',
-      maxLabel: '4 GB',
-      onChanged: (value) =>
-          ref.read(assetCacheCapProvider.notifier).setCap(value.round()),
-    );
-  }
-}
-
-/// Image quality tier selector, in the screen share dialog's chip style.
-class _ImageQualitySelector extends ConsumerWidget {
-  const _ImageQualitySelector();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final currentAsync = ref.watch(imageQualityProvider);
-    final current = currentAsync.valueOrNull ?? ImageQuality.balanced;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const SettingsFieldLabel(label: 'Image quality'),
-        const SizedBox(height: HollowSpacing.xs),
-        Text(
-          current.description,
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 11,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Wrap(
-          spacing: HollowSpacing.sm,
-          runSpacing: HollowSpacing.sm,
-          children: [
-            for (final q in ImageQuality.values)
-              HollowChip(
-                label: q.label,
-                selected: q == current,
-                onTap: () =>
-                    ref.read(imageQualityProvider.notifier).setQuality(q),
-              ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          'Images and GIFs are converted to WebP to save bandwidth and storage. '
-          'Receivers can still save them as PNG, JPG, etc.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary.withValues(alpha: 0.7),
-            fontSize: 10,
-            height: 1.4,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Data location row + open-folder button.
-class _DataLocationRow extends StatelessWidget {
-  const _DataLocationRow();
-
-  /// The on-disk data directory shown in the FILES section. Portable mode and a
-  /// pinned profile override it with the resolved root; otherwise it mirrors the
-  /// Rust core's `dirs::data_dir()/hollow`. Desktop only.
+  /// Portable mode and a pinned profile resolve their own root; otherwise it
+  /// mirrors the Rust core's `dirs::data_dir()/hollow`.
   static String _dataLocationPath() {
     if (isPortableMode || isPinnedProfile) return hollowDataDir;
     return defaultDesktopDataRoot();
   }
 
-  /// Opens the data directory in the OS file manager.
   Future<void> _openDataFolder(BuildContext context) async {
     final dir = _dataLocationPath();
     try {
@@ -247,46 +157,68 @@ class _DataLocationRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(LucideIcons.folder, size: 16, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SelectableText(
-                _dataLocationPath(),
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 10,
-                  fontFamily: 'monospace',
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                isPortableMode
-                    ? 'Portable mode: identity key, encrypted database, and '
-                        'downloaded files travel with the app folder.'
-                    : isPinnedProfile
-                        ? 'Switched profile: identity key, encrypted '
-                            'database, and downloaded files live in this '
-                            'folder. Manage profiles in Settings > Profile.'
-                        : 'Identity key, encrypted database, and downloaded '
-                            'files.',
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary, fontSize: 10),
-              ),
-            ],
+        SettingsRow(
+          title: 'Data folder',
+          subtitleWidget: SelectableText(
+            _dataLocationPath(),
+            style:
+                HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
+          ),
+          trailing: HollowButton.ghost(
+            compact: true,
+            onPressed: () => _openDataFolder(context),
+            child: const Text('Open'),
           ),
         ),
-        const SizedBox(width: HollowSpacing.sm),
-        HollowButton.outline(
-          onPressed: () => _openDataFolder(context),
-          icon: const Icon(LucideIcons.externalLink, size: 14),
-          compact: true,
-          child: const Text('Open'),
+        if (isPortableMode)
+          const SettingsNote(
+              'Portable mode keeps your identity and files with the app '
+              'folder.'),
+      ],
+    );
+  }
+}
+
+/// Caches few people tune: vault playback and the emote and GIF images.
+class StorageAdvancedSettings extends ConsumerWidget {
+  const StorageAdvancedSettings({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final vaultAsync = ref.watch(vaultCacheCapProvider);
+    final assetsAsync = ref.watch(assetCacheCapProvider);
+    final vault = vaultAsync.valueOrNull ?? 1024;
+    final assets = assetsAsync.valueOrNull ?? 512;
+    return SettingsAdvanced(
+      // Decided again once both caps have loaded, so a changed one opens it.
+      key: ValueKey(vaultAsync.hasValue && assetsAsync.hasValue),
+      initiallyOpen: vault != 1024 || assets != 512,
+      children: [
+        SettingsSliderRow(
+          title: 'Vault cache',
+          subtitle: 'Played vault videos and files, oldest cleared first',
+          value: vault.toDouble().clamp(256, 10240),
+          min: 256,
+          max: 10240,
+          divisions: 40,
+          valueLabel: _mbLabel(vault),
+          onChanged: (value) => _save(context,
+              ref.read(vaultCacheCapProvider.notifier).setCap(value.round())),
+        ),
+        SettingsSliderRow(
+          title: 'Emotes and GIFs',
+          subtitle: 'The ones your servers use are always kept',
+          value: assets.toDouble().clamp(64, 4096),
+          min: 64,
+          max: 4096,
+          divisions: 63,
+          valueLabel: _mbLabel(assets),
+          onChanged: (value) => _save(context,
+              ref.read(assetCacheCapProvider.notifier).setCap(value.round())),
         ),
       ],
     );

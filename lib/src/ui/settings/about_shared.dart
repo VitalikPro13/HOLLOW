@@ -4,7 +4,6 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -41,13 +40,10 @@ Widget legalMarkdownView(
       }
     },
     styleSheet: MarkdownStyleSheet(
-      h2: HollowTypography.heading.copyWith(
+      h2: HollowTypography.subheading.copyWith(color: hollow.textPrimary),
+      h3: HollowTypography.body.copyWith(
         color: hollow.textPrimary,
-        fontSize: 16,
-      ),
-      h3: HollowTypography.heading.copyWith(
-        color: hollow.textPrimary,
-        fontSize: 14,
+        fontWeight: FontWeight.w600,
       ),
       p: HollowTypography.body.copyWith(
         color: hollow.textPrimary,
@@ -58,14 +54,14 @@ Widget legalMarkdownView(
       ),
       strong: HollowTypography.body.copyWith(
         color: hollow.textPrimary,
-        fontWeight: FontWeight.w700,
+        fontWeight: FontWeight.w600,
       ),
       a: HollowTypography.body.copyWith(
         color: hollow.accent,
         decoration: TextDecoration.underline,
         decorationColor: hollow.accent,
       ),
-      blockSpacing: 12,
+      blockSpacing: HollowSpacing.md,
       horizontalRuleDecoration: BoxDecoration(
         border: Border(
           top: BorderSide(
@@ -77,38 +73,25 @@ Widget legalMarkdownView(
   );
 }
 
-/// The About sections' one link shape.
-Widget aboutLinkButton({
-  required VoidCallback onPressed,
-  required IconData icon,
-  required String label,
-}) {
-  return Align(
-    alignment: Alignment.centerLeft,
-    child: HollowButton.ghost(
-      onPressed: onPressed,
-      icon: Icon(icon, size: 16),
-      child: Text(label),
-    ),
-  );
-}
-
 /// Opens a brand or social URL in the external browser.
 void launchBrandUrl(String url) {
   launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 }
 
+/// Where feedback goes.
+const kSupportEmail = 'feedback@anonlisten.com';
+
 /// Copies the feedback email to the clipboard.
 void copySupportEmail(BuildContext context) {
-  Clipboard.setData(const ClipboardData(text: 'feedback@anonlisten.com'));
+  Clipboard.setData(const ClipboardData(text: kSupportEmail));
   HollowToast.show(context, 'Email copied to clipboard',
       type: HollowToastType.success);
 }
 
-/// Opens the AnonListen website externally.
-void openAnonListenSite() {
+/// Opens Hollow's website externally.
+void openHollowSite() {
   launchUrl(
-    Uri.parse('https://anonlisten.com'),
+    Uri.parse('https://hollow.anonlisten.com'),
     mode: LaunchMode.externalApplication,
   );
 }
@@ -122,7 +105,7 @@ void showHollowLicensesPage(BuildContext context) {
     applicationIcon: Padding(
       padding: const EdgeInsets.all(HollowSpacing.md),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(HollowTheme.of(context).radiusLg),
         child: Image.asset(
           'assets/hollow_logo_rounded.png',
           width: 48,

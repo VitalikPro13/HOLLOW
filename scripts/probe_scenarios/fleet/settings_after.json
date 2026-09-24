@@ -1,0 +1,668 @@
+{
+ "_": [
+  "Session 16 after pass: the Settings place (every page, search, the unsaved bar, a wide and a narrow window, light)",
+  "and the three-tab Friends Manager, on two FRESH throwaway peers (b sends a a request; a accepts).",
+  "run: powershell -File scripts\fleet.ps1 -Scenario settings_after -Peers a,b"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "f-add"
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Requests",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "f-sent"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Needs Attention",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "f-requests"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Friends",
+   "index": 1
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "f-friends"
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "type:_FriendsManager > text:probe-b",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "f-friends-hover"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:More for probe-b",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "f-friends-more"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-01-profile"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-02-security"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Devices",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-03-devices"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Appearance",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-04-appearance"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accessibility",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-05-accessibility"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Notifications",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-06-notifications"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & Video",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-07-audio"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Shortcuts",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-08-shortcuts"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Network",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-09-network"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Files & Storage",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-10-storage"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:About",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-11-about"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Recovery",
+   "dy": -600,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-02b-security-lower"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:People",
+   "dy": -800,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-02c-security-end"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & Video",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Voice",
+   "dy": -700,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Show advanced settings",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-07b-audio-lower"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Network",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Change",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-09b-network-relays"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Search settings",
+   "value": "noise"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-20-search"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:What are you up to?",
+   "value": "Mixing the new EP"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-21-unsaved"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Security",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-22-unsaved-other-page"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Save",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-23-saved"
+  },
+  {
+   "peer": "a",
+   "op": "zoom",
+   "value": 0.67
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-30-wide"
+  },
+  {
+   "peer": "a",
+   "op": "zoom",
+   "value": 1.5
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-31-narrow"
+  },
+  {
+   "peer": "a",
+   "op": "zoom",
+   "value": 1.0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-32-light"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-33-light-profile"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s-40-closed"
+  }
+ ]
+}

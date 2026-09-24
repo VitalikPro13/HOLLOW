@@ -83,7 +83,6 @@ import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
 import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
@@ -102,6 +101,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/settings/server_settings_panel.dart';
+import 'package:hollow/src/ui/settings/settings_place.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
@@ -120,6 +120,7 @@ import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/shell/archive_dashboard.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart';
@@ -1257,7 +1258,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     bool match(AppShortcut s) => binds[s]!.matchesEvent(event, hk);
 
     if (match(AppShortcut.openSettings)) {
-      showUserSettingsDialog(context);
+      toggleSettings(ref.read);
       return true;
     }
 
@@ -1787,6 +1788,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
           child: Row(
             children: [
               const RepaintBoundary(child: ServerStrip()),
+              if (ref.watch(settingsTabOpenProvider))
+                const Expanded(child: SettingsPlace())
+              else ...[
               _buildChannelSidebar(
                 peers: peers,
                 lastMessages: lastMessages,
@@ -1831,6 +1835,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                 visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
               ),
               HelpPanelSlider(visible: helpPanelOpen),
+              ],
             ],
           ),
         ),
@@ -1938,7 +1943,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
         const SystemStatusBanner(),
 
         Expanded(
-          child: ClipRect(child: Row(
+          child: ref.watch(settingsTabOpenProvider)
+              ? const SettingsPlace()
+              : ClipRect(child: Row(
             children: [
               if (selectedServerId != null)
                 Row(

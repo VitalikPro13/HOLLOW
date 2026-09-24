@@ -2,16 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Multi-device management shared by the desktop Devices category and the
 /// mobile Settings tab. The two surfaces differ only in text styling and row
@@ -26,6 +21,15 @@ bool deviceIsActive(MyDevice d) =>
 /// The device's label, or its shortened peer id when it has none.
 String deviceTitle(MyDevice d) =>
     d.label.isNotEmpty ? d.label : shortenPeerId(d.peerId);
+
+/// Re-pulls the device list from the running node. Call on open: the startup
+/// warm-up races node readiness and nothing keeps the list fresh while
+/// Settings is closed, so it renders stale after a restart.
+void refreshMyDevices(WidgetRef ref) {
+  ref.read(deviceLinkProvider.notifier).refresh();
+  ref.read(deviceLabelProvider.notifier).refresh();
+  ref.invalidate(localDevicePeerIdProvider);
+}
 
 /// Label edit dialog, persisted through [deviceLabelProvider].
 Future<void> renameDeviceFlow(
@@ -52,10 +56,16 @@ Future<void> renameDeviceFlow(
       ],
     ),
   );
-  if (saved == true) {
+  if (saved != true) return;
+  try {
     await ref
         .read(deviceLabelProvider.notifier)
         .setLabel(device.peerId, controller.text.trim());
+  } catch (e) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not rename the device: $e',
+          type: HollowToastType.error);
+    }
   }
 }
 
@@ -149,148 +159,5 @@ Future<void> resetDeviceListsFlow(BuildContext context) async {
       HollowToast.show(context, 'Reset failed: $e',
           type: HollowToastType.error);
     }
-  }
-}
-
-/// Row shell for a device entry, with the surface-specific action buttons
-/// appended at the end.
-class DeviceRowShell extends StatelessWidget {
-  final MyDevice device;
-  final List<Widget> actions;
-
-  const DeviceRowShell({
-    super.key,
-    required this.device,
-    required this.actions,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final title = deviceTitle(device);
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        children: [
-          Icon(LucideIcons.smartphone, size: 18, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        title,
-                        overflow: TextOverflow.ellipsis,
-                        style: HollowTypography.body.copyWith(
-                            color: hollow.textPrimary,
-                            fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                    if (device.isThisDevice) ...[
-                      const SizedBox(width: HollowSpacing.xs),
-                      const HollowBadge('This device',
-                          kind: HollowBadgeKind.accent),
-                    ],
-                  ],
-                ),
-                Text(
-                  '${shortenPeerId(device.peerId)} · ${device.online ? "online" : "offline"}',
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ],
-            ),
-          ),
-          ...actions,
-        ],
-      ),
-    );
-  }
-}
-
-/// The "Your Devices" list. Stateful for the "Show all" toggle that reveals
-/// offline, unlabelled ghost devices.
-class DevicesListSection extends ConsumerStatefulWidget {
-  final TextStyle Function(HollowTheme hollow) infoStyle;
-  final Widget Function(MyDevice device) rowBuilder;
-
-  const DevicesListSection({
-    super.key,
-    required this.infoStyle,
-    required this.rowBuilder,
-  });
-
-  @override
-  ConsumerState<DevicesListSection> createState() =>
-      _DevicesListSectionState();
-}
-
-class _DevicesListSectionState extends ConsumerState<DevicesListSection> {
-  bool _showAll = false;
-
-  @override
-  void initState() {
-    super.initState();
-    // Re-pull from the running node's resolver on open: the startup warm-up
-    // races node readiness and nothing keeps the provider fresh while Settings
-    // is closed, so the list renders stale after a restart.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(deviceLinkProvider.notifier).refresh();
-      ref.read(deviceLabelProvider.notifier).refresh();
-      ref.invalidate(localDevicePeerIdProvider);
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final devices = ref.watch(myDevicesProvider);
-
-    if (devices.length <= 1) {
-      return Text(
-        'Only this device is linked to your identity. Link another below to sync '
-        'your messages, friends and profile across devices.',
-        style: widget.infoStyle(hollow),
-      );
-    }
-
-    final ghosts = devices.where((d) => !deviceIsActive(d)).toList();
-    final shown =
-        _showAll ? devices : devices.where(deviceIsActive).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Devices linked to your identity. Remove a device you no longer use or '
-          'have lost. It can no longer read your messages once removed.',
-          style: widget.infoStyle(hollow),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        for (final d in shown)
-          Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-            child: widget.rowBuilder(d),
-          ),
-        if (ghosts.isNotEmpty)
-          HollowButton.ghost(
-            compact: true,
-            onPressed: () => setState(() => _showAll = !_showAll),
-            child: Text(_showAll
-                ? 'Hide old devices'
-                : 'Show all (${ghosts.length} offline)'),
-          ),
-      ],
-    );
   }
 }

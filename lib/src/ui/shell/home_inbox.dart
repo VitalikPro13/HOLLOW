@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
@@ -36,7 +37,6 @@ import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart'
@@ -75,8 +75,9 @@ class DesktopHomeActions extends HomeActions {
   bool get installsUpdates => true;
 
   @override
-  void openUpdate(BuildContext context) =>
-      showUserSettingsDialog(context, openUpdatesTab: true);
+  void openUpdate(BuildContext context) => openSettings(
+      ProviderScope.containerOf(context, listen: false).read,
+      category: SettingsCategory.about);
 
   @override
   void addFriend(BuildContext context) =>
@@ -86,7 +87,9 @@ class DesktopHomeActions extends HomeActions {
   void addServer(BuildContext context) => showCreateServerDialog(context);
 
   @override
-  void editProfile(BuildContext context) => showUserSettingsDialog(context);
+  void editProfile(BuildContext context) => openSettings(
+      ProviderScope.containerOf(context, listen: false).read,
+      category: SettingsCategory.profile);
 }
 
 // ---------------------------------------------------------------------------

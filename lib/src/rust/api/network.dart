@@ -716,6 +716,10 @@ Future<HollowpackImport> importHollowpack({required String path}) =>
 Future<List<OwnedArt>> listOwnedArt() =>
     RustLib.instance.api.crateApiNetworkListOwnedArt();
 
+/// Removes one item from Your art on this install. Local only: nothing is sent.
+Future<void> removeOwnedArt({required String itemId}) =>
+    RustLib.instance.api.crateApiNetworkRemoveOwnedArt(itemId: itemId);
+
 /// One-shot migration for a profile authored BEFORE animated media moved to the
 /// asset rail, where the animation sat in `avatar`/`banner` as raw source bytes and
 /// rode every profile push. Converts ours in place and re-announces once.
