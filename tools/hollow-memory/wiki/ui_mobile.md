@@ -25,11 +25,11 @@ Tab state: `mobileTabProvider` (`StateProvider<int>`, default 0) in `lib/src/ui/
 
 ### MobileNavBar
 **File:** `lib/src/ui/mobile/mobile_nav_bar.dart`
-Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBuilder` + `Stack` for animated glow.
-- **Animated glow:** `AnimatedPositioned` radial gradient circle (accent 0.3→0.1→0.0, `RadialGradient`, 84×76) follows active tab with 300ms `easeOutCubic`. Wrapped in `ClipRect` to prevent bleed outside bar. Maps tab indices 0,1 to slots 0,1 and 2,3 to slots 3,4 (skipping center button slot).
+Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBuilder` + `Stack` for the active-tab bar.
+- **Active-tab bar (2026-09-24, Vitalik's pick over accent-only and the old radial glow):** a 32 x 2 px accent bar on the bar's top edge above the active tab, sliding by `AnimatedPositioned` (`HollowDurations.normal`, `HollowCurves.subtle`, zero under reduce motion), so the active tab reads by POSITION as well as colour. Maps tab indices 0,1 to slots 0,1 and 2,3 to slots 3,4 (skipping the centre slot). Icons 24; the label keeps one weight whether active or not (a bold active label reflowed).
 - Chats tab: total unread count (DM + channel)
 - Friends tab: pending incoming friend request count
-- **Center "+" button** (`_AddButton`): 40×40 accent-colored rounded container with plus icon. Opens `NewConversationDialog` (Join Server, Create Server — no Add Friend, that's in Friends tab). Passed via `onAdd` callback from `MobileShell`.
+- **Center "+" button** (`_AddButton`): 40×40 accent-filled rounded container with plus icon, no shadow (the accent glow went with the tab glow). Opens `NewConversationDialog` (Join Server, Create Server — no Add Friend, that's in Friends tab). Passed via `onAdd` callback from `MobileShell`.
 - Archive tab
 - Settings tab
 
@@ -51,6 +51,7 @@ The desktop Home inbox on a phone, plus the server list (a phone has no dock). W
 - **One `CustomScrollView`:** the first-run line, a search field (`Search conversations`, once there is any DM or server), `HomeAttention` and `HomeSetupChecklist` with `_MobileHomeActions` (touch layout; no update row, the stores update phones; add friend = `showMobileAddFriendSheet`, add server = `showNewConversationDialog`, profile = `openMobileProfileSettings`), the `HomeFilters` chips, then the list.
 - **All:** Saved messages and parked joins pinned first, then DMs and servers ranked unread first, then newest, then by name (servers carry no time). **Unread:** the hot DMs and servers. **Mentions:** one `ConversationRow` per channel that mentioned us, which opens that channel. A server row carries its mention count (red, `@`) or else its unread count; mention rows are not repeated in All.
 - **Rows:** DMs, Saved messages and mentions are `ConversationRow(touch: true)` with 48 px leading, full-bleed, long press = the DM sheet. Servers are `_ServerRow` (`ServerAvatar(animate: expanded)`, members line, `HollowCountBadge`, chevron) expanding into the channel tree; the tree's rows use `HollowCountBadge` and a success `HollowBadge` for voice occupants. Geometry constants `_kAvatar` 48, `_kTreeIndent`, `_kTreeLeft`.
+- **Active Now** (2026-09-24): above the chips, only while a voice room has people in it: a `HollowSectionHeader` + up to two `HomeVoiceRoomTile(touch: true, onOpen:)` (then "and N more rooms"), from `homeVoiceRooms(ref)`; Join goes through the tab's own `_openVoiceChannel` (leave-your-call toast, switch confirm, chat + voice routes). News and Relay are NOT here: rendered at the end of the list and rejected by Vitalik ("takes so much space"); they close mobile Settings instead.
 - `AmbientBackground` still wraps the tab (draws nothing unless the Ambient opt-in is on). The old teal "Hollow" wordmark and `_HeaderShimmerLine` are gone.
 
 ### Pending Join Row (pending joins rung 1, 2026-08-29)
@@ -256,7 +257,7 @@ Below the Channels section, a "Management" section with `_NavRow` widgets (icon 
 **Purpose:** Shared profile bottom sheet used from member panel, DM header tap, and friend long-press.
 
 ### Layout
-- `SafeArea` → `ConstrainedBox(maxHeight: 0.9 × screen)` → `Column(min)`: (the `showHollowSheet` handle sits above, OUTSIDE the scrollable), then `Flexible(SingleChildScrollView(...))` for everything below. The cap keeps the barrier tappable and the external handle keeps drag-to-dismiss working when a long showcase makes the content scroll (same shape as mobile_message_actions.dart) — before this, a filled showcase produced a full-screen sheet that couldn't be closed.
+- Opened with `showHollowSheet(scrollControlled: true, maxHeightFactor: 0.9)`: the WHOLE sheet, handle included, stops at 90% of the screen so the scrim above it stays tappable (2026-09-24; the earlier cap sat on the content only, and the handle pushed the sheet up to the status bar). Body: `SafeArea` → `Column(min)` → `Flexible(SingleChildScrollView(...))`; the handle stays OUTSIDE the scrollable so drag-to-dismiss works when a long showcase scrolls.
 - Banner (180px) — `AnimatedGifImage` or gradient fallback via `bannerColorFromId()`
 - Avatar (72px) overlapping banner by 36px (`Transform.translate`), bordered
 - Name: local nickname (bold) + profile name (secondary) if nickname set, else just profile name
@@ -370,7 +371,7 @@ Name field (max 24) + 9 preset color circles. `crdt_api.createLabel()`.
 - Divider (`hollow.textSecondary` @ 0.35 alpha) separates the profile card from the nav tiles.
 - `_SettingsNavTile` rows (accent icon box 36px + title + subtitle + chevron). **Restructured 2026-06-21** to mirror the desktop category split: **Help**, **Appearance**, **Network**, **Audio & Video**, **Files & Storage**, **Security**, **Devices**, **Backup**, **About**. (The old single "System" and "Security" tiles were split.)
 - `_push()` → `Navigator.push(MaterialPageRoute(_SettingsSubPage(title, child)))`.
-- **Bottom of the list:** `HomeStatusCard` (the website-driven system-status card from `system_status_banner.dart` — green "All systems operational" when healthy, else the active notice + countdown; gives mobile a status pull-surface since the mobile banner is push-only-for-problems; added 2026-06-27 BEFORE Your Stats), then `_MobileStatsCard` ("Your Stats" — Friends / Servers / DM messages / Devices online, mirrors the desktop Home `_SyncStatsCard` for eyeball multi-device sync comparison), followed by `_MobileOnlineCounter` (a port of the desktop Home shell's bottom "Online … N" row — users icon + `_MobileShimmerLine` divider + live `relayStats.onlineUsers`).
+- **Bottom of the list (2026-09-24):** `HomeStatusCard` (the website-driven system-status card from `system_status_banner.dart`; the mobile banner only pushes problems, this is the pull surface), then the desktop Home rail's `HomeNewsCard` (latest post, the whole card opens it; "What's new in X" link; "Updated to X" after an update) and `HomeRelayCard(loadBars: mobileTab == 3)` (relay name, connection, load bars, online count; the bars and their 7 s poll run only while Settings is the visible tab, every tab stays mounted). The old Your Stats card moved to Devices as the shared `SyncCheckCard`; the hand-drawn Relay Server card and Online counter are gone.
 
 ### _SettingsSubPage
 Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Column[back-arrow header row (HollowPressable + heading), Divider, Expanded(child)]`. The bodies are: `_ProfileTab`, `_AppearanceTab`, `_NetworkTab` (formerly `_SystemTab`, trimmed to Peer ID + relay), `_AudioTab`, `_FilesTab`, `_SecurityTab` (trimmed to App Lock + Device Protection + Recovery), `_DevicesTab`, `_BackupTab`, `_AboutTab`. The new tabs (`_AppearanceTab`/`_AudioTab`/`_FilesTab`/`_DevicesTab`/`_BackupTab`) are thin compositions of the same already-modular section widgets (`_ThemeToggleRow`, `_AccentHueSection`, `_BackgroundSection`, `_AudioQualityPicker`, `_RingtonePicker`, `_ImageQualityPicker`, `_AutoDownloadSlider`, `_CacheCapSlider`, `_DevicesSectionMobile`, `_LinkDeviceButton`, `_ResetDeviceListButton`, `_BackupExportButton`). `_AutoDownloadSlider` (previously unused) is now wired into `_FilesTab`.
@@ -412,9 +413,7 @@ Every settings subpage titles its groups with the shared `HollowSectionHeader` (
 - **Unlocking… spinner** (`_UnlockingOverlay`, flag-driven `Stack` over the shell — NOT a dialog, so nothing races it dismissed): the post-unlock Argon2id derivation (~1.5-3s) + the local DB load can't begin until unlock finishes (the SQLCipher passphrase is derived from the just-unlocked identity — local-first render can't help). `_unlocking` is set the instant a secret is in hand (both `tryBiometric` and the password-entry path) and cleared after `profileProvider`/`friendsProvider` load in `_bootstrap` (conversation list renderable). Only shows when an App Lock is active; wrong-secret + identity-error paths clear it. See `feedback_app_lock_unlock_ux` memory.
 
 ### About Tab
-- Centered `hollow_logo_rounded.png` (96x96, ClipRRect rounded) + "Hollow" display text + tagline
-- Info section: version (v0.4.2), platform, license (AGPL-3.0)
-- Links section: anonlisten.com, github.com/AnonListen/Hollow
+See "About Tab (Info + Links + Legal)" below.
 
 ---
 
@@ -828,18 +827,14 @@ List of channels with current level badge. Tap → bottom sheet with 4 options: 
 - Long-press on server header (or tap ellipsis icon): bottom sheet with Export Shards, Import Shards, Start Recovery Pool actions
 - Shard export uses mobile file save pattern (temp dir → FFI → bytes → `FilePicker.saveFile(bytes:)`) on Android/iOS
 
-## About Tab (Relay Stats + News + Links + Legal)
+## About Tab (Info + Links + Legal)
 
 **File:** `lib/src/ui/mobile/tabs/mobile_settings_tab.dart` (`_AboutTab`)
 
 ### Info Section
 `_InfoRow` widgets: Version (0.4.2), Platform (`Platform.operatingSystem` — dynamic), License (AGPL-3.0).
 
-### Relay Stats Card
-Container with status dot (green if `relayStats.isFresh` — a fetch succeeded in the last ~20s; was `fetchCount > 0` which stayed green forever after the first fetch), relay domain, online users count, RAM usage bar (`_StatBar`), bandwidth bar. Watches `relayStatsProvider` (7s polling).
-
-### News Section
-Latest 3 posts from `newsProvider`. Cards show title + date + a 4-line plain-text teaser (`_plainTeaser()` strips markdown markers so `**`/`#`/`[]()` don't show raw). Tap opens `showHollowDialog` with the full body rendered as real markdown via `MarkdownBody` (same `flutter_markdown_plus` + stylesheet as the desktop `home_dashboard` news, with `onTapLink` → external browser), title, date, and X close button. Previously the expanded body was plain `Text(post.body)` — markdown rendering was added to match desktop.
+The Relay box and the three-post News list left About on 2026-09-24 (they duplicated the News + Relay cards that now close the Settings list); the root row's subtitle reads "Version, contact & legal".
 
 ### Contact Section
 `HollowButton.ghost` with icons: email (copies to clipboard), website (opens external browser), GitHub (opens `github.com/VitalikPro13/HOLLOW` externally). Uses `BrandIcons.github` for GitHub icon.

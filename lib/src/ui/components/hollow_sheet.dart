@@ -12,10 +12,14 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 ///
 /// [handle] is false only when the builder places [HollowSheetHandle] itself,
 /// as a `DraggableScrollableSheet` must, so the handle drags with the content.
+///
+/// [maxHeightFactor] caps the WHOLE sheet, handle included, at that share of
+/// the screen height.
 Future<T?> showHollowSheet<T>({
   required BuildContext context,
   required WidgetBuilder builder,
   bool scrollControlled = false,
+  double? maxHeightFactor,
   bool handle = true,
   bool isDismissible = true,
   bool enableDrag = true,
@@ -38,18 +42,27 @@ Future<T?> showHollowSheet<T>({
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
     ),
-    builder: (sheetContext) => ColoredBox(
-      color: HollowTheme.of(sheetContext).overlay,
-      child: handle
-          ? Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const HollowSheetHandle(),
-                Flexible(child: builder(sheetContext)),
-              ],
-            )
-          : builder(sheetContext),
-    ),
+    builder: (sheetContext) {
+      final sheet = ColoredBox(
+        color: HollowTheme.of(sheetContext).overlay,
+        child: handle
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const HollowSheetHandle(),
+                  Flexible(child: builder(sheetContext)),
+                ],
+              )
+            : builder(sheetContext),
+      );
+      if (maxHeightFactor == null) return sheet;
+      return ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetContext).height * maxHeightFactor,
+        ),
+        child: sheet,
+      );
+    },
   );
 }
 

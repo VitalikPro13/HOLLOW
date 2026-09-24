@@ -134,6 +134,15 @@ Guard baselines moved: font-size 597 to 596, radius 117 to 116 (sweep 9); font-s
   - **Also:** a muted DM counts nothing on Home (as in the friends bar); the nav bar's Chats and Friends counters are `HollowCountBadge` (accent, red `@` when a server mentioned you).
   - **Left for later:** the nav bar's radial glow behind the active tab is a gradient; the mobile server row still hand-builds its avatar-plus-two-lines layout (it expands, so it is not a `ConversationRow`); the News card, relay card and Active Now have no phone home yet (mobile Settings shows news); the update check runs once per launch.
 
+- **Session 11, the Home follow-ups (2026-09-24).** Verified on the mini's iOS Simulators with `fleet/home_mobile_rail.json` (b sits in a voice room of a's server); shots in `build/mrail2/`.
+  - **Update re-check:** `UpdateNotifier` owns a one-shot 2 h `Timer` (desktop only), re-armed by every check, so a manual check pushes the next one out; skipped while downloading / extracting / ready. A background check shows no "Checking..." and no error (an offline hour must not paint Settings red).
+  - **Nav bar:** Vitalik picked the 2 px accent bar that slides above the active tab (rendered against plain accent-only and the old glow in one run through a temporary probe variant switch, deleted after). The active tab now reads by position, not colour alone; icons 24, the label no longer turns bold when active (it reflowed), the + lost its accent shadow. Gradient 20 to 19.
+  - **Rail on a phone:** the brief's first guess (News + Relay closing the Chats list) was rendered and REJECTED: "takes so much space" in Chats. Active Now stays on Chats, above the chips, only while a voice room has people (two rooms, then "and N more"; Join goes through the phone's own voice flow). News + Relay replaced the END of the Settings list (after the status card); the old hand-drawn Relay Server card, Online counter and Your Stats left it (Your Stats is `SyncCheckCard` on Devices, as on desktop), and About lost its duplicate Relay box and three-post News list. `HomeNewsCard` / `HomeRelayCard(loadBars:)` / `HomeVoiceRoomTile(onOpen:, touch:)` / `homeVoiceRooms` are shared with the desktop rail.
+  - **The News card is one target** (it opens the post; "What's new in X" stays a link): a text link is too small for a finger. Desktop scenario `home_redesign.json` taps `text:News` now.
+  - **Profile sheet capped at 90% of the screen, handle included** (`showHollowSheet(maxHeightFactor:)`), so the scrim above it stays tappable; its old cap measured only the content, and the handle pushed the sheet to the status bar. Pinned by a widget test with tall content. Other tall sheets can take the same parameter.
+  - The mobile test harness (`hollowTestOverrides`) stubs news, updater, relay stats and the changelog now that the phone shell reads them.
+  - Guard baselines: font-size 556 to 541, color-literal 130 to 129, radius 103 to 102, sized-box-gap 159 to 158, gradient 20 to 19.
+
 ### Four bugs the work surfaced, all fixed
 
 1. **Ghost and outline buttons failed contrast.** They drew their label in raw `hollow.accent`, which is 2.33:1 on the light theme. 244 ghost uses. Now `accentText`.
@@ -149,12 +158,7 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 9 are done** (sessions 4 to 8). **Session 9 wrote the screen standards, the Home mockup (approved) and built Home on desktop; session 10 brought it to the phone's Chats tab (Vitalik: "looks AMAZING"). Next: the chat screen, desktop and phone in the same pass, plus the three small Home items below.**
-
-**Home follow-ups, queued for next session (small, do them first):**
-- **The rail on a phone.** News (latest post, "What's new in X", the "Updated to X" moment), the Relay card and Active Now have no place on mobile; Settings shows three news posts in its own list. Brief first: most likely a compact News + Relay block at the END of the Chats scroll (below the list, never above it: the list is the focal point) and Active Now as a strip above the chips only while a voice room has people in it. Decide with Vitalik from a render, not prose.
-- **The mobile nav bar's active-tab glow** (`mobile_nav_bar.dart`, a `RadialGradient` under the selected tab that slides with `AnimatedPositioned`) is a gradient the rules ban. Replace with the accent icon + label alone (already there) or a 2 px accent bar; render both. Lowers `gradient` to 19. The centre + keeps its fill but loses its accent `BoxShadow` (a glow).
-- **Re-check for updates while the app stays open.** The manifest is fetched once per launch (`newsProvider.build`), so a session left open for days never shows the Needs Attention update row. Give `UpdateNotifier` its OWN one-shot `Timer` re-armed every 2 hours (desktop only, skipped while downloading / extracting / ready). Do NOT hook it to `GuestFetchMode.periodic30m` (a per guest-server user choice, not an app clock) or the 60 s status poll (`status_provider.dart`, far too often for a signed manifest). Decided with Vitalik 2026-09-24.
+**Sweeps 3 to 9 are done** (sessions 4 to 8). **Session 9 wrote the screen standards, the Home mockup (approved) and built Home on desktop; session 10 brought it to the phone's Chats tab (Vitalik: "looks AMAZING"); session 11 closed the three Home follow-ups (below). Next: the chat screen, desktop and phone in the same pass.**
 
 1. ~~Sweep 3c~~ done, see above.
 2. ~~Sweep 4, dividers~~ done, see above.

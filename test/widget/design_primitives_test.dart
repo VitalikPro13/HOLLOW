@@ -984,5 +984,47 @@ void main() {
           .first);
       expect(surface.color, hollow.overlay);
     });
+
+    testWidgets('maxHeightFactor caps the whole sheet, handle included',
+        (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => Center(
+                child: TextButton(
+                  onPressed: () => showHollowSheet<void>(
+                    context: context,
+                    scrollControlled: true,
+                    maxHeightFactor: 0.9,
+                    builder: (_) => const SingleChildScrollView(
+                      child: SizedBox(height: 2000, child: Text('Tall body')),
+                    ),
+                  ),
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+
+      final surfaceTop = tester
+          .getTopLeft(find
+              .ancestor(
+                  of: find.byType(HollowSheetHandle),
+                  matching: find.byType(ColoredBox))
+              .first)
+          .dy;
+      // 10% of an 800 px screen stays above the sheet.
+      expect(surfaceTop, closeTo(80, 0.5));
+    });
   });
 }

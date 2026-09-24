@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -45,8 +46,8 @@ class HomeRail extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Inset(child: _NewsCard()),
-          _Inset(child: _RelayCard()),
+          _Inset(child: HomeNewsCard()),
+          _Inset(child: HomeRelayCard()),
           _ActiveNow(),
           SizedBox(height: HollowSpacing.xl),
         ],
@@ -58,29 +59,45 @@ class HomeRail extends StatelessWidget {
 /// A card in the panel: the raised step on the panel's chrome.
 class _RailCard extends StatelessWidget {
   final Widget child;
-  const _RailCard({required this.child});
+
+  /// The whole card as one target, for a phone where a text link is too
+  /// small to hit.
+  final VoidCallback? onTap;
+
+  const _RailCard({required this.child, this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final radius = BorderRadius.circular(hollow.radiusLg);
     return Padding(
       padding: const EdgeInsets.only(bottom: HollowSpacing.lg),
-      child: Container(
-        padding: const EdgeInsets.all(HollowSpacing.lg),
-        decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusLg),
-        ),
-        child: child,
-      ),
+      child: onTap == null
+          ? Container(
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: radius,
+              ),
+              child: child,
+            )
+          : HollowPressable(
+              onTap: onTap,
+              semanticButton: false,
+              borderRadius: radius,
+              backgroundColor: hollow.elevated,
+              hoverColor: hollow.hover,
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              child: child,
+            ),
     );
   }
 }
 
 /// The latest news post, and the changelog of the build that is running; the
 /// first launch after an update leads with what changed.
-class _NewsCard extends ConsumerWidget {
-  const _NewsCard();
+class HomeNewsCard extends ConsumerWidget {
+  const HomeNewsCard({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -108,6 +125,7 @@ class _NewsCard extends ConsumerWidget {
 
     final post = posts.isEmpty ? null : posts.first;
     return _RailCard(
+      onTap: post == null ? null : () => showNewsPostDialog(context, post),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -175,23 +193,13 @@ class _NewsCard extends ConsumerWidget {
                   .copyWith(color: hollow.textSecondary),
             ),
           ],
-          const SizedBox(height: HollowSpacing.md),
-          Wrap(
-            spacing: HollowSpacing.lg,
-            runSpacing: HollowSpacing.xs,
-            children: [
-              if (post != null)
-                HollowTextLink(
-                  'Read the post',
-                  onTap: () => showNewsPostDialog(context, post),
-                ),
-              if (release != null && !justUpdated)
-                HollowTextLink(
-                  "What's new in ${release.version}",
-                  onTap: openChangelog,
-                ),
-            ],
-          ),
+          if (release != null && !justUpdated) ...[
+            const SizedBox(height: HollowSpacing.md),
+            HollowTextLink(
+              "What's new in ${release.version}",
+              onTap: openChangelog,
+            ),
+          ],
         ],
       ),
     );
@@ -200,8 +208,12 @@ class _NewsCard extends ConsumerWidget {
 
 /// The relay this identity lives on: which one, whether we reach it, and how
 /// loaded it is, so a slow evening has a visible reason.
-class _RelayCard extends ConsumerWidget {
-  const _RelayCard();
+class HomeRelayCard extends ConsumerWidget {
+  /// False drops the load bars and so their 7 s poll, for a card that is
+  /// mounted but not on screen (a phone keeps every tab mounted).
+  final bool loadBars;
+
+  const HomeRelayCard({super.key, this.loadBars = true});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -243,8 +255,10 @@ class _RelayCard extends ConsumerWidget {
             style: HollowTypography.monoSmall
                 .copyWith(color: hollow.textTertiary),
           ),
-          const SizedBox(height: HollowSpacing.md),
-          const RelayLoadBars(),
+          if (loadBars) ...[
+            const SizedBox(height: HollowSpacing.md),
+            const RelayLoadBars(),
+          ],
         ],
       ),
     );
@@ -280,7 +294,7 @@ String plainNewsExcerpt(String markdown) {
       .trim();
 }
 
-class _VoiceRoom {
+class HomeVoiceRoom {
   final String serverId;
   final String channelId;
   final String serverName;
@@ -288,7 +302,7 @@ class _VoiceRoom {
   final List<String> people;
   final bool mine;
 
-  const _VoiceRoom({
+  const HomeVoiceRoom({
     required this.serverId,
     required this.channelId,
     required this.serverName,
@@ -296,6 +310,41 @@ class _VoiceRoom {
     required this.people,
     required this.mine,
   });
+}
+
+/// Voice rooms with someone in them, across every server we are in.
+List<HomeVoiceRoom> homeVoiceRooms(WidgetRef ref) {
+  final voice = ref.watch(voiceChannelProvider);
+  final servers = ref.watch(serverListProvider);
+  final links = ref.watch(deviceLinkProvider);
+  final rooms = <HomeVoiceRoom>[];
+  for (final MapEntry(key: serverId, value: channels)
+      in voice.participants.entries) {
+    // Conferences are virtual servers with their own surface.
+    if (serverId.startsWith('conf:')) continue;
+    final server = servers[serverId];
+    if (server == null) continue;
+    for (final MapEntry(key: channelId, value: devices) in channels.entries) {
+      if (devices.isEmpty) continue;
+      final people = {for (final d in devices) links.identityOf(d)}.toList();
+      final name = ref
+              .watch(serverChannelsProvider(serverId))
+              .valueOrNull?[channelId]
+              ?.name ??
+          '';
+      rooms.add(HomeVoiceRoom(
+        serverId: serverId,
+        channelId: channelId,
+        serverName: server.name,
+        channelName: name,
+        people: people,
+        mine: voice.currentServerId == serverId &&
+            voice.currentChannelId == channelId,
+      ));
+    }
+  }
+  rooms.sort((a, b) => b.people.length.compareTo(a.people.length));
+  return rooms;
 }
 
 class _ActiveNow extends ConsumerWidget {
@@ -307,7 +356,7 @@ class _ActiveNow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final rooms = _voiceRooms(ref);
+    final rooms = homeVoiceRooms(ref);
     final online = ref.watch(onlineIdentitiesProvider);
     final profiles = ref.watch(profileProvider);
     final onlineFriends = [
@@ -333,7 +382,7 @@ class _ActiveNow extends ConsumerWidget {
             ),
           ),
         for (final room in rooms) ...[
-          _Inset(child: _VoiceRoomTile(room: room)),
+          _Inset(child: HomeVoiceRoomTile(room: room)),
           const SizedBox(height: HollowSpacing.xs),
         ],
         if (onlineFriends.isNotEmpty) ...[
@@ -376,51 +425,31 @@ class _ActiveNow extends ConsumerWidget {
     return 'Online';
   }
 
-  /// Voice rooms with someone in them, across every server we are in.
-  List<_VoiceRoom> _voiceRooms(WidgetRef ref) {
-    final voice = ref.watch(voiceChannelProvider);
-    final servers = ref.watch(serverListProvider);
-    final links = ref.watch(deviceLinkProvider);
-    final rooms = <_VoiceRoom>[];
-    for (final MapEntry(key: serverId, value: channels)
-        in voice.participants.entries) {
-      // Conferences are virtual servers with their own surface.
-      if (serverId.startsWith('conf:')) continue;
-      final server = servers[serverId];
-      if (server == null) continue;
-      for (final MapEntry(key: channelId, value: devices) in channels.entries) {
-        if (devices.isEmpty) continue;
-        final people = {for (final d in devices) links.identityOf(d)}.toList();
-        final name = ref
-                .watch(serverChannelsProvider(serverId))
-                .valueOrNull?[channelId]
-                ?.name ??
-            '';
-        rooms.add(_VoiceRoom(
-          serverId: serverId,
-          channelId: channelId,
-          serverName: server.name,
-          channelName: name,
-          people: people,
-          mine: voice.currentServerId == serverId &&
-              voice.currentChannelId == channelId,
-        ));
-      }
-    }
-    rooms.sort((a, b) => b.people.length.compareTo(a.people.length));
-    return rooms;
-  }
 }
 
-class _VoiceRoomTile extends ConsumerStatefulWidget {
-  final _VoiceRoom room;
-  const _VoiceRoomTile({required this.room});
+/// A voice room with people in it and one action, Join (or Open when we are
+/// already in it).
+class HomeVoiceRoomTile extends ConsumerStatefulWidget {
+  final HomeVoiceRoom room;
+
+  /// Replaces the desktop join-and-open, for a shell with its own voice route.
+  final Future<void> Function(HomeVoiceRoom room)? onOpen;
+
+  /// Full-size button, for a finger.
+  final bool touch;
+
+  const HomeVoiceRoomTile({
+    super.key,
+    required this.room,
+    this.onOpen,
+    this.touch = false,
+  });
 
   @override
-  ConsumerState<_VoiceRoomTile> createState() => _VoiceRoomTileState();
+  ConsumerState<HomeVoiceRoomTile> createState() => _HomeVoiceRoomTileState();
 }
 
-class _VoiceRoomTileState extends ConsumerState<_VoiceRoomTile> {
+class _HomeVoiceRoomTileState extends ConsumerState<HomeVoiceRoomTile> {
   bool _busy = false;
 
   static const _faces = 3;
@@ -431,6 +460,11 @@ class _VoiceRoomTileState extends ConsumerState<_VoiceRoomTile> {
     final container = ProviderScope.containerOf(context, listen: false);
     setState(() => _busy = true);
     try {
+      final onOpen = widget.onOpen;
+      if (onOpen != null) {
+        await onOpen(room);
+        return;
+      }
       if (!room.mine) {
         await ref
             .read(voiceChannelProvider.notifier)
@@ -530,7 +564,7 @@ class _VoiceRoomTileState extends ConsumerState<_VoiceRoomTile> {
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.outline(
-            compact: true,
+            compact: !widget.touch,
             loading: _busy,
             onPressed: _go,
             child: Text(room.mine ? 'Open' : 'Join'),

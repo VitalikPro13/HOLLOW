@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -50,37 +52,27 @@ class MobileNavBar extends ConsumerWidget {
           height: 56,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final totalWidth = constraints.maxWidth;
-              final slotWidth = totalWidth / 5;
+              final slotWidth = constraints.maxWidth / 5;
               // The centre slot is not a tab, so indexes past it shift by one.
               final slotIndex = currentTab < 2 ? currentTab : currentTab + 1;
-              final glowLeft = slotIndex * slotWidth + slotWidth / 2 - 28;
 
-              return ClipRect(
-                child: Stack(
+              return Stack(
                 children: [
+                  // The active tab is marked by position as well as colour.
                   AnimatedPositioned(
                     duration: ReduceMotionController.instance.isReduced
                         ? Duration.zero
-                        : const Duration(milliseconds: 300),
-                    curve: Curves.easeOutCubic,
-                    left: glowLeft - 14,
-                    top: -10,
-                    child: IgnorePointer(
-                      child: Container(
-                        width: 84,
-                        height: 76,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: RadialGradient(
-                            colors: [
-                              hollow.accent.withValues(alpha: 0.3),
-                              hollow.accent.withValues(alpha: 0.1),
-                              hollow.accent.withValues(alpha: 0.0),
-                            ],
-                            stops: const [0.0, 0.45, 1.0],
-                          ),
-                        ),
+                        : HollowDurations.normal,
+                    curve: HollowCurves.subtle,
+                    left: slotIndex * slotWidth +
+                        (slotWidth - _indicatorWidth) / 2,
+                    top: 0,
+                    child: Container(
+                      width: _indicatorWidth,
+                      height: HollowSpacing.xxs,
+                      decoration: BoxDecoration(
+                        color: hollow.accent,
+                        borderRadius: BorderRadius.circular(hollow.radiusXs),
                       ),
                     ),
                   ),
@@ -128,7 +120,6 @@ class MobileNavBar extends ConsumerWidget {
                     ],
                   ),
                 ],
-              ),
               );
             },
           ),
@@ -136,7 +127,10 @@ class MobileNavBar extends ConsumerWidget {
       ),
     );
   }
+
+  static const double _indicatorWidth = 32;
 }
+
 
 class _AddButton extends StatelessWidget {
   final VoidCallback? onTap;
@@ -160,13 +154,6 @@ class _AddButton extends StatelessWidget {
               decoration: BoxDecoration(
                 color: hollow.accent,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                boxShadow: [
-                  BoxShadow(
-                    color: hollow.accent.withValues(alpha: 0.25),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
               ),
               child: ExcludeSemantics(
                 child: Icon(LucideIcons.plus,
@@ -235,7 +222,7 @@ class _NavTab extends StatelessWidget {
             Stack(
               clipBehavior: Clip.none,
               children: [
-                Icon(icon, size: 22, color: color),
+                Icon(icon, size: 24, color: color),
                 if (badge > 0)
                   Positioned(
                     top: -6,
@@ -255,10 +242,7 @@ class _NavTab extends StatelessWidget {
               maxScaleFactor: 1.3,
               child: Text(
                 label,
-                style: HollowTypography.caption.copyWith(
-                  color: color,
-                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
-                ),
+                style: HollowTypography.caption.copyWith(color: color),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),

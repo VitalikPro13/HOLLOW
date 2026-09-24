@@ -32,7 +32,7 @@ An app pane anchored to the window, never a centred max-width group (design lang
 Absent when nothing waits. One `elevated` row each, ghost secondary + compact outline primary with per-row `loading:` and a failure toast:
 - Unacknowledged `securityAlertsProvider` entries grouped per master: new device(s), identity re-keyed, identity reappeared. Verify = `showVerifyContactDialog` (not awaited), Dismiss = `acknowledgeForPeer`.
 - Incoming friend requests (`friendsProvider`, pending + incoming): Accept / Decline.
-- An update ready (`hasUpdateProvider`): View update opens Settings on Updates. Desktop only (`installsUpdates`). The manifest is checked ONCE per launch (`newsProvider.build`), so a session left open for days only learns of a release on restart or from Settings > Updates.
+- An update ready (`hasUpdateProvider`): View update opens Settings on Updates. Desktop only (`installsUpdates`). The manifest is checked at launch (`newsProvider.build`) and again every 2 h by `UpdateNotifier`'s own one-shot `Timer` (desktop only, re-armed by every check, so a manual check pushes the next one out; skipped while downloading / extracting / ready). A background check shows no progress and no error. Never tie it to `GuestFetchMode.periodic30m` or the 60 s status poll.
 More than 3 collapse behind "Show all N".
 
 ## Get Set Up (`HomeSetupChecklist`)
@@ -51,9 +51,11 @@ Shown while the person has no friend OR no server, `homeSetupProvider.loaded`, a
 
 ## Side panel (`HomeRail`)
 
-1. **News card:** header "News" + the running version as a mono `HollowBadge`; the latest `newsProvider` post (title, date, plain-text excerpt via `plainNewsExcerpt`); links "Read the post" (`showNewsPostDialog`) and teal "What's new in X" (`showChangelogDialog`, Older / Newer to walk versions). When `changelogSeen != currentVersion`, the card leads with "Updated to X", three changelog lines and "See everything that's new" until opened (`markChangelogSeen`). The changelog is `changelog.txt` BUNDLED as a pubspec asset and parsed by `core/changelog.dart` (`changelogProvider`); `describes()` matches `0.11` to `0.11.0`. No network, no third party. Links are `HollowTextLink`.
+1. **News card:** header "News" + the running version as a mono `HollowBadge`; the latest `newsProvider` post (title, date, plain-text excerpt via `plainNewsExcerpt`); the WHOLE card opens the post (`showNewsPostDialog`; a text link was too small for a finger) and a teal "What's new in X" (`showChangelogDialog`, Older / Newer to walk versions). When `changelogSeen != currentVersion`, the card leads with "Updated to X", three changelog lines and "See everything that's new" until opened (`markChangelogSeen`). The changelog is `changelog.txt` BUNDLED as a pubspec asset and parsed by `core/changelog.dart` (`changelogProvider`); `describes()` matches `0.11` to `0.11.0`. No network, no third party. Links are `HollowTextLink`.
 2. **Relay card:** "Relay", the connection dot + `overallConnectionProvider.label` via `connectionVisual()`, the relay domain in mono, then `RelayLoadBars` (`settings/relay_health_card.dart`: RAM, bandwidth, the 7 s poll sweep, an "Online" count row). Watching it runs `relayStatsProvider`'s poll, so it polls while Home or Settings > Network is open.
 3. **Active Now:** voice rooms across every non-conference server from `voiceChannelProvider.participants` (devices resolved to masters, channel names via `serverChannelsProvider`), each with Join (joins, then opens the channel) or Open when we are in it; then online friends (`onlineIdentitiesProvider`) as `HollowListRow` with their status or "In voice, <server>", capped at 8. Screen shares across servers are not tracked, so they do not appear.
+
+The pieces are public and shared with the phone (wiki `ui_mobile`): `HomeNewsCard`, `HomeRelayCard(loadBars:)` (false drops the bars and their poll for a mounted-but-hidden tab) close mobile Settings; `homeVoiceRooms(ref)` + `HomeVoiceRoomTile(onOpen:, touch:)` are the phone Chats' Active Now.
 
 ## Moved off Home
 

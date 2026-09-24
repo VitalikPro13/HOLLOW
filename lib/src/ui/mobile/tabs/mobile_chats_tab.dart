@@ -52,6 +52,7 @@ import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart'
     show openMobileProfileSettings;
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
+import 'package:hollow/src/ui/shell/home_rail.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
@@ -101,6 +102,10 @@ class _MobileHomeActions extends HomeActions {
 const _actions = _MobileHomeActions();
 
 const double _kAvatar = 48;
+
+/// Voice rooms shown before the list; past this they would push it off the
+/// first screen.
+const int _kRoomCap = 2;
 
 class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   final _expandedServers = <String>{};
@@ -268,6 +273,14 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ));
   }
 
+  Future<void> _openVoiceRoom(HomeVoiceRoom room) async {
+    final channels =
+        await ref.read(serverChannelsProvider(room.serverId).future);
+    final channel = channels[room.channelId];
+    if (channel == null || !mounted) return;
+    await _openVoiceChannel(room.serverId, channel);
+  }
+
   void _newMessage() => showNewMessageDialog(
         context,
         onOpen: (_, peerId) => _openDmChat(peerId),
@@ -330,6 +343,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       HomeFilter.mentions => mentions.where(matches).toList(),
     };
     final hasConversations = ranked.isNotEmpty;
+    final rooms = homeVoiceRooms(ref);
 
     return AmbientBackground(
       color1: hollow.accent,
@@ -399,6 +413,27 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                             actions: _actions,
                             compact: hasConversations,
                           ),
+                        if (rooms.isNotEmpty) ...[
+                          const SizedBox(height: HollowSpacing.xl),
+                          const HollowSectionHeader('Active Now'),
+                          for (final room in rooms.take(_kRoomCap)) ...[
+                            HomeVoiceRoomTile(
+                              key: ValueKey('${room.serverId}/${room.channelId}'),
+                              room: room,
+                              touch: true,
+                              onOpen: _openVoiceRoom,
+                            ),
+                            const SizedBox(height: HollowSpacing.xs),
+                          ],
+                          if (rooms.length > _kRoomCap)
+                            Text(
+                              rooms.length - _kRoomCap == 1
+                                  ? 'and 1 more room'
+                                  : 'and ${rooms.length - _kRoomCap} more rooms',
+                              style: HollowTypography.bodySmall
+                                  .copyWith(color: hollow.textTertiary),
+                            ),
+                        ],
                         if (hasConversations) ...[
                           const SizedBox(height: HollowSpacing.xl),
                           Align(

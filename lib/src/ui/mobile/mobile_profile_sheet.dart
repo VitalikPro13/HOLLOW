@@ -52,6 +52,8 @@ void showMobileProfileSheet(
   showHollowSheet(
     context: context,
     scrollControlled: true,
+    // Room above the sheet to tap it closed.
+    maxHeightFactor: 0.9,
     builder: (_) => MobileProfileSheet(
       peerId: peerId,
       role: role,
@@ -111,15 +113,10 @@ class MobileProfileSheet extends ConsumerWidget {
     final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
     final board = ShowcaseBoard.decode(profile?.showcaseBoard);
 
-    // The sheet stays below full screen so the barrier is tappable, and the
-    // drag handle stays OUTSIDE the scrollable, or a long showcase leaves no
-    // way to dismiss it: the inner scroll eats the drag gesture.
+    // The drag handle stays OUTSIDE the scrollable, or a long showcase leaves
+    // no way to dismiss it: the inner scroll eats the drag gesture.
     return SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-        ),
-        child: Column(
+      child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Flexible(
@@ -509,7 +506,6 @@ class MobileProfileSheet extends ConsumerWidget {
             ),
           ],
         ),
-      ),
     );
   }
 

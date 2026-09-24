@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/changelog.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -19,16 +20,19 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
+import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
@@ -109,6 +113,13 @@ List<Override> hollowTestOverrides({
       licenseKeyProvider.overrideWith(() => _MockLicenseKeyNotifier()),
       licenseErrorProvider.overrideWith((ref) => null),
       windowVisibleProvider.overrideWith((ref) => true),
+
+      // --- News, updates, relay load (no network, no Rust) ---
+      newsProvider.overrideWith(() => _MockNewsNotifier()),
+      updaterProvider.overrideWith(() => _MockUpdateNotifier()),
+      relayStatsProvider.overrideWith(() => _MockRelayStatsNotifier()),
+      changelogProvider
+          .overrideWith((ref) async => const <ChangelogRelease>[]),
 
       // --- User-provided overrides (last wins) ---
       ...extra,
@@ -313,6 +324,21 @@ class _MockSavedRelayListNotifier extends SavedRelayListNotifier {
 class _MockLicenseKeyNotifier extends LicenseKeyNotifier {
   @override
   String? build() => null;
+}
+
+class _MockNewsNotifier extends NewsNotifier {
+  @override
+  NewsState build() => const NewsState(hasFetched: true);
+}
+
+class _MockUpdateNotifier extends UpdateNotifier {
+  @override
+  UpdateState build() => const UpdateState();
+}
+
+class _MockRelayStatsNotifier extends RelayStatsNotifier {
+  @override
+  RelayStats build() => const RelayStats();
 }
 
 class _MockHiddenArchiveDmsNotifier extends HiddenArchiveDmsNotifier {

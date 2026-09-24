@@ -108,7 +108,7 @@
     { "peer": "a", "op": "shot", "name": "h-07-new-message" },
     { "peer": "a", "op": "key", "value": "escape" },
     { "peer": "a", "op": "wait", "ms": 600 },
-    { "peer": "a", "op": "tap", "target": "text:Read the post", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:News", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 800 },
     { "peer": "a", "op": "shot", "name": "h-08-news-post" },
     { "peer": "a", "op": "key", "value": "escape" },

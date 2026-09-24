@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -171,26 +172,51 @@ class UpdateState {
 }
 
 class UpdateNotifier extends Notifier<UpdateState> {
+  /// Its own clock: a session left open for days must still see a release.
+  static const recheckEvery = Duration(hours: 2);
+
+  Timer? _recheck;
+
   @override
   UpdateState build() {
+    ref.onDispose(() => _recheck?.cancel());
+    _armRecheck();
     return UpdateState(currentVersion: updater_api.getCurrentVersion());
   }
 
-  Future<void> checkForUpdates() async {
+  /// Desktop only: phones update through their stores.
+  void _armRecheck() {
+    if (!(Platform.isWindows || Platform.isMacOS || Platform.isLinux)) return;
+    _recheck?.cancel();
+    _recheck = Timer(recheckEvery, () => checkForUpdates(background: true));
+  }
+
+  /// A [background] check shows no progress and no failure: an hour offline
+  /// should not paint Settings red.
+  Future<void> checkForUpdates({bool background = false}) async {
+    _armRecheck();
     if (state.status == UpdateStatus.downloading ||
         state.status == UpdateStatus.extracting ||
         state.status == UpdateStatus.readyToInstall) {
       return;
     }
-    state = state.copyWith(status: UpdateStatus.checking, error: null);
+    if (!background) {
+      state = state.copyWith(status: UpdateStatus.checking, error: null);
+    }
     try {
       final bustCache = DateTime.now().millisecondsSinceEpoch;
       final json = await updater_api.fetchVersionManifest(
           manifestUrl: '$kManifestUrl?t=$bustCache');
       final manifest =
           VersionManifest.fromJson(jsonDecode(json) as Map<String, dynamic>);
-      state = state.copyWith(status: UpdateStatus.idle, manifest: manifest);
+      // A background result lands under whatever the user started meanwhile.
+      final settled = !background ||
+          state.status == UpdateStatus.idle ||
+          state.status == UpdateStatus.error;
+      state = state.copyWith(
+          status: settled ? UpdateStatus.idle : null, manifest: manifest);
     } catch (e) {
+      if (background) return;
       state = state.copyWith(
           status: UpdateStatus.error,
           error: 'Failed to check for updates: $e');

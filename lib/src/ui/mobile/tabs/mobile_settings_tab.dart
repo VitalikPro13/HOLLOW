@@ -14,16 +14,11 @@ import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
-import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
-import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
-import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/ui/settings/about_shared.dart';
 import 'package:hollow/src/core/providers/support_marks_provider.dart';
@@ -64,12 +59,10 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
 import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
@@ -77,6 +70,8 @@ import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/shop_availability.dart';
+import 'package:hollow/src/ui/settings/sync_check_card.dart';
+import 'package:hollow/src/ui/shell/home_rail.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/ui/shop/owned_art_panel.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
@@ -297,7 +292,7 @@ class MobileSettingsTab extends ConsumerWidget {
         _SettingsNavTile(
           icon: LucideIcons.info,
           title: 'About',
-          subtitle: 'Version, relay status, news & legal',
+          subtitle: 'Version, contact & legal',
           onTap: () =>
               _push(context, 'About', const _AboutTab(key: ValueKey('about'))),
         ),
@@ -309,255 +304,11 @@ class MobileSettingsTab extends ConsumerWidget {
         // Mobile's pull surface for status; the mobile banner only pushes
         // problems.
         const HomeStatusCard(),
-
-        const SizedBox(height: HollowSpacing.md),
-
-        // DM messages converge across a person's devices, so they can be
-        // eyeball-compared; channel messages are lazy-paged per device and
-        // would diverge, so they are not counted.
-        const _MobileStatsCard(),
-
-        const SizedBox(height: HollowSpacing.md),
-
-        const _MobileRelayCard(),
-
-        const SizedBox(height: HollowSpacing.md),
-        const _MobileOnlineCounter(),
-      ],
-    );
-  }
-}
-
-/// Live count of peers the relay reports as connected.
-class _MobileOnlineCounter extends ConsumerWidget {
-  const _MobileOnlineCounter();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    // All four mobile tabs stay mounted, so the watch is gated on this one
-    // being visible: dropping it disposes the provider and stops its poll.
-    final onSettingsTab = ref.watch(mobileTabProvider) == 3;
-    final relayStats =
-        onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
-    return Row(
-      children: [
-        Icon(LucideIcons.users, size: 13, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.xs),
-        Text(
-          'Online',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        const Expanded(child: HollowDivider()),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(
-          '${relayStats.onlineUsers}',
-          style: HollowTypography.bodySmall.copyWith(
-            color: hollow.textPrimary,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Relay RAM and bandwidth, plus this connection's daily relay data budget.
-class _MobileRelayCard extends ConsumerWidget {
-  const _MobileRelayCard();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    // All four mobile tabs stay mounted, so the watch is gated on this one
-    // being visible: dropping it disposes the provider and stops its poll.
-    final onSettingsTab = ref.watch(mobileTabProvider) == 3;
-    final stats =
-        onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(LucideIcons.radioTower, size: 14,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'Relay Server',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          StatBar(
-            hollow: hollow,
-            icon: LucideIcons.memoryStick,
-            label: 'RAM',
-            value: stats.memLabel,
-            progress: stats.memUsagePercent,
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          StatBar(
-            hollow: hollow,
-            icon: LucideIcons.activity,
-            label: 'Bandwidth',
-            value: stats.bandwidthLabel,
-            progress: stats.bandwidthUsagePercent,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Locally-knowable counts that converge across a person's devices, so two
-/// devices can be compared at a glance.
-class _MobileStatsCard extends ConsumerWidget {
-  const _MobileStatsCard();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final friends = ref.watch(friendsProvider);
-    final servers = ref.watch(serverListProvider);
-    final devices = ref.watch(myDevicesProvider);
-    ref.watch(lastDmMessageProvider);
-    final dmCount = ref.watch(_mobileDmCountProvider);
-
-    final friendCount =
-        friends.values.where((f) => f.status == 'accepted').length;
-    final devicesOnline = devices.where((d) => d.online).length;
-    final deviceCount = devices.length;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(LucideIcons.chartColumn, size: 14,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'Your Stats',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          _MobileStatRow(
-            hollow: hollow,
-            icon: LucideIcons.users,
-            label: 'Friends',
-            value: '$friendCount',
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          _MobileStatRow(
-            hollow: hollow,
-            icon: LucideIcons.server,
-            label: 'Servers',
-            value: '${servers.length}',
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          _MobileStatRow(
-            hollow: hollow,
-            icon: LucideIcons.messageSquare,
-            label: 'DM messages',
-            value: dmCount.maybeWhen(
-              data: (n) => '$n',
-              orElse: () => '…',
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          _MobileStatRow(
-            hollow: hollow,
-            icon: LucideIcons.smartphone,
-            label: 'Devices',
-            value: deviceCount > 1
-                ? '$devicesOnline / $deviceCount online'
-                : '1',
-            valueColor: deviceCount > 1
-                ? (devicesOnline == deviceCount
-                    ? hollow.success
-                    : hollow.warning)
-                : hollow.textPrimary,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// DM message count for the mobile stats card (see desktop `_dmMessageCountProvider`).
-final _mobileDmCountProvider = FutureProvider.autoDispose<int>((ref) async {
-  ref.watch(lastDmMessageProvider);
-  try {
-    return await storage_api.countAllDmMessages();
-  } catch (_) {
-    return 0;
-  }
-});
-
-class _MobileStatRow extends StatelessWidget {
-  final HollowTheme hollow;
-  final IconData icon;
-  final String label;
-  final String value;
-  final Color? valueColor;
-
-  const _MobileStatRow({
-    required this.hollow,
-    required this.icon,
-    required this.label,
-    required this.value,
-    this.valueColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(
-          label,
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 13,
-          ),
-        ),
-        const Spacer(),
-        Text(
-          value,
-          style: HollowTypography.body.copyWith(
-            color: valueColor ?? hollow.textPrimary,
-            fontWeight: FontWeight.w600,
-            fontSize: 13,
-          ),
-        ),
+        const SizedBox(height: HollowSpacing.lg),
+        const HomeNewsCard(),
+        // All four mobile tabs stay mounted, so the load bars (and their
+        // poll) run only while this one shows.
+        HomeRelayCard(loadBars: ref.watch(mobileTabProvider) == 3),
       ],
     );
   }
@@ -1936,6 +1687,8 @@ class _DevicesTab extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
         const _ResetDeviceListButton(),
+        const SizedBox(height: HollowSpacing.xl),
+        const SyncCheckCard(),
       ],
     );
   }
@@ -4003,12 +3756,6 @@ class _AboutTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Gated like _MobileOnlineCounter, so the stats poll stops on leaving.
-    final onSettingsTab = ref.watch(mobileTabProvider) == 3;
-    final relayStats =
-        onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
-    final newsState = ref.watch(newsProvider);
-    final relayDomain = ref.watch(relayDomainProvider);
     // Rust's APP_VERSION is the one source for this, never a literal.
     final appVersion = ref.watch(updaterProvider).currentVersion;
 
@@ -4052,111 +3799,6 @@ class _AboutTab extends ConsumerWidget {
         ),
         _InfoRow(label: 'Platform', value: Platform.operatingSystem),
         const _InfoRow(label: 'License', value: 'AGPL-3.0'),
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        const HollowSectionHeader('Relay'),
-        Container(
-          padding: const EdgeInsets.all(HollowSpacing.md),
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 8, height: 8,
-                    decoration: BoxDecoration(
-                      color: relayStats.isFresh
-                          ? const Color(0xFF4CAF50)
-                          : hollow.textSecondary,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Text(relayDomain,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary, fontSize: 13,
-                          fontWeight: FontWeight.w500)),
-                  ),
-                  Text('${relayStats.onlineUsers} online',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.accent, fontSize: 11,
-                        fontWeight: FontWeight.w600)),
-                ],
-              ),
-              const SizedBox(height: HollowSpacing.md),
-              _StatBar(
-                label: 'RAM',
-                value: relayStats.memLabel,
-                progress: relayStats.memUsagePercent,
-                color: hollow.accent,
-                hollow: hollow,
-              ),
-              const SizedBox(height: HollowSpacing.sm),
-              _StatBar(
-                label: 'Bandwidth',
-                value: relayStats.bandwidthLabel,
-                progress: relayStats.bandwidthUsagePercent,
-                color: hollow.accent,
-                hollow: hollow,
-              ),
-            ],
-          ),
-        ),
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        const HollowSectionHeader('News'),
-        if (!newsState.hasFetched)
-          const Padding(
-            padding: EdgeInsets.all(HollowSpacing.lg),
-            child: Center(child: HollowSpinner.medium()),
-          )
-        else if (newsState.posts.isEmpty)
-          const HollowEmptyState(dense: true, title: 'No news yet')
-        else
-          ...newsState.posts.take(3).map((post) => Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.md),
-            child: GestureDetector(
-              onTap: () => _showNewsDialog(context, post, hollow),
-              child: Container(
-                padding: const EdgeInsets.all(HollowSpacing.md),
-                decoration: BoxDecoration(
-                  color: hollow.elevated,
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(post.title,
-                              style: HollowTypography.body.copyWith(
-                                color: hollow.textPrimary,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13)),
-                        ),
-                        Text(post.date,
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textSecondary, fontSize: 11)),
-                      ],
-                    ),
-                    const SizedBox(height: HollowSpacing.xs),
-                    Text(_plainTeaser(post.body),
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textSecondary, fontSize: 12),
-                        maxLines: 4, overflow: TextOverflow.ellipsis),
-                  ],
-                ),
-              ),
-            ),
-          )),
 
         const SizedBox(height: HollowSpacing.xl),
 
@@ -4303,136 +3945,6 @@ class _AboutTab extends ConsumerWidget {
           ],
         ),
       ),
-    );
-  }
-
-  void _showNewsDialog(BuildContext context, NewsPost post, HollowTheme hollow) {
-    showHollowDialog(
-      context: context,
-      builder: (_) => HollowDialog(
-        title: post.title,
-        showClose: true,
-        maxWidth: 400,
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(post.date,
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary)),
-            const SizedBox(height: HollowSpacing.md),
-            MarkdownBody(
-              data: post.body,
-              shrinkWrap: true,
-              selectable: true,
-              onTapLink: (text, href, title) {
-                if (href != null) {
-                  launchUrl(Uri.parse(href),
-                      mode: LaunchMode.externalApplication);
-                }
-              },
-              styleSheet: MarkdownStyleSheet(
-                p: HollowTypography.body.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 13,
-                  height: 1.5,
-                ),
-                h2: HollowTypography.heading.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 15,
-                ),
-                h3: HollowTypography.heading.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 14,
-                ),
-                listBullet: HollowTypography.body.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 13,
-                ),
-                strong: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                ),
-                a: HollowTypography.body.copyWith(
-                  color: hollow.accent,
-                  fontSize: 13,
-                  decoration: TextDecoration.underline,
-                  decorationColor: hollow.accent,
-                ),
-                blockSpacing: 8,
-                horizontalRuleDecoration: BoxDecoration(
-                  border: Border(
-                    top: BorderSide(
-                      color: hollow.border.withValues(alpha: 0.5),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Strips markdown markers so the card teaser reads cleanly; the expanded
-  /// dialog renders the real markdown.
-  String _plainTeaser(String body) {
-    return body
-        .replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '')
-        .replaceAll(RegExp(r'\*\*(.+?)\*\*'), r'$1')
-        .replaceAll(RegExp(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)'), r'$1')
-        .replaceAll(RegExp(r'`(.+?)`'), r'$1')
-        .replaceAll(RegExp(r'^\s*[-*]\s+', multiLine: true), '• ')
-        .replaceAll(RegExp(r'\[(.+?)\]\((.+?)\)'), r'$1')
-        .trim();
-  }
-}
-
-class _StatBar extends StatelessWidget {
-  final String label;
-  final String value;
-  final double progress;
-  final Color color;
-  final HollowTheme hollow;
-
-  const _StatBar({
-    required this.label,
-    required this.value,
-    required this.progress,
-    required this.color,
-    required this.hollow,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label, style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary, fontSize: 11)),
-            Text(value, style: HollowTypography.caption.copyWith(
-              color: hollow.textPrimary, fontSize: 11,
-              fontWeight: FontWeight.w500)),
-          ],
-        ),
-        const SizedBox(height: 4),
-        SizedBox(
-          height: 4,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(2),
-            child: LinearProgressIndicator(
-              value: progress.clamp(0.0, 1.0),
-              backgroundColor: hollow.border,
-              valueColor: AlwaysStoppedAnimation(color),
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
