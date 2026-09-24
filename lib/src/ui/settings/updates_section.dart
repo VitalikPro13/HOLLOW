@@ -18,10 +18,6 @@ import 'package:hollow/src/ui/settings/settings_kit.dart';
 /// Phones update through their stores; only desktop runs the updater.
 bool get _hasUpdater => Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
-/// When the manifest last arrived. Process-wide so a reopened About still says
-/// when it last looked.
-DateTime? _lastChecked;
-
 /// Settings > About's Updates section: one status row for the updater, what's
 /// new in this build, and older builds to fall back to.
 class UpdatesTab extends ConsumerStatefulWidget {
@@ -66,9 +62,6 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(updaterProvider.select((s) => s.manifest), (prev, next) {
-      if (next != null && !identical(prev, next)) _lastChecked = DateTime.now();
-    });
     return SettingsSection(
       title: 'Updates',
       children: [
@@ -176,7 +169,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
           title = 'Not checked yet';
         }
 
-        final checked = _lastChecked;
+        final checked = state.lastChecked;
         return SettingsRow(
           title: title,
           // The failure stays beside the button that retries it.
@@ -187,7 +180,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
               : null,
           subtitle: checked == null
               ? null
-              : 'Checked ${conversationTimeLabel(checked)}',
+              : 'Last checked ${relativeTimeLabel(checked)}',
           trailing: latest != null && !checking
               ? HollowButton.filled(
                   compact: true,

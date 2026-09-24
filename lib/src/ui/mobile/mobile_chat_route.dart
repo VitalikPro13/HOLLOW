@@ -3224,6 +3224,50 @@ class _DmMuteButton extends ConsumerWidget {
   }
 }
 
+/// Starts a DM call and opens the call screen: the one phone path, shared by
+/// the chat header and the Friends tab's sheet.
+Future<void> startMobileDmCall(
+    BuildContext context, WidgetRef ref, String peerId,
+    {bool withVideo = false}) async {
+  // Starting a DM call disconnects a server voice channel, so it is confirmed
+  // first (issue #49).
+  final vc = ref.read(voiceChannelProvider);
+  if (vc.isInVoiceChannel) {
+    final channelName = vc.currentChannelName ?? 'voice';
+    final confirmed = await showHollowConfirm(
+      context: context,
+      title: 'Start call?',
+      message: 'Starting this call will disconnect you from #$channelName.',
+      confirmLabel: 'Start call',
+    );
+    if (confirmed != true || !context.mounted) return;
+  }
+  if (!await ensureTurnForCall(context, ref)) return;
+  if (!context.mounted) return;
+  try {
+    await ref
+        .read(callProvider.notifier)
+        .startCall(peerId, withVideo: withVideo);
+  } catch (_) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not start the call',
+          type: HollowToastType.error);
+    }
+    return;
+  }
+  if (!context.mounted) return;
+  openMobileCallScreen(context, peerId);
+}
+
+void openMobileCallScreen(BuildContext context, String peerId) =>
+    Navigator.of(context, rootNavigator: true).push(
+      hollowMobileRoute(
+        settings: const RouteSettings(name: 'call-screen'),
+        transition: HollowRouteTransition.slideUp,
+        builder: (_) => MobileCallScreen(peerId: peerId),
+      ),
+    );
+
 class _DmCallButtons extends ConsumerWidget {
   final String peerId;
   const _DmCallButtons({required this.peerId});
@@ -3237,42 +3281,7 @@ class _DmCallButtons extends ConsumerWidget {
     final isCallWithThisPeer = isInCall && call.peerId == peerId;
     final canCall = isOnline && !isInCall;
 
-    Future<void> startAndOpen({bool withVideo = false}) async {
-      // Starting a DM call disconnects a server voice channel, so it is
-      // confirmed first (issue #49).
-      final vc = ref.read(voiceChannelProvider);
-      if (vc.isInVoiceChannel) {
-        final channelName = vc.currentChannelName ?? 'voice';
-        final confirmed = await showHollowConfirm(
-          context: context,
-          title: 'Start call?',
-          message: 'Starting this call will disconnect you from #$channelName.',
-          confirmLabel: 'Start call',
-        );
-        if (confirmed != true || !context.mounted) return;
-      }
-      if (!await ensureTurnForCall(context, ref)) return;
-      if (!context.mounted) return;
-      await ref
-          .read(callProvider.notifier)
-          .startCall(peerId, withVideo: withVideo);
-      if (!context.mounted) return;
-      Navigator.of(context).push(
-        hollowMobileRoute(
-          settings: const RouteSettings(name: 'call-screen'),
-          transition: HollowRouteTransition.slideUp,
-          builder: (_) => MobileCallScreen(peerId: peerId),
-        ),
-      );
-    }
-
-    void openCall() => Navigator.of(context).push(
-          hollowMobileRoute(
-            settings: const RouteSettings(name: 'call-screen'),
-            transition: HollowRouteTransition.slideUp,
-            builder: (_) => MobileCallScreen(peerId: peerId),
-          ),
-        );
+    void openCall() => openMobileCallScreen(context, peerId);
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -3283,7 +3292,7 @@ class _DmCallButtons extends ConsumerWidget {
           size: 44,
           color: isCallWithThisPeer ? hollow.success : null,
           onPressed: canCall
-              ? () => startAndOpen()
+              ? () => startMobileDmCall(context, ref, peerId)
               : isCallWithThisPeer
                   ? openCall
                   : null,
@@ -3292,7 +3301,9 @@ class _DmCallButtons extends ConsumerWidget {
           icon: LucideIcons.video,
           label: 'Video call',
           size: 44,
-          onPressed: canCall ? () => startAndOpen(withVideo: true) : null,
+          onPressed: canCall
+              ? () => startMobileDmCall(context, ref, peerId, withVideo: true)
+              : null,
         ),
       ],
     );

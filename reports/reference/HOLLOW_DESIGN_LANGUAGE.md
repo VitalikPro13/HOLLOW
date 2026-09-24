@@ -23,7 +23,7 @@ These decide the cases the rules do not cover.
 
 1. **Content first, chrome recedes.** Messages get the brightest surface. Dock, sidebar and title bar sit below it.
 2. **Hierarchy by lightness and weight, not by size, borders or shadows.** Two to three text colours, two weights, in any one view.
-3. **One colour, one meaning.** The accent means interactive or primary. It never tints a card, never glows, never lands on a heading. Never colour alone: pair it with shape, text or an icon.
+3. **One colour, one meaning.** The accent means interactive or primary. It never tints a card, never glows, never lands on a heading. Never colour alone: pair it with shape, text or an icon. A chart or split bar takes `hollow.categorical` in fixed order (blue, orange, aqua, then a neutral), never the accent or a semantic colour, and always beside a labelled legend.
 4. **Separation by tone and spacing before lines.** A border only where the boundary is genuinely ambiguous.
 5. **Deprioritise instead of deleting.** Smaller and quieter, still visible. Simplicity is not the absence of things.
 6. **Familiarity over novelty.** Do not rebrand a known pattern. A menu looks like a menu.
@@ -355,9 +355,9 @@ A screen is done when every one of these holds on a render, desktop and mobile, 
 7. **Icons earn their place.** An icon stands for a control or tells two kinds of item apart. An icon on every row of a settings page, or beside every label, is noise.
 8. **One row per kind of thing.** A conversation row, a person row and a settings row each look the same on every screen that shows one (Home, sidebar, mobile Chats, Archive). A second hand-built version of the same row is a bug.
 9. **Every region has a clear next step.** An empty region says what fills it and offers the one action that does (section 6). A first run is a designed screen, not the populated screen with nothing in it.
-10. **Numbers and dates are honest.** A numeric date is ambiguous across locales ("9/17" is American only), so list times go through `conversationTimeLabel()` (`core/time_labels.dart`): `14:05` today, Yesterday, a weekday within the week, `Sep 17`, then `Sep 17, 2025`. Changing numbers use tabular figures. A written date or a day name ("Sep 14", "Sat", "September 10, 2026") is words, so it takes the interface face at `textTertiary`; the console voice is for what the protocol produces (ids, hashes, versions, relay names).
+10. **Numbers and dates are honest.** A numeric date is ambiguous across locales ("9/17" is American only), so list times go through `conversationTimeLabel()` (`core/time_labels.dart`): `14:05` today, Yesterday, a weekday within the week, `Sep 17`, then `Sep 17, 2025`. A status line's age ("Last checked 3 hours ago") goes through `relativeTimeLabel()` beside it. Changing numbers use tabular figures. A written date or a day name ("Sep 14", "Sat", "September 10, 2026") is words, so it takes the interface face at `textTertiary`; the console voice is for what the protocol produces (ids, hashes, versions, relay names).
 11. **Reading width.** A block of prose runs 50 to 75 characters a line.
-12. **Targets.** Desktop controls at least 28 px tall with the whole row as the hit area; touch targets at least 44 px (iOS) or 48 px (Android), whatever the painted size.
+12. **Targets.** Desktop controls at least 28 px tall with the whole row as the hit area; touch targets at least 44 px (iOS) or 48 px (Android), whatever the painted size. A phone's text button takes `HollowButton(touch: true)` (44 tall); desktop leaves it off.
 13. **Keyboard.** Every action reachable by keyboard, Escape leaves the innermost layer, focus is visible through `HollowFocusRing`.
 14. **Five states.** Loaded, empty, loading, error, offline (section 6), each rendered once before the screen is called done.
 

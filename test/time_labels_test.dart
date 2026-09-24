@@ -32,4 +32,18 @@ void main() {
         conversationTimeLabel(DateTime.fromMillisecondsSinceEpoch(0), now: now),
         '');
   });
+
+  test('relative labels count minutes, hours, then days', () {
+    expect(relativeTimeLabel(DateTime(2026, 9, 23, 18, 29, 30), now: now),
+        'just now');
+    expect(relativeTimeLabel(DateTime(2026, 9, 23, 18, 29), now: now),
+        '1 minute ago');
+    expect(relativeTimeLabel(DateTime(2026, 9, 23, 15, 10), now: now),
+        '3 hours ago');
+    expect(relativeTimeLabel(DateTime(2026, 9, 22, 12), now: now),
+        'yesterday');
+    expect(relativeTimeLabel(DateTime(2026, 9, 19, 12), now: now),
+        '4 days ago');
+    expect(relativeTimeLabel(DateTime(2026, 9, 1), now: now), 'on Sep 1');
+  });
 }

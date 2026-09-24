@@ -18,9 +18,13 @@ void main() {
       {List<Override> extra = const []}) async {
     tester.view.physicalSize = const Size(900, 1400);
     tester.view.devicePixelRatio = 1.0;
+    // On a Linux runner the updater row asks Rust for the install kind, and
+    // the bridge is never initialised in a widget test.
+    linuxInstallKindOverride = 'tarball';
     addTearDown(() {
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();
+      linuxInstallKindOverride = null;
     });
     await tester.pumpWidget(
       ProviderScope(
@@ -73,6 +77,27 @@ void main() {
     expect(find.text('Install and restart'), findsOneWidget);
     expect(find.text('Privacy'), findsOneWidget);
   });
+
+  testWidgets('about: the updater row says when it last checked',
+      (tester) async {
+    await pumpPage(tester, const AboutSettingsPage(), extra: [
+      updaterProvider.overrideWith(() => _CheckedUpdater()),
+    ]);
+    expect(find.text("You're up to date"), findsOneWidget);
+    expect(find.text('Last checked 3 hours ago'), findsOneWidget);
+  });
+}
+
+class _CheckedUpdater extends UpdateNotifier {
+  @override
+  UpdateState build() => UpdateState(
+        currentVersion: '0.11.1',
+        manifest: const VersionManifest(latest: '0.11.1', versions: []),
+        lastChecked: DateTime.now().subtract(const Duration(hours: 3)),
+      );
+
+  @override
+  Future<void> checkForUpdates({bool background = false}) async {}
 }
 
 class _ReadyUpdater extends UpdateNotifier {

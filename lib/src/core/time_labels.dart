@@ -25,3 +25,23 @@ String conversationTimeLabel(DateTime at, {DateTime? now}) {
   final monthDay = '${_months[at.month - 1]} ${at.day}';
   return at.year == today.year ? monthDay : '$monthDay, ${at.year}';
 }
+
+/// How long ago [at] was, for a status line: `just now`, `5 minutes ago`,
+/// `3 hours ago`, `yesterday`, `4 days ago`, then `on Sep 17`.
+String relativeTimeLabel(DateTime at, {DateTime? now}) {
+  final current = now ?? DateTime.now();
+  final ago = current.difference(at);
+  if (ago.inMinutes < 1) return 'just now';
+  if (ago.inHours < 1) {
+    return ago.inMinutes == 1 ? '1 minute ago' : '${ago.inMinutes} minutes ago';
+  }
+  if (ago.inDays < 1) {
+    return ago.inHours == 1 ? '1 hour ago' : '${ago.inHours} hours ago';
+  }
+  final days = DateTime(current.year, current.month, current.day)
+      .difference(DateTime(at.year, at.month, at.day))
+      .inDays;
+  if (days <= 1) return 'yesterday';
+  if (days < 7) return '$days days ago';
+  return 'on ${conversationTimeLabel(at, now: current)}';
+}

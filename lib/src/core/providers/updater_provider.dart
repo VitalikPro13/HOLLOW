@@ -132,6 +132,10 @@ class UpdateState {
   final String? error;
   final String currentVersion;
 
+  /// When a manifest last arrived, manual or background; a failed check
+  /// leaves it alone.
+  final DateTime? lastChecked;
+
   const UpdateState({
     this.status = UpdateStatus.idle,
     this.manifest,
@@ -143,6 +147,7 @@ class UpdateState {
     this.batPath,
     this.error,
     this.currentVersion = '',
+    this.lastChecked,
   });
 
   UpdateState copyWith({
@@ -156,6 +161,7 @@ class UpdateState {
     String? batPath,
     String? error,
     String? currentVersion,
+    DateTime? lastChecked,
   }) =>
       UpdateState(
         status: status ?? this.status,
@@ -168,6 +174,7 @@ class UpdateState {
         batPath: batPath ?? this.batPath,
         error: error ?? this.error,
         currentVersion: currentVersion ?? this.currentVersion,
+        lastChecked: lastChecked ?? this.lastChecked,
       );
 }
 
@@ -214,7 +221,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
           state.status == UpdateStatus.idle ||
           state.status == UpdateStatus.error;
       state = state.copyWith(
-          status: settled ? UpdateStatus.idle : null, manifest: manifest);
+          status: settled ? UpdateStatus.idle : null,
+          manifest: manifest,
+          lastChecked: DateTime.now());
     } catch (e) {
       if (background) return;
       state = state.copyWith(

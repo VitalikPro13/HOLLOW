@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +7,7 @@ import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 const _opacityKey = 'bg_panel_opacity';
+const _nameKey = 'bg_image_name';
 const _bgFileName = 'custom_background.img';
 
 Directory _hollowDir() {
@@ -20,14 +20,24 @@ class BackgroundState {
   final Uint8List? imageBytes;
   final double panelOpacity; // 0.0 = fully transparent panels, 1.0 = solid (default)
 
-  const BackgroundState({this.imageBytes, this.panelOpacity = 1.0});
+  /// The picked file's name, for Settings; null for an image saved before
+  /// names were kept.
+  final String? imageName;
+
+  const BackgroundState({this.imageBytes, this.panelOpacity = 1.0, this.imageName});
 
   bool get hasBackground => imageBytes != null && imageBytes!.isNotEmpty;
 
-  BackgroundState copyWith({Uint8List? imageBytes, double? panelOpacity, bool clearImage = false}) {
+  BackgroundState copyWith({
+    Uint8List? imageBytes,
+    double? panelOpacity,
+    String? imageName,
+    bool clearImage = false,
+  }) {
     return BackgroundState(
       imageBytes: clearImage ? null : (imageBytes ?? this.imageBytes),
       panelOpacity: panelOpacity ?? this.panelOpacity,
+      imageName: clearImage ? null : (imageName ?? this.imageName),
     );
   }
 }
@@ -40,6 +50,7 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
     try {
       final opacityStr = await storage_api.loadSetting(key: _opacityKey);
       final opacity = opacityStr != null ? (double.tryParse(opacityStr) ?? 1.0) : 1.0;
+      final name = await storage_api.loadSetting(key: _nameKey);
 
       final dir = _hollowDir();
       final file = File('${dir.path}/$_bgFileName');
@@ -48,17 +59,26 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
         bytes = await AtRest.read(file.path);
       }
 
-      state = BackgroundState(imageBytes: bytes, panelOpacity: opacity);
+      state = BackgroundState(
+        imageBytes: bytes,
+        panelOpacity: opacity,
+        imageName: bytes == null || name == null || name.isEmpty ? null : name,
+      );
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load background: $e');
     }
   }
 
-  Future<void> setImage(Uint8List bytes) async {
+  Future<void> setImage(Uint8List bytes, {String? name}) async {
     try {
       final dir = _hollowDir();
       await AtRest.write('${dir.path}/$_bgFileName', bytes);
-      state = state.copyWith(imageBytes: bytes);
+      await storage_api.saveSetting(key: _nameKey, value: name ?? '');
+      state = BackgroundState(
+        imageBytes: bytes,
+        panelOpacity: state.panelOpacity,
+        imageName: name,
+      );
     } catch (e) {
       debugPrint('[HOLLOW] Failed to save background: $e');
     }
@@ -69,6 +89,7 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
       final dir = _hollowDir();
       // Through AtRest so the file key row dies with the wallpaper.
       await AtRest.remove('${dir.path}/$_bgFileName');
+      await storage_api.saveSetting(key: _nameKey, value: '');
       state = state.copyWith(clearImage: true);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to clear background: $e');

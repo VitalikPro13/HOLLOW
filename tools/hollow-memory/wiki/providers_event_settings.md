@@ -496,13 +496,14 @@ Provider: `backgroundProvider` -- `NotifierProvider<BackgroundNotifier, Backgrou
 
 ### BackgroundState
 - `imageBytes: Uint8List?` -- Raw bytes of the custom background image.
+- `imageName: String?` -- The picked file's display name, persisted in the `bg_image_name` setting so Appearance names it after a restart (null for an image saved before 2026-09-24: it reads "Custom image").
 - `panelOpacity: double` -- 0.0 (fully transparent panels) to 1.0 (solid, default). Controls overlay panel opacity when a background image is set.
 - `hasBackground` -- Convenience getter, true when `imageBytes` is non-null and non-empty.
 
 ### BackgroundNotifier Methods
 - `load()` -- Reads panel opacity from `storage_api.loadSetting(key: 'bg_panel_opacity')` and image bytes from `~/.hollow/custom_background.img` (or `HOLLOW_DATA_DIR` override). Called during bootstrap.
-- `setImage(Uint8List bytes)` -- Writes bytes to `custom_background.img` in the hollow data directory.
-- `clearImage()` -- Deletes the background image file, sets state with `clearImage: true`.
+- `setImage(Uint8List bytes, {String? name})` -- Writes bytes to `custom_background.img` in the hollow data directory and persists `name` as `bg_image_name`.
+- `clearImage()` -- Deletes the background image file and forgets the name, sets state with `clearImage: true`.
 - `setOpacity(double opacity)` -- Clamps to [0.0, 1.0], persists to `'bg_panel_opacity'` setting.
 
 ---
@@ -895,7 +896,7 @@ Derived: `hasUpdateProvider` -- `Provider<bool>` (watches `updaterProvider`, ret
 `idle`, `checking`, `downloading`, `extracting`, `readyToInstall`, `error`
 
 ### UpdateState
-Fields: `status`, `manifest`, `selectedVersion`, `downloadProgress` (0.0-1.0), `bytesDownloaded`, `totalBytes`, `downloadedZipPath`, `batPath`, `error`, `currentVersion`.
+Fields: `status`, `manifest`, `selectedVersion`, `downloadProgress` (0.0-1.0), `bytesDownloaded`, `totalBytes`, `downloadedZipPath`, `batPath`, `error`, `currentVersion`, `lastChecked` (`DateTime?`, stamped whenever a manifest arrives, manual or the 2 h background re-check; a failed check keeps the previous stamp). About shows it through `relativeTimeLabel()` (`core/time_labels.dart`): "Last checked 3 hours ago".
 
 ### UpdateNotifier Methods
 

@@ -40,6 +40,9 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   final Color error;
   final Color success;
   final Color warning;
+  /// Series colours for a chart or a split bar, in fixed order: never cycled,
+  /// never the accent, and never beside a value without its label.
+  final List<Color> categorical;
   /// Badges, chips, keycaps: the smallest stop.
   final double radiusXs;
   final double radiusMd;
@@ -67,6 +70,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.error,
     required this.success,
     required this.warning,
+    required this.categorical,
     required this.radiusXs,
     required this.radiusMd,
     required this.radiusLg,
@@ -86,6 +90,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         error: HollowColors.error,
         success: HollowColors.success,
         warning: HollowColors.warning,
+        categorical: HollowColors.categorical,
       );
 
   factory HollowTheme.light() => HollowTheme._build(
@@ -104,6 +109,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         error: HollowColors.errorLight,
         success: HollowColors.successLight,
         warning: HollowColors.warningLight,
+        categorical: HollowColors.categoricalLight,
       );
 
   factory HollowTheme.darkWithHue(double hue) => HollowTheme.dark().copyWithAccent(
@@ -137,6 +143,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required Color error,
     required Color success,
     required Color warning,
+    required List<Color> categorical,
   }) {
     final surfaces = ladder.all;
     Color legible(Color c, [double ratio = 4.5]) =>
@@ -162,6 +169,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       error: error,
       success: success,
       warning: warning,
+      categorical: [for (final c in categorical) legible(c, 3.0)],
       radiusXs: HollowRadius.xs,
       radiusMd: HollowRadius.md,
       radiusLg: HollowRadius.lg,
@@ -237,6 +245,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     Color? error,
     Color? success,
     Color? warning,
+    List<Color>? categorical,
     double? radiusXs,
     double? radiusMd,
     double? radiusLg,
@@ -263,6 +272,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       error: error ?? this.error,
       success: success ?? this.success,
       warning: warning ?? this.warning,
+      categorical: categorical ?? this.categorical,
       radiusXs: radiusXs ?? this.radiusXs,
       radiusMd: radiusMd ?? this.radiusMd,
       radiusLg: radiusLg ?? this.radiusLg,
@@ -294,6 +304,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       error: Color.lerp(error, other.error, t)!,
       success: Color.lerp(success, other.success, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
+      categorical: [
+        for (var i = 0; i < categorical.length; i++)
+          Color.lerp(categorical[i], other.categorical[i], t)!,
+      ],
       radiusXs: radiusXs + (other.radiusXs - radiusXs) * t,
       radiusMd: radiusMd + (other.radiusMd - radiusMd) * t,
       radiusLg: radiusLg + (other.radiusLg - radiusLg) * t,

@@ -113,10 +113,6 @@ class AppearanceSettingsView extends ConsumerWidget {
   }
 }
 
-/// The name of the image picked this session. The provider keeps only the
-/// bytes, so after a restart the row says "Custom image" instead.
-final _pickedBackgroundName = StateProvider<String?>((ref) => null);
-
 class _BackgroundImageRow extends ConsumerStatefulWidget {
   const _BackgroundImageRow();
 
@@ -146,8 +142,9 @@ class _BackgroundImageRowState extends ConsumerState<_BackgroundImageRow> {
         title: 'Crop background',
       );
       if (cropped != null) {
-        await ref.read(backgroundProvider.notifier).setImage(cropped);
-        ref.read(_pickedBackgroundName.notifier).state = file.name;
+        await ref
+            .read(backgroundProvider.notifier)
+            .setImage(cropped, name: file.name);
       }
     } catch (e) {
       if (!mounted) return;
@@ -163,8 +160,9 @@ class _BackgroundImageRowState extends ConsumerState<_BackgroundImageRow> {
 
   @override
   Widget build(BuildContext context) {
-    final has = ref.watch(backgroundProvider).hasBackground;
-    final name = ref.watch(_pickedBackgroundName);
+    final bg = ref.watch(backgroundProvider);
+    final has = bg.hasBackground;
+    final name = bg.imageName;
     return SettingsRow(
       title: 'Background image',
       subtitle: has ? (name ?? 'Custom image') : 'None',
@@ -181,10 +179,8 @@ class _BackgroundImageRowState extends ConsumerState<_BackgroundImageRow> {
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.ghost(
               compact: true,
-              onPressed: () {
-                ref.read(_pickedBackgroundName.notifier).state = null;
-                ref.read(backgroundProvider.notifier).clearImage();
-              },
+              onPressed: () =>
+                  ref.read(backgroundProvider.notifier).clearImage(),
               child: const Text('Remove'),
             ),
           ],

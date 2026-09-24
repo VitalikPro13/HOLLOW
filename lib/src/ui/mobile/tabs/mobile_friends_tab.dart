@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -123,6 +124,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
                 ),
                 const SizedBox(height: HollowSpacing.sm),
                 HollowButton.outline(
+                  touch: true,
                   onPressed: () => showMobileAddFriendSheet(context),
                   icon: const Icon(LucideIcons.userPlus, size: 16),
                   expand: true,
@@ -305,6 +307,9 @@ class _FriendRow extends ConsumerWidget {
     final favs = ref.read(favouriteFriendsProvider);
     final isFav = favs.contains(peerId);
     final name = localNicknames[peerId] ?? displayNameFor(profiles, peerId);
+    // As on desktop: a call is offered only when it can start.
+    final canCall = ref.read(onlineIdentitiesProvider).contains(peerId) &&
+        ref.read(callProvider).status == CallStatus.idle;
 
     showHollowSheet(
       context: context,
@@ -326,6 +331,16 @@ class _FriendRow extends ConsumerWidget {
                 _openChat(context, ref, peerId);
               },
             ),
+
+            if (canCall)
+              _ActionRow(
+                icon: LucideIcons.phone,
+                label: 'Voice call',
+                onTap: () {
+                  Navigator.pop(context);
+                  startMobileDmCall(context, ref, peerId);
+                },
+              ),
 
             _ActionRow(
               icon: LucideIcons.user,
@@ -546,6 +561,7 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
     final actions = <Widget>[
       if (widget.isIncoming) ...[
         HollowButton.ghost(
+          touch: true,
           semanticLabel: 'Decline friend request',
           loading: _busy == 'decline',
           onPressed: () => _answer('decline',
@@ -554,6 +570,7 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
           child: const Text('Decline'),
         ),
         HollowButton.outline(
+          touch: true,
           semanticLabel: 'Accept friend request',
           loading: _busy == 'accept',
           onPressed: () => _answer('accept',
@@ -564,6 +581,7 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
         ),
       ] else
         HollowButton.ghost(
+          touch: true,
           semanticLabel: 'Cancel friend request',
           loading: _busy == 'cancel',
           onPressed: () => _answer('cancel',
@@ -715,6 +733,7 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                 const SizedBox(height: HollowSpacing.md),
                 // Directly under the input, with no competing buttons between.
                 HollowButton.filled(
+                  touch: true,
                   onPressed: _send,
                   loading: _sending,
                   expand: true,

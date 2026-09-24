@@ -927,6 +927,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
             if (incoming) ...[
               HollowButton.ghost(
                 compact: true,
+                touch: _isTouch,
                 semanticLabel: 'Reject friend request',
                 loading: busy == 'reject',
                 onPressed: () => _answer(
@@ -939,6 +940,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.outline(
                 compact: true,
+                touch: _isTouch,
                 semanticLabel: 'Accept friend request',
                 loading: busy == 'accept',
                 onPressed: () => _answer(
@@ -951,6 +953,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
             ] else
               HollowButton.ghost(
                 compact: true,
+                touch: _isTouch,
                 semanticLabel: 'Cancel friend request',
                 loading: busy == 'cancel',
                 onPressed: () => _answer(

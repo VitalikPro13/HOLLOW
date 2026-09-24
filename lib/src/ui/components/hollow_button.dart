@@ -19,6 +19,12 @@ class HollowButton extends StatefulWidget {
   final bool expand;
   final bool compact;
 
+  /// Phones: at least [touchHeight] tall, the platforms' minimum target.
+  /// Desktop leaves it off, so its rows keep their density.
+  final bool touch;
+
+  static const double touchHeight = 44;
+
   /// Tints an [HollowButton.outline] with the error colour, to flag a
   /// cautionary action without the solid `.danger` fill that confirm dialogs
   /// own. No effect on other variants.
@@ -41,6 +47,7 @@ class HollowButton extends StatefulWidget {
     this.variant = HollowButtonVariant.filled,
     this.expand = false,
     this.compact = false,
+    this.touch = false,
     this.semanticLabel,
     this.loading = false,
     this.danger = false,
@@ -53,6 +60,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.touch = false,
     this.semanticLabel,
     this.loading = false,
   })  : variant = HollowButtonVariant.filled,
@@ -65,6 +73,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.touch = false,
     this.semanticLabel,
     this.loading = false,
   })  : variant = HollowButtonVariant.ghost,
@@ -77,6 +86,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.touch = false,
     this.semanticLabel,
     this.loading = false,
     this.danger = false,
@@ -89,6 +99,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.touch = false,
     this.semanticLabel,
     this.loading = false,
   })  : variant = HollowButtonVariant.danger,
@@ -300,6 +311,10 @@ class _HollowButtonState extends State<HollowButton>
                 child: AnimatedContainer(
                   duration: HollowDurations.fast,
                   curve: HollowCurves.subtle,
+                  // The Row centres its label in the extra height.
+                  constraints: widget.touch
+                      ? const BoxConstraints(minHeight: HollowButton.touchHeight)
+                      : null,
                   // The outline's 1 px border comes out of the padding, so
                   // swapping a variant never moves the layout around it.
                   padding: EdgeInsets.symmetric(

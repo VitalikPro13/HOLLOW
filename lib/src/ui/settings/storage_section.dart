@@ -89,10 +89,10 @@ class _SummaryHeader extends StatelessWidget {
     final total = downloads + cache + shards + assets;
 
     final segments = [
-      _UsageSegment('Downloads', downloads, hollow.accent),
-      _UsageSegment('Vault', cache, hollow.warning),
-      _UsageSegment('Held for friends', shards, hollow.textSecondary),
-      _UsageSegment('Emotes and GIFs', assets, hollow.accentMuted),
+      _UsageSegment('Downloads', downloads, hollow.categorical[0]),
+      _UsageSegment('Vault', cache, hollow.categorical[1]),
+      _UsageSegment('Emotes and GIFs', assets, hollow.categorical[2]),
+      _UsageSegment('Held for friends', shards, hollow.categorical[3]),
     ];
 
     return Column(

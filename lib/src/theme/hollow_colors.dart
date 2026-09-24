@@ -46,4 +46,22 @@ abstract final class HollowColors {
   static const warningLight = Color(0xFF92600A); // 5.38:1 on white
 
   static const borderLight = Color(0x14000000); // ~8% black
+
+  // Categorical series (a storage bar's kinds): blue, orange, aqua, then a
+  // neutral for "the rest". The three hues stay apart under every colour
+  // vision deficiency with ALL pairs adjacent (OKLab dE >= 9), since a zero
+  // segment drops out and brings two others together. Stepped per theme, not
+  // flipped; HollowTheme lifts each to 3:1 on every surface.
+  static const categorical = [
+    Color(0xFF3987E5),
+    Color(0xFFD95926),
+    Color(0xFF199E70),
+    Color(0xFF8B919A),
+  ];
+  static const categoricalLight = [
+    Color(0xFF2A78D6),
+    Color(0xFFEB6834),
+    Color(0xFF1BAF7A),
+    Color(0xFF6B7280),
+  ];
 }

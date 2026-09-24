@@ -52,6 +52,19 @@ void main() {
     });
   });
 
+  test('categorical series clear the UI threshold on every surface', () {
+    for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+      expect(t.categorical, hasLength(4));
+      for (final c in t.categorical) {
+        for (final bg in _surfaces(t)) {
+          expectRatio('categorical', c, bg, uiMin);
+        }
+      }
+      // A series is never mistaken for the accent, which means "acts".
+      expect(t.categorical, isNot(contains(t.accent)));
+    }
+  });
+
   test('chrome sits below the canvas on dark, so content is the brightest',
       () {
     final t = HollowTheme.dark();
