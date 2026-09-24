@@ -146,11 +146,9 @@ class _AssetCacheCapSlider extends ConsumerWidget {
     return SettingsLabeledSlider(
       icon: LucideIcons.smile,
       title: 'Emotes & GIFs limit',
-      subtitle:
-          '$cap MB: least-recently added emotes, stickers and GIFs are evicted '
-          'when this is exceeded (ones your servers or personal set use are kept). '
-          'Separate from this: the GIF search cache is capped at 200 MB, with '
-          'the oldest thumbnails evicted past that.',
+      subtitle: 'Past $cap MB, the emotes, stickers and GIFs added longest '
+          'ago are removed first. Ones your servers or personal set use are '
+          'always kept.',
       value: cap.toDouble().clamp(64, 4096),
       min: 64,
       max: 4096,

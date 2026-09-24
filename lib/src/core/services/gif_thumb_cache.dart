@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../rust/api/network.dart' as network_api;
@@ -16,32 +14,30 @@ void _dbg(String msg) {
   } catch (_) {}
 }
 
-/// Disk and RAM cache for GIF picker thumbnails, so a restarted app still
-/// shows the grid instantly.
+/// RAM cache for GIF and sticker picker thumbnails, for this session only.
 ///
-/// Disk is a ~200 MB LRU by mtime that the OS is free to wipe: everything here
-/// is refetchable public thumbnail data, never message content. RAM is a small
-/// insertion-ordered tier for the visible grid. Only ever fed URLs from
-/// [gifs_api.GifItem], which Rust already origin-checked against the proxy.
+/// Never on disk: search results change on every search, and what a person
+/// keeps is saved (and counted) as an asset, so a disk tier only ever held
+/// stale previews. Bounded by entries AND bytes, since an animated preview can
+/// be megabytes. Only ever fed URLs from [gifs_api.GifItem], which Rust
+/// already origin-checked against the proxy.
 class GifThumbCache {
   GifThumbCache._();
   static final GifThumbCache instance = GifThumbCache._();
 
-  static const _maxDiskBytes = 200 * 1024 * 1024;
   static const _maxRamEntries = 200;
+  static const _maxRamBytes = 48 * 1024 * 1024;
   // The proxy caps cached media at 6 MB — anything bigger is not ours.
   static const _maxItemBytes = 6 * 1024 * 1024 + 65536;
-  static const _sweepEveryWrites = 25;
   // Cold thumbnails burst 30+ at once when a grid page lands. Unbounded
   // parallel downloads each open their own TLS handshake and saturate both
   // the user's connection and the shared host's PHP workers, and the search
   // POST then starves behind them. Keep a small FIFO window.
   static const _maxConcurrentDownloads = 4;
 
-  Future<Directory>? _dirFuture;
   final _ram = <String, Uint8List>{};
+  int _ramBytes = 0;
   final _inflight = <String, Future<Uint8List?>>{};
-  int _writesSinceSweep = 0;
   int _activeDownloads = 0;
   final _downloadWaiters = <Completer<void>>[];
   HttpClient? _sharedClient;
@@ -70,27 +66,8 @@ class GifThumbCache {
     }
   }
 
-  Future<Directory> _cacheDir() {
-    return _dirFuture ??= () async {
-      try {
-        final base = await getApplicationCacheDirectory();
-        final dir =
-            Directory('${base.path}${Platform.pathSeparator}gif_thumbs');
-        await dir.create(recursive: true);
-        return dir;
-      } catch (_) {
-        // Never memoize a FAILED lookup: one transient miss would otherwise
-        // disable the disk tier for the rest of the session.
-        _dirFuture = null;
-        rethrow;
-      }
-    }();
-  }
-
-  String _key(String url) => sha256.convert(utf8.encode(url)).toString();
-
-  /// Bytes for a thumbnail URL: RAM, then disk, then network. Null on any
-  /// failure, where callers render a placeholder.
+  /// Bytes for a thumbnail URL: RAM, then network. Null on any failure, where
+  /// callers render a placeholder.
   Future<Uint8List?> load(String url) {
     final ram = _ram.remove(url);
     if (ram != null) {
@@ -108,32 +85,9 @@ class GifThumbCache {
   }
 
   Future<Uint8List?> _load(String url) async {
-    try {
-      final dir = await _cacheDir();
-      final file = File('${dir.path}${Platform.pathSeparator}${_key(url)}');
-      if (await file.exists()) {
-        final bytes = await file.readAsBytes();
-        _ramPut(url, bytes);
-        // Touch for LRU; best-effort (some filesystems refuse).
-        try {
-          file.setLastModifiedSync(DateTime.now());
-        } catch (_) {}
-        return bytes;
-      }
-      final bytes = await _download(url);
-      if (bytes == null) return null;
-      _ramPut(url, bytes);
-      final tmp = File('${file.path}.tmp');
-      await tmp.writeAsBytes(bytes, flush: true);
-      await tmp.rename(file.path);
-      if (++_writesSinceSweep >= _sweepEveryWrites) {
-        _writesSinceSweep = 0;
-        _sweep().catchError((_) {});
-      }
-      return bytes;
-    } catch (_) {
-      return null;
-    }
+    final bytes = await _download(url);
+    if (bytes != null) _ramPut(url, bytes);
+    return bytes;
   }
 
   int _dlOk = 0;
@@ -186,64 +140,25 @@ class GifThumbCache {
   }
 
   void _ramPut(String url, Uint8List bytes) {
-    _ram.remove(url);
+    final previous = _ram.remove(url);
+    if (previous != null) _ramBytes -= previous.length;
     _ram[url] = bytes;
-    while (_ram.length > _maxRamEntries) {
-      _ram.remove(_ram.keys.first);
+    _ramBytes += bytes.length;
+    while (_ram.length > _maxRamEntries || _ramBytes > _maxRamBytes) {
+      final oldest = _ram.keys.first;
+      _ramBytes -= _ram.remove(oldest)!.length;
     }
   }
 
-  /// Total bytes on disk (Storage Manager display).
-  Future<int> sizeBytes() async {
+  /// Deletes the disk tier older versions kept (up to 200 MB of stale
+  /// previews). Run once per launch, off the UI's critical path.
+  static Future<void> purgeLegacyDiskCache() async {
     try {
-      final dir = await _cacheDir();
-      var total = 0;
-      await for (final e in dir.list()) {
-        if (e is File) {
-          total += await e.length();
-        }
-      }
-      return total;
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  /// Wipe the cache (Storage Manager cleanup action).
-  Future<void> clear() async {
-    _ram.clear();
-    try {
-      final dir = await _cacheDir();
-      await for (final e in dir.list()) {
-        try {
-          await e.delete();
-        } catch (_) {}
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _sweep() async {
-    final dir = await _cacheDir();
-    final files = <(File, DateTime, int)>[];
-    var total = 0;
-    await for (final e in dir.list()) {
-      if (e is! File) continue;
-      try {
-        final stat = await e.stat();
-        files.add((e, stat.modified, stat.size));
-        total += stat.size;
-      } catch (_) {}
-    }
-    if (total <= _maxDiskBytes) return;
-    files.sort((a, b) => a.$2.compareTo(b.$2)); // oldest first
-    // Hysteresis to 90% so consecutive writes do not each trigger a sweep.
-    final target = (_maxDiskBytes * 0.9).round();
-    for (final (file, _, size) in files) {
-      if (total <= target) break;
-      try {
-        await file.delete();
-        total -= size;
-      } catch (_) {}
+      final base = await getApplicationCacheDirectory();
+      final dir = Directory('${base.path}${Platform.pathSeparator}gif_thumbs');
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (e) {
+      _dbg('legacy disk cache purge failed: ${e.runtimeType}');
     }
   }
 }

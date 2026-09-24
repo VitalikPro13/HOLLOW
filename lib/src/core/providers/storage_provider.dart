@@ -3,22 +3,25 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
-import 'package:hollow/src/core/services/gif_thumb_cache.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Live storage-usage breakdown for the Storage Manager UI (Settings → Storage).
-/// Auto-disposes so it re-reads disk on each panel open; invalidated by the
-/// action methods below after any clear/evict.
+///
+/// Settings warms it on open ([warmStorageBreakdown]) and it outlives its last
+/// listener for a minute, so the Storage tab paints its figures on the first
+/// frame instead of a spinner. The action methods below invalidate it after
+/// any clear or evict.
 final storageBreakdownProvider =
     FutureProvider.autoDispose<storage_api.StorageBreakdown>((ref) async {
+  final link = ref.keepAlive();
+  final timer = Timer(const Duration(minutes: 1), link.close);
+  ref.onDispose(timer.cancel);
   return storage_api.getStorageBreakdown();
 });
 
-/// Disk usage of the GIF picker's thumbnail cache (Dart-owned, app cache
-/// dir — not part of the Rust StorageBreakdown).
-final gifThumbCacheSizeProvider = FutureProvider.autoDispose<int>((ref) {
-  return GifThumbCache.instance.sizeBytes();
-});
+/// Starts reading the breakdown before the Storage tab is on screen.
+void warmStorageBreakdown(ProviderContainer container) =>
+    container.read(storageBreakdownProvider.future).ignore();
 
 /// Progress of the one-time sweep that encrypts files left in the clear by an
 /// older version.
@@ -121,17 +124,6 @@ class StorageActions {
       return 0;
     } finally {
       _refresh();
-    }
-  }
-
-  /// Wipe the GIF picker's thumbnail disk cache (pure cache, refetches).
-  Future<void> clearGifThumbCache() async {
-    try {
-      await GifThumbCache.instance.clear();
-    } catch (e) {
-      debugPrint('[HOLLOW-STORAGE] clearGifThumbCache failed: $e');
-    } finally {
-      _ref.invalidate(gifThumbCacheSizeProvider);
     }
   }
 }

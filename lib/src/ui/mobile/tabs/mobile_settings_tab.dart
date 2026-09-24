@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/providers/storage_provider.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
@@ -245,8 +246,13 @@ class MobileSettingsTab extends ConsumerWidget {
           icon: LucideIcons.hardDrive,
           title: 'Files & Storage',
           subtitle: 'Disk usage, downloads, cache & media',
-          onTap: () => _push(context, 'Files & Storage',
-              const _StorageTab(key: ValueKey('storage'))),
+          onTap: () {
+            // Read during the push, so the page lands with its figures.
+            warmStorageBreakdown(
+                ProviderScope.containerOf(context, listen: false));
+            _push(context, 'Files & Storage',
+                const _StorageTab(key: ValueKey('storage')));
+          },
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
@@ -2517,9 +2523,9 @@ class _AssetCacheCapSlider extends ConsumerWidget {
               ref.read(assetCacheCapProvider.notifier).setCap(v.round()),
         ),
         Text(
-            'Least-recently added emotes, stickers and GIFs are evicted past '
-            'this. Separate from this: the GIF search cache is capped at '
-            '200 MB, with the oldest thumbnails evicted past that.',
+            'Past this, the emotes, stickers and GIFs added longest ago are '
+            'removed first. Ones your servers or personal set use are always '
+            'kept.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11,
             )),

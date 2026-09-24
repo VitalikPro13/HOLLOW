@@ -71,23 +71,26 @@ class AtRestImageProvider extends ImageProvider<AtRestImageKey> {
 
   const AtRestImageProvider(this.path, {this.scale = 1.0});
 
+  /// Synchronous on purpose: an async key misses the [ImageCache] for one
+  /// frame, so an already-decoded image flashed empty every time its
+  /// conversation opened. One stat is microseconds.
   @override
-  Future<AtRestImageKey> obtainKey(ImageConfiguration configuration) async {
+  Future<AtRestImageKey> obtainKey(ImageConfiguration configuration) {
     var modifiedMs = 0;
     var length = 0;
     try {
-      final stat = await File(path).stat();
+      final stat = File(path).statSync();
       modifiedMs = stat.modified.millisecondsSinceEpoch;
       length = stat.size;
     } catch (_) {
       // A vanished file still needs a key; the load below reports the failure.
     }
-    return AtRestImageKey(
+    return SynchronousFuture(AtRestImageKey(
       path: path,
       modifiedMs: modifiedMs,
       length: length,
       scale: scale,
-    );
+    ));
   }
 
   @override
@@ -164,7 +167,7 @@ class _AttachmentImageState extends State<AttachmentImage> {
   @override
   void initState() {
     super.initState();
-    if (widget.animated) _loadBytes();
+    if (widget.animated) _startAnimated();
   }
 
   @override
@@ -173,24 +176,22 @@ class _AttachmentImageState extends State<AttachmentImage> {
     if (old.path != widget.path || old.animated != widget.animated) {
       _bytes = null;
       _failed = false;
-      if (widget.animated) _loadBytes();
+      if (widget.animated) _startAnimated();
     }
+  }
+
+  /// A cached payload is taken in the same frame, never after a setState.
+  /// Keyed by path alone: an attachment's name carries its file id, so the
+  /// same path never comes back holding different bytes.
+  void _startAnimated() {
+    ++_loadGeneration;
+    _bytes = _recallAnimated(widget.path);
+    if (_bytes == null) _loadBytes();
   }
 
   Future<void> _loadBytes() async {
     final path = widget.path;
-    final generation = ++_loadGeneration;
-
-    // Keyed by path alone: an attachment's name carries its file id, so the
-    // same path never comes back holding different bytes.
-    final cached = _recallAnimated(path);
-    if (cached != null) {
-      if (mounted && generation == _loadGeneration) {
-        setState(() => _bytes = cached);
-      }
-      return;
-    }
-
+    final generation = _loadGeneration;
     try {
       final bytes = await AtRest.read(path);
       _rememberAnimated(path, bytes);

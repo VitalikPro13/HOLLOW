@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 
@@ -5,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/services/gif_thumb_cache.dart';
 import 'package:hollow/src/core/rust_licenses.dart';
 import 'package:hollow/src/core/services/video_backend.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
@@ -243,6 +245,9 @@ Future<void> main(List<String> args) async {
   // Before runApp so no shop button can flash onto a store build while the
   // answer is still in flight (Apple 3.1.1 / Play policy).
   await ShopAvailability.prime();
+
+  // Older versions kept GIF search previews on disk; the cache is RAM-only now.
+  unawaited(GifThumbCache.purgeLegacyDiskCache());
 
   // Seed reduce-motion from the OS flag BEFORE tickers start, or decorative
   // animations spin on the login screen with Reduce Motion on. The persisted

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/providers/storage_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -57,6 +58,7 @@ void showUserSettingsDialog(BuildContext context,
   final container = ProviderScope.containerOf(context, listen: false);
   final localPeerId = container.read(identityProvider).peerId;
   if (localPeerId == null) return;
+  warmStorageBreakdown(container);
 
   final profiles = container.read(profileProvider);
   final currentProfile = profiles[localPeerId];

@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
@@ -155,5 +156,29 @@ void main() {
     await tester.pump();
 
     expect(find.text('broken'), findsOneWidget);
+  });
+
+  test('the key is synchronous, so a cached image paints on the first frame',
+      () {
+    // An async key missed the ImageCache for one frame: every image flashed
+    // empty each time its conversation opened.
+    final path = ciphertextAt('shot.png');
+    final key = AtRestImageProvider(path).obtainKey(ImageConfiguration.empty);
+    expect(key, isA<SynchronousFuture<AtRestImageKey>>());
+  });
+
+  testWidgets('a cached animation shows in the first frame, no gap',
+      (tester) async {
+    final path = ciphertextAt('wave.gif');
+    AtRest.debugRead = (_) async => _gif;
+
+    await pump(tester, AttachmentImage(path: path, animated: true));
+    await tester.pump();
+    await pump(tester, const SizedBox.shrink());
+
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(body: AttachmentImage(path: path, animated: true))));
+    expect(find.byType(AnimatedGifImage), findsOneWidget,
+        reason: 'no pump between mount and paint');
   });
 }

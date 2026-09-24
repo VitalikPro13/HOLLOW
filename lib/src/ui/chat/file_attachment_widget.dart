@@ -319,6 +319,8 @@ class FileAttachmentWidget extends ConsumerWidget {
 
     if (isComplete && diskPath != null && File(diskPath).existsSync()) {
       final isGif = attachment.fileExt.toLowerCase() == 'gif';
+      final knownSize = tileSize != null ||
+          ((attachment.width ?? 0) > 0 && (attachment.height ?? 0) > 0);
       // The stored row may not carry the disk path yet, so the item opens on
       // the path this bubble resolved.
       void open() => unawaited(openMediaViewer(
@@ -346,6 +348,11 @@ class FileAttachmentWidget extends ConsumerWidget {
                 child: AttachmentImage(
                   path: diskPath,
                   animated: isGif,
+                  // The final size from the first frame when the dimensions
+                  // are known, so a decode never grows the row under the
+                  // reader.
+                  width: knownSize ? displayWidth : null,
+                  height: knownSize ? displayHeight : null,
                   fit: tileSize != null ? BoxFit.cover : BoxFit.contain,
                   // Decode at bubble size: a 12 MP camera image decoded on
                   // first paint is a visible beat on phones. ResizeImage never
