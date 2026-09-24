@@ -110,6 +110,9 @@ class SettingsSection extends StatelessWidget {
   final String? title;
   final String? subtitle;
 
+  /// Beside the title in the console voice ("8 of 50").
+  final String? count;
+
   /// One trailing action on the header, a ghost button.
   final Widget? action;
   final List<Widget> children;
@@ -118,6 +121,7 @@ class SettingsSection extends StatelessWidget {
     super.key,
     this.title,
     this.subtitle,
+    this.count,
     this.action,
     required this.children,
   });
@@ -131,7 +135,8 @@ class SettingsSection extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (title != null)
-            HollowSectionHeader(title!, subtitle: subtitle, action: action),
+            HollowSectionHeader(title!,
+                subtitle: subtitle, count: count, action: action),
           ...children,
         ],
       ),

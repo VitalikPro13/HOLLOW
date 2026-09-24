@@ -1,0 +1,77 @@
+{
+  "_": [
+    "Server settings on a phone: the list with its grey icons, then the shared",
+    "pages at touch density (Overview, Channels with one channel open, Roles,",
+    "Members, Profile, Notifications). A throwaway server, deleted at the end.",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario server_settings_after_mobile -Peers a"
+  ],
+  "peers": ["a"],
+  "steps": [
+    { "peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000, "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:New conversation", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "enter_text", "target": "hint:Server name", "value": "ss-phone" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:ss-phone", "timeout_ms": 30000 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+
+    { "peer": "a", "op": "long_press", "target": "text:ss-phone", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "tap", "target": "text:Server settings", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 2000 },
+    { "peer": "a", "op": "shot", "name": "ssm-01-list" },
+
+    { "peer": "a", "op": "tap", "target": "text:Overview", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "ssm-02-overview" },
+    { "peer": "a", "op": "enter_text", "target": "hint:What is this server about?", "value": "A phone check." },
+    { "peer": "a", "op": "wait", "ms": 600 },
+    { "peer": "a", "op": "shot", "name": "ssm-03-overview-unsaved" },
+    { "peer": "a", "op": "tap", "target": "text:Reset", "index": 0, "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "text:Channels", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "ssm-04-channels" },
+    { "peer": "a", "op": "tap", "target": "text:general", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "shot", "name": "ssm-05-channel-open", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "text:Roles", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "ssm-06-roles" },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "text:Members", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "ssm-07-members" },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "text:Profile", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "ssm-08-profile" },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "text:Notifications", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "ssm-09-notifications" },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 }
+  ],
+  "cleanup": [
+    { "peer": "a", "op": "tap", "target": "text:Overview", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "reveal", "target": "text:Delete server", "index": 0, "soft": true },
+    { "peer": "a", "op": "tap", "target": "text:Delete server", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait_for", "gone": "text:ss-phone", "timeout_ms": 30000, "soft": true }
+  ]
+}

@@ -466,6 +466,14 @@ class ProbeRunner {
         await settle(frames: step['frames'] as int? ?? 20);
         return 'wheeled ${step['target']} by $dx,$dy';
 
+      case 'reveal':
+        // Scrolls every scroller around the target until it is on screen,
+        // for a control at the foot of a long page.
+        final finder = _finder(step);
+        await tester.ensureVisible(finder);
+        await settle(frames: step['frames'] as int? ?? 20);
+        return 'revealed ${step['target']}';
+
       case 'scroll':
         final finder = _finder(step);
         final dx = (step['dx'] as num?)?.toDouble() ?? 0;

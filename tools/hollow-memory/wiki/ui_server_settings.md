@@ -1,610 +1,67 @@
-# ServerSettingsPanel -- Server Configuration
+# Server settings -- a place, desktop and phone
 
-Replaces the chat pane when `serverSettingsOpenProvider` is `true`. Contains all server management UI organized into permission-gated tabs. Source: `lib/src/ui/settings/server_settings_panel.dart`.
+Rebuilt 2026-09-24 (design language session 18) onto the Settings shell. The old `ServerSettingsPanel` with its tab strip, the eight `*_tab.dart` files and the five phone sub-routes are gone.
 
-## ServerSettingsPanel -- Tab Router and Permission Gating
+## The place model
 
-`file:ServerSettingsPanel` is a `ConsumerStatefulWidget` that takes `ServerInfo server` and an optional `VoidCallback onClose`. It replaces the chat pane in the main shell.
+- **Switch:** `serverSettingsOpenProvider` (`server_provider.dart`) stays the ONE open flag; ~25 navigation sites set it false.
+- **Open:** `openServerSettings(read, serverId, {page})` (`core/providers/server_settings_provider.dart`) closes every centre tab (`setShellTab(null)`), stores the server id ALWAYS (a split's right pane reads its own overridden `selectedServerProvider`, so "the selected one" is ambiguous there), resets the page to its default and opens. `closeServerSettings(read)` clears the flag.
+- **Target:** `serverSettingsTargetProvider` = the stored id, else the selected server.
+- **Shell mounts** (`hollow_shell.dart` `_serverSettingsPlace`): Classic replaces the channel sidebar AND the chat pane (the server strip stays); Dock replaces the whole centre row; split view is covered too (the old 800x600 dialog is gone). The member panel hides. A target that is not the selected server renders inside `ForeignServerSettingsScope`, which overrides `selectedServerProvider`, `channelListProvider` and `channelLayoutProvider` with fresh notifiers loaded for that server, so the pages never edit the left pane's channels.
+- **Openers:** channel sidebar gear (toggles), channel sidebar right-click, server strip / dock server menu (select the server first, then open), the right pane's sidebar gear, phone long-press sheet ("Server settings" -> `MobileServerSettingsRoute`).
+- **Close:** the X ("Close server settings (Esc)"), Escape, or the gear again; it returns to the channel it covered. A server deleted or left elsewhere while open closes the place on the next frame.
 
-**State:** `_selectedTab` (int) tracks the currently selected tab index.
+## The shared frame
 
-**Provider dependencies:**
-- `serverListProvider` -- re-reads server by ID so name updates are reflected live in the header
-- `myPermissionsProvider(serverId)` -- async int bitmask of local user's permissions
-- `myRoleProvider(serverId)` -- async string role name for the local user
+`ui/settings/settings_place_frame.dart`: `SettingsPlaceFrame` (rail + page column; on a wide window the PAIR centres and the rail's surface bleeds to the left edge; X top right; one floating bottom bar), `SettingsRail`, `SettingsRailItem`, `SettingsRailGroupLabel`, `SettingsUnsavedBar`. Settings (`settings_place.dart`) and `ServerSettingsPlace` (`ui/server_settings/server_settings_place.dart`) both use it.
 
-**Loading guard:** If either `myPermissionsProvider` or `myRoleProvider` has not loaded yet, renders a skeleton header with a close button and an empty body. This prevents a flash of wrong tabs before permissions are known.
+## Pages and gates
 
-**Tab visibility logic** (`_visibleTabs(permissions, myRole)`):
-- **Overview** -- always visible (all members see nickname settings, admins see server settings)
-- **Channels** -- only if `permissions & Permission.manageChannels != 0`
-- **Roles** -- only if `permissions & Permission.manageRoles != 0`
-- **Labels** -- always visible (self-service label picker for all, management for MANAGE_ROLES)
-- **Members** -- always visible (viewing is open, action buttons gated inside the tab)
-- **Notifications** -- always visible
-- **Danger** -- always visible (owner sees Delete, non-owners see Leave)
+`ui/server_settings/server_settings_catalog.dart`: `ServerSettingsPage` enum (rail order), label, grey icon, `requires` bit, `serverSettingsPagesFor(perms)`, `defaultServerSettingsPage(perms)` (Overview with MANAGE_SERVER, else Profile), `serverSettingsPageFor(page, id)`, plus `confirmDeleteServer` / `confirmLeaveServer`.
 
-Each tab is a record `({IconData icon, String label, bool isDanger})`. The Danger tab has `isDanger: true` which tints it red.
+| Group | Page | Gate | File |
+|---|---|---|---|
+| Server | Overview | manageServer | `pages/overview_page.dart` |
+| Server | Access | manageServer | `pages/access_page.dart` |
+| Server | Channels | manageChannels | `pages/channels_page.dart` |
+| Server | Roles | manageRoles | `pages/roles_page.dart` |
+| Server | Labels | manageRoles | `pages/labels_page.dart` |
+| Server | Emotes and stickers | everyone (add/remove: manageEmotes) | `pages/emotes_page.dart` |
+| Server | Members | everyone (actions gated) | `pages/members_page.dart` |
+| You | Profile | everyone | `pages/profile_page.dart` |
+| You | Notifications | everyone | `pages/notifications_page.dart` |
 
-**Tab bar clamping:** If permissions change (e.g., role downgrade) and `_selectedTab >= tabs.length`, it is clamped to 0.
+Nothing renders until `serverSettingsAccessProvider(id)` (permissions AND role loaded) is non-null: rendering earlier flashes the wrong pages.
 
-**Layout structure:**
-1. **Header bar** (48px) -- settings icon, "Server Settings -- {serverName}" title with ellipsis, close button (X icon). Close button calls `onClose` if provided, otherwise sets `serverSettingsOpenProvider` to false.
-2. **Tab bar** (40px) -- `EdgeScrollRow` of `_TabButton` widgets on `hollow.surface` background with bottom border. Arrows + wheel-panning appear only while the tabs overflow (a narrow panel or a larger text setting); before 2026-07-30 the overflowing tabs were unreachable on a plain wheel mouse.
-3. **Tab content** -- `_buildTabContent` inside a `FocusTraversalGroup`. Switching tabs is instant (no crossfade).
+## Save model
 
-**`_TabButton`:** `HollowPressable` with `subtle: true`. Shows icon (14px) + label text. Selected state: accent color (or error for danger), `FontWeight.w600`. Unselected: `hollow.textSecondary`, `FontWeight.w400`.
+- **Text fields** ride `serverSettingsDraftProvider(serverId)` (`ServerSettingsDraftNotifier`): name (32), description (256), member limit, your nickname (32). One bar, "You have unsaved server changes" (Reset / Save), on every page. Save writes only what changed (`renameServer`, `description`, `max_members`, `setNickname`); an empty name or a limit below the LIVE member count throws `ServerDraftError`, shown as a toast with the edits kept. Reset re-reads the saved values.
+- **Channel list** rides `channelLayoutDraftProvider(serverId)`: order, categories and dividers are staged; the bar on the Channels page reads "You changed the channel list" (Discard / Save layout). Save goes through the caller's `ChannelLayoutNotifier.mutate` (the right pane's scoped one when foreign). Channels created elsewhere appear through `effectiveLayoutFrom`, so no auto-save is needed.
+- **Everything else writes at once**, over an optimistic update that reverts with a toast on failure: switches, chips, menus, per-channel properties, role bits, labels.
+- The phone shows the draft's Reset / Save and the layout's Discard / Save layout in each page's title bar instead of a floating bar.
 
-**Tab content routing** (`_buildTabContent`): Switch on `tab.label` string to instantiate the appropriate tab widget:
-- `'Overview'` -> `OverviewTab(server, canManageServer: permissions & Permission.manageServer != 0)`
-- `'Channels'` -> `ChannelsTab(serverId)`
-- `'Roles'` -> `RolesTab(serverId)`
-- `'Labels'` -> `LabelsTab(serverId)`
-- `'Members'` -> `MembersTab(serverId)`
-- `'Notifications'` -> `NotificationsTab(serverId)`
-- `'Danger'` -> `DangerZoneTab(server)`
+## Page notes
 
-Each tab has a stable `ValueKey`, so its state resets on a tab switch.
+- **Overview:** Icon (48, "Square. A GIF or animated WebP moves.") and Banner ("Wide, 3 to 1") apply at once (crop 1:1 / 3:1, animated picks skip the cropper, 2 MB cap, `applyLocalWrite` seeding); Name + Description; "How an invite shows it" preview (232 wide, beside the fields from 560 px, above them on a phone); Advanced fold: Server ID (mono, Copy) and Template (Export / Import -> `server_template.dart`); Danger zone for the owner only: outline danger "Delete server" -> confirm "Delete <name>?".
+- **Access:** Joining (Private server: Rust rejects EVERY new join, `server_state.is_private()`; Adult content; Member limit via the draft), Twitch verification (switch with the purple brand icon; turning it on with no channel opens the channel dialog first; Channel row + Change dialog; "Followed for at least" menu over `kFollowDaySteps`; Subscribers only; Only I accept requests), While members are away (Offline catch-up; absent = on at 3 days; Keep them for 1 / 3 / 7 days). Every key is a per-key `updateServerSetting`.
+- **Twitch channel dialog:** typing a channel name looks up its numeric id after 600 ms through `twitch_lookup_channel` (Helix `/users?login=`). Helix needs a Bearer token on every call, and the app has no client secret, so the lookup uses the CONNECTED account's user token; without one it says to connect Twitch in Settings, Profile. The id field stays editable; "Fill from my account" fills your own.
+- **Channels:** toolbar (New channel, New category, Divider; all ghost). Category rows: small secondary label, hover-revealed "Set access for all" (`runCategoryBulkAccess`) + More (Rename, Delete category with a confirm). Channel rows (40, 52 on touch): grip, # or speaker, name then `channelSummary()` (only what differs: "<gate> can see", "<gate> can post", "Slow 30s", "Media only", "Public", "N members with temporary access"), chevron. Click opens an inline panel: Who can see it, Who can post, Slow mode, Media only, Public (the last four text only), Temporary access (hidden when public; `showChannelGrantsDialog`), Rename, outline danger Delete channel. Drag starts at once under a pointer, after a hold on touch.
+- **Roles:** one table, a column per role (96 px, 64 on touch), 7 permission rows. A column is editable only when your priority beats the role's (owner 3 > admin 2 > moderator 1 > member 0), matching Rust. `rolePermissionsProvider(id)` reads Rust's `defaultRolePermissions`, never a Dart copy. "Reset to defaults" resets every column you may edit.
+- **Labels:** "Labels <count>" with ghost New label; rows: colour dot, name, "Access · opens #x · 3 members" / "Anyone can wear it · N members", ghost "Give to members" (`showLabelAssignDialog`) + More (Edit, Delete). `showLabelEditDialog` / `showLabelAssignDialog` live here.
+- **Emotes and stickers:** counts in the section header ("8 of 50"); tiles are the art; a manager's tap opens Remove (with a confirm).
+- **Members:** Moderation first when you hold kickMembers (Muted with "For another 23 hours" + Unmute; Banned with Unban; `bannedMembersProvider`). Then "Everyone <count>": search + chips All / Admins / Moderators / Members with counts; one flat list sorted owner, admin, moderator, member, then name; at most 100 rows with a note to search. Row: avatar, name + "You" badge, "Role · labels" or "Muted". More (only when `canManageRole(myRole, role)` and not you): Make <role>, Labels and temporary access (`showManageMemberDialog`), Copy user ID, Mute, Kick, Ban (`moderation_dialogs.dart`). On a phone a tap opens the profile sheet and More / long-press opens an action sheet.
+- **Profile:** nickname via the draft with a live message line; "Your labels" chips (access labels locked, a tap says staff hand them out); Danger zone "Leave <server>" for non-owners.
+- **Notifications:** server level chips (All messages / Mentions only / Nothing, with a line describing the choice) and per-channel `ChannelOverrideDropdown` (`ui/settings/channel_override_dropdown.dart`, shared with Settings > Notifications) for channels you can see.
 
-## OverviewTab -- Server Identity and Settings
+## Phone
 
-Source: `lib/src/ui/settings/overview_tab.dart` (763 lines). `ConsumerStatefulWidget` taking `ServerInfo server` and `bool canManageServer`.
+`MobileServerSettingsRoute` is the list: server header (icon 48, name, "N online · M members"), groups Server / You, 56 px `MobileSettingsNavRow` rows with grey icons and values (Members count, notification level), plus "Storage on this phone" (`MobileStorageRoute`). Each row pushes `MobileSettingsSubPage` (shared with `mobile_settings_tab.dart`) with the SAME page under `SettingsDensity(touch: true)`, wrapped in `ForeignServerSettingsScope` when the server is not the selected one. Invite lives on the long-press sheet, not here.
 
-**Text editing controllers (6 total):**
-- `_nameController` -- server name, initialized from `widget.server.name`
-- `_descController` -- server description, loaded async
-- `_nicknameController` -- local user's server nickname, loaded async
-- `_twitchChannelController` -- Twitch channel display name
-- `_twitchChannelIdController` -- numeric Twitch user ID
-- `_twitchMinDaysController` -- minimum follow days, initialized to `'0'`
-- `_maxMembersController` -- max member cap (digits-only via `FilteringTextInputFormatter.digitsOnly`; blank = unlimited)
+## Tests and probes
 
-**Boolean state flags:**
-- `_saving` -- disables Save buttons during name/description save
-- `_savingNickname` -- disables nickname Save button during save
-- `_twitchEnabled` -- master toggle for Twitch verification
-- `_twitchRequireSub` -- require subscription (not just follow)
-- `_twitchOwnerVerify` -- owner-online verification mode
-- `_savingTwitch` -- disables Twitch save button during save
-- `_isPrivate` -- private (invite-only) server toggle
-- `_savingAccess` -- disables the Access save button during save
+`test/widget/server_settings_test.dart` (rail gates, default page, Escape, the unsaved bar, `channelSummary`, the roles table's locked column, members moderation + filter, the phone list). Fleet: `server_settings_after.json`, `server_settings_classic.json`, `server_settings_after_mobile.json`; the probe op `reveal` scrolls Overview's Delete server into view for every cleanup.
 
-**Initialization (`initState`):**
-- `_loadDescription()` -- calls `crdt_api.getServerSetting(serverId, 'description')`, populates controller
-- `_loadNickname()` -- gets `identityProvider.peerId`, calls `crdt_api.getServerMembers(serverId)`, finds local user's nickname
-- `_loadTwitchSettings()` -- reads 6 server settings keys: `twitch_verification_enabled`, `twitch_channel_name`, `twitch_channel_id`, `twitch_min_follow_days`, `twitch_require_sub`, `twitch_owner_verify`
-- `_loadAccessSettings()` -- reads `is_private` and `max_members` settings keys (0/empty = blank field = unlimited)
-
-**`didUpdateWidget`:** If server name changed externally, updates `_nameController.text`.
-
-### Server Settings Section (admin+ only, gated by `canManageServer`)
-
-Entire section wrapped in `if (widget.canManageServer)`, headed `HollowSectionHeader('Server Settings')`. Every section header on this tab is the shared `HollowSectionHeader`, written as-is in Title Case ("Server Settings", "Access", "Offline Catch-up", "Server Template", "Twitch Verification", "Your Identity"). Contains:
-
-**Server Icon:**
-- Displays `_stagedIcon ?? serverAvatarProvider[serverId]` as 48x48 `ClipRRect` image (gaplessPlayback), or a placeholder container with image icon; 14px spinner overlay while `_iconBusy`
-- "Upload" button (`HollowButton.ghost`) -> `_pickServerAvatar()` (optimistic staging, 2026-07-16/17):
-  1. `FilePicker.platform.pickFiles(type: FileType.image)` to select image
-  2. Reads file bytes
-  3. `showImageCropDialog(imageBytes, aspectRatio: 1.0, title: 'Crop Server Icon')` for square crop
-  4. Stages cropped bytes SYNCHRONOUSLY (`_stagedIcon` + `_iconBusy`) so the icon updates instantly; `_iconPickGen` guards overlapping picks
-  5. `crdt_api.setServerAvatar(serverId, rawBytes: cropped)` (Rust WebP encode + queued CRDT write)
-  6. On success: `serverAvatarProvider.applyLocalWrite(serverId, cropped)` — NEVER an immediate `loadAvatar` (races the fire-and-forget persist and shows the previous icon; see memory `feedback_crdt_read_after_write_race`), then drop staging + success toast. On failure: revert staging + error toast
-- "Remove" button (`HollowButton.ghost` with trash icon) -- only shown if `serverAvatarProvider` contains key for this server. `_clearServerAvatar()` bumps the pick gen, calls `crdt_api.clearServerAvatar(serverId)`, then `applyLocalWrite(serverId, null)` + toast.
-- Mobile twin: `mobile_server_settings_route.dart:_pickAvatar/_clearAvatar` — identical flow.
-
-**Server Name:**
-- `HollowTextField` with `_nameController`, hint "Server name", `maxLength: 32`, `onSubmitted` triggers save
-- Adjacent "Save" `HollowButton.filled`, disabled while `_saving` is true
-- `_saveName()`: trims text, skips if empty or unchanged, calls `crdt_api.renameServer(serverId, newName)`, shows success/error toast
-
-**Description:**
-- `HollowTextField` with `_descController`, hint "What is this server about?", `maxLines: 3`, `maxLength: 256`
-- "Save Description" `HollowButton.filled` aligned right, disabled while `_saving`
-- `_saveDescription()`: calls `crdt_api.updateServerSetting(serverId, 'description', desc)`
-
-**Access (private + member cap):**
-- Section header "Access".
-- **Private server** toggle (`HollowToggle`, `_isPrivate`) with subtitle "New members can't join via the link." When ON, the join handler rejects all new joiners.
-- **Max members** field (`HollowTextField`, `_maxMembersController`, digits-only, hint "Unlimited") + helper "Leave blank for no limit. Existing members are never removed."
-- ONE section-level **"Save Access Settings"** `HollowButton.filled` placed BELOW both controls (right-aligned, like "Save Twitch Settings") — NOT an inline save next to the input (that wrongly reads as "save this field").
-- `_saveAccessSettings()`: parses the field (0/empty = unlimited, stored as "0"). For a finite cap, fetches the LIVE member count via `crdt_api.getServerMembers().length` (not the possibly-stale `ServerInfo.memberCount`) and rejects with a toast if the cap is below the current count. Writes `is_private` and `max_members` via `crdt_api.updateServerSetting` (reuses `ServerSettingChanged` — no new CRDT op). Enforcement is on the Rust join handler; see `rust_sync_handler.md` / `swarm.rs ServerJoinRequest`.
-
-**Server Template:**
-- Section header "Server Template" with description text
-- "Export" button (`HollowButton.outline`) -> `exportServerTemplate(context, server)`
-- "Import" button (`HollowButton.outline`) -> `importServerTemplate(context, ref, server)`
-
-**Server ID:**
-- Read-only display in elevated container with border
-- `SelectableText` showing `serverId` in mono font
-- "Copy" button -> `Clipboard.setData(ClipboardData(text: serverId))`, toast "Copied to clipboard"
-
-### Twitch Verification Section (admin+ only, inside `canManageServer`)
-
-Section header "Twitch Verification" with description "Gate join requests behind Twitch follow or subscription checks."
-
-**Enable toggle:**
-- Row with Twitch icon (SimpleIcons.twitch, purple #9146FF), label "Require Twitch Verification", `HollowToggle`
-- When disabled, all sub-settings are hidden
-
-**Conditional sub-settings (shown when `_twitchEnabled`):**
-
-**Twitch Channel ID:**
-- `HollowTextField` with `_twitchChannelIdController`, hint "e.g. 123456789", `maxLength: 32`
-- "Fill from account" button (`HollowButton.ghost` with userCheck icon) -> `_fillTwitchFromAccount()`:
-  - Calls `twitch_api.twitchGetUserId()` and `twitch_api.twitchGetUsername()`
-  - Populates both controllers if successful
-  - Error toast if Twitch not connected
-
-**Channel Display Name:**
-- `HollowTextField` with `_twitchChannelController`, hint "e.g. coolStreamer123", `maxLength: 64`
-- Shown to joiners in verification messages
-
-**Minimum Follow Days:**
-- `HollowTextField` 100px wide, `_twitchMinDaysController`, hint "0", `maxLength: 4`
-- 0 = just following is enough
-
-**Require Subscription toggle:**
-- Row with crown icon, label "Require Subscription", description "Members must be subscribed to your channel"
-- `HollowToggle` bound to `_twitchRequireSub`
-
-**Owner-Online Verification toggle:**
-- Row with shield icon, label "Owner-Online Verification"
-- Description: "Only you (the owner) can accept join requests. Fully resistant to modified clients, but you must be online."
-- `HollowToggle` bound to `_twitchOwnerVerify`
-
-**Save Twitch Settings button:**
-- `HollowButton.filled`, aligned right, disabled while `_savingTwitch`
-- `_saveTwitchSettings()`: writes all 6 settings via `crdt_api.updateServerSetting()`. If enabled, also calls `twitch_api.twitchGetUsername()` and `crdt_api.setTwitchUsername()` to set the owner's Twitch badge.
-
-### Your Identity Section (all members)
-
-Always visible regardless of `canManageServer`.
-
-**Server Nickname:**
-- Section header "Your Identity"
-- Label "Server Nickname" with description "This nickname is only visible on this server. Leave empty to use your display name."
-- `HollowTextField` with `_nicknameController`, hint "Nickname (optional)", `maxLength: 32`, `onSubmitted` triggers save
-- "Save" `HollowButton.filled`, disabled while `_savingNickname`
-- `_saveNickname()`: calls `crdt_api.setNickname(serverId, peerId, nickname)`, invalidates `serverMembersProvider(serverId)`, shows "Nickname cleared" or "Nickname updated" toast
-
-## ChannelsTab -- Channel Layout Editor
-
-Source: `lib/src/ui/settings/channels_tab.dart` (1034 lines). `ConsumerStatefulWidget` with `serverId`.
-
-### Data Model
-
-Three sealed classes represent layout items:
-- `CategoryItem(String name)` -- category header
-- `ChannelItem(String channelId)` -- a channel reference
-- `SeparatorItem()` -- visual break that also breaks category scope
-
-**State:**
-- `_layout` -- `List<LayoutItem>`, the current working layout
-- `_savedLayout` -- `List<LayoutItem>`, snapshot from DB for dirty comparison
-- `_loaded` -- bool, false until initial load completes
-
-**Dirty detection (`_dirty`):** Compares `_layout` against `_savedLayout` by length, runtime type, and field values. Returns true if any difference.
-
-### Layout Loading
-
-`_loadLayout()`:
-1. Calls `crdt_api.getChannelLayout(serverId)` which returns JSON string
-2. Parses JSON array, constructs `LayoutItem` list from `type` field (`'category'`, `'channel'`, `'separator'`)
-3. Calls `_effectiveLayoutFrom(layout, channels)` to reconcile with actual channel list
-4. Sets both `_layout` and `_savedLayout` to the effective layout
-
-`_effectiveLayoutFrom(base, channels)`:
-- Starts from the base layout
-- Finds channel IDs referenced in layout
-- Appends any channels from `channelListProvider` not yet in the layout (sorted by name)
-- Removes layout entries for channels that no longer exist in provider
-- Returns the reconciled list
-
-**Auto-sync:** In `build()`, if `channels.isNotEmpty && effective.length != _layout.length` (channels created/deleted externally), schedules a post-frame callback that updates both `_layout` and `_savedLayout`, then auto-saves the layout JSON via `crdt_api.updateChannelLayout()`. The `channels.isNotEmpty` guard prevents layout corruption when `channelListProvider` is cleared during server deselection (switching to Home tab) while the settings panel is still mounted.
-
-**Channel property controls:** Each `_ChannelRow` has `onVisibilityChanged`, `onPostingChanged`, `onPublicToggled` callbacks. These use optimistic UI updates via `channelListProvider.updateChannel()` BEFORE calling the FFI. The visibility/posting chips are `ChannelAccessPicker`s (chip + `showHollowMenu`). The public toggle is a globe icon (accent when public).
-
-### Actions
-
-**Save (`_save`):**
-- Serializes `_layout` to JSON array (category: `{type, name}`, channel: `{type, channel_id}`, separator: `{type}`)
-- Calls `crdt_api.updateChannelLayout(serverId, layoutJson)` -- persisted via CRDT
-- Updates `_savedLayout` to match `_layout`
-- Shows "Channel layout saved" success toast
-
-**Add Channel (`_addChannel`):**
-- Opens `showHollowDialog` with `StatefulBuilder` for channel type toggle
-- Channel type toggle: two `_ChannelTypeChip` widgets ("Text" with hash icon, "Voice" with volume icon)
-- `HollowTextField` for channel name, `maxLength: 32`, prefix icon changes with type
-- On submit: calls `crdt_api.createChannel(serverId, name, category: null, channelType)`, triggers rebuild
-- CRDT operation -- channel appears in provider, auto-sync picks it up
-
-**Add Category (`_addCategory`):**
-- Opens `showHollowDialog` with name text field, `maxLength: 32`
-- On submit: appends `CategoryItem(name)` to `_layout` (local only until saved)
-
-**Add Separator:** Inline button appends `SeparatorItem()` to `_layout`
-
-**Rename Category (`_renameCategory(index, currentName)`):**
-- Dialog with pre-filled text field
-- Replaces `_layout[index]` with new `CategoryItem(name)`
-
-**Remove Category (`_removeCategory(index)`):** Removes `_layout[index]` directly, no confirmation.
-
-**Rename Channel (`_renameChannel(channelId, currentName)`):**
-- Dialog with pre-filled text field
-- Calls `crdt_api.renameChannel(serverId, channelId, newName)` -- CRDT operation, immediate
-
-**Delete Channel (`_deleteChannel(channelId, name)`):**
-- Confirmation dialog: "Are you sure you want to delete #name? This cannot be undone."
-- On confirm: calls `crdt_api.removeChannel(serverId, channelId)`, removes from `_layout`, shows info toast
-
-### Build Layout
-
-**Header row:**
-- Description text "Drag to reorder channels and categories"
-- Three buttons: "Break" (add separator), "Category" (add category), "Channel" (add channel)
-
-**Drag-and-drop list:** `ReorderableListView.builder` with:
-- `buildDefaultDragHandles: false` -- custom drag handles via `ReorderableDragStartListener`
-- `proxyDecorator` -- Material elevation 4, shadow, rounded corners during drag
-- `onReorder` -- standard remove/insert with index adjustment
-
-**Item rendering per type:**
-
-**`_SeparatorRow`:** Drag handle + 1.5px horizontal line + delete (X) button.
-
-**`_CategoryRow`:** Accent-tinted container with:
-- Drag handle (gripVertical icon)
-- Folder icon in accent color
-- Category name as the user typed it (no uppercase), `label` style, textPrimary, w600, ellipsis
-- ShieldCheck icon button -> **category bulk-apply** (issue #32): `_bulkApplyAccess(index, name)` forward-scans `_layout` from the category's INDEX (never its name — duplicates legal) to the next Category/Separator, skips public channels, opens `showCategoryBulkAccessDialog` (`category_bulk_access_dialog.dart` — per-dimension toggle cards + tier-or-Custom chips), then stamps each channel SEQUENTIALLY with per-channel optimistic+revert and a summary toast that never implies rollback. Posting skipped for voice channels. No Rust support — pure Dart over the per-channel setters.
-- Pencil icon button -> rename
-- Trash icon button -> delete
-- All three wrapped in `HollowTooltip`s
-
-**`_ChannelRow`:** Determines `isUnderCategory` by scanning backwards through `_layout` for the nearest `CategoryItem` (a `SeparatorItem` breaks scope). If under a category, shows tree connector (`_TreeConnectorPainter` -- vertical + horizontal line, `isLast` variant for the L-shaped connector).
-
-Row contains:
-- Optional indent (12px + 16px connector + 4px gap) when under a category
-- Elevated container with:
-  - Drag handle
-  - Channel icon (hash for text, volume2 for voice)
-  - Channel name
-  - **Public toggle** (globe icon) -- `HollowPressable` toggle button. When `is_public` is true: accent-tinted globe icon with filled background. When false: neutral globe icon. Tap calls `crdt_api.setChannelPublic(serverId, channelId, !isPublic)` with **optimistic update** via `channelListProvider.updateChannel()` BEFORE the FFI call. Only shown for text channels. Public channels send messages as Ed25519-signed plaintext (not MLS-encrypted).
-  - **Visibility `ChannelAccessPicker`** (eye icon, `settings/channel_access_pickers.dart`, shared with mobile) -- a `HollowChip` with a chevron that opens `showHollowMenu` over Everyone / Mod+ / Admin+ / Custom… (check on the current value; Custom = issue #32, opens `showAccessLabelPicker`, access labels only)
-  - **Posting `ChannelAccessPicker`** (messageSquare icon) -- same options
-  - **Temporary access** (userPlus icon, `if (!isPublic)`, in the RIGHT action cluster after the globe) -- opens `showChannelGrantsDialog` (`channel_grants_dialog.dart`): active grants with `…peerid · remaining` captions + revoke, and a `MemberSearchPicker` → duration flow (`kGrantDurationOptions` 15m/1h/24h/Until revoked)
-  - Every icon/chip in the row is wrapped in a `HollowTooltip`
-  - **Slow-mode `SlowModePicker`** (timer icon, text channels only, same file) -- `HollowChip` reading "Slow mode" / "Slow 30s", opens `showHollowMenu` over `kSlowModeOptions` (Off/5s/10s/30s/1m/5m/15m/1h, defined in `channel_access_pickers.dart`); labels via `slowModeDurationLabel()` from `lib/src/core/moderation_format.dart`. Optimistic update then `crdt_api.setChannelSlowMode()`. Moderator+ are exempt from the limit.
-  - **Media-only toggle** (image icon, text channels only) -- `HollowPressable`, accent when on. Optimistic update then `crdt_api.setChannelMediaOnly()`. Media-only channels accept only images/GIFs/videos (captions allowed); the chat input filters the file picker to `kMediaOnlyExtensions` and blocks text-only sends + voice recordings with a toast.
-  - Rename button (pencil icon)
-  - Delete button (trash icon, red)
-
-**`ChannelAccessPicker`:** chip label shows the current level:
-- `'everyone'` -> "All", `'moderator'` -> "Mod+", `'admin'` -> "Admin+" (no warning tint since design sweep 3; the label says it)
-- Label gate active (`gateLabels` non-empty) -> the label NAME (1 label) or "N labels" with a shieldCheck glyph, chip capped at 120px and ellipsized; the menu checks Custom
-- On select: applies **optimistic update** via `channelListProvider.updateChannel()` BEFORE calling `crdt_api.setChannelVisibility()` or `crdt_api.setChannelPosting()` -- CRDT operations. The optimistic update is needed because CrdtStore is fire-and-forget via mpsc, so the DB write may not be flushed when `ServerUpdated` fires (causing stale reads without the optimistic path).
-- Picking a plain tier on a label-gated channel shows a confirm ("Remove label requirement?") then clears the gate (optimistic mirrors the Rust handler's clearing op); picking Custom opens the label multi-select and mirrors the Rust Admin+ tier stamp optimistically. Mobile parity: the same `ChannelAccessPicker` + the long-press sheet's 4th "Custom…" option + a `Temporary Access` action row.
-
-**Save/Discard bar:** Only shown when `_dirty`. Two buttons:
-- "Discard" (`HollowButton.ghost`) -- sets `_loaded = false`, calls `_loadLayout()` to reload from DB
-- "Save Layout" (`HollowButton.filled`) -- calls `_save()`
-
-**Channel type (creation dialog):** two `HollowChip`s, Text and Voice, 8px apart.
-
-## MembersTab -- Member Management
-
-Source: `lib/src/ui/settings/members_tab.dart` (634 lines). `ConsumerWidget` with `serverId`.
-
-### Member List Display
-
-Watches `serverMembersProvider(serverId)` (async) and `myRoleProvider(serverId)` (async).
-
-**Sort order:** owner (0), admin (1), moderator (2), member (3) -- numeric priority sort.
-
-**`_MemberRow`:** `ConsumerWidget` displaying:
-- `HollowAvatar` (32px) with profile avatar bytes
-- Display name resolved via `serverDisplayNameFor(profiles, peerId, nickname)` -- resolution order: server nickname -> local nickname -> profile display name -> short peer ID
-- "(you)" italic label next to own name
-- Peer ID in caption style, ellipsized
-- **Role badge:** colored container with icon + capitalized role name
-  - Owner: warning color, crown icon
-  - Admin: purple (#A78BFA), shield icon
-  - Moderator: orange-red blend, shieldCheck icon
-  - Member: textSecondary, user icon
-
-### Role Management
-
-**Tier-gating logic:**
-
-`_canManageRole(actorRole, targetRole)`:
-- Priority map: owner=3, admin=2, moderator=1, member=0
-- Owner can manage everyone
-- Moderators and members cannot manage anyone
-- Admins can manage targets with lower priority
-
-`_assignableRoles(actorRole)`:
-- Owner: [admin, moderator, member]
-- Admin: [moderator, member]
-- Others: []
-
-**Action menu:** the `...` button opens `showHollowMenu` (issue #61 — it was a Material `PopupMenuButton` before, the last one on this surface), anchored off the BUTTON via a `Builder` rather than the 600px row. Shown only if `canManage` (not self and `canManageRole` passes). Contains:
-- Role change options: for each assignable role that differs from current, shows icon + "Make {Role}" text
-- Divider (if any assignable roles exist)
-- "Kick Member" (userMinus icon, red)
-- "Mute Member" (volumeX icon, warning)
-- "Ban Member" (ban icon, red)
-
-### The confirms live in ONE place (issue #61)
-
-`lib/src/ui/settings/moderation_dialogs.dart` owns all four. Each does the WHOLE job — confirm, FFI, invalidate
-`serverMembersProvider` + `mutedMembersProvider`, toast — so no call site awaits or handles anything.
-
-| Function | Surface | Wire call |
-|---|---|---|
-| `showChangeRoleDialog` | confirm, "Change {name}'s role to {Role}?" | `crdt_api.changeMemberRole` |
-| `showKickMemberDialog` | danger confirm | `crdt_api.kickMember` |
-| `showBanMemberDialog` | danger confirm | `crdt_api.banMember` |
-| `showMuteMemberDialog` | duration picker from `kMuteDurationOptions` (10 min / 1 h / 24 h / 7 d / Permanent) | `muteMemberFor` → `crdt_api.muteMember` |
-
-The duration IS the mute confirmation; there is no second "are you sure", because picking a length is already
-deliberate and a mute is reversible from the Muted Members section below.
-
-**Three consumers, no copies:** this tab, `mobile/mobile_members_route.dart`, and the desktop user context menu
-(`ui_member_panel.md`). Mobile keeps its own bottom-sheet duration PICKER because a sheet is what every other
-mobile action list is, but both platforms write through the shared `muteMemberFor` so the wording, the
-invalidations and the toast cannot drift. Mobile role changes now confirm, matching desktop.
-
-Same hierarchy gate throughout (KICK_MEMBERS + outrank), enforced in Rust regardless of what the UI allowed.
-
-### Muted Members Section
-
-`_MutedMembersSection` -- `ConsumerStatefulWidget`, shown only when `canKick`, ABOVE the banned section.
-
-**Data:** watches `mutedMembersProvider(serverId)` (channel_provider.dart) — NOT a one-shot load. The provider is invalidated on `ServerUpdated` via the event provider's 0/120/400/1000ms ramp (CrdtStore writes are fire-and-forget, a single immediate reload reads stale DB), so a fresh mute appears without leaving the tab.
-
-**Display:** expandable header (chevron + volumeX + "Muted ({count})" in warning color); rows show `HollowAvatar` + display name (server nickname > displayName, resolved from `serverMembersProvider` — muted members are still members) + remaining time via `formatMuteRemaining()` ("Permanent" / "2h 10m left"); "Unmute" ghost button calls `crdt_api.unmuteMember` then invalidates the provider.
-
-Mobile parity: `mobile_members_route.dart` mirrors all of this (mute option in the actions bottom sheet → duration bottom sheet; `_MutedRow` list watching the same provider). The muted user's own input bar shows a "You are muted on this server — {remaining} left" banner via `myMuteStatusProvider` (self-invalidates at expiry).
-
-### Banned Members Section
-
-`_BannedMembersSection` -- `ConsumerStatefulWidget`, shown only when `canKick` (owner or admin).
-
-**State:** `_banned` (nullable list of peer IDs), `_expanded` (bool).
-
-**Loading:** `crdt_api.getBannedMembers(serverId)` on init.
-
-**Display:** Expandable section with chevron toggle:
-- Header: chevron + ban icon + "Banned ({count})" in error color
-- When expanded: list of banned peer IDs in elevated containers, each with "Unban" ghost button
-- `_unban(peerId)`: calls `crdt_api.unbanMember(serverId, peerId)`, reloads list, shows toast
-
-### Confirm Dialog
-
-`_ConfirmDialog`: Reusable confirmation widget with Material wrapping for text rendering.
-- 360px wide, glassmorphic surface (alpha 0.92), accent border (alpha 0.2), dark shadow
-- Title (heading style, 18px), message (body, textSecondary), two buttons (Cancel ghost, Confirm filled or danger)
-
-## RolesTab -- Permission Configuration
-
-Source: `lib/src/ui/settings/roles_tab.dart` (261 lines). `ConsumerStatefulWidget` with `serverId`.
-
-### Permission Bitmask
-
-Constants from `file:Permission` class (in `server_provider.dart`):
-- `manageServer` = bit 0 (1)
-- `manageChannels` = bit 1 (2)
-- `manageRoles` = bit 2 (4)
-- bit 3 unused (MANAGE_INVITES was removed)
-- `kickMembers` = bit 4 (16)
-- `sendMessages` = bit 5 (32)
-- `readMessages` = bit 6 (64)
-
-**`_permissionEntries`:** 6 entries for the toggle UI, each with `label`, `desc`, and `bit`:
-- Manage Server -- "Server settings, profile, and deletion"
-- Manage Channels -- "Create, edit, and delete channels"
-- Manage Roles -- "Change member roles and labels"
-- Kick Members -- "Remove or ban members"
-- Send Messages -- "Send messages in channels"
-- Read Messages -- "View messages in channels"
-
-### Default Permissions
-
-`_defaultPerms` (must match Rust `MemberRole::default_permissions()`):
-- Admin: manageChannels | manageRoles | kickMembers | sendMessages | readMessages
-- Moderator: kickMembers | sendMessages | readMessages
-- Member: sendMessages | readMessages
-
-Owner always has `Permission.all` (all bits set), not editable.
-
-### State and Loading
-
-**State:** `_perms` (Map<String, int>), `_loading` (bool).
-
-`_loadPermissions()`: Iterates `['admin', 'moderator', 'member']`, calls `crdt_api.getRolePermissions(serverId, role)` for each. Falls back to `_defaultPerms` on error.
-
-### Build Structure
-
-Watches `myRoleProvider(serverId)` to determine editing ability. Role priority: owner=3, admin=2, moderator=1, member=0.
-
-For each of `['admin', 'moderator', 'member']`, renders `_buildRoleSection(role, hollow, canEdit)` where `canEdit = myPriority > rolePriority[role]`.
-
-**Role section:** Elevated container with border containing:
-- **Header row:** Role icon + name (colored per role), "Reset" ghost button (only if `canEdit`)
-  - Role colors: admin = purple (#AB47BC, shieldCheck), moderator = orange (#FF9800, shield), member = grey (#78909C, user)
-- **Permission toggles:** One `_PermissionRow` per `_permissionEntries` entry
-
-**`_PermissionRow`:** Row with label + description on left, `HollowToggle` on right. Toggle `onChanged` is null when `canEdit` is false (visually disabled).
-
-### Permission Toggling
-
-`_togglePermission(role, bit, enabled)`:
-- Optimistically updates local state with bitwise OR (enable) or AND-NOT (disable)
-- Calls `crdt_api.changeRolePermissions(serverId, role, updatedBitmask)`
-- On error: reverts local state, shows error toast
-
-`_resetToDefault(role)`:
-- Optimistically sets `_perms[role]` to `_defaultPerms[role]`
-- Calls `crdt_api.changeRolePermissions(serverId, role, defaultPerm)`
-- Shows "{Role} permissions reset to defaults" success toast
-- On error: reverts, shows error toast
-
-## LabelsTab -- Cosmetic Labels and Self-Service Picker
-
-Source: `lib/src/ui/settings/labels_tab.dart` (469 lines). `ConsumerStatefulWidget` with `serverId`.
-
-### Preset Colors
-
-9 preset colors: red (#EF4444), orange (#F97316), yellow (#EAB308), green (#22C55E), cyan (#06B6D4), blue (#3B82F6), purple (#8B5CF6), pink (#EC4899), grey (#78909C).
-
-`_parseColor(hex)`: Strips `#`, parses 6-char hex to `Color`. Falls back to grey (#78909C).
-
-### State and Loading
-
-**State:** `_labels` (nullable `List<LabelFfi>`), `_myLabelIds` (Set of label IDs the local user has).
-
-`_loadLabels()`:
-1. `crdt_api.getServerLabels(serverId)` -- gets all server labels
-2. `crdt_api.getServerMembers(serverId)` -- finds local user's member entry
-3. Extracts label IDs from local user's `labels` list into `_myLabelIds`
-
-**Live refresh:** `ref.listen(serverMembersProvider(serverId), ...)` triggers `_loadLabels()` when server state updates from remote peers.
-
-### Self-Assign Section (all members)
-
-Shown when `labels.isNotEmpty`. Header: "Pick your labels" with description "Tap to add or remove labels from your profile".
-
-**Label chips:** `Wrap` of shared `LabelChip` widgets (`ui/components/label_visuals.dart` — also home of `kLabelPresetColors`, `parseLabelColor`, `shortPeerIdSuffix`, `LabelTypeChip`):
-- Selected: colored background (alpha 0.25), colored border, check icon; access labels carry a shieldCheck glyph
-- **ACCESS labels render LOCKED** (issue #32): dimmed via AnimatedOpacity, lock icon, desktop tooltip / tap-toast "Access labels are assigned by staff" — visible, never hidden; activation announces instead of no-oping
-- Cosmetic tap calls `_toggleSelfLabel(labelId)` (assign/unassign FFI). Self-assign of access labels is also refused Rust-side.
-
-### Management Section (MANAGE_ROLES permission required)
-
-Gated by `canManage = myPermissionsProvider & Permission.manageRoles != 0`.
-
-**Header row:** Settings icon + "Manage Labels" title + "New" filled button.
-
-**Label list:** Each label in an elevated row with:
-- Color swatch (14px circle) + shieldCheck glyph for access labels
-- Label name in label color, bold
-- Assign (userPlus) -> `showLabelAssignDialog`; Edit (pencil) -> `_showLabelDialog(existing:)`; Delete (trash, red) -> `_deleteLabel`
-- All three in `HollowTooltip`s
-
-### Create / Edit Label Dialog
-
-`_showLabelDialog({existing})`: `showHollowDialog` with `StatefulBuilder` (create AND edit share it).
-- `HollowTextField` for label name (prefilled on edit)
-- Color picker: `Wrap` of `kLabelPresetColors` circles (28px), selected one has white 2px border
-- **Type row (issue #32):** two `LabelTypeChip`s — Cosmetic (tag icon, "Anyone can add it to their own profile.") vs Access (shieldCheck, "Can gate channels; only staff can assign it."), default Cosmetic
-- Cancel + Create/Save; calls `crdt_api.createLabel(..., access:)` or `updateLabel(..., access:)`, waits 100ms, reloads
-
-### Delete Label
-
-`_deleteLabel(labelId)`: Directly calls `crdt_api.deleteLabel(serverId, labelId)`, waits 100ms, reloads labels. No confirmation dialog. Deleting a label still referenced by a channel gate = fail-closed lockout on that channel.
-
-### Assign Dialog (redesigned issue #32)
-
-`showLabelAssignDialog(context, serverId:, label:, onDone:)` (public entry point; used by the tab, tests and the screenshot harness).
-
-**Display:** explainer line + a bordered card wrapping `MemberSearchPicker` (`ui/components/member_search_picker.dart` — THE shared searchable member list, also used by the mobile Assign dialog and the grants dialog): search field (live filter over display name / nickname / raw peer id), rows = `HollowAvatar(28)` + name + `shortPeerIdSuffix` (`…T7iS4F`) in textTertiary — disambiguates same-name/same-avatar members — + checkSquare/square trailing icon in the label's color. 'No members match' empty state.
-
-**Seeding:** selection seeds ONCE from the first `serverMembersProvider` data via `ref.listen` + a `_seeded` guard — a one-shot read could render everyone unchecked on a cold open, and without the guard the post-toggle refetch would revert optimistic checkmarks.
-
-Tap toggles assignment via `crdt_api.assignLabel` / `crdt_api.unassignLabel`, invalidates `serverMembersProvider`.
-- "Done" button calls `onDone()` then pops
-
-## NotificationsTab -- Notification Settings
-
-Source: `lib/src/ui/settings/notifications_tab.dart` (336 lines). `ConsumerWidget` with `serverId`.
-
-### Notification Levels
-
-From `notification_provider.dart`:
-- `NotificationLevel`: `all`, `mentions`, `nothing`
-- `ChannelNotificationLevel`: `inherit`, `all`, `mentions`, `nothing`
-
-Storage keys: `notif:{serverId}` for server level, `notif:{serverId}:{channelId}` for channel overrides.
-
-### Server-Wide Setting
-
-`HollowSectionHeader('Server Notifications')` with description "Default notification level for all channels in this server."
-
-`_NotificationLevelSelector`: Row of three `_LevelChip` widgets:
-- "All Messages" (bell icon, accent color when selected)
-- "Mentions Only" (atSign icon, warning color when selected)
-- "Nothing" (bellOff icon, error color when selected)
-
-Selected chip: colored background (alpha 0.15), colored border, bold text. Unselected: surface background, neutral border.
-
-On change: `notifNotifier.setServerLevel(serverId, level)`.
-
-### Per-Channel Overrides
-
-`HollowSectionHeader('Channel Overrides')` with description "Override notification settings for specific channels."
-
-For each channel in `channelListProvider`:
-- Row with hash icon, channel name (ellipsized), `ChannelOverrideDropdown`
-
-**`ChannelOverrideDropdown`** (`notifications_tab.dart`, shared with user settings): a `HollowChip` with a chevron opening `showHollowMenu` (`alignEnd: true`, right-aligned under the chip), 4 options with a check on the current one:
-- Default (settings icon) -- uses `ChannelNotificationLevel.inherit`
-- All (bell icon) -- `ChannelNotificationLevel.all`
-- Mentions (atSign icon) -- `ChannelNotificationLevel.mentions`
-- Nothing (bellOff icon) -- `ChannelNotificationLevel.nothing`
-
-The chip shows the current level's label.
-
-On change: `notifNotifier.setChannelOverride(serverId, channelId, level)`.
-
-## DangerZoneTab -- Leave and Delete Server
-
-Source: `lib/src/ui/settings/danger_zone_tab.dart` (248 lines). `ConsumerWidget` taking `ServerInfo server`.
-
-### Role Detection
-
-Watches `myRoleProvider(server.serverId)`. `isOwner = roleAsync.valueOrNull == 'owner'`.
-
-### Layout
-
-Red-bordered container (`error` color, alpha 0.3) with:
-- Header: alertTriangle icon + "Danger Zone" in error color
-- Content varies by role
-
-### Non-Owner: Leave Server
-
-Row with:
-- Left: "Leave this server" title + "You will need a new invite to rejoin." description
-- Right: `HollowButton.danger` with logOut icon, "Leave Server"
-
-`_confirmLeave()`: `showHollowDialog` -> `HollowDialog` with:
-- Title: "Leave Server"
-- Content: 'Are you sure you want to leave "{serverName}"?' + 'You will need a new invite to rejoin this server.'
-- Cancel ghost button, "Leave Server" danger button
-
-`_leaveServer()`:
-1. `crdt_api.leaveServer(serverId)`
-2. Clears state: `serverSettingsOpenProvider = false`, `selectedServerProvider = null`, `selectedChannelProvider = null`, `channelListProvider.clear()`
-3. Toast: 'Left "{serverName}"'
-
-### Owner: Delete Server
-
-Row with:
-- Left: "Delete this server" title + "Once deleted, all data is permanently removed." description
-- Right: `HollowButton.danger` with trash2 icon, "Delete Server"
-
-`_confirmDelete()`: `showHollowDialog` -> `HollowDialog` with:
-- Title: "Delete Server"
-- Content: 'Are you sure you want to delete "{serverName}"?' + 'This action cannot be undone. All channels and messages will be permanently deleted.'
-- Cancel ghost button, "Delete Server" danger button
-
-`_deleteServer()`:
-1. `crdt_api.deleteServer(serverId)`
-2. Clears state: same as leave (serverSettingsOpen, selectedServer, selectedChannel, channelList)
-3. Toast: 'Server "{serverName}" deleted'
+---
 
 ## ServerTemplate -- Export and Import System
 

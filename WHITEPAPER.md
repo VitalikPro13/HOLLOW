@@ -1510,7 +1510,7 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 - No Twitch data is stored on the relay or any server infrastructure.
 - The OAuth token is ephemeral: used once and discarded.
 - Verification status is stored only in each peer's local encrypted database.
-- The server owner's Twitch channel name is the only Twitch-related data shared among members.
+- The server owner's Twitch channel name and its public numeric ID are the only Twitch-related data shared among members. The owner's client resolves the ID from the name directly against Twitch with the owner's own token; no Hollow infrastructure is involved.
 
 ---
 

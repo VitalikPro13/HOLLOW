@@ -66,8 +66,39 @@ Future<bool> twitchIsConnected() =>
 Future<String?> twitchGetUserId() =>
     RustLib.instance.api.crateApiTwitchTwitchGetUserId();
 
+/// Finds a channel's numeric id from its name, with the connected account's
+/// token. `Ok(None)` when no such channel exists; `Err` when no account is
+/// connected or Twitch cannot be reached.
+Future<TwitchChannelLookup?> twitchLookupChannel({required String login}) =>
+    RustLib.instance.api.crateApiTwitchTwitchLookupChannel(login: login);
+
 Future<String?> twitchGetUsername() =>
     RustLib.instance.api.crateApiTwitchTwitchGetUsername();
+
+/// A Twitch channel found by name.
+class TwitchChannelLookup {
+  final String id;
+  final String login;
+  final String displayName;
+
+  const TwitchChannelLookup({
+    required this.id,
+    required this.login,
+    required this.displayName,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ login.hashCode ^ displayName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TwitchChannelLookup &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          login == other.login &&
+          displayName == other.displayName;
+}
 
 class TwitchDeviceFlowResult {
   final String userCode;

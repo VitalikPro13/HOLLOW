@@ -329,6 +329,37 @@ pub fn twitch_get_user_id() -> Result<Option<String>, String> {
     Ok(user_id.filter(|id| !id.is_empty()))
 }
 
+/// A Twitch channel found by name.
+pub struct TwitchChannelLookup {
+    pub id: String,
+    pub login: String,
+    pub display_name: String,
+}
+
+/// Finds a channel's numeric id from its name, with the connected account's
+/// token. `Ok(None)` when no such channel exists; `Err` when no account is
+/// connected or Twitch cannot be reached.
+#[frb]
+pub fn twitch_lookup_channel(login: String) -> Result<Option<TwitchChannelLookup>, String> {
+    let login = login.trim().trim_start_matches('@').to_ascii_lowercase();
+    if !twitch::is_twitch_login(&login) {
+        return Ok(None);
+    }
+    if !twitch_ensure_token()? {
+        return Err("Connect Twitch in Settings, Profile to look channels up by name".to_string());
+    }
+    let access_token = {
+        let cache = get_token_cache().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        cache.as_ref().ok_or("Token cache empty")?.access_token.clone()
+    };
+    let found = get_runtime().block_on(twitch::lookup_user_by_login(&access_token, &login))?;
+    Ok(found.map(|u| TwitchChannelLookup {
+        display_name: if u.display_name.is_empty() { u.login.clone() } else { u.display_name },
+        id: u.id,
+        login: u.login,
+    }))
+}
+
 #[frb]
 pub fn twitch_get_username() -> Result<Option<String>, String> {
     let username = load_tw_setting(KEY_TWITCH_USERNAME)?;

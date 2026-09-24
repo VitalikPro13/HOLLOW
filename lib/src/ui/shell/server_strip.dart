@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
@@ -651,15 +652,13 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     );
   }
 
-  /// Selects [serverId] and opens its settings panel.
-  ///
-  /// Selecting FIRST is not optional: the panel reads the selected server, so
-  /// flipping the flag alone opens the settings of whatever was on screen.
+  /// Selects [serverId] then opens its settings, so closing them lands in
+  /// that server.
   Future<void> _openServerSettings(String serverId) async {
     if (ref.read(selectedServerProvider) != serverId) {
       await _selectServer(serverId);
     }
-    ref.read(serverSettingsOpenProvider.notifier).state = true;
+    openServerSettings(ref.read, serverId);
   }
 
   Future<void> _selectServer(String serverId) async {

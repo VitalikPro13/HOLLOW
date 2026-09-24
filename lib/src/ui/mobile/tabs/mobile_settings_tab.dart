@@ -38,7 +38,7 @@ void _openCategory(BuildContext context, SettingsCategory category) {
   }
   Navigator.of(context).push(
     hollowMobileRoute(
-      builder: (_) => _SettingsSubPage(
+      builder: (_) => MobileSettingsSubPage(
         title: category.label,
         actions: category == SettingsCategory.profile
             ? const _ProfileSaveActions()
@@ -59,7 +59,7 @@ void _openCategory(BuildContext context, SettingsCategory category) {
 void _pushPage(BuildContext context, String title, Widget child) {
   Navigator.of(context).push(
     hollowMobileRoute(
-      builder: (_) => _SettingsSubPage(title: title, child: child),
+      builder: (_) => MobileSettingsSubPage(title: title, child: child),
     ),
   );
 }
@@ -73,7 +73,7 @@ class MobileSettingsTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    Widget row(SettingsCategory c) => _SettingsNavRow(
+    Widget row(SettingsCategory c) => MobileSettingsNavRow(
           icon: c.icon,
           title: c.label,
           onTap: () => _openCategory(context, c),
@@ -92,7 +92,7 @@ class MobileSettingsTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.md),
         const _IdentityRow(),
         for (final g in SettingsGroup.values) ...[
-          _GroupCaption(g.label),
+          MobileSettingsGroupCaption(g.label),
           for (final c in SettingsCategory.values)
             if (c.group == g && _onPhone(c)) row(c),
         ],
@@ -100,7 +100,7 @@ class MobileSettingsTab extends ConsumerWidget {
         for (final c in SettingsCategory.values)
           if (c.group == null) row(c),
         const SizedBox(height: HollowSpacing.lg),
-        _SettingsNavRow(
+        MobileSettingsNavRow(
           icon: LucideIcons.circleHelp,
           title: 'Help',
           onTap: () => _pushPage(context, 'Help', const HelpResourceCenter()),
@@ -108,7 +108,7 @@ class MobileSettingsTab extends ConsumerWidget {
         // Absent entirely on store builds (Apple 3.1.1 / Play): no gallery,
         // no prices, no import, no redeem.
         if (ref.watch(shopAvailableProvider))
-          _SettingsNavRow(
+          MobileSettingsNavRow(
             icon: LucideIcons.store,
             title: 'Hollow Shop',
             onTap: () => _pushPage(
@@ -186,9 +186,9 @@ class _IdentityRow extends ConsumerWidget {
   }
 }
 
-class _GroupCaption extends StatelessWidget {
+class MobileSettingsGroupCaption extends StatelessWidget {
   final String label;
-  const _GroupCaption(this.label);
+  const MobileSettingsGroupCaption(this.label, {super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -205,14 +205,19 @@ class _GroupCaption extends StatelessWidget {
 }
 
 /// One page in the list: its icon, its name and a chevron, edge to edge.
-class _SettingsNavRow extends StatelessWidget {
+class MobileSettingsNavRow extends StatelessWidget {
   final IconData icon;
   final String title;
+
+  /// The page's current state, quiet before the chevron ("Mentions only").
+  final String? value;
   final VoidCallback onTap;
 
-  const _SettingsNavRow({
+  const MobileSettingsNavRow({
+    super.key,
     required this.icon,
     required this.title,
+    this.value,
     required this.onTap,
   });
 
@@ -237,6 +242,15 @@ class _SettingsNavRow extends StatelessWidget {
                     HollowTypography.bodyTouch.copyWith(color: hollow.textPrimary),
               ),
             ),
+            if (value != null) ...[
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                value!,
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+            ],
             Icon(LucideIcons.chevronRight,
                 size: 16, color: hollow.textSecondary),
           ],
@@ -246,14 +260,15 @@ class _SettingsNavRow extends StatelessWidget {
   }
 }
 
-/// Full-screen pushed settings subpage, with MobileServerSettingsRoute's
-/// chrome. [actions] sit on the bar's trailing edge.
-class _SettingsSubPage extends StatelessWidget {
+/// A full-screen pushed settings page: back, its title, and [actions] on the
+/// bar's trailing edge. Settings and a server's settings share it.
+class MobileSettingsSubPage extends StatelessWidget {
   final String title;
   final Widget? actions;
   final Widget child;
 
-  const _SettingsSubPage({
+  const MobileSettingsSubPage({
+    super.key,
     required this.title,
     this.actions,
     required this.child,

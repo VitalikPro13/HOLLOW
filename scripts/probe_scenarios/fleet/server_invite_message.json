@@ -64,10 +64,10 @@
   "cleanup": [
     { "peer": "a", "op": "right_click", "target": "server:fleet-probe" },
     { "peer": "a", "op": "tap", "target": "menu > text:Server settings" },
-    { "peer": "a", "op": "tap", "target": "text:Danger", "index": 0 },
+    { "peer": "a", "op": "reveal", "target": "text:Delete server", "index": 0 },
     { "peer": "a", "op": "tap", "target": "text:Delete server", "index": 0 },
     { "peer": "a", "op": "log", "message": "index 1: index 0 is the dialog's TITLE, and tapping a title silently does nothing" },
-    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 1 },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0 },
     { "peer": "a", "op": "wait_for", "gone": "server:fleet-probe", "timeout_ms": 30000 },
     { "peer": "b", "op": "log", "message": "the delete tombstone has to reach B's server strip too" },
     { "peer": "b", "op": "wait_for", "gone": "server:fleet-probe", "timeout_ms": 90000 }

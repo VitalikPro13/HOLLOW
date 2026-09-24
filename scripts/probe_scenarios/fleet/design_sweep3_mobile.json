@@ -20,7 +20,7 @@
 
     { "peer": "a", "op": "long_press", "target": "text:sweep3", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 1000 },
-    { "peer": "a", "op": "tap", "target": "text:Server Settings", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:Server settings", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 2000 },
     { "peer": "a", "op": "shot", "name": "mobile-s3-01-server-settings" },
 

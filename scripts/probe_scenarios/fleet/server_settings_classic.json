@@ -1,0 +1,54 @@
+{
+ "_": [
+  "Server settings in the Classic layout: the rail takes the channel list's place, the server strip stays.",
+  "One throwaway peer; switches to Classic and back, and deletes its server in cleanup.",
+  "run: powershell -File scripts\\fleet.ps1 -Scenario server_settings_classic -Peers a"
+ ],
+ "peers": ["a"],
+ "steps": [
+  {"peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
+  {"peer": "a", "op": "wait", "ms": 1500},
+  {"peer": "a", "op": "tap", "target": "semantics:Create a server"},
+  {"peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "ss-classic"},
+  {"peer": "a", "op": "tap", "target": "text:Create", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "server:ss-classic", "timeout_ms": 30000},
+
+  {"peer": "a", "op": "tap", "target": "semantics:Settings"},
+  {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "tap", "target": "text:Appearance", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 800},
+  {"peer": "a", "op": "tap", "target": "text:Classic", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "key", "value": "escape"},
+  {"peer": "a", "op": "wait", "ms": 1200},
+
+  {"peer": "a", "op": "open_server", "name": "ss-classic"},
+  {"peer": "a", "op": "wait", "ms": 1500},
+  {"peer": "a", "op": "tap", "target": "semantics:Server settings", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 1500},
+  {"peer": "a", "op": "shot", "name": "ssc-01-classic-overview"},
+  {"peer": "a", "op": "tap", "target": "text:Members", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "shot", "name": "ssc-02-classic-members"},
+  {"peer": "a", "op": "key", "value": "escape"},
+  {"peer": "a", "op": "wait", "ms": 1000},
+  {"peer": "a", "op": "shot", "name": "ssc-03-classic-closed"}
+ ],
+ "cleanup": [
+  {"peer": "a", "op": "key", "value": "escape"},
+  {"peer": "a", "op": "right_click", "target": "server:ss-classic"},
+  {"peer": "a", "op": "tap", "target": "menu > text:Server settings"},
+  {"peer": "a", "op": "wait", "ms": 800},
+  {"peer": "a", "op": "reveal", "target": "text:Delete server", "index": 0},
+  {"peer": "a", "op": "tap", "target": "text:Delete server", "index": 0},
+  {"peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0},
+  {"peer": "a", "op": "wait_for", "gone": "server:ss-classic", "timeout_ms": 30000},
+  {"peer": "a", "op": "tap", "target": "semantics:Settings"},
+  {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "tap", "target": "text:Appearance", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 800},
+  {"peer": "a", "op": "tap", "target": "text:Dock", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "key", "value": "escape"}
+ ]
+}

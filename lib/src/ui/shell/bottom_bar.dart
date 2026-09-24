@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -251,13 +252,13 @@ void _togglePlace(WidgetRef ref, ShellTab tab) {
   }
 }
 
-/// Selects [serverId] then opens its settings: the panel reads the SELECTED
-/// server, so flipping the flag alone opens the wrong one.
+/// Selects [serverId] then opens its settings, so closing them lands in that
+/// server.
 Future<void> _openServerSettings(WidgetRef ref, String serverId) async {
   if (ref.read(selectedServerProvider) != serverId) {
     await _selectServer(ref, serverId);
   }
-  ref.read(serverSettingsOpenProvider.notifier).state = true;
+  openServerSettings(ref.read, serverId);
 }
 
 Future<void> _selectServer(WidgetRef ref, String serverId) async {

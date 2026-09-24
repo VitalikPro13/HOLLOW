@@ -147,12 +147,10 @@
     { "peer": "a", "op": "key", "value": "escape" },
     { "peer": "a", "op": "right_click", "target": "server:chat-probe" },
     { "peer": "a", "op": "tap", "target": "menu > text:Server settings" },
-    { "peer": "a", "op": "tap", "target": "semantics:Scroll settings tabs right", "allowMiss": true },
-    { "peer": "a", "op": "tap", "target": "semantics:Scroll settings tabs right", "allowMiss": true },
     { "peer": "a", "op": "wait", "ms": 400 },
-    { "peer": "a", "op": "tap", "target": "text:Danger", "index": 0 },
+    { "peer": "a", "op": "reveal", "target": "text:Delete server", "index": 0 },
     { "peer": "a", "op": "tap", "target": "text:Delete server", "index": 0 },
-    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 1 },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0 },
     { "peer": "a", "op": "wait_for", "gone": "server:chat-probe", "timeout_ms": 30000 },
     { "peer": "b", "op": "wait_for", "gone": "server:chat-probe", "timeout_ms": 90000 }
   ]

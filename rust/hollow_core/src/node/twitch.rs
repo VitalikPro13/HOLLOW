@@ -312,6 +312,53 @@ pub(crate) async fn check_subscription(
     }
 }
 
+/// A Twitch login as Twitch allows it: 1 to 25 ASCII letters, digits or `_`.
+pub(crate) fn is_twitch_login(login: &str) -> bool {
+    (1..=25).contains(&login.len())
+        && login.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// A channel found by its login: its numeric id, login and display name.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TwitchUser {
+    pub id: String,
+    pub login: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
+/// Looks up a channel by login. Helix wants a Bearer token on every call since
+/// 2020, and a user token of any scope is enough for `/users`.
+pub(crate) async fn lookup_user_by_login(
+    access_token: &str,
+    login: &str,
+) -> Result<Option<TwitchUser>, String> {
+    if !is_twitch_login(login) {
+        return Ok(None);
+    }
+    let resp = reqwest::Client::new()
+        .get(format!("{HELIX_BASE}/users"))
+        .query(&[("login", login)])
+        .header("Client-Id", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await
+        .map_err(|e| format!("Twitch lookup failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("Twitch lookup failed ({status})"));
+    }
+    #[derive(Deserialize)]
+    struct UsersResp {
+        data: Vec<TwitchUser>,
+    }
+    let users: UsersResp = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse the Twitch lookup: {e}"))?;
+    Ok(users.data.into_iter().next())
+}
+
 // ── Proof generation (joiner-side) ─────────────────────────────────
 
 pub(crate) async fn generate_proof(
@@ -504,4 +551,19 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<u64> {
 
 fn is_leap(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::is_twitch_login;
+
+    #[test]
+    fn only_a_twitch_shaped_login_reaches_the_url() {
+        assert!(is_twitch_login("synthlab_tv"));
+        assert!(is_twitch_login("a"));
+        assert!(!is_twitch_login(""));
+        assert!(!is_twitch_login("has space"));
+        assert!(!is_twitch_login("a&login=b"));
+        assert!(!is_twitch_login(&"x".repeat(26)));
+    }
 }

@@ -1684,7 +1684,7 @@ class _ServerContextSheet extends ConsumerWidget {
           const SizedBox(height: HollowSpacing.lg),
           _SheetAction(
             icon: LucideIcons.settings,
-            label: 'Server Settings',
+            label: 'Server settings',
             onTap: onNavigateSettings,
           ),
           if (canManageChannels)

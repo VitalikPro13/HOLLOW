@@ -137,6 +137,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredFileInfo dco_decode_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
+  TwitchChannelLookup dco_decode_box_autoadd_twitch_channel_lookup(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
@@ -476,6 +479,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredFileInfo? dco_decode_opt_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
+  TwitchChannelLookup? dco_decode_opt_box_autoadd_twitch_channel_lookup(
+    dynamic raw,
+  );
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
@@ -624,6 +632,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SyncSenderProfileFfi dco_decode_sync_sender_profile_ffi(dynamic raw);
+
+  @protected
+  TwitchChannelLookup dco_decode_twitch_channel_lookup(dynamic raw);
 
   @protected
   TwitchDeviceFlowResult dco_decode_twitch_device_flow_result(dynamic raw);
@@ -786,6 +797,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StoredFileInfo sse_decode_box_autoadd_stored_file_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TwitchChannelLookup sse_decode_box_autoadd_twitch_channel_lookup(
     SseDeserializer deserializer,
   );
 
@@ -1221,6 +1237,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  TwitchChannelLookup? sse_decode_opt_box_autoadd_twitch_channel_lookup(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
@@ -1395,6 +1416,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SyncSenderProfileFfi sse_decode_sync_sender_profile_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TwitchChannelLookup sse_decode_twitch_channel_lookup(
     SseDeserializer deserializer,
   );
 
@@ -1604,6 +1630,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_stored_file_info(
     StoredFileInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_twitch_channel_lookup(
+    TwitchChannelLookup self,
     SseSerializer serializer,
   );
 
@@ -2181,6 +2213,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_twitch_channel_lookup(
+    TwitchChannelLookup? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
@@ -2420,6 +2458,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_sync_sender_profile_ffi(
     SyncSenderProfileFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_twitch_channel_lookup(
+    TwitchChannelLookup self,
     SseSerializer serializer,
   );
 

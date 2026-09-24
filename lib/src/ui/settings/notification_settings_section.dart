@@ -23,7 +23,7 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
-import 'package:hollow/src/ui/settings/notifications_tab.dart';
+import 'package:hollow/src/ui/settings/channel_override_dropdown.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 

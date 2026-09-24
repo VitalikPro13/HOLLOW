@@ -12,7 +12,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
-import 'package:hollow/src/ui/settings/labels_tab.dart';
+import 'package:hollow/src/ui/server_settings/pages/labels_page.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Member picker search contract:

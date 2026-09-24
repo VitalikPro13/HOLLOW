@@ -18,7 +18,7 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
-import 'package:hollow/src/ui/settings/labels_tab.dart';
+import 'package:hollow/src/ui/server_settings/pages/labels_page.dart';
 
 /// Screenshot harness for the channel-access dialogs (bulk category access,
 /// temporary grants, access-label picker). Renders each dialog OPEN at a

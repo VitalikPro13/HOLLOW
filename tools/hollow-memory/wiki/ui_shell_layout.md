@@ -17,7 +17,7 @@ The file defines the following widget classes:
 - **`_SplitDivider`** — `StatefulWidget`. Draggable vertical divider between split panes. 6px wide hit area, accent-colored when hovered or dragged, transparent otherwise. Uses `SystemMouseCursors.resizeColumn`.
 
 Top-level function:
-- **`_showServerSettingsDialog()`** — Shows `ServerSettingsPanel` as a dialog popup (800x600) using `showGeneralDialog`. Used during split view because inline settings would only replace one pane.
+- **`_serverSettingsPlace()`** — The server settings place when `serverSettingsOpenProvider` is set: replaces the channel sidebar + chat pane (Classic keeps the server strip), covers split view too, and wraps a non-selected target in `ForeignServerSettingsScope`. See `ui_server_settings.md`.
 
 ## Bootstrap Sequence
 
@@ -140,10 +140,11 @@ Column
   ├── SystemStatusBanner
   └── Expanded Row
       ├── ServerStrip (RepaintBoundary, 72px implicit width)
+      ├── (server settings open: Expanded ServerSettingsPlace, and nothing below)
       ├── ChannelSidebar (240px fixed width) + _ChannelSidebarSeam
       ├── Expanded: chat area
       │   └── RepaintBoundary → AmbientBackground → Container(key: _mainPaneKey)
-      │       └── ServerSettingsPanel OR _buildChatOrEmpty()
+      │       └── _buildChatOrEmpty()
       ├── _MemberPanelSlot (conditional on server selected + panel open + no VC full-bleed)
       └── HelpPanelSlider
 ```

@@ -223,11 +223,11 @@ if (-not $KeepServer) {
         Step a @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 60000 }
         Step a @{ op = 'right_click'; target = "server:$server" }
         Step a @{ op = 'tap'; target = 'menu > text:Server settings' }
-        Step a @{ op = 'tap'; target = 'text:Danger'; index = 0 }
+        Step a @{ op = 'reveal'; target = 'text:Delete server'; index = 0 }
         Step a @{ op = 'tap'; target = 'text:Delete server'; index = 0 }
         # index 1: index 0 is the dialog's TITLE, and tapping a title silently
         # does nothing and PASSES.
-        Step a @{ op = 'tap'; target = 'dialog > text:Delete server'; index = 1 }
+        Step a @{ op = 'tap'; target = 'dialog > text:Delete server'; index = 0 }
         Step a @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 60000 }
         Step b @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 120000 }
         Step c @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 120000 }

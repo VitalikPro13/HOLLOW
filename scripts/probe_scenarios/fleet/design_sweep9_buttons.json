@@ -15,7 +15,8 @@
   {
    "peer": "a",
    "op": "wait_for",
-   "provider": "connection", "equals": "connected",
+   "provider": "connection",
+   "equals": "connected",
    "timeout_ms": 120000,
    "soft": true
   },
@@ -538,8 +539,8 @@
   },
   {
    "peer": "a",
-   "op": "tap",
-   "target": "text:Danger",
+   "op": "reveal",
+   "target": "text:Delete server",
    "index": 0
   },
   {
@@ -557,7 +558,7 @@
    "peer": "a",
    "op": "tap",
    "target": "dialog > text:Delete server",
-   "index": 1,
+   "index": 0,
    "soft": true
   },
   {

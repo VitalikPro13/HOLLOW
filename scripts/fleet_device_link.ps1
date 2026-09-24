@@ -710,11 +710,11 @@ function Remove-Server($peer, $name) {
     Step $peer @{ op = 'wait_for'; target = "server:$name"; timeout_ms = 60000 }
     Step $peer @{ op = 'right_click'; target = "server:$name" }
     Step $peer @{ op = 'tap'; target = 'menu > text:Server settings' }
-    Step $peer @{ op = 'tap'; target = 'text:Danger'; index = 0 }
+    Step $peer @{ op = 'reveal'; target = 'text:Delete server'; index = 0 }
     Step $peer @{ op = 'tap'; target = 'text:Delete server'; index = 0 }
     # index 1: index 0 is the dialog's TITLE, and tapping a title silently does
     # nothing and PASSES.
-    Step $peer @{ op = 'tap'; target = 'dialog > text:Delete server'; index = 1 }
+    Step $peer @{ op = 'tap'; target = 'dialog > text:Delete server'; index = 0 }
     Step $peer @{ op = 'wait_for'; gone = "server:$name"; timeout_ms = 60000 }
 }
 

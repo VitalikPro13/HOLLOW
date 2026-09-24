@@ -100,7 +100,8 @@ import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/ui/settings/server_settings_panel.dart';
+import 'package:hollow/src/core/providers/server_settings_provider.dart';
+import 'package:hollow/src/ui/server_settings/server_settings_place.dart';
 import 'package:hollow/src/ui/settings/settings_place.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
@@ -1426,12 +1427,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
         }
       },
       onOpenSettings: () {
-        final split = ref.read(splitViewProvider);
-        if (split.isSplit && selectedServer != null) {
-          _showServerSettingsDialog(context, selectedServer);
+        if (selectedServer == null) return;
+        if (ref.read(serverSettingsOpenProvider)) {
+          closeServerSettings(ref.read);
         } else {
-          ref.read(serverSettingsOpenProvider.notifier).state =
-              !ref.read(serverSettingsOpenProvider);
+          openServerSettings(ref.read, selectedServer.serverId);
         }
       },
       canManageChannels: selectedServer != null &&
@@ -1565,6 +1565,18 @@ class _HollowShellState extends ConsumerState<HollowShell>
       key: ValueKey(selectedPeerId),
       peerId: selectedPeerId,
     );
+  }
+
+  /// The server settings place when open, scoped to its own server when that
+  /// is not the selected one (opened from a split's right pane).
+  Widget? _serverSettingsPlace(bool open) {
+    if (!open) return null;
+    final target = ref.watch(serverSettingsTargetProvider);
+    if (target == null) return null;
+    const place = ServerSettingsPlace();
+    return target == ref.watch(selectedServerProvider)
+        ? place
+        : ForeignServerSettingsScope(serverId: target, child: place);
   }
 
   @override
@@ -1790,6 +1802,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
               const RepaintBoundary(child: ServerStrip()),
               if (ref.watch(settingsTabOpenProvider))
                 const Expanded(child: SettingsPlace())
+              else if (_serverSettingsPlace(settingsOpen) case final place?)
+                Expanded(child: place)
               else ...[
               _buildChannelSidebar(
                 peers: peers,
@@ -1811,20 +1825,16 @@ class _HollowShellState extends ConsumerState<HollowShell>
                     // pane's state per conversation.
                     child: Container(
                       key: ValueKey(_mainPaneKey(
-                          settingsOpen: settingsOpen,
-                          selectedServer: selectedServer,
                           selectedChannelId: selectedChannelId,
                           selectedPeerId: selectedPeerId)),
                       color: hollow.background,
-                      child: settingsOpen && selectedServer != null
-                          ? ServerSettingsPanel(server: selectedServer)
-                          : _buildChatOrEmpty(
-                              hollow: hollow,
-                              selectedPeerId: selectedPeerId,
-                              peers: peers,
-                              selectedChannelId: selectedChannelId,
-                              channels: channels,
-                            ),
+                      child: _buildChatOrEmpty(
+                        hollow: hollow,
+                        selectedPeerId: selectedPeerId,
+                        peers: peers,
+                        selectedChannelId: selectedChannelId,
+                        channels: channels,
+                      ),
                     ),
                   ),
                 ),
@@ -1845,8 +1855,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   /// Identifies what the main pane shows, so its state resets on a switch.
   String _mainPaneKey({
-    required bool settingsOpen,
-    required ServerInfo? selectedServer,
     required String? selectedChannelId,
     required String? selectedPeerId,
   }) {
@@ -1855,9 +1863,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (ref.watch(archiveTabOpenProvider)) return 'archive';
     if (ref.watch(conferenceTabOpenProvider)) return 'conference';
     if (ref.watch(shopTabOpenProvider)) return 'shop';
-    if (settingsOpen && selectedServer != null) {
-      return 'settings-${selectedServer.serverId}';
-    }
     return selectedChannelId ?? selectedPeerId ?? 'empty';
   }
 
@@ -1930,9 +1935,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         ? splitState.rightPane?.serverId
         : selectedServerId;
 
-    final singleKey = settingsOpen && selectedServer != null
-        ? 'settings-${selectedServer.serverId}'
-        : selectedChannelId ?? selectedPeerId ?? 'empty';
+    final singleKey = selectedChannelId ?? selectedPeerId ?? 'empty';
 
     return Column(
       children: [
@@ -1945,7 +1948,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         Expanded(
           child: ref.watch(settingsTabOpenProvider)
               ? const SettingsPlace()
-              : ClipRect(child: Row(
+              : _serverSettingsPlace(settingsOpen) ?? ClipRect(child: Row(
             children: [
               if (selectedServerId != null)
                 Row(
@@ -1976,8 +1979,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
                         selectedPeerId: selectedPeerId,
                         selectedChannelId: selectedChannelId,
                         channels: channels,
-                        settingsOpen: settingsOpen,
-                        selectedServer: selectedServer,
                       )
                     : RepaintBoundary(
                         key: const ValueKey('single'),
@@ -1988,21 +1989,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
                             key: ValueKey((
                               singleKey,
                               _mainPaneKey(
-                                  settingsOpen: settingsOpen,
-                                  selectedServer: selectedServer,
                                   selectedChannelId: selectedChannelId,
                                   selectedPeerId: selectedPeerId),
                             )),
                             color: hollow.background,
-                            child: settingsOpen && selectedServer != null
-                                ? ServerSettingsPanel(server: selectedServer)
-                                : _buildChatOrEmpty(
-                                    hollow: hollow,
-                                    selectedPeerId: selectedPeerId,
-                                    peers: peers,
-                                    selectedChannelId: selectedChannelId,
-                                    channels: channels,
-                                  ),
+                            child: _buildChatOrEmpty(
+                              hollow: hollow,
+                              selectedPeerId: selectedPeerId,
+                              peers: peers,
+                              selectedChannelId: selectedChannelId,
+                              channels: channels,
+                            ),
                           ),
                         ),
                       ),
@@ -2127,8 +2124,6 @@ class _SplitChatArea extends ConsumerStatefulWidget {
   final String? selectedPeerId;
   final String? selectedChannelId;
   final Map<String, ChannelInfo> channels;
-  final bool settingsOpen;
-  final ServerInfo? selectedServer;
 
   const _SplitChatArea({
     super.key,
@@ -2136,8 +2131,6 @@ class _SplitChatArea extends ConsumerStatefulWidget {
     required this.selectedPeerId,
     required this.selectedChannelId,
     required this.channels,
-    required this.settingsOpen,
-    required this.selectedServer,
   });
 
   @override
@@ -2192,18 +2185,11 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
                     color1: hollow.accent,
                     color2: const Color(0xFF6366F1),
                     child: Container(
-                      key: ValueKey(widget.settingsOpen &&
-                              widget.selectedServer != null
-                          ? 'settings-${widget.selectedServer!.serverId}'
-                          : widget.selectedChannelId ??
-                              widget.selectedPeerId ??
-                              'empty-left'),
+                      key: ValueKey(widget.selectedChannelId ??
+                          widget.selectedPeerId ??
+                          'empty-left'),
                       color: hollow.background,
-                      child: widget.settingsOpen &&
-                              widget.selectedServer != null
-                          ? ServerSettingsPanel(
-                              server: widget.selectedServer!)
-                          : _buildLeftChatOrEmpty(hollow),
+                      child: _buildLeftChatOrEmpty(hollow),
                     ),
                   ),
                 ),
@@ -2339,7 +2325,7 @@ class _RightPaneSidebarState extends ConsumerState<_RightPaneSidebar> {
       },
       onOpenSettings: () {
         if (selectedServer != null) {
-          _showServerSettingsDialog(context, selectedServer);
+          openServerSettings(ref.read, selectedServer.serverId);
         }
       },
       canManageChannels: selectedServer != null &&
@@ -2474,26 +2460,6 @@ class _RightChannelChatState extends State<_RightChannelChat> {
     }
     if (mounted) setState(() {});
   }
-}
-
-/// Shows server settings as a dialog popup (used during split view).
-void _showServerSettingsDialog(BuildContext context, ServerInfo server) {
-  showHollowDialog(
-    context: context,
-    // The zoom shrinks the logical viewport, so the surface's screen clamp
-    // keeps this fixed-size panel on-screen.
-    builder: (context) => HollowDialogSurface(
-      width: 800,
-      padded: false,
-      child: SizedBox(
-        height: 600,
-        child: ServerSettingsPanel(
-          server: server,
-          onClose: () => Navigator.of(context).pop(),
-        ),
-      ),
-    ),
-  );
 }
 
 /// Draggable vertical divider between split panes.
