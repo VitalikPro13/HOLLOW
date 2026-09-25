@@ -57,10 +57,11 @@ class MobileServerSettingsRoute extends ConsumerWidget {
                   : null,
           child: SettingsDensity(
             touch: true,
-            child: SingleChildScrollView(
+            child: SettingsScrollView(
               padding: const EdgeInsets.fromLTRB(HollowSpacing.lg,
                   HollowSpacing.sm, HollowSpacing.lg, HollowSpacing.xl),
-              child: serverSettingsPageFor(page, serverId),
+              slivers: page.slivers,
+              page: serverSettingsPageFor(page, serverId),
             ),
           ),
         );

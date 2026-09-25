@@ -43,6 +43,10 @@ extension ServerSettingsPageMeta on ServerSettingsPage {
         ServerSettingsPage.notifications => LucideIcons.bell,
       };
 
+  /// The page is a `SettingsSliverPage`: Members builds its rows lazily, so a
+  /// thousand-member server scrolls without building a thousand rows.
+  bool get slivers => this == ServerSettingsPage.members;
+
   /// Profile and Notifications are about how the server treats YOU.
   bool get isYou =>
       this == ServerSettingsPage.profile ||

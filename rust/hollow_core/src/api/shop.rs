@@ -128,6 +128,9 @@ pub struct ShopListing {
     /// opened whichever listing the shop found first. The shop still redirects an old
     /// hash link, single before set.
     pub item_url: String,
+    /// The artist's own Ko-fi item, where the piece is actually sold, `""` when the
+    /// catalog names none. Rebuilt from the item code, never the remote string.
+    pub buy_url: String,
 }
 
 /// The public catalog as the app consumes it.
@@ -211,6 +214,9 @@ struct RawListing {
     /// key. Absent on listings from before phase 2.
     #[serde(default, deserialize_with = "lenient")]
     item: String,
+    /// `https://ko-fi.com/s/<code>`, absent on shops from before the Ko-fi rail.
+    #[serde(default, deserialize_with = "lenient")]
+    buy_url: String,
 }
 
 #[frb(ignore)]
@@ -343,6 +349,20 @@ fn valid_slug(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// The Ko-fi item link rebuilt from its code, or `""`. Anything but Ko-fi's own
+/// item address is refused: the app opens this in the system browser on a tap.
+fn kofi_buy_url(raw: &str) -> String {
+    let Some(code) = raw.trim().strip_prefix("https://ko-fi.com/s/") else {
+        return String::new();
+    };
+    let code = code.strip_suffix('/').unwrap_or(code);
+    if (4..=32).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        format!("https://ko-fi.com/s/{code}")
+    } else {
+        String::new()
+    }
+}
+
 /// Trim and cap a remote string at `max` CHARACTERS, never bytes: a cap that splits a
 /// multi-byte character is a panic waiting for its first non-Latin title.
 fn clamp(s: &str, max: usize) -> String {
@@ -469,6 +489,7 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
             // redirects to the listing it best matches.
             format!("{origin}/item/{display_hash}")
         },
+        buy_url: kofi_buy_url(&raw.buy_url),
         bundle: kinds.len() >= 2,
         slug,
         title,
@@ -1822,6 +1843,24 @@ mod tests {
     }
 
     #[test]
+    fn buy_url_is_only_ever_a_kofi_item() {
+        assert_eq!(kofi_buy_url("https://ko-fi.com/s/a1b2c3d4e5"), "https://ko-fi.com/s/a1b2c3d4e5");
+        assert_eq!(kofi_buy_url(" https://ko-fi.com/s/A1b2C3/ "), "https://ko-fi.com/s/A1b2C3");
+        for bad in [
+            "",
+            "http://ko-fi.com/s/a1b2c3d4e5",
+            "https://ko-fi.com.evil.example/s/a1b2c3",
+            "https://evil.example/?https://ko-fi.com/s/a1b2c3",
+            "https://ko-fi.com/s/a1b",
+            "https://ko-fi.com/s/a1b2c3?next=https://evil.example",
+            "https://ko-fi.com/s/a1b2c3/../../logout",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(kofi_buy_url(bad), "", "{bad} must be refused");
+        }
+    }
+
+    #[test]
     fn catalog_parses_the_live_shape_tolerantly() {
         let good = h("ab");
         let anim = h("cd");
@@ -1841,6 +1880,7 @@ mod tests {
                   "license": "Personal use",
                   "created_at": "2026-08-01T00:00:00.000Z",
                   "sales_this_week": 12,
+                  "buy_url": "https://ko-fi.com/s/a1b2c3d4e5",
                   "artist": {{
                     "slug": "nadia",
                     "display_name": "Nadia",
@@ -1904,6 +1944,7 @@ mod tests {
             frame.item_url, "https://shop.example/item/gilded-frame",
             "the item link is the listing's own slug, never the art's hash"
         );
+        assert_eq!(frame.buy_url, "https://ko-fi.com/s/a1b2c3d4e5");
         assert!(!frame.bundle);
 
         let derived = &cat.listings[1];

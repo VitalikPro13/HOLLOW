@@ -31,10 +31,6 @@ import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Rows drawn before the list asks for a search: the host scrolls the whole
-/// page, so a thousand-member server must not build a thousand rows.
-const int _kMaxRows = 100;
-
 /// Peer ids banned from a server. Invalidated after an unban.
 final bannedMembersProvider = FutureProvider.autoDispose
     .family<List<String>, String>((ref, serverId) async {
@@ -84,7 +80,8 @@ String _shortId(String id) =>
     id.length > 12 ? '${id.substring(0, 4)}…${id.substring(id.length - 4)}' : id;
 
 /// Everyone in the server: moderation first for those who can act on it, then
-/// one searchable list filtered by role. A big server stays one list.
+/// one searchable list filtered by role. A big server stays one list, built
+/// lazily as it scrolls (a `SettingsSliverPage`).
 class MembersPage extends ConsumerStatefulWidget {
   final String serverId;
   const MembersPage({super.key, required this.serverId});
@@ -122,6 +119,7 @@ class _MembersPageState extends ConsumerState<MembersPage> {
         serverDisplayNameFor(profiles, m.peerId, nickname: m.nickname);
 
     Widget everyone;
+    var shown = const <crdt_api.MemberFfi>[];
     if (members == null) {
       everyone = membersAsync.hasError
           ? Text('Could not load the members',
@@ -139,7 +137,7 @@ class _MembersPageState extends ConsumerState<MembersPage> {
           return folded != 0 ? folded : a.peerId.compareTo(b.peerId);
         });
       final q = _query.trim().toLowerCase();
-      final shown = [
+      shown = [
         for (final m in sorted)
           if (_filter.matches(m.role) &&
               (q.isEmpty || nameOf(m).toLowerCase().contains(q)))
@@ -190,28 +188,32 @@ class _MembersPageState extends ConsumerState<MembersPage> {
               dense: true,
               title: 'Nobody here matches that',
               description: 'Check the spelling, or pick All.',
-            )
-          else ...[
-            for (final m in shown.take(_kMaxRows))
-              _MemberRow(
-                key: ValueKey(m.peerId),
-                serverId: _sid,
-                member: m,
-                name: nameOf(m),
-                isMe: m.peerId == me,
-                canAct: m.peerId != me && canManageRole(myRole, m.role),
-                myRole: myRole,
-              ),
-            if (shown.length > _kMaxRows)
-              SettingsNote('Showing $_kMaxRows of ${shown.length}. Search to '
-                  'find someone further down.'),
-          ],
+            ),
         ],
       );
     }
 
-    return SettingsPage(
+    final indexOf = {for (var i = 0; i < shown.length; i++) shown[i].peerId: i};
+    return SettingsSliverPage(
       title: 'Members',
+      list: SliverList.builder(
+        itemCount: shown.length,
+        // A filter or search moves a row to a new index; its key finds it.
+        findChildIndexCallback: (key) =>
+            key is ValueKey<String> ? indexOf[key.value] : null,
+        itemBuilder: (context, i) {
+          final m = shown[i];
+          return _MemberRow(
+            key: ValueKey(m.peerId),
+            serverId: _sid,
+            member: m,
+            name: nameOf(m),
+            isMe: m.peerId == me,
+            canAct: m.peerId != me && canManageRole(myRole, m.role),
+            myRole: myRole,
+          );
+        },
+      ),
       children: [
         if (canModerate) _ModerationSection(serverId: _sid),
         SettingsSection(

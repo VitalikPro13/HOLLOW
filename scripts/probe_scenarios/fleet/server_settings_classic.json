@@ -1,6 +1,6 @@
 {
  "_": [
-  "Server settings in the Classic layout: the rail takes the channel list's place, the server strip stays.",
+  "Settings and Server settings in the Classic layout: the rail takes the channel list's place, the server strip stays, and the rail keeps your user bar at its foot.",
   "One throwaway peer; switches to Classic and back, and deletes its server in cleanup.",
   "run: powershell -File scripts\\fleet.ps1 -Scenario server_settings_classic -Peers a"
  ],
@@ -19,6 +19,7 @@
   {"peer": "a", "op": "wait", "ms": 800},
   {"peer": "a", "op": "tap", "target": "text:Classic", "index": 0},
   {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "shot", "name": "ssc-00-classic-settings"},
   {"peer": "a", "op": "key", "value": "escape"},
   {"peer": "a", "op": "wait", "ms": 1200},
 

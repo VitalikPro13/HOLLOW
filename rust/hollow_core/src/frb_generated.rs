@@ -18062,6 +18062,7 @@ impl SseDecode for crate::api::shop::ShopListing {
         let mut var_wide = <bool>::sse_decode(deserializer);
         let mut var_credentialItem = <String>::sse_decode(deserializer);
         let mut var_itemUrl = <String>::sse_decode(deserializer);
+        let mut var_buyUrl = <String>::sse_decode(deserializer);
         return crate::api::shop::ShopListing {
             slug: var_slug,
             title: var_title,
@@ -18082,6 +18083,7 @@ impl SseDecode for crate::api::shop::ShopListing {
             wide: var_wide,
             credential_item: var_credentialItem,
             item_url: var_itemUrl,
+            buy_url: var_buyUrl,
         };
     }
 }
@@ -22719,6 +22721,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::shop::ShopListing {
             self.wide.into_into_dart().into_dart(),
             self.credential_item.into_into_dart().into_dart(),
             self.item_url.into_into_dart().into_dart(),
+            self.buy_url.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -26219,6 +26222,7 @@ impl SseEncode for crate::api::shop::ShopListing {
         <bool>::sse_encode(self.wide, serializer);
         <String>::sse_encode(self.credential_item, serializer);
         <String>::sse_encode(self.item_url, serializer);
+        <String>::sse_encode(self.buy_url, serializer);
     }
 }
 

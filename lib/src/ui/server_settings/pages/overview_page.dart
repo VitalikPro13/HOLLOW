@@ -223,13 +223,12 @@ class _OverviewPageState extends ConsumerState<OverviewPage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
-                touch
-                    ? preview
-                    : Align(
-                        alignment: Alignment.centerLeft,
-                        child: SizedBox(
-                            width: _InvitePreview.width, child: preview),
-                      ),
+                // A phone too keeps it at the desktop's width: full width it
+                // reads as a banner, not a preview.
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(width: _InvitePreview.width, child: preview),
+                ),
                 const SizedBox(height: HollowSpacing.lg),
                 editor,
               ],

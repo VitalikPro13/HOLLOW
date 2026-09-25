@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `announce_support_creds`, `apply_hidden`, `badge_on`, `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `drop_other_twitch_owner_creds`, `fetch_bounded`, `fetch_pack`, `file_for_kind`, `forget_own_cred`, `forget_twitch_owner_creds`, `hidden_on`, `http`, `keep_own_cred_row`, `keep_own_credential`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `lookup_refusal`, `lookup_remote`, `lookup_status_is_dead`, `mint_twitch_credential`, `my_master_peer_id`, `own_credential_union`, `own_twitch_owner_entry`, `parse_catalog`, `post_json_bounded`, `price_label`, `primary_kind_of`, `published_creds_json`, `read_bounded`, `redeem_remote`, `removed_items`, `republish_support_creds`, `republish_to_row`, `sanitize_file`, `sanitize_listing`, `save_removed_items`, `shop_client`, `shop_refusal`, `support_badge_preference`, `twitch_post`, `twitch_refusal`, `twitch_request_body`, `union_json`, `valid_redeem_code`, `valid_slug`, `verify_twitch_owner_with`
+// These functions are ignored because they are not marked as `pub`: `announce_support_creds`, `apply_hidden`, `badge_on`, `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `drop_other_twitch_owner_creds`, `fetch_bounded`, `fetch_pack`, `file_for_kind`, `forget_own_cred`, `forget_twitch_owner_creds`, `hidden_on`, `http`, `keep_own_cred_row`, `keep_own_credential`, `kind_of_role`, `kind_roles`, `kofi_buy_url`, `lenient_vec`, `lenient`, `lookup_refusal`, `lookup_remote`, `lookup_status_is_dead`, `mint_twitch_credential`, `my_master_peer_id`, `own_credential_union`, `own_twitch_owner_entry`, `parse_catalog`, `post_json_bounded`, `price_label`, `primary_kind_of`, `published_creds_json`, `read_bounded`, `redeem_remote`, `removed_items`, `republish_support_creds`, `republish_to_row`, `sanitize_file`, `sanitize_listing`, `save_removed_items`, `shop_client`, `shop_refusal`, `support_badge_preference`, `twitch_post`, `twitch_refusal`, `twitch_request_body`, `union_json`, `valid_redeem_code`, `valid_slug`, `verify_twitch_owner_with`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`, `RawLookupListing`, `RawLookup`, `RawRedeem`, `RawTwitchKey`, `TwitchVerifier`, `UnionEntry`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`, `default`, `default`, `default`, `default`
@@ -463,6 +463,10 @@ class ShopListing {
   /// hash link, single before set.
   final String itemUrl;
 
+  /// The artist's own Ko-fi item, where the piece is actually sold, `""` when the
+  /// catalog names none. Rebuilt from the item code, never the remote string.
+  final String buyUrl;
+
   const ShopListing({
     required this.slug,
     required this.title,
@@ -483,6 +487,7 @@ class ShopListing {
     required this.wide,
     required this.credentialItem,
     required this.itemUrl,
+    required this.buyUrl,
   });
 
   @override
@@ -505,7 +510,8 @@ class ShopListing {
       bundle.hashCode ^
       wide.hashCode ^
       credentialItem.hashCode ^
-      itemUrl.hashCode;
+      itemUrl.hashCode ^
+      buyUrl.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -530,5 +536,6 @@ class ShopListing {
           bundle == other.bundle &&
           wide == other.wide &&
           credentialItem == other.credentialItem &&
-          itemUrl == other.itemUrl;
+          itemUrl == other.itemUrl &&
+          buyUrl == other.buyUrl;
 }

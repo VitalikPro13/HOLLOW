@@ -206,7 +206,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 307,
+    baseline: 306,
   ),
   _Rule(
     id: 'material-colors',
@@ -214,7 +214,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 155,
+    baseline: 154,
   ),
   _Rule(
     id: 'color-literal',

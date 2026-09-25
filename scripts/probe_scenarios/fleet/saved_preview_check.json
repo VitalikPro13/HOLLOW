@@ -1,0 +1,14 @@
+{
+ "_": [
+  "Saved messages preview on Home after a restart, step 2 of 2: boot on the SAME data and look at Home",
+  "before touching anything. The row must carry the note and its time without being opened first.",
+  "run: fleet.ps1 -Scenario saved_preview_check -Peers a -ReuseData"
+ ],
+ "peers": ["a"],
+ "steps": [
+  {"peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
+  {"peer": "a", "op": "wait", "ms": 2500},
+  {"peer": "a", "op": "shot", "name": "saved-01-home-after-restart"},
+  {"peer": "a", "op": "wait_for", "target": "contains:note to self", "timeout_ms": 5000}
+ ]
+}

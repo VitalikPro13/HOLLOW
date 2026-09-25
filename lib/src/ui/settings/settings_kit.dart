@@ -85,6 +85,85 @@ class SettingsPage extends StatelessWidget {
   }
 }
 
+/// A [SettingsPage] that ends in a list too long to build at once (a
+/// thousand members): [children] as on any page, then the [list] sliver under
+/// the last of them. Its host must scroll it with `slivers: true`.
+class SettingsSliverPage extends StatelessWidget {
+  final String? title;
+  final String? intro;
+  final List<Widget> children;
+  final Widget list;
+
+  const SettingsSliverPage({
+    super.key,
+    this.title,
+    this.intro,
+    required this.children,
+    required this.list,
+  });
+
+  @override
+  Widget build(BuildContext context) => SliverMainAxisGroup(
+        slivers: [
+          SliverToBoxAdapter(
+            child: SettingsPage(title: title, intro: intro, children: children),
+          ),
+          list,
+        ],
+      );
+}
+
+/// The scroll view every settings host puts its page in, desktop and phone.
+/// [slivers] is for a [SettingsSliverPage]; any other page is one box.
+class SettingsScrollView extends StatelessWidget {
+  final Widget page;
+  final bool slivers;
+  final EdgeInsets padding;
+
+  /// The page column's widest, held to the leading edge.
+  final double? maxWidth;
+  final ScrollController? controller;
+
+  const SettingsScrollView({
+    super.key,
+    required this.page,
+    required this.padding,
+    this.slivers = false,
+    this.maxWidth,
+    this.controller,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (slivers) {
+      return CustomScrollView(
+        controller: controller,
+        slivers: [
+          SliverPadding(
+            padding: padding,
+            sliver: maxWidth == null
+                ? page
+                : SliverConstrainedCrossAxis(maxExtent: maxWidth!, sliver: page),
+          ),
+        ],
+      );
+    }
+    return SingleChildScrollView(
+      controller: controller,
+      padding: padding,
+      child: maxWidth == null
+          ? page
+          : Align(
+              alignment: Alignment.topLeft,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxWidth!),
+                child: page,
+              ),
+            ),
+    );
+  }
+}
+
 /// Marks a page's own sections: their spacing comes from the page's dividers,
 /// so they drop their own top gap. A section nested inside one keeps it.
 class _SettingsTopLevel extends InheritedWidget {

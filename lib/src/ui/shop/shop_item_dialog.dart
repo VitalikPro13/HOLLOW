@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
@@ -6,36 +7,63 @@ import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/shop/shop_dashboard.dart' show ShopArtPreview;
+import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
+import 'package:hollow/src/ui/shop/shop_art.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// One listing, big enough to judge: the art, who drew it, what the licence
-/// says, and either Buy (which leaves for the browser) or Wear it.
-Future<void> showShopItemDialog(
-  BuildContext context,
-  shop.ShopListing listing,
-) {
+/// One listing, shown on your own profile: who made it, what it costs, and
+/// either Buy (the artist's Ko-fi, in the browser) or Wear it. A dialog on
+/// desktop, a sheet on a phone.
+Future<void> showShopItem(BuildContext context, shop.ShopListing listing) {
+  if (isShopPhone) {
+    return showHollowSheet<void>(
+      context: context,
+      scrollControlled: true,
+      builder: (_) => _ShopItemView(listing: listing, sheet: true),
+    );
+  }
   return showHollowDialog<void>(
     context: context,
-    builder: (_) => _ShopItemDialog(listing: listing),
+    builder: (_) => _ShopItemView(listing: listing, sheet: false),
   );
 }
 
-class _ShopItemDialog extends ConsumerStatefulWidget {
-  final shop.ShopListing listing;
+const double _kTryOnWidth = 280;
 
-  const _ShopItemDialog({required this.listing});
+/// Touch layout: a sheet instead of a dialog, full-width buttons. Read from
+/// the target platform so a widget test can render the phone.
+bool get isShopPhone =>
+    defaultTargetPlatform == TargetPlatform.android ||
+    defaultTargetPlatform == TargetPlatform.iOS;
 
-  @override
-  ConsumerState<_ShopItemDialog> createState() => _ShopItemDialogState();
+String _kindLabel(shop.ShopListing listing) {
+  if (listing.bundle) return 'Bundle';
+  return switch (listing.primaryKind) {
+    'avatar' => 'Avatar',
+    'frame' => 'Frame',
+    'banner' => 'Banner',
+    _ => 'Art',
+  };
 }
 
-class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
+class _ShopItemView extends ConsumerStatefulWidget {
+  final shop.ShopListing listing;
+  final bool sheet;
+
+  const _ShopItemView({required this.listing, required this.sheet});
+
+  @override
+  ConsumerState<_ShopItemView> createState() => _ShopItemViewState();
+}
+
+class _ShopItemViewState extends ConsumerState<_ShopItemView> {
   bool _busy = false;
 
   /// The imported item that covers EVERY file this listing sells, if any. One
@@ -50,21 +78,29 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
     return null;
   }
 
+  bool get _sellsOnKofi => widget.listing.buyUrl.isNotEmpty;
+
   Future<void> _buy() async {
-    final uri = Uri.tryParse(widget.listing.itemUrl);
+    // Straight to the artist's Ko-fi item: the shop's own page would only
+    // show the same piece again and send the buyer on.
+    final url = _sellsOnKofi ? widget.listing.buyUrl : widget.listing.itemUrl;
+    final uri = Uri.tryParse(url);
     if (uri == null) return;
-    setState(() => _busy = true);
     try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw const FormatException('No browser took the link');
+      }
       if (!mounted) return;
-      HollowToast.show(context, 'Opening the shop in your browser',
+      HollowToast.show(
+          context,
+          _sellsOnKofi
+              ? 'Opening Ko-fi in your browser'
+              : 'Opening the shop in your browser',
           type: HollowToastType.info);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'That link could not be opened: $e',
+      HollowToast.show(context, 'That link could not be opened',
           type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -73,13 +109,15 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
     try {
       // Wear what THIS listing sells, from the item that covers it: wearing a
       // single avatar out of a bundle's pack must not put the frame on too.
-      final kinds = item.kinds.toSet().intersection(widget.listing.kinds.toSet());
+      final kinds =
+          item.kinds.toSet().intersection(widget.listing.kinds.toSet());
       await ref
           .read(ownedArtProvider.notifier)
           .wear(item, kinds.isEmpty ? item.kinds.toSet() : kinds);
       if (!mounted) return;
       HollowToast.show(context, 'Wearing ${item.title}',
           type: HollowToastType.success);
+      Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
       final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
@@ -90,43 +128,14 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
   }
 
   Future<void> _openArtist() async {
-    final url = widget.listing.artist.url;
-    if (url.isEmpty) return;
-    final uri = Uri.tryParse(url);
+    final uri = Uri.tryParse(widget.listing.artist.url);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  Widget _preview(String kind) {
-    if (kind == 'banner') {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: HollowSpacing.md),
-        child: AspectRatio(
-          aspectRatio: 2.5,
-          child: ShopArtPreview(
-            listing: widget.listing,
-            size: 128,
-            animate: true,
-            kindOverride: kind,
-          ),
-        ),
-      );
-    }
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HollowSpacing.md),
-      child: Center(
-        child: SizedBox(
-          width: 128,
-          height: 128,
-          child: ShopArtPreview(
-            listing: widget.listing,
-            size: 128,
-            animate: true,
-            kindOverride: kind,
-          ),
-        ),
-      ),
-    );
+  void _redeem() {
+    Navigator.of(context).pop();
+    showRedeemEntryDialog(context);
   }
 
   @override
@@ -138,110 +147,178 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
     // The library, which anyone could have handed over, only decides whether
     // Wear it is offered; Buy stays until the piece is bought.
     final bought = listing.credentialItem.isNotEmpty &&
-        ref.watch(shop.ownCredentialItemsProvider).contains(listing.credentialItem);
+        ref
+            .watch(shop.ownCredentialItemsProvider)
+            .contains(listing.credentialItem);
     // Watched, not read: importing the pack while this is open flips the action
     // from Buy to Wear it.
     ref.watch(ownedArtProvider);
     final owned = _ownedItem();
+    // Never a price or a Buy button on a store build; the page is already gone
+    // there, and this is the second lock.
+    final showBuy = available && !bought;
+    final buyLabel = Text(_sellsOnKofi ? 'Buy on Ko-fi' : 'Buy');
+    const buyIcon = Icon(LucideIcons.externalLink, size: 14);
+    final touch = widget.sheet;
 
-    final kinds = listing.bundle && listing.kinds.isNotEmpty
-        ? listing.kinds
-        : [
-            listing.primaryKind.isEmpty
-                ? (listing.kinds.isEmpty ? 'avatar' : listing.kinds.first)
-                : listing.primaryKind
-          ];
+    final Widget? buy = !showBuy
+        ? null
+        : owned != null
+            // Beside Wear it, Buy is the quieter button.
+            ? HollowButton.outline(
+                onPressed: _busy ? null : _buy,
+                touch: touch,
+                expand: touch,
+                icon: buyIcon,
+                child: buyLabel,
+              )
+            : HollowButton.filled(
+                onPressed: _busy ? null : _buy,
+                touch: touch,
+                expand: touch,
+                icon: buyIcon,
+                child: buyLabel,
+              );
+    final Widget? wear = owned == null
+        ? null
+        : HollowButton.filled(
+            onPressed: _busy ? null : () => _wear(owned),
+            loading: _busy,
+            touch: touch,
+            expand: touch,
+            child: const Text('Wear it'),
+          );
+    final Widget? redeem = showBuy && owned == null
+        ? HollowButton.ghost(
+            onPressed: _redeem,
+            touch: touch,
+            expand: touch,
+            child: const Text('Redeem a code'),
+          )
+        : null;
+
+    final tryOn = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ShopTryOnCard(listing: listing),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          listing.primaryKind == 'frame' && !listing.bundle
+              ? 'On your avatar, as people will see it'
+              : 'On your profile, as people will see it',
+          style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
+        ),
+      ],
+    );
+
+    final details = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            HollowBadge(_kindLabel(listing)),
+            if (bought) ...[
+              const SizedBox(width: HollowSpacing.xs),
+              const HollowBadge('Owned', kind: HollowBadgeKind.success),
+            ],
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        if (listing.artist.url.isEmpty)
+          Text('by ${listing.artist.displayName}',
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textSecondary))
+        else
+          HollowTextLink('by ${listing.artist.displayName}',
+              onTap: _openArtist),
+        if (available) ...[
+          const SizedBox(height: HollowSpacing.md),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              if (listing.wasLabel.isNotEmpty) ...[
+                Text(
+                  listing.wasLabel,
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textTertiary,
+                    decoration: TextDecoration.lineThrough,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+              ],
+              Text(listing.priceLabel,
+                  style: HollowTypography.heading
+                      .copyWith(color: hollow.accentText)),
+            ],
+          ),
+        ],
+        if (listing.description.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.md),
+          HollowDialogText(listing.description),
+        ],
+        if (listing.license.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Text(listing.license,
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.textTertiary)),
+        ],
+        if (bought && owned == null) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Text(
+            'You bought this. Import the pack from your receipt to wear it.',
+            style: HollowTypography.bodySmall
+                .copyWith(color: hollow.textSecondary),
+          ),
+        ],
+      ],
+    );
+
+    if (widget.sheet) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.only(
+          left: HollowSpacing.lg,
+          right: HollowSpacing.lg,
+          bottom: HollowSpacing.lg,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            tryOn,
+            const SizedBox(height: HollowSpacing.lg),
+            Text(listing.title,
+                style: HollowTypography.heading
+                    .copyWith(color: hollow.textPrimary)),
+            const SizedBox(height: HollowSpacing.sm),
+            details,
+            const SizedBox(height: HollowSpacing.xl),
+            // Primary first under the thumb; the quiet alternative below it.
+            for (final button in [wear, buy, redeem].whereType<Widget>()) ...[
+              button,
+              const SizedBox(height: HollowSpacing.sm),
+            ],
+          ],
+        ),
+      );
+    }
 
     return HollowDialog(
       title: listing.title,
       showClose: true,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
+      width: 680,
+      content: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          for (final kind in kinds) _preview(kind),
-          if (listing.description.isNotEmpty) ...[
-            HollowDialogText(listing.description),
-            const SizedBox(height: HollowSpacing.md),
-          ],
-          if (listing.artist.url.isEmpty)
-            Text(
-              'by ${listing.artist.displayName}',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary),
-            )
-          else
-            Align(
-              alignment: Alignment.centerLeft,
-              child: HollowPressable(
-                onTap: _openArtist,
-                semanticButton: false,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: EdgeInsets.zero,
-                child: Text(
-                  'by ${listing.artist.displayName}',
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.accentText),
-                ),
-              ),
-            ),
-          if (listing.license.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.xs),
-            Text(
-              listing.license,
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textTertiary),
-            ),
-          ],
-          if (available) ...[
-            const SizedBox(height: HollowSpacing.md),
-            Row(
-              children: [
-                if (listing.wasLabel.isNotEmpty) ...[
-                  Text(
-                    listing.wasLabel,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textTertiary,
-                      decoration: TextDecoration.lineThrough,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                ],
-                Text(
-                  listing.priceLabel,
-                  style: HollowTypography.subheading
-                      .copyWith(color: hollow.accentText),
-                ),
-              ],
-            ),
-          ],
+          SizedBox(width: _kTryOnWidth, child: tryOn),
+          const SizedBox(width: HollowSpacing.xl),
+          Expanded(child: details),
         ],
       ),
-      actions: [
-        // Never a price or a Buy button on a store build; the dashboard is
-        // already gone there, and this is the second lock.
-        if (available) ...[
-          // Beside Wear it, Buy is the quieter button.
-          if (!bought)
-            owned != null
-                ? HollowButton.outline(
-                    onPressed: _busy ? null : _buy,
-                    icon: const Icon(LucideIcons.externalLink, size: 14),
-                    child: const Text('Buy'),
-                  )
-                : HollowButton.filled(
-                    onPressed: _busy ? null : _buy,
-                    icon: const Icon(LucideIcons.externalLink, size: 14),
-                    child: const Text('Buy'),
-                  ),
-          if (owned != null)
-            HollowButton.filled(
-              onPressed: _busy ? null : () => _wear(owned),
-              loading: _busy,
-              child: const Text('Wear it'),
-            ),
-        ],
-      ],
+      leadingActions: [?redeem],
+      actions: [?buy, ?wear],
     );
   }
 }

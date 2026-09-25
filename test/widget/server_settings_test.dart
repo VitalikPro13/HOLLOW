@@ -1,7 +1,8 @@
 /// A server's settings as a place: the rail shows only the pages the viewer's
 /// permissions open, the default page follows them, text edits raise the one
 /// unsaved bar, a channel row says only what differs, the roles table locks
-/// the columns above you, and Members puts moderation first.
+/// the columns above you, Members puts moderation first and builds a thousand
+/// rows lazily, and Classic keeps your user bar at the rail's foot.
 library;
 
 import 'package:flutter/material.dart';
@@ -12,18 +13,22 @@ import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
+import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/ui/server_settings/pages/channels_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/members_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/roles_page.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_place.dart';
-import 'package:hollow/src/ui/settings/settings_place.dart';
+import 'package:hollow/src/ui/settings/settings_place_frame.dart';
+import 'package:hollow/src/ui/shell/user_bar.dart';
 
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
@@ -35,6 +40,14 @@ const _admin = Permission.all;
 class _Servers extends ServerListNotifier {
   @override
   Map<String, ServerInfo> build() => testServers;
+}
+
+class _Layout extends LayoutModeNotifier {
+  final LayoutMode mode;
+  _Layout(this.mode);
+
+  @override
+  LayoutMode build() => mode;
 }
 
 crdt_api.MemberFfi _m(String id, String name, String role,
@@ -60,14 +73,19 @@ List<Override> _overrides({
   required int perms,
   required String role,
   Map<String, String> settings = const {},
+  List<crdt_api.MemberFfi>? members,
+  LayoutMode? layout,
 }) =>
     hollowTestOverrides(extra: [
+      if (layout != null)
+        layoutModeProvider.overrideWith(() => _Layout(layout)),
       serverListProvider.overrideWith(_Servers.new),
       myPermissionsProvider(kServerId1).overrideWith((_) async => perms),
       myRoleProvider(kServerId1).overrideWith((_) async => role),
       serverSettingProvider
           .overrideWith((ref, a) async => settings[a.key] ?? ''),
-      serverMembersProvider(kServerId1).overrideWith((_) async => _members),
+      serverMembersProvider(kServerId1)
+          .overrideWith((_) async => members ?? _members),
       serverLabelsProvider(kServerId1)
           .overrideWith((_) async => const <crdt_api.LabelFfi>[]),
       mutedMembersProvider(kServerId1)
@@ -97,6 +115,8 @@ Future<ProviderContainer> _pumpPlace(
   required int perms,
   required String role,
   ServerSettingsPage? page,
+  List<crdt_api.MemberFfi>? members,
+  LayoutMode? layout,
 }) async {
   tester.view.physicalSize = const Size(1280, 900);
   tester.view.devicePixelRatio = 1.0;
@@ -105,7 +125,8 @@ Future<ProviderContainer> _pumpPlace(
     tester.view.resetDevicePixelRatio();
   });
   final container = ProviderContainer(
-      overrides: _overrides(perms: perms, role: role));
+      overrides: _overrides(
+          perms: perms, role: role, members: members, layout: layout));
   addTearDown(container.dispose);
   container.read(selectedServerProvider.notifier).state = kServerId1;
   openServerSettings(container.read, kServerId1, page: page);
@@ -135,6 +156,52 @@ String? _selectedRail(WidgetTester tester) => tester
     .firstOrNull
     ?.label;
 
+/// A server of [n] people: you as the owner, then members "Member 0000" on.
+List<crdt_api.MemberFfi> _crowd(int n) => [
+      _m(kLocalPeerId, 'Vitalik', 'owner'),
+      for (var i = 0; i < n - 1; i++)
+        _m('p_$i', 'Member ${i.toString().padLeft(4, '0')}', 'member'),
+    ];
+
+/// The phone's server settings list, with [page] pushed from it.
+Future<void> _pumpPhonePage(
+  WidgetTester tester, {
+  required int perms,
+  required String role,
+  required String page,
+  List<crdt_api.MemberFfi>? members,
+}) async {
+  tester.view.physicalSize = const Size(390, 844);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+  final container = ProviderContainer(
+      overrides: _overrides(perms: perms, role: role, members: members));
+  addTearDown(container.dispose);
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp(
+        theme: HollowThemeData.dark(),
+        home: const MobileServerSettingsRoute(serverId: kServerId1),
+      ),
+    ),
+  );
+  await tester.pump();
+  await tester.pump();
+  await tester.tap(find.text(page));
+  await tester.pump();
+  await tester.pump(const Duration(seconds: 1));
+}
+
+/// The page's own scrollable, never the rail's.
+Finder _pageScrollable() => find
+    .descendant(
+        of: find.byType(CustomScrollView), matching: find.byType(Scrollable))
+    .first;
+
 void main() {
   group('rail', () {
     testWidgets('a plain member sees their own pages, starting on Profile',
@@ -162,6 +229,31 @@ void main() {
       ]);
       expect(_selectedRail(tester), 'Overview');
       expect(find.text('Server settings'), findsOneWidget);
+    });
+
+    testWidgets('Classic keeps your user bar at the foot of the rail',
+        (tester) async {
+      await _pumpPlace(tester,
+          perms: _member, role: 'member', layout: LayoutMode.classic);
+      final bar = find.descendant(
+          of: find.byType(SettingsPlaceFrame), matching: find.byType(UserBar));
+      expect(bar, findsOneWidget);
+      // Under the rail, never under the page.
+      expect(tester.getTopRight(bar).dx,
+          lessThanOrEqualTo(tester.getTopRight(find.byType(SettingsRail)).dx));
+      expect(
+          find.descendant(
+              of: bar, matching: find.bySemanticsLabel('Settings')),
+          findsWidgets);
+      // At the foot: below the last rail item.
+      expect(tester.getTopLeft(bar).dy,
+          greaterThan(tester.getBottomLeft(find.text('Notifications')).dy));
+    });
+
+    testWidgets('Dock leaves the user bar to the dock', (tester) async {
+      await _pumpPlace(tester,
+          perms: _member, role: 'member', layout: LayoutMode.dock);
+      expect(find.byType(UserBar), findsNothing);
     });
 
     testWidgets('Escape closes the place', (tester) async {
@@ -269,6 +361,41 @@ void main() {
       expect(find.text('Nobody here matches that'), findsOneWidget);
     });
 
+    testWidgets('a thousand members build lazily, with no cap note',
+        (tester) async {
+      await _pumpPlace(tester,
+          perms: _owner,
+          role: 'owner',
+          page: ServerSettingsPage.members,
+          members: _crowd(1000));
+      await tester.pump();
+      expect(find.text('1000'), findsWidgets);
+      expect(find.text('Member 0000'), findsOneWidget);
+      expect(find.textContaining('Search to'), findsNothing);
+      // Only what the viewport shows is built.
+      expect(find.byType(HollowAvatar).evaluate().length, lessThan(60));
+      expect(find.text('Member 0998'), findsNothing);
+
+      await tester.scrollUntilVisible(find.text('Member 0998'), 2000,
+          scrollable: _pageScrollable());
+      expect(find.text('Member 0998'), findsOneWidget);
+      expect(find.text('Member 0000'), findsNothing);
+      expect(find.textContaining('Search to'), findsNothing);
+    });
+
+    testWidgets('search still narrows a thousand to one', (tester) async {
+      await _pumpPlace(tester,
+          perms: _owner,
+          role: 'owner',
+          page: ServerSettingsPage.members,
+          members: _crowd(1000));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField).first, 'member 0998');
+      await tester.pump();
+      expect(find.text('Member 0998'), findsOneWidget);
+      expect(find.text('Member 0000'), findsNothing);
+    });
+
     testWidgets('a plain member sees no moderation', (tester) async {
       await _pumpPlace(tester,
           perms: _member, role: 'member', page: ServerSettingsPage.members);
@@ -312,6 +439,32 @@ void main() {
       }
       expect(find.text('Overview'), findsNothing);
       expect(find.text('Server settings'), findsOneWidget);
+    });
+
+    testWidgets('the invite preview keeps the desktop width, on the left',
+        (tester) async {
+      await _pumpPhonePage(tester,
+          perms: _owner, role: 'owner', page: 'Overview');
+      final label = find.text('How an invite shows it');
+      expect(label, findsOneWidget);
+      final preview = find
+          .ancestor(of: label, matching: find.byType(Column))
+          .first;
+      final rect = tester.getRect(preview);
+      expect(rect.width, lessThanOrEqualTo(232));
+      expect(rect.left, HollowSpacing.lg);
+    });
+
+    testWidgets('Members scrolls a thousand rows lazily', (tester) async {
+      await _pumpPhonePage(tester,
+          perms: _owner, role: 'owner', page: 'Members', members: _crowd(1000));
+      expect(find.text('Member 0000'), findsOneWidget);
+      expect(find.textContaining('Search to'), findsNothing);
+      expect(find.byType(HollowAvatar).evaluate().length, lessThan(40));
+
+      await tester.scrollUntilVisible(find.text('Member 0998'), 2000,
+          scrollable: _pageScrollable());
+      expect(find.text('Member 0998'), findsOneWidget);
     });
   });
 }

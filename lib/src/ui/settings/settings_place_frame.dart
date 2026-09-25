@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -7,6 +9,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/shell/user_bar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The rail's width, a navigation sidebar's (design language 5.2).
@@ -31,12 +35,17 @@ const _pagePadding = EdgeInsets.fromLTRB(
 ///
 /// On a wide window the rail and its page centre as a PAIR, the rail's chrome
 /// running out to the left edge; below that width the pair hugs the left edge.
-/// Either way every region touches an edge of the window.
-class SettingsPlaceFrame extends StatelessWidget {
+/// Either way every region touches an edge of the window. In Classic the place
+/// covers the channel sidebar, so your user bar stays under the rail; Dock
+/// needs none, the dock holds you.
+class SettingsPlaceFrame extends ConsumerWidget {
   final Widget rail;
 
   /// The page on screen; keyed by the caller so a switch resets its state.
   final Widget page;
+
+  /// [page] is a [SettingsSliverPage].
+  final bool sliverPage;
   final ScrollController? scroll;
   final String closeLabel;
   final String closeTooltip;
@@ -56,6 +65,7 @@ class SettingsPlaceFrame extends StatelessWidget {
     required this.closeLabel,
     required this.closeTooltip,
     required this.onClose,
+    this.sliverPage = false,
     this.scroll,
     this.onEscape,
     this.bottomBar,
@@ -71,8 +81,9 @@ class SettingsPlaceFrame extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    final classic = ref.watch(layoutModeProvider) == LayoutMode.classic;
     return Focus(
       autofocus: true,
       onKeyEvent: _onKey,
@@ -91,26 +102,45 @@ class SettingsPlaceFrame extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (bleed > 0)
-                SizedBox(width: bleed, child: ColoredBox(color: hollow.surface)),
-              rail,
+              if (classic)
+                SizedBox(
+                  width: bleed + kSettingsRailWidth,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (bleed > 0)
+                              SizedBox(
+                                  width: bleed,
+                                  child: ColoredBox(color: hollow.surface)),
+                            rail,
+                          ],
+                        ),
+                      ),
+                      _RailUserBar(inset: bleed),
+                    ],
+                  ),
+                )
+              else ...[
+                if (bleed > 0)
+                  SizedBox(
+                      width: bleed, child: ColoredBox(color: hollow.surface)),
+                rail,
+              ],
               Expanded(
                 child: Stack(
                   children: [
                     Positioned.fill(
                       child: FocusTraversalGroup(
                         policy: ReadingOrderTraversalPolicy(),
-                        child: SingleChildScrollView(
+                        child: SettingsScrollView(
                           controller: scroll,
                           padding: _pagePadding,
-                          child: Align(
-                            alignment: Alignment.topLeft,
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(
-                                  maxWidth: kSettingsPageMaxWidth),
-                              child: page,
-                            ),
-                          ),
+                          maxWidth: kSettingsPageMaxWidth,
+                          slivers: sliverPage,
+                          page: page,
                         ),
                       ),
                     ),
@@ -145,6 +175,35 @@ class SettingsPlaceFrame extends StatelessWidget {
           ),
         );
       }),
+    );
+  }
+}
+
+/// Classic's user bar at the rail's foot. Like the channel sidebar's it runs
+/// out to the server strip, through the bleed, while its content stays under
+/// the rail.
+class _RailUserBar extends StatelessWidget {
+  final double inset;
+  const _RailUserBar({required this.inset});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final hairline = BorderSide(color: hollow.border);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: hollow.opaqueSurface,
+        border: Border(top: hairline),
+      ),
+      child: DecoratedBox(
+        // Over the bar, so the rail's right hairline carries on down.
+        position: DecorationPosition.foreground,
+        decoration: BoxDecoration(border: Border(right: hairline)),
+        child: Padding(
+          padding: EdgeInsets.only(left: inset),
+          child: const UserBar(),
+        ),
+      ),
     );
   }
 }

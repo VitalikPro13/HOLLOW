@@ -17568,8 +17568,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ShopListing dco_decode_shop_listing(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 19)
-      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
+    if (arr.length != 20)
+      throw Exception('unexpected arr length: expect 20 but see ${arr.length}');
     return ShopListing(
       slug: dco_decode_String(arr[0]),
       title: dco_decode_String(arr[1]),
@@ -17590,6 +17590,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       wide: dco_decode_bool(arr[16]),
       credentialItem: dco_decode_String(arr[17]),
       itemUrl: dco_decode_String(arr[18]),
+      buyUrl: dco_decode_String(arr[19]),
     );
   }
 
@@ -21703,6 +21704,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_wide = sse_decode_bool(deserializer);
     var var_credentialItem = sse_decode_String(deserializer);
     var var_itemUrl = sse_decode_String(deserializer);
+    var var_buyUrl = sse_decode_String(deserializer);
     return ShopListing(
       slug: var_slug,
       title: var_title,
@@ -21723,6 +21725,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       wide: var_wide,
       credentialItem: var_credentialItem,
       itemUrl: var_itemUrl,
+      buyUrl: var_buyUrl,
     );
   }
 
@@ -25485,6 +25488,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.wide, serializer);
     sse_encode_String(self.credentialItem, serializer);
     sse_encode_String(self.itemUrl, serializer);
+    sse_encode_String(self.buyUrl, serializer);
   }
 
   @protected

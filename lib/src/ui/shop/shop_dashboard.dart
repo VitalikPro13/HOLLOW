@@ -1,43 +1,41 @@
-import 'dart:io';
-
 import 'package:desktop_drop/desktop_drop.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
-import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/animated_gif_image.dart';
-import 'package:hollow/src/ui/components/avatar_frame.dart';
-import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
-import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_skeleton.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
-import 'package:hollow/src/ui/shop/shop_item_dialog.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
+import 'package:hollow/src/ui/shop/shop_art.dart';
+import 'package:hollow/src/ui/shop/shop_item_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// The Hollow Shop wall: a grid of listings pulled from the signed catalog.
+/// The Hollow Shop: one shelf per kind, each kind at its own shape, pulled
+/// from the signed catalog.
 ///
-/// Buying happens in the system browser and comes back as a `.hollowpack`
-/// imported from this same page; nothing here unlocks anything inside Hollow.
-/// Renders nothing at all when the shop is unavailable, which is defence in
-/// depth: a store build has no button that reaches this page either.
+/// Buying happens on the artist's Ko-fi and comes back as a code redeemed or a
+/// `.hollowpack` imported here; nothing on this page unlocks anything. Renders
+/// nothing at all when the shop is unavailable, which is defence in depth: a
+/// store build has no button that reaches this page either.
 class ShopDashboard extends ConsumerStatefulWidget {
-  /// Pushed as a mobile route (or inside a settings sub-page) rather than
-  /// taking over the desktop centre pane, so the page skips its own title.
+  /// Pushed as a phone page whose app bar already names it, so the page skips
+  /// its own title.
   final bool embedded;
 
   const ShopDashboard({super.key, this.embedded = false});
@@ -46,39 +44,44 @@ class ShopDashboard extends ConsumerStatefulWidget {
   ConsumerState<ShopDashboard> createState() => _ShopDashboardState();
 }
 
-/// The filter pills. `null` means the kind filter is off.
-enum _ShopFilter { all, frames, avatars, banners, bundles }
+/// Below this a square tile stops reading as the art, so a column goes.
+const double _kMinTile = 200;
+
+const _kShelfTitles = {
+  ShopShelf.avatars: 'Avatars',
+  ShopShelf.frames: 'Frames',
+  ShopShelf.banners: 'Banners',
+  ShopShelf.bundles: 'Bundles',
+};
 
 class _ShopDashboardState extends ConsumerState<ShopDashboard> {
-  _ShopFilter _filter = _ShopFilter.all;
+  /// Null shows every shelf, one row each.
+  ShopShelf? _filter;
+  bool _framesOnMe = false;
   bool _dragging = false;
 
-  bool get _isMobile => Platform.isAndroid || Platform.isIOS;
-
-  bool _matches(shop.ShopListing listing) {
-    switch (_filter) {
-      case _ShopFilter.all:
-        return true;
-      case _ShopFilter.frames:
-        return listing.kinds.contains('frame');
-      case _ShopFilter.avatars:
-        return listing.kinds.contains('avatar');
-      case _ShopFilter.banners:
-        return listing.kinds.contains('banner');
-      case _ShopFilter.bundles:
-        return listing.bundle;
-    }
-  }
+  bool get _isMobile => isShopPhone;
 
   Future<void> _openInBrowser() async {
-    final origin = ref.read(shop.shopOriginProvider).valueOrNull;
-    if (origin == null || origin.isEmpty) return;
-    final uri = Uri.tryParse(origin);
-    if (uri == null) return;
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!mounted) return;
-    HollowToast.show(context, 'Opening the shop in your browser',
-        type: HollowToastType.info);
+    // Awaited, not `valueOrNull`: nothing watches the origin, so the first
+    // read only STARTED the lookup and the first tap did nothing.
+    try {
+      final origin = await ref.read(shop.shopOriginProvider.future);
+      final uri = Uri.tryParse(origin);
+      if (origin.isEmpty || uri == null) {
+        throw const FormatException('The shop has no address');
+      }
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw const FormatException('No browser took the link');
+      }
+      if (!mounted) return;
+      HollowToast.show(context, 'Opening the shop in your browser',
+          type: HollowToastType.info);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'The shop could not be opened',
+          type: HollowToastType.error);
+    }
   }
 
   Future<void> _handleDrop(DropDoneDetails details) async {
@@ -89,150 +92,341 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
     await importHollowpackAt(context, ref, path);
   }
 
+  void _showMore(BuildContext buttonContext) {
+    showHollowMenu(
+      context: buttonContext,
+      alignEnd: true,
+      anchor: overlayAnchorOf(buttonContext,
+          localOffset: Offset(buttonContext.size?.width ?? 0,
+              buttonContext.size?.height ?? 0)),
+      builder: (_, _) => [
+        HollowMenuItem(
+          icon: LucideIcons.packageOpen,
+          label: 'Import a pack',
+          onTap: () => pickAndImportHollowpack(context, ref),
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.externalLink,
+          label: 'Open the shop in your browser',
+          onTap: _openInBrowser,
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.refreshCw,
+          label: 'Refresh',
+          onTap: () {
+            ref.invalidate(shop.shopCatalogProvider);
+            // The catalog is fetched fresh every time, so the toast is the
+            // only sign the tap did anything when nothing on the wall changed.
+            HollowToast.show(context, 'Shop refreshed');
+          },
+        ),
+        // The phone's Profile is one tap back in Settings; the desktop's is a
+        // place away.
+        if (!_isMobile) ...[
+          const HollowMenuDivider(),
+          HollowMenuItem(
+            icon: LucideIcons.user,
+            label: 'Your art in Settings',
+            onTap: () =>
+                openSettings(ref.read, category: SettingsCategory.profile),
+          ),
+        ],
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!ref.watch(shopAvailableProvider)) return const SizedBox.shrink();
 
     final hollow = HollowTheme.of(context);
-
-    return Container(
+    return ColoredBox(
       color: hollow.background,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: _wrapDropTarget(
+        hollow,
+        LayoutBuilder(
+          builder: (context, constraints) =>
+              _buildPage(hollow, constraints.maxWidth),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPage(HollowTheme hollow, double width) {
+    final touch = widget.embedded && _isMobile;
+    final pad = touch ? HollowSpacing.lg : HollowSpacing.xl;
+    // Cards carry an xs inset for their hover, so the grid sits xs further out
+    // and the ART lines up with the headings.
+    final gridPad = pad - HollowSpacing.xs;
+    final content = width - pad * 2;
+    final squareCols =
+        ((content + HollowSpacing.lg) / (_kMinTile + HollowSpacing.lg))
+            .floor()
+            .clamp(2, 12);
+    final wideCols = squareCols >= 4 ? 2 : 1;
+
+    final catalog = ref.watch(shop.shopCatalogProvider);
+    final children = <Widget>[
+      _buildHeader(hollow, pad, touch),
+      _buildFilters(pad, touch),
+      ...catalog.when(
+        loading: () => _skeletonShelves(pad, gridPad, squareCols, wideCols),
+        error: (error, _) => [_buildError(error)],
+        data: (data) =>
+            _buildShelves(hollow, data, pad, gridPad, squareCols, wideCols),
+      ),
+      const SizedBox(height: HollowSpacing.xxl),
+    ];
+    return ListView(children: children);
+  }
+
+  Widget _buildHeader(HollowTheme hollow, double pad, bool touch) {
+    final intro = Text(
+      'Avatars, banners and frames made by real people. The artist gets 100% '
+      'of every sale, and the art is yours to keep: real files without DRM.',
+      style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+    );
+    // The one thing only the app can do: the purchase happens on Ko-fi, the
+    // code it mails comes back here.
+    final redeem = HollowButton.filled(
+      onPressed: () => showRedeemEntryDialog(context),
+      touch: touch,
+      icon: const Icon(LucideIcons.ticket, size: 16),
+      child: const Text('Redeem a code'),
+    );
+    final more = Builder(
+      builder: (buttonContext) => HollowIconButton(
+        icon: LucideIcons.moreHorizontal,
+        label: 'More shop actions',
+        size: touch ? 44 : 32,
+        onPressed: () => _showMore(buttonContext),
+      ),
+    );
+
+    if (widget.embedded) {
+      return Padding(
+        padding: EdgeInsets.only(left: pad, top: HollowSpacing.lg, right: pad),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            intro,
+            const SizedBox(height: HollowSpacing.lg),
+            Row(children: [redeem, const Spacer(), more]),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: EdgeInsets.only(left: pad, top: HollowSpacing.xl, right: pad),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildHeader(hollow),
-          Expanded(child: _wrapDropTarget(hollow, _buildBody(hollow))),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Hollow Shop',
+                    style: HollowTypography.heading
+                        .copyWith(color: hollow.textPrimary)),
+                const SizedBox(height: HollowSpacing.xs),
+                // Prose keeps a reading measure; the page itself runs to the
+                // pane's edges.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: intro,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.lg),
+          redeem,
+          const SizedBox(width: HollowSpacing.sm),
+          more,
         ],
       ),
     );
   }
 
-  Widget _buildHeader(HollowTheme hollow) {
-    final pills = [
-      for (final filter in _ShopFilter.values)
+  Widget _buildFilters(double pad, bool touch) {
+    final chips = [
+      HollowChip(
+        label: 'All',
+        selected: _filter == null,
+        onTap: () => setState(() => _filter = null),
+      ),
+      for (final shelf in ShopShelf.values)
         HollowChip(
-          label: _filterLabel(filter),
-          selected: _filter == filter,
-          onTap: () => setState(() => _filter = filter),
+          label: _kShelfTitles[shelf]!,
+          selected: _filter == shelf,
+          onTap: () => setState(() => _filter = shelf),
         ),
     ];
-
-    // Nothing here is the primary action: buying happens on a card, and these
-    // four are utilities. An action row with no primary is all ghost, so the
-    // two outlines went, and the bare pressable became a button like its
-    // neighbours.
-    final actions = [
-      HollowButton.ghost(
-        onPressed: _openInBrowser,
-        compact: true,
-        icon: const Icon(LucideIcons.externalLink, size: 14),
-        child: const Text('Open in browser'),
-      ),
-      const SizedBox(width: HollowSpacing.sm),
-      HollowButton.ghost(
-        onPressed: () => showRedeemEntryDialog(context),
-        compact: true,
-        icon: const Icon(LucideIcons.ticket, size: 14),
-        child: const Text('Redeem a code'),
-      ),
-      const SizedBox(width: HollowSpacing.sm),
-      HollowButton.ghost(
-        onPressed: () => pickAndImportHollowpack(context, ref),
-        compact: true,
-        icon: const Icon(LucideIcons.packageOpen, size: 14),
-        child: const Text('Import a pack'),
-      ),
-      const SizedBox(width: HollowSpacing.sm),
-      HollowTooltip(
-        message: 'Refresh the shop',
-        child: HollowButton.ghost(
-          semanticLabel: 'Refresh the shop',
-          compact: true,
-          onPressed: () {
-            ref.invalidate(shop.shopCatalogProvider);
-            // The catalog is fetched fresh every time, so the toast is the only
-            // sign the tap did anything when nothing on the wall changed.
-            HollowToast.show(context, 'Shop refreshed');
-          },
-          child: const Icon(LucideIcons.refreshCw, size: 16),
-        ),
-      ),
-    ];
-
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: hollow.border)),
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // Narrow: the pills take their own line rather than fighting the
-          // buttons for width.
-          final stacked = constraints.maxWidth < 620;
-          final title = widget.embedded
-              ? null
-              : Text('Hollow Shop',
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textPrimary));
-
-          if (stacked) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (title != null) ...[
-                  title,
-                  const SizedBox(height: HollowSpacing.sm),
-                ],
-                Row(children: [const Spacer(), ...actions]),
-                const SizedBox(height: HollowSpacing.sm),
-                Wrap(
-                  spacing: HollowSpacing.sm,
-                  runSpacing: HollowSpacing.xs,
-                  children: pills,
-                ),
-              ],
-            );
-          }
-
-          return Row(
-            children: [
-              if (title != null) ...[
-                title,
-                const SizedBox(width: HollowSpacing.lg),
-              ],
-              // Takes the free width, doubling as the Spacer that pushes the
-              // actions right.
-              Expanded(
-                child: Wrap(
-                  spacing: HollowSpacing.sm,
-                  runSpacing: HollowSpacing.xs,
-                  children: pills,
-                ),
-              ),
-              ...actions,
+    final padding =
+        EdgeInsets.fromLTRB(pad, HollowSpacing.xl, pad, HollowSpacing.xl);
+    if (touch) {
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: padding,
+        child: Row(
+          children: [
+            for (var i = 0; i < chips.length; i++) ...[
+              if (i > 0) const SizedBox(width: HollowSpacing.sm),
+              chips[i],
             ],
-          );
-        },
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: padding,
+      child: Wrap(
+        spacing: HollowSpacing.sm,
+        runSpacing: HollowSpacing.sm,
+        children: chips,
       ),
     );
   }
 
-  String _filterLabel(_ShopFilter filter) {
-    switch (filter) {
-      case _ShopFilter.all:
-        return 'All';
-      case _ShopFilter.frames:
-        return 'Frames';
-      case _ShopFilter.avatars:
-        return 'Avatars';
-      case _ShopFilter.banners:
-        return 'Banners';
-      case _ShopFilter.bundles:
-        return 'Bundles';
+  List<Widget> _buildShelves(
+    HollowTheme hollow,
+    shop.ShopCatalog catalog,
+    double pad,
+    double gridPad,
+    int squareCols,
+    int wideCols,
+  ) {
+    if (catalog.listings.isEmpty) {
+      return const [HollowEmptyState(title: 'Nothing is on sale yet')];
     }
+    final byShelf = {for (final s in ShopShelf.values) s: <shop.ShopListing>[]};
+    for (final listing in catalog.listings) {
+      byShelf[shelfOf(listing)]!.add(listing);
+    }
+
+    final out = <Widget>[];
+    for (final shelf in ShopShelf.values) {
+      if (_filter != null && _filter != shelf) continue;
+      final listings = byShelf[shelf]!;
+      if (listings.isEmpty) continue;
+      final cols = isWideShelf(shelf) ? wideCols : squareCols;
+      // All shows one row per shelf; a shelf's own filter shows everything.
+      final shown = _filter == null ? listings.take(cols).toList() : listings;
+      if (out.isNotEmpty) out.add(const SizedBox(height: HollowSpacing.xl));
+      out.add(Padding(
+        padding: EdgeInsets.symmetric(horizontal: pad),
+        child: HollowSectionHeader(
+          _kShelfTitles[shelf]!,
+          count: '${listings.length}',
+          action: _shelfAction(hollow, shelf, listings.length > shown.length),
+        ),
+      ));
+      out.addAll(_tileRows(
+        gridPad,
+        cols,
+        [
+          for (final listing in shown)
+            _ShopCard(
+              key: ValueKey(listing.slug),
+              listing: listing,
+              shelf: shelf,
+              framesOnMe: _framesOnMe,
+            ),
+        ],
+      ));
+    }
+    if (out.isEmpty) {
+      return const [HollowEmptyState(title: 'Nothing here yet')];
+    }
+    return out;
+  }
+
+  Widget? _shelfAction(HollowTheme hollow, ShopShelf shelf, bool more) {
+    final frames = shelf == ShopShelf.frames;
+    if (!frames && !more) return null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (frames) ...[
+          Text('On my avatar',
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textSecondary)),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowToggle(
+            value: _framesOnMe,
+            semanticLabel: 'Preview frames on my avatar',
+            onChanged: (v) => setState(() => _framesOnMe = v),
+          ),
+        ],
+        if (frames && more) const SizedBox(width: HollowSpacing.lg),
+        if (more)
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => setState(() => _filter = shelf),
+            child: const Text('See all'),
+          ),
+      ],
+    );
+  }
+
+  /// [tiles] in rows of [cols], equal widths, the last row left-aligned.
+  List<Widget> _tileRows(double gridPad, int cols, List<Widget> tiles) {
+    final rows = <Widget>[];
+    for (var start = 0; start < tiles.length; start += cols) {
+      if (rows.isNotEmpty) rows.add(const SizedBox(height: HollowSpacing.md));
+      rows.add(Padding(
+        padding: EdgeInsets.symmetric(horizontal: gridPad),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var i = 0; i < cols; i++) ...[
+              if (i > 0) const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: start + i < tiles.length
+                    ? tiles[start + i]
+                    : const SizedBox.shrink(),
+              ),
+            ],
+          ],
+        ),
+      ));
+    }
+    return rows;
+  }
+
+  List<Widget> _skeletonShelves(
+      double pad, double gridPad, int squareCols, int wideCols) {
+    final out = <Widget>[];
+    for (final shelf in ShopShelf.values) {
+      if (_filter != null && _filter != shelf) continue;
+      final wide = isWideShelf(shelf);
+      if (out.isNotEmpty) out.add(const SizedBox(height: HollowSpacing.xl));
+      out.add(Padding(
+        padding: EdgeInsets.only(left: pad, right: pad, bottom: HollowSpacing.sm),
+        child: const Align(
+          alignment: Alignment.centerLeft,
+          child: HollowSkeleton(height: HollowSpacing.lg, width: 120),
+        ),
+      ));
+      out.addAll(_tileRows(gridPad, wide ? wideCols : squareCols, [
+        for (var i = 0; i < (wide ? wideCols : squareCols); i++)
+          _SkeletonCard(wide: wide),
+      ]));
+    }
+    return out;
+  }
+
+  Widget _buildError(Object error) {
+    final message = error.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
+    return HollowEmptyState(
+      glyph: LucideIcons.wifiOff,
+      title: 'The shop could not be reached',
+      description: message,
+      action: HollowButton.outline(
+        onPressed: () => ref.invalidate(shop.shopCatalogProvider),
+        child: const Text('Try again'),
+      ),
+    );
   }
 
   Widget _wrapDropTarget(HollowTheme hollow, Widget child) {
@@ -247,32 +441,11 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
           if (_dragging)
             Positioned.fill(
               child: IgnorePointer(
-                child: Container(
-                  color: hollow.background.withValues(alpha: 0.85),
-                  alignment: Alignment.center,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.xl,
-                      vertical: HollowSpacing.lg,
-                    ),
-                    decoration: BoxDecoration(
-                      color: hollow.surface,
-                      borderRadius: BorderRadius.circular(hollow.radiusLg),
-                      border: Border.all(color: hollow.accent, width: 2),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(LucideIcons.packageOpen,
-                            size: 40, color: hollow.accent),
-                        const SizedBox(height: HollowSpacing.sm),
-                        Text(
-                          'Drop a .hollowpack to import',
-                          style: HollowTypography.subheading
-                              .copyWith(color: hollow.textPrimary),
-                        ),
-                      ],
-                    ),
+                child: ColoredBox(
+                  color: hollow.background,
+                  child: const HollowEmptyState(
+                    glyph: LucideIcons.packageOpen,
+                    title: 'Drop a .hollowpack to import it',
                   ),
                 ),
               ),
@@ -281,88 +454,20 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
       ),
     );
   }
-
-  Widget _buildBody(HollowTheme hollow) {
-    final catalog = ref.watch(shop.shopCatalogProvider);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _artistStrip(hollow),
-        Expanded(
-          child: catalog.when(
-            loading: () => const Center(child: HollowSpinner.large()),
-            error: (error, _) => _buildError(hollow, error),
-            data: (data) => _buildGrid(hollow, data),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildError(HollowTheme hollow, Object error) {
-    final message = error.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'The shop could not be reached',
-              style: HollowTypography.subheading
-                  .copyWith(color: hollow.textPrimary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: HollowSpacing.xs),
-            Text(
-              message,
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            HollowButton.outline(
-              onPressed: () => ref.invalidate(shop.shopCatalogProvider),
-              child: const Text('Try again'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGrid(HollowTheme hollow, shop.ShopCatalog catalog) {
-    final listings = catalog.listings.where(_matches).toList();
-    if (listings.isEmpty) {
-      return HollowEmptyState(
-        title: catalog.listings.isEmpty
-            ? 'Nothing is on sale yet'
-            : 'Nothing here yet',
-      );
-    }
-
-    return GridView.builder(
-      padding: const EdgeInsets.all(HollowSpacing.lg),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 240,
-        mainAxisSpacing: HollowSpacing.md,
-        crossAxisSpacing: HollowSpacing.md,
-        childAspectRatio: 0.74,
-      ),
-      itemCount: listings.length,
-      itemBuilder: (context, index) {
-        final listing = listings[index];
-        return _ShopCard(key: ValueKey(listing.slug), listing: listing);
-      },
-    );
-  }
 }
 
+/// One listing: the art IS the card, full bleed, title and price beneath it.
 class _ShopCard extends ConsumerWidget {
   final shop.ShopListing listing;
+  final ShopShelf shelf;
+  final bool framesOnMe;
 
-  const _ShopCard({super.key, required this.listing});
+  const _ShopCard({
+    super.key,
+    required this.listing,
+    required this.shelf,
+    required this.framesOnMe,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -374,339 +479,129 @@ class _ShopCard extends ConsumerWidget {
     final isOwned = listing.credentialItem.isNotEmpty &&
         bought.contains(listing.credentialItem);
 
+    final Widget art = switch (shelf) {
+      ShopShelf.avatars || ShopShelf.banners =>
+        ShopArtFill(listing: listing, kind: listing.primaryKind),
+      ShopShelf.frames => ShopFrameArt(listing: listing, onMe: framesOnMe),
+      ShopShelf.bundles => ShopBundleArt(listing: listing),
+    };
+
     return HollowPressable(
-      semanticLabel:
-          '${listing.title} by ${listing.artist.displayName}, ${listing.priceLabel}',
-      onTap: () => showShopItemDialog(context, listing),
-      borderRadius: BorderRadius.circular(hollow.radiusLg),
-      padding: EdgeInsets.zero,
-      child: Container(
-        decoration: BoxDecoration(
-          // A background step, not a step AND a hairline: the art fills the
-          // tile, so the boundary is never in doubt and an outline on top of it
-          // only makes the wall read as a grid of boxes.
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusLg),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // The art IS the card, so it takes the whole slot the caption
-            // leaves rather than a fixed 96px floating in the middle of it.
-            // Measured rather than given a hard AspectRatio, because the cell
-            // height comes from the grid delegate and a square that does not
-            // fit would overflow the text below.
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(HollowSpacing.sm),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    final side = constraints.maxWidth < constraints.maxHeight
-                        ? constraints.maxWidth
-                        : constraints.maxHeight;
-                    return Center(
-                      child: SizedBox(
-                        width: side,
-                        height: side,
-                        child: ShopArtPreview(
-                          listing: listing,
-                          size: side,
-                          neutralFace: true,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
+      semanticLabel: '${listing.title} by ${listing.artist.displayName}, '
+          '${listing.priceLabel}${isOwned ? ', owned' : ''}',
+      semanticButton: false,
+      onTap: () => showShopItem(context, listing),
+      // Concentric with the art's radius across the xs inset.
+      borderRadius: BorderRadius.circular(hollow.radiusXl),
+      padding: const EdgeInsets.all(HollowSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(hollow.radiusLg),
+            child: AspectRatio(
+              aspectRatio: isWideShelf(shelf) ? kShopBannerAspect : 1,
+              child: art,
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                HollowSpacing.sm,
-                0,
-                HollowSpacing.sm,
-                HollowSpacing.sm,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    listing.title,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        listing.title,
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    'by ${listing.artist.displayName}',
-                    style: HollowTypography.caption
-                        .copyWith(color: hollow.textSecondary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: HollowSpacing.xs),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // The price group gives way before the chips do: a narrow
-                      // card scales the numbers rather than cutting a chip in
-                      // half, which would say nothing at all.
-                      Flexible(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          alignment: Alignment.centerLeft,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (listing.wasLabel.isNotEmpty) ...[
-                                // On sale: the list price, struck, right before
-                                // what a buyer pays.
-                                Text(
-                                  listing.wasLabel,
-                                  style: HollowTypography.caption.copyWith(
-                                    color: hollow.textTertiary,
-                                    decoration: TextDecoration.lineThrough,
-                                  ),
-                                ),
-                                const SizedBox(width: HollowSpacing.xs),
-                              ],
-                              Text(
-                                listing.priceLabel,
-                                style: HollowTypography.body.copyWith(
-                                  color: hollow.accentText,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    if (listing.wasLabel.isNotEmpty) ...[
+                      // On sale: the list price, struck, right before what a
+                      // buyer pays.
+                      Text(
+                        listing.wasLabel,
+                        style: HollowTypography.bodySmall.copyWith(
+                          color: hollow.textTertiary,
+                          decoration: TextDecoration.lineThrough,
                         ),
                       ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      // The badges are one group at the trailing edge. Left as
-                      // siblings of the price, spaceBetween spreads all three
-                      // evenly and strands the kind in the middle of the row.
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          HollowBadge(
-                            listing.bundle
-                                ? 'bundle'
-                                : (listing.primaryKind.isEmpty
-                                    ? 'art'
-                                    : listing.primaryKind),
-                          ),
-                          if (isOwned) ...[
-                            const SizedBox(width: HollowSpacing.xs),
-                            const HollowBadge('Owned',
-                                kind: HollowBadgeKind.success),
-                          ],
-                        ],
-                      ),
+                      const SizedBox(width: HollowSpacing.xs),
                     ],
-                  ),
-                ],
-              ),
+                    Text(
+                      listing.priceLabel,
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.accentText,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HollowSpacing.xxs),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'by ${listing.artist.displayName}',
+                        style: HollowTypography.bodySmall
+                            .copyWith(color: hollow.textSecondary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    // The shelf already names the kind, so Owned is the one
+                    // badge a card carries.
+                    if (isOwned)
+                      const HollowBadge('Owned', kind: HollowBadgeKind.success),
+                  ],
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// Teal strip below the header: the one sentence a buyer should read before the
-/// wall, in the accent colour with a heart rather than a warning. `accentText`
-/// for both glyph and copy, because raw `accent` is a fill.
-Widget _artistStrip(HollowTheme hollow) {
-  final color = hollow.accentText;
-  return Container(
-    width: double.infinity,
-    padding: const EdgeInsets.symmetric(
-      horizontal: HollowSpacing.lg,
-      vertical: 10,
-    ),
-    decoration: BoxDecoration(
-      color: hollow.accent.withValues(alpha: 0.08),
-      border: Border(
-        bottom: BorderSide(color: hollow.border.withValues(alpha: 0.3)),
-      ),
-    ),
-    child: Row(
-      children: [
-        Icon(LucideIcons.heart, size: 14, color: color),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Text(
-            'Avatars, banners and frames drawn by real people. The artist '
-            'gets 100% of every sale, and the art is yours to keep: '
-            'real files without DRM.',
-            style: HollowTypography.caption.copyWith(
-              color: color,
-              fontSize: 11,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-/// The preview for a listing's primary kind. Shared by the wall (still, 96px)
-/// and the item dialog (bigger, and the avatar animates there).
-class ShopArtPreview extends ConsumerWidget {
-  final shop.ShopListing listing;
-  final double size;
-
-  /// The wall stays still; the dialog is where a person is actually looking.
-  final bool animate;
-
-  /// Render this kind instead of the listing's primary one, so a bundle can
-  /// show one preview per kind.
-  final String? kindOverride;
-
-  /// A frame on the WALL sits over a neutral face, so the frame itself is what
-  /// the card shows. The item dialog leaves this false and puts the frame on
-  /// your own avatar, which is the question that dialog answers.
-  final bool neutralFace;
-
-  const ShopArtPreview({
-    super.key,
-    required this.listing,
-    required this.size,
-    this.animate = false,
-    this.kindOverride,
-    this.neutralFace = false,
-  });
+class _SkeletonCard extends StatelessWidget {
+  final bool wide;
+  const _SkeletonCard({required this.wide});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final me = ref.watch(identityProvider.select((s) => s.peerId)) ?? '';
-    final kind = kindOverride ?? listing.primaryKind;
-
-    Widget placeholder() => Container(
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-        );
-
-    Widget failed() => Container(
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          alignment: Alignment.center,
-          child: Icon(LucideIcons.imageOff, size: 20, color: hollow.textTertiary),
-        );
-
-    // Hover means the ROW (the card's HollowPressable publishes it): at rest
-    // the still, hovered the animation, and the item dialog always plays.
-    final wantAnim = animate || (HoverScope.maybeOf(context) ?? false);
-
-    // For a bundle the display hash is the primary kind's art; another kind
-    // falls back to the file that carries it.
-    final hash = _hashFor(kind, wantAnim);
-    if (hash.isEmpty) return placeholder();
-
-    final art = ref.watch(shop.shopArtProvider(hash));
-    // The first hover asks the shop for the animation; the still keeps painting
-    // until it lands.
-    final stillHash = _hashFor(kind, false);
-    final Uint8List? fallback = wantAnim && stillHash != hash
-        ? ref.watch(shop.shopArtProvider(stillHash)).valueOrNull
-        : null;
-    final bytes = art.valueOrNull ?? fallback;
-    if (bytes == null) {
-      return art.hasError ? failed() : placeholder();
-    }
-    if (bytes.isEmpty) return failed();
-
-    if (kind == 'frame') {
-      // Frame art has to be judged in front of a face, so it is seeded into the
-      // shared frame cache (RAM only) and painted by the avatar.
-      final seeded =
-          ref.watch(avatarFrameProvider.select((m) => m.containsKey(hash)));
-      if (!seeded) {
-        final frames = ref.read(avatarFrameProvider.notifier);
-        Future.microtask(() => frames.seed(hash, bytes));
-      }
-      if (neutralFace) {
-        final face = Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: Color.alphaBlend(
-              Colors.white.withValues(alpha: 0.14),
-              hollow.elevated,
-            ),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(
-              color: hollow.accent.withValues(alpha: 0.65),
-              width: 1,
+    return Padding(
+      padding: const EdgeInsets.all(HollowSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) => HollowSkeleton(
+              height: constraints.maxWidth / (wide ? kShopBannerAspect : 1),
+              radius: hollow.radiusLg,
             ),
           ),
-        );
-        return Center(
-          child: AvatarFrame(
-            id: hash,
-            size: size,
-            radius: hollow.radiusMd,
-            animate: wantAnim,
-            child: face,
+          const SizedBox(height: HollowSpacing.sm),
+          const FractionallySizedBox(
+            widthFactor: 0.6,
+            child: HollowSkeleton(height: HollowSpacing.md),
           ),
-        );
-      }
-      return Center(
-        child: HollowAvatar(
-          peerId: me,
-          size: size,
-          frameId: hash,
-          animate: wantAnim,
-        ),
-      );
-    }
-    if (kind == 'avatar') {
-      return Center(
-        child: HollowAvatar(
-          peerId: me,
-          size: size,
-          imageBytes: bytes,
-          frameId: '',
-          animate: wantAnim,
-        ),
-      );
-    }
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: AnimatedGifImage(
-        bytes: bytes,
-        fit: listing.wide ? BoxFit.contain : BoxFit.cover,
-        animate: wantAnim,
-        errorWidget: failed(),
+          const SizedBox(height: HollowSpacing.xs),
+          const FractionallySizedBox(
+            widthFactor: 0.35,
+            child: HollowSkeleton(height: HollowSpacing.md),
+          ),
+        ],
       ),
     );
-  }
-
-  /// The art to show for [kind]. At rest the still sibling wins, so a grid of
-  /// cards is not a grid of running animations.
-  String _hashFor(String kind, bool wantAnim) {
-    if (kindOverride == null || kindOverride == listing.primaryKind) {
-      if (!wantAnim && listing.stillHash.isNotEmpty) {
-        return listing.stillHash;
-      }
-      return listing.displayHash;
-    }
-    for (final file in listing.files) {
-      if (file.role == kind ||
-          file.role == '${kind}_still' ||
-          file.role == '${kind}_anim') {
-        return file.sha256;
-      }
-    }
-    return listing.displayHash;
   }
 }

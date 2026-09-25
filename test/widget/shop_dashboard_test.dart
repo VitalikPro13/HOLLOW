@@ -1,8 +1,9 @@
 /// The Hollow Shop wall.
 ///
-/// What this pins: the catalog renders as cards, art you already own says so,
-/// the kind pills actually filter, and the item dialog offers Buy for a
-/// listing you do not own and Wear it for one you do. Preview art is left
+/// What this pins: the catalog renders as one shelf per kind at each kind's
+/// shape, art you already own says so, the kind chips actually filter, and the
+/// item dialog offers Buy (on Ko-fi when the catalog names it) for a listing
+/// you do not own and Wear it for one you do. Preview art is left
 /// hanging on purpose, so the placeholder path is what gets exercised.
 library;
 
@@ -17,6 +18,8 @@ import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/shop/shop_art.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 
 import '../helpers/test_app.dart';
@@ -82,6 +85,7 @@ final _frameListing = shop.ShopListing(
   bundle: false,
   wide: false,
   itemUrl: 'https://shop.anonlisten.com/i/winter-frame',
+  buyUrl: '',
   credentialItem: _frameItem,
 );
 
@@ -113,6 +117,8 @@ final _bannerListing = shop.ShopListing(
   bundle: false,
   wide: true,
   itemUrl: 'https://shop.anonlisten.com/i/second-piece',
+  // Sold on the artist's Ko-fi: Buy goes there and says so.
+  buyUrl: 'https://ko-fi.com/s/b2c3d4e5f6',
   credentialItem: _bannerItem,
 );
 
@@ -154,6 +160,7 @@ final _setListing = shop.ShopListing(
   bundle: true,
   wide: true,
   itemUrl: 'https://shop.anonlisten.com/i/winter-set',
+  buyUrl: '',
   credentialItem: _setItem,
 );
 
@@ -221,7 +228,8 @@ class _FakeOwnedArt extends OwnedArtNotifier {
 }
 
 Future<void> _pumpShop(WidgetTester tester) async {
-  tester.view.physicalSize = const Size(1280, 800);
+  // Tall enough that every shelf is built: the page is a lazy list.
+  tester.view.physicalSize = const Size(1280, 1600);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(() {
     tester.view.resetPhysicalSize();
@@ -276,7 +284,7 @@ void main() {
   testWidgets('a kind pill filters the wall', (tester) async {
     await _pumpShop(tester);
 
-    await tester.tap(find.text('Banners'), warnIfMissed: false);
+    await tester.tap(find.widgetWithText(HollowChip, 'Banners'));
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Winter Frame'), findsNothing);
@@ -295,7 +303,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Wear it'), findsOneWidget);
-    expect(find.text('Buy'), findsOneWidget);
+    expect(find.text('Buy on Ko-fi'), findsOneWidget);
   });
 
   testWidgets('a bought listing offers Wear it and no Buy', (tester) async {
@@ -322,5 +330,31 @@ void main() {
 
     expect(find.text('Wear it'), findsNothing);
     expect(find.text('Buy'), findsOneWidget);
+  });
+
+  testWidgets('each kind sits on its own shelf, at its own shape',
+      (tester) async {
+    await _pumpShop(tester);
+
+    for (final title in ['Frames', 'Banners', 'Bundles']) {
+      expect(find.widgetWithText(HollowChip, title), findsOneWidget);
+    }
+    // Shelf headers name the kind, so no card repeats it as a badge.
+    expect(find.text('frame'), findsNothing);
+    expect(find.text('banner'), findsNothing);
+
+    final frame = tester.getSize(find.byType(ShopFrameArt));
+    expect(frame.width, moreOrLessEquals(frame.height, epsilon: 0.5));
+    // The banner and the set are both wide, at the one banner ratio.
+    for (final art in [ShopArtFill, ShopBundleArt]) {
+      final size = tester.getSize(find.byType(art).first);
+      expect(size.width / size.height,
+          moreOrLessEquals(kShopBannerAspect, epsilon: 0.02));
+    }
+  });
+
+  testWidgets('the intro says made, not drawn', (tester) async {
+    await _pumpShop(tester);
+    expect(find.textContaining('made by real people'), findsOneWidget);
   });
 }

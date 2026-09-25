@@ -121,6 +121,7 @@ import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/shell/archive_dashboard.dart';
@@ -1040,6 +1041,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (earlyAcceptedPeerIds.isNotEmpty) {
       ref.read(chatProvider.notifier).loadLastMessagePreviews(earlyAcceptedPeerIds);
     }
+    // Saved messages is a DM with our own master, never a friend row, so the
+    // list above misses it and Home showed no preview until it was opened. Its
+    // id settles on the master only once the device list loads, hence a listen.
+    ref.listenManual<String?>(savedMessagesPeerIdProvider, (_, id) {
+      if (id == null) return;
+      ref.read(chatProvider.notifier).loadLastMessagePreviews([id]);
+    }, fireImmediately: true);
 
     // NETWORK PHASE, once the local UI is populated. This is the blocking 5s
     // HTTP call, and it is non-fatal: fetchRelayStatus swallows errors and

@@ -111,6 +111,7 @@ class _ServerSettingsPlaceState extends ConsumerState<ServerSettingsPlace> {
         key: ValueKey((sid, page)),
         child: serverSettingsPageFor(page, sid),
       ),
+      sliverPage: page.slivers,
       scroll: _scroll,
       closeLabel: 'Close server settings',
       closeTooltip: 'Close server settings (Esc)',

@@ -1,0 +1,19 @@
+{
+ "_": [
+  "Saved messages preview on Home after a restart, step 1 of 2: accept the pending friend (Home lists conversations only once there is one), then write a note to yourself.",
+  "run: fleet.ps1 -Scenario saved_preview_seed -Peers a, then saved_preview_check with -ReuseData"
+ ],
+ "peers": ["a"],
+ "steps": [
+  {"peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
+  {"peer": "a", "op": "wait", "ms": 1500},
+  {"peer": "a", "op": "tap", "target": "text:Accept", "index": 0, "soft": true},
+  {"peer": "a", "op": "wait_for", "target": "text:Saved messages", "timeout_ms": 15000},
+  {"peer": "a", "op": "tap", "target": "text:Saved messages", "index": 0},
+  {"peer": "a", "op": "wait", "ms": 1200},
+  {"peer": "a", "op": "enter_text", "target": "field", "value": "note to self ${RUN}"},
+  {"peer": "a", "op": "key", "value": "enter"},
+  {"peer": "a", "op": "wait", "ms": 2000},
+  {"peer": "a", "op": "shot", "name": "saved-00-sent"}
+ ]
+}
