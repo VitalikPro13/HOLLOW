@@ -4,6 +4,7 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
@@ -21,7 +22,6 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -179,8 +179,8 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      HollowToast.show(context, message, type: HollowToastType.error);
+      HollowToast.show(context, friendlyError(e),
+          type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -188,27 +188,20 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
 
   Future<void> _remove() async {
     final item = widget.item;
-    final kinds = item.kinds.map(ownedRoleLabel).join(', ').toLowerCase();
-    final confirmed = await showHollowConfirm(
+    final owned = ref.read(ownedArtProvider.notifier);
+    final removed = await showHollowConfirm(
       context: context,
       title: 'Remove ${item.title}?',
-      message: 'Its $kinds leave Your art on this device. Anything you wear '
-          'now stays on until you change it. Import the pack again to get it '
+      message: '${ownedKindsLeaveSentence(item.kinds)} Anything you wear now '
+          'stays on until you change it. Import the pack again to get it '
           'back.',
       confirmLabel: 'Remove',
       destructive: true,
+      onConfirm: () => owned.remove(item),
     );
-    if (!confirmed || !mounted) return;
-    try {
-      await ref.read(ownedArtProvider.notifier).remove(item);
-      if (!mounted) return;
-      HollowToast.show(context, 'Removed ${item.title}',
-          type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Could not remove ${item.title}',
-          type: HollowToastType.error);
-    }
+    if (!removed || !mounted) return;
+    HollowToast.show(context, 'Removed ${item.title}',
+        type: HollowToastType.success);
   }
 
   Future<void> _openArtist() async {
@@ -433,23 +426,16 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
   }
 
   Future<void> _forget(BuildContext context) async {
-    final confirmed = await showHollowConfirm(
+    final forgotten = await showHollowConfirm(
       context: context,
       title: 'Forget this code?',
       message: 'Hollow will stop keeping it. The receipt email still has it, '
           'so this is not the last copy.',
       confirmLabel: 'Forget',
       destructive: true,
+      onConfirm: () => shop.forgetRedeemCode(code: code),
     );
-    if (!confirmed) return;
-    try {
-      await shop.forgetRedeemCode(code: code);
-      ref.invalidate(shop.keptRedeemCodesProvider);
-    } catch (e) {
-      if (!context.mounted) return;
-      HollowToast.show(context, 'That code could not be forgotten: $e',
-          type: HollowToastType.error);
-    }
+    if (forgotten) ref.invalidate(shop.keptRedeemCodesProvider);
   }
 
   void _openMenu(BuildContext buttonContext) {
@@ -560,8 +546,8 @@ class _SupportMarksSectionState extends ConsumerState<SupportMarksSection> {
       await _reloadMyProfile();
     } catch (e) {
       if (!mounted) return;
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      HollowToast.show(context, message, type: HollowToastType.error);
+      HollowToast.show(context, friendlyError(e),
+          type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -575,8 +561,8 @@ class _SupportMarksSectionState extends ConsumerState<SupportMarksSection> {
       await _reloadMyProfile();
     } catch (e) {
       if (!mounted) return;
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      HollowToast.show(context, message, type: HollowToastType.error);
+      HollowToast.show(context, friendlyError(e),
+          type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -641,7 +627,6 @@ class _CredentialRow extends ConsumerStatefulWidget {
 }
 
 class _CredentialRowState extends ConsumerState<_CredentialRow> {
-  bool _busy = false;
 
   shop.OwnSupportCred get cred => widget.cred;
 
@@ -663,6 +648,7 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
 
   Future<void> _remove() async {
     final label = supportCredLabel(cred);
+    final marks = ref.read(shop.supportMarksFfiProvider);
     final confirmed = await showHollowConfirm(
       context: context,
       title: 'Remove this mark?',
@@ -671,25 +657,19 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
           'stay in your library, and Owned on the Shop tab goes away.',
       confirmLabel: 'Remove',
       destructive: true,
+      onConfirm: () => marks.remove(cred.item),
     );
     if (!confirmed || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      await ref.read(shop.supportMarksFfiProvider).remove(cred.item);
-      ref.invalidate(shop.ownSupportCredsProvider);
-      ref.invalidate(shop.ownCredentialItemsProvider);
-      final me = ref.read(identityProvider).peerId;
-      if (me != null && me.isNotEmpty) {
-        await ref.read(profileProvider.notifier).reloadProfile(me);
-      }
-      if (!mounted) return;
-      HollowToast.show(context, 'Mark removed', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      HollowToast.show(context, message, type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
+    ref.invalidate(shop.ownSupportCredsProvider);
+    ref.invalidate(shop.ownCredentialItemsProvider);
+    HollowToast.show(context, 'Mark removed', type: HollowToastType.success);
+    final me = ref.read(identityProvider).peerId;
+    if (me != null && me.isNotEmpty) {
+      // The mark is already gone; a failed re-read only delays the card.
+      await ref
+          .read(profileProvider.notifier)
+          .reloadProfile(me)
+          .catchError((_) {});
     }
   }
 
@@ -718,18 +698,25 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
     return SettingsRow(
       title: supportCredLabel(cred),
       subtitle: meta.isEmpty ? null : meta,
-      trailing: _busy
-          ? const Padding(
-              padding: EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-              child: HollowSpinner(),
-            )
-          : Builder(
-              builder: (buttonContext) => HollowIconButton(
-                icon: LucideIcons.ellipsis,
-                label: 'More',
-                onPressed: () => _openMenu(buttonContext),
-              ),
-            ),
+      trailing: Builder(
+        builder: (buttonContext) => HollowIconButton(
+          icon: LucideIcons.ellipsis,
+          label: 'More',
+          onPressed: () => _openMenu(buttonContext),
+        ),
+      ),
     );
   }
+}
+
+/// "Its frame leaves Your art on this device." with the kinds joined as a
+/// sentence, so a bundle reads "Its avatar and banner leave ...".
+String ownedKindsLeaveSentence(List<String> kinds) {
+  final names = [for (final k in kinds) ownedRoleLabel(k).toLowerCase()];
+  if (names.isEmpty) return 'It leaves Your art on this device.';
+  final joined = names.length == 1
+      ? names.single
+      : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+  final verb = names.length == 1 ? 'leaves' : 'leave';
+  return 'Its $joined $verb Your art on this device.';
 }

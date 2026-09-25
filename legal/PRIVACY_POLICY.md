@@ -1,6 +1,6 @@
 # Hollow: Privacy Policy
 
-**Last updated: September 7, 2026**
+**Last updated: September 25, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains what data exists, where it exists, and what we can and cannot access.
 
@@ -64,7 +64,7 @@ Desktop platforms do not use any push service. Notifications on desktop are gene
 ## In-app reporting and blocking
 
 - **Blocking** is entirely local. Your block list is stored only on your device in the encrypted database. It is never sent to us and we cannot see it.
-- **Reporting** a user sends the reported account's cryptographic peer ID and a category (e.g., spam, harassment) to the relay. The relay stores only anonymous aggregates: a count of reports per reported account and category, plus a one-way hash used to prevent duplicate reports. Who reported whom is never written to disk, and no message content is (or can be) included in a report; we cannot decrypt any conversation.
+- **Reporting** a user sends the reported account's cryptographic peer ID and a category (e.g., spam, harassment) to the relay. The relay stores a count of reports per reported account and category. So that the same report is not counted twice, it also stores a one-way fingerprint of each report, keyed with a secret that never leaves the relay; without that secret the fingerprint reveals nothing about who filed the report. Your report reaches the relay over your own connection, but the relay does not store who sent it. No message content is (or can be) included in a report; we cannot decrypt any conversation.
 
 ## Infrastructure and hosting
 
@@ -126,9 +126,9 @@ Because Hollow is designed with privacy by design, our ability to respond to dat
 - We **cannot** provide conversation history. No readable message history exists on our infrastructure. The temporary offline-delivery buffer holds only end-to-end encrypted payloads, in memory, that we have no keys to decrypt.
 - We **cannot** provide metadata about who communicates with whom. The relay does not maintain or log this information persistently.
 
-The only user-related record our infrastructure writes to disk is the anonymous abuse-report counter described above, which contains no identities, no message content, and no communication metadata.
+The only user-related record our infrastructure writes to disk is the abuse-report counter described above: the peer IDs of reported accounts with their report counts, and the keyed fingerprints. It contains no message content, no communication metadata, and no readable record of who filed a report.
 
-We will comply with valid, binding court orders issued under applicable law (EU/French jurisdiction). We will notify affected users of any requests unless legally prohibited from doing so. We will challenge overbroad or legally questionable requests.
+We will comply with valid, binding court orders issued under applicable law (the European Union and Poland). We will notify affected users of any requests unless legally prohibited from doing so. We will challenge overbroad or legally questionable requests.
 
 If we receive any government or law enforcement requests, we will publish a transparency report documenting them.
 

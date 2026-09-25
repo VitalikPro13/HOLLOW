@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
@@ -179,7 +180,9 @@ Future<void> saveServerDraft(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, 'Could not save: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't save. Try again."),
           type: HollowToastType.error);
     }
   }

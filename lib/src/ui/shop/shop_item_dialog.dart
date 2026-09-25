@@ -251,7 +251,7 @@ class _ShopItemViewState extends ConsumerState<_ShopItemView> {
               ],
               Text(listing.priceLabel,
                   style: HollowTypography.heading
-                      .copyWith(color: hollow.accentText)),
+                      .copyWith(color: hollow.textPrimary)),
             ],
           ),
         ],

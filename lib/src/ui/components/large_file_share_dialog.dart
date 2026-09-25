@@ -23,7 +23,7 @@ Future<bool> confirmLargeFileShare(
   required String fileName,
   required int sizeBytes,
 }) async {
-  final hollow = HollowTheme.of(context);
+  final limit = _fmtMb(kLargeFileThresholdBytes);
   final result = await showHollowDialog<bool>(
     context: context,
     builder: (ctx) => HollowDialog(
@@ -33,22 +33,19 @@ Future<bool> confirmLargeFileShare(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           HollowDialogText(
-            '"$fileName" is over 34 MB, so it can\'t be sent directly. It will '
-            'be hosted as a Hollow Share link and transferred peer-to-peer.',
+            '"$fileName" is over $limit, so Hollow sends it as a Share link '
+            'that the other side downloads straight from you.',
           ),
           const SizedBox(height: HollowSpacing.md),
-          Text(
-            'Heads up: Share transfers are direct (STUN-only, no relay fallback), '
-            'and you need to stay online to host the file until the other side '
-            'has finished downloading it.',
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary),
+          const HollowDialogText(
+            "Keep Hollow open until they finish. If your two devices can't "
+            "connect directly, the download can't start.",
           ),
         ],
       ),
       actions: [
         HollowButton.ghost(
-          child: const Text('Cancel'),
+          child: const Text("Don't send it"),
           onPressed: () => Navigator.of(ctx).pop(false),
         ),
         HollowButton.filled(
@@ -72,6 +69,7 @@ Future<bool> confirmLargeFilesShare(
         fileName: files.first.name, sizeBytes: files.first.sizeBytes);
   }
   final hollow = HollowTheme.of(context);
+  final limit = _fmtMb(kLargeFileThresholdBytes);
   final result = await showHollowDialog<bool>(
     context: context,
     builder: (ctx) => HollowDialog(
@@ -80,9 +78,9 @@ Future<bool> confirmLargeFilesShare(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const HollowDialogText(
-            'These are over 34 MB, so they can\'t be sent directly. They will '
-            'be hosted as Hollow Share links and transferred peer-to-peer.',
+          HollowDialogText(
+            'These are over $limit, so Hollow sends them as Share links that '
+            'the other side downloads straight from you.',
           ),
           const SizedBox(height: HollowSpacing.sm),
           for (final f in files)
@@ -90,21 +88,18 @@ Future<bool> confirmLargeFilesShare(
               '${f.name} (${_fmtMb(f.sizeBytes)})',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: HollowTypography.caption.copyWith(color: hollow.textPrimary),
+              style: HollowTypography.label.copyWith(color: hollow.textPrimary),
             ),
           const SizedBox(height: HollowSpacing.md),
-          Text(
-            'Heads up: Share transfers are direct (STUN-only, no relay fallback), '
-            'and you need to stay online to host the files until the other side '
-            'has finished downloading them.',
-            style:
-                HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          const HollowDialogText(
+            "Keep Hollow open until they finish. If your two devices can't "
+            "connect directly, the downloads can't start.",
           ),
         ],
       ),
       actions: [
         HollowButton.ghost(
-          child: const Text('Leave them out'),
+          child: const Text("Don't send them"),
           onPressed: () => Navigator.of(ctx).pop(false),
         ),
         HollowButton.filled(

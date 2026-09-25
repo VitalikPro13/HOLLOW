@@ -23,7 +23,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "semantics:New conversation",
+      "target": "semantics:Add a server",
       "index": 0
     },
     {
@@ -34,7 +34,7 @@
     {
       "peer": "a",
       "op": "enter_text",
-      "target": "hint:Server name",
+      "target": "hint:My Awesome Server",
       "value": "sweep6"
     },
     {

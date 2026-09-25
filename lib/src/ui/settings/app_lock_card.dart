@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -60,7 +61,8 @@ class AppLockCard extends ConsumerWidget {
                   .setMinutes(choice)
                   .catchError((Object e) {
                 if (context.mounted) {
-                  HollowToast.show(context, 'Could not save the setting: $e',
+                  HollowToast.show(context, friendlyError(e,
+                          fallback: "Couldn't save the setting. Try again."),
                       type: HollowToastType.error);
                 }
               }),

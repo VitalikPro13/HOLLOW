@@ -23,7 +23,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
@@ -36,7 +35,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
-import 'package:hollow/src/ui/shell/friends_bar.dart';
+import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -405,18 +404,8 @@ class _Actions extends ConsumerWidget {
           HollowMenuItem(
             icon: LucideIcons.userMinus,
             label: 'Remove friend',
-            onTap: () async {
-              final yes = await showHollowConfirm(
-                context: buttonContext,
-                title: 'Remove $name as a friend?',
-                message: 'Your messages stay. You can add each other again.',
-                confirmLabel: 'Remove',
-                destructive: true,
-              );
-              if (yes && buttonContext.mounted) {
-                await removeFriendAndTidy(buttonContext, ref, peerId);
-              }
-            },
+            onTap: () => confirmRemoveFriend(buttonContext, ref,
+                peerId: peerId, name: name),
           ),
         const HollowMenuDivider(),
         HollowMenuItem(

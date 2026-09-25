@@ -9,9 +9,9 @@
   "peers": ["a"],
   "steps": [
     { "peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000, "soft": true },
-    { "peer": "a", "op": "tap", "target": "semantics:New conversation", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "semantics:Add a server", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 1000 },
-    { "peer": "a", "op": "enter_text", "target": "hint:Server name", "value": "ss-phone" },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "ss-phone" },
     { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
     { "peer": "a", "op": "wait_for", "target": "text:ss-phone", "timeout_ms": 30000 },
     { "peer": "a", "op": "wait", "ms": 1500 },

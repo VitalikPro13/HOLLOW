@@ -2,14 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// Which gate the picker sets.
+enum AccessLabelGate { see, post }
+
+/// The picker's title, owned here so every surface asks the same question.
+/// [target] names what the gate is on: "#general", "the channels in General".
+String accessLabelPickerTitle(AccessLabelGate gate, String target) =>
+    gate == AccessLabelGate.see
+        ? 'Who can see $target'
+        : 'Who can post in $target';
 
 /// Multi-select picker for a channel's ACCESS labels. Returns the chosen
 /// label-id set, where empty clears the gate back to tier mode, or null on
@@ -17,14 +24,20 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 Future<Set<String>?> showAccessLabelPicker({
   required BuildContext context,
   required String serverId,
-  required String title,
   required Set<String> initial,
+  AccessLabelGate gate = AccessLabelGate.see,
+  String? target,
+  @Deprecated('The title comes from gate and target') String? title,
 }) {
   return showHollowDialog<Set<String>>(
     context: context,
     builder: (_) => _AccessLabelPickerDialog(
       serverId: serverId,
-      title: title,
+      // A caller not yet on gate/target keeps its own title until it moves.
+      title: target == null && title != null
+          ? title
+          : accessLabelPickerTitle(gate, target ?? 'this channel'),
+      gate: gate,
       initial: initial,
     ),
   );
@@ -33,11 +46,13 @@ Future<Set<String>?> showAccessLabelPicker({
 class _AccessLabelPickerDialog extends ConsumerStatefulWidget {
   final String serverId;
   final String title;
+  final AccessLabelGate gate;
   final Set<String> initial;
 
   const _AccessLabelPickerDialog({
     required this.serverId,
     required this.title,
+    required this.gate,
     required this.initial,
   });
 
@@ -58,85 +73,64 @@ class _AccessLabelPickerDialogState
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final labelsAsync = ref.watch(serverLabelsProvider(widget.serverId));
     final accessLabels =
         (labelsAsync.valueOrNull ?? const []).where((l) => l.access).toList();
+    final see = widget.gate == AccessLabelGate.see;
+
+    final Widget labels;
+    if (labelsAsync.isLoading && accessLabels.isEmpty) {
+      labels = const HollowSpinner.medium();
+    } else if (labelsAsync.hasError && accessLabels.isEmpty) {
+      labels = const HollowEmptyState(
+        dense: true,
+        title: "Couldn't load the labels",
+        description: 'Close this and try again.',
+      );
+    } else if (accessLabels.isEmpty) {
+      labels = const HollowEmptyState(
+        dense: true,
+        title: 'No access labels yet',
+        description: 'Create one under Labels and mark it Access.',
+      );
+    } else {
+      labels = Wrap(
+        spacing: HollowSpacing.sm,
+        runSpacing: HollowSpacing.sm,
+        children: [
+          for (final l in accessLabels)
+            LabelChip(
+              label: l,
+              selected: _selected.contains(l.labelId),
+              onTap: () => setState(() {
+                if (!_selected.remove(l.labelId)) {
+                  _selected.add(l.labelId);
+                }
+              }),
+            ),
+        ],
+      );
+    }
 
     return HollowDialog(
       title: widget.title,
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const HollowDialogText(
-            'Members holding ANY selected label get access. Admins and the '
-            'Owner always have access.',
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          if (labelsAsync.isLoading && accessLabels.isEmpty)
-            const Center(child: HollowSpinner.large())
-          else if (accessLabels.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              child: const HollowEmptyState(
-                dense: true,
-                title: 'No access labels yet',
-                description:
-                    'Create one in the Labels tab and mark it "Access".',
-              ),
-            )
-          else
-            // The same grouped-card language as the bulk-access sections, so
-            // the chips do not float loose on the dialog background.
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              child: Wrap(
-                spacing: HollowSpacing.sm,
-                runSpacing: HollowSpacing.sm,
-                children: [
-                  for (final l in accessLabels)
-                    LabelChip(
-                      label: l,
-                      selected: _selected.contains(l.labelId),
-                      onTap: () => setState(() {
-                        if (!_selected.remove(l.labelId)) {
-                          _selected.add(l.labelId);
-                        }
-                      }),
-                    ),
-                ],
-              ),
-            ),
+          HollowDialogText(see
+              ? 'Members with any of these labels can see it. Admins and the '
+                  'owner always can.'
+              : 'Members with any of these labels can post. Admins and the '
+                  'owner always can.'),
+          const SizedBox(height: HollowSpacing.lg),
+          labels,
           if (_selected.isEmpty && widget.initial.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.md),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(LucideIcons.triangleAlert,
-                    size: 14, color: hollow.warning),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: Text(
-                    'No labels selected. The channel returns to '
-                    'tier-based access.',
-                    style: HollowTypography.bodySmall.copyWith(
-                      color: hollow.warning,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+            const SizedBox(height: HollowSpacing.lg),
+            HollowDialogText(see
+                ? 'With no label chosen, roles decide who can see it again.'
+                : 'With no label chosen, roles decide who can post again.'),
           ],
         ],
       ),

@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/shell/voice_room_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The voice room's chat is in the side panel. Session-sticky, on by default.
@@ -63,7 +64,10 @@ class VoiceChannelPane extends ConsumerWidget {
                         source: VcCallStageSource(
                             serverId: serverId, channelId: channelId),
                       )
-                    : _RoomPreview(serverId: serverId, channelId: channelId),
+                    : _RoomPreview(
+                        serverId: serverId,
+                        channelId: channelId,
+                        channelName: channelName),
               ),
             ],
           ),
@@ -163,8 +167,13 @@ final _silent = Provider<bool>((_) => false);
 class _RoomPreview extends ConsumerStatefulWidget {
   final String serverId;
   final String channelId;
+  final String channelName;
 
-  const _RoomPreview({required this.serverId, required this.channelId});
+  const _RoomPreview({
+    required this.serverId,
+    required this.channelId,
+    required this.channelName,
+  });
 
   @override
   ConsumerState<_RoomPreview> createState() => _RoomPreviewState();
@@ -174,6 +183,13 @@ class _RoomPreviewState extends ConsumerState<_RoomPreview> {
   bool _joining = false;
 
   Future<void> _join() async {
+    if (!await confirmVoiceRoomSwitch(context, ref,
+            serverId: widget.serverId,
+            channelId: widget.channelId,
+            channelName: widget.channelName) ||
+        !mounted) {
+      return;
+    }
     setState(() => _joining = true);
     try {
       await ref

@@ -282,7 +282,7 @@ void main() {
     await capture(tester, 'manage_member_overview');
 
     // Grant flow for the ungated-yet channel → duration picker.
-    await tester.tap(find.text('Grant'));
+    await tester.tap(find.text('Give access').first);
     await tester.pumpAndSettle();
     expect(find.textContaining('How long'), findsOneWidget);
     await capture(tester, 'manage_member_duration');

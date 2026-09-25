@@ -124,27 +124,52 @@ chat popups get Manage Member too.
 `showManageMemberDialog(context, serverId:, peerId:)` — peerId MUST be the
 MASTER identity (roles/labels/grants are master-keyed CRDT state). Member-
 first inverse of the channel-centric `channel_grants_dialog` — same FFI,
-same LWW model. Three permission-gated `SettingsCard` sections, each hidden
-without the capability:
-- **Role** — `LabelTypeChip`s: target's current role first, then
+same LWW model. Title "Manage <name>"; three permission-gated sections under
+dense `HollowSectionHeader`s (no cards), each hidden without the capability:
+- **Role**: `HollowChip`s in RANK order (owner, admin, moderator, member,
+  so they never reorder between members): the current role plus
   `assignableRoles(myRole)` (shared `core/role_hierarchy.dart`, which also
-  serves members_tab so the ladders can't drift). Tap → confirm dialog →
-  `changeMemberRole` → 150ms CrdtStore beat → invalidate
-  `serverMembersProvider`. Gated by `canManageRole` && non-self.
-- **Labels** — `LabelChip` toggles over `serverLabelsProvider`; selection
+  serves the Members page so the ladders can't drift). Tap →
+  `showChangeRoleDialog(currentRole:)` (the ONE role confirm, below), and
+  the dialog's own `_role` holds the result. Gated by `canManageRole` &&
+  non-self.
+- **Labels**: `LabelChip` toggles over `serverLabelsProvider`; selection
   state seeded ONCE from the member row (`_labelIds ??=`, labels-tab
   `_seeded` rule — a refetch right after a queued write returns the previous
-  value), optimistic with revert-on-error via assign/unassignLabel. Gated
-  by MANAGE_ROLES.
-- **Temporary channel access** — rows for channels with non-empty
+  value), optimistic with revert + `friendlyError` toast on failure via
+  assign/unassignLabel. Empty: "This server has no labels yet". Gated by
+  MANAGE_ROLES.
+- **Temporary channel access**: rows for channels with non-empty
   `visibilityLabels` from `serverChannelsProvider` (computing per-member
   visibility would re-implement the Rust predicate; redundant grants are
-  harmless). Active grant shows remaining time (`formatMuteRemaining`) or
-  "Until revoked" + revoke X; else a Grant button → `_View.pickDuration`
-  (same `kGrantDurationOptions` as the grants dialog) →
-  `grantChannelAccess`. Gated by MANAGE_CHANNELS.
+  harmless). An active grant's subtitle is `grantRemainingLabel` ("<time>
+  left", or "Until someone removes it" for a permanent one: another admin
+  may have given it) + a remove X (optimistic, back on failure); else an
+  outline "Give access" → `_View.pickDuration` in the same dialog ("How long
+  should <name> have access to #x?", `HollowDurationPicker`, Back + Give
+  access). The grant runs inside the dialog (`HollowDialogAction`: loading
+  confirm, error above the actions), then toasts "Access given for 1 hour"
+  / "Access given until someone removes it". Own writes live in `_grants`
+  (`optimisticGrant`), and `dispose` invalidates `channelGrantsProvider` for
+  every channel it touched. Gated by MANAGE_CHANNELS.
 
 Dart gates are advisory — Rust `op_allowed` re-validates every op.
+
+## Moderation confirms (`ui/settings/moderation_dialogs.dart`)
+
+ONE file for every surface (Members page, member menu, Manage member, phone
+sheets). Each function confirms, runs the FFI INSIDE the confirm
+(`showHollowConfirm(onConfirm:)`: a failure shows in the dialog with a
+retry), then invalidates `serverMembersProvider` + `mutedMembersProvider`
+and toasts. `showChangeRoleDialog` ("Make <name> an admin?", "They go from
+Member to Admin, which changes what they can do here." when `currentRole`
+is known, confirm "Make admin"), `showKickMemberDialog` / `showBanMemberDialog`
+(danger), `showMuteMemberDialog` (the duration IS the confirm:
+`showHollowDurationDialog` with the `HollowDurationPicker` chips 10 minutes /
+15 minutes / 1 hour / 24 hours / 7 days / "Until I remove it"; toast "<name>
+is muted for 1 hour" or "until someone unmutes them"), `unmuteMember` (no
+confirm; "<name> can post again"). The four confirms return `Future<bool>`
+(true once done).
 
 ## UserBar Widget Overview
 

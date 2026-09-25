@@ -32,7 +32,7 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - **Active-tab bar (2026-09-24, Vitalik's pick over accent-only and the old radial glow):** a 32 x 2 px accent bar on the bar's top edge above the active tab, sliding by `AnimatedPositioned` (`HollowDurations.normal`, `HollowCurves.subtle`, zero under reduce motion), so the active tab reads by POSITION as well as colour. Maps tab indices 0,1 to slots 0,1 and 2,3 to slots 3,4 (skipping the centre slot). Icons 24; the label keeps one weight whether active or not (a bold active label reflowed).
 - Chats tab: total unread count (DM + channel)
 - Friends tab: pending incoming friend request count
-- **Center "+" button** (`_AddButton`): 40×40 accent-filled rounded container with plus icon, no shadow (the accent glow went with the tab glow). Opens `NewConversationDialog` (Join Server, Create Server — no Add Friend, that's in Friends tab). Passed via `onAdd` callback from `MobileShell`.
+- **Center "+" button** (`_AddButton`): 40×40 accent-filled rounded container with plus icon, no shadow (the accent glow went with the tab glow). Semantics "Add a server". Opens `showCreateServerDialog` (`dialogs/create_server_dialog.dart`), the desktop "Add a server" dialog, whose two halves ("Join a server" / "Start your own") stack on a phone. Join refuses text that is not an invite link or a 32-hex server id (`isServerIdShape`), inline: "That isn't an invite link or server ID. Check what you pasted." Passed via `onAdd` callback from `MobileShell`. The phone's own `NewConversationDialog` is deleted (2026-09-25).
 - Archive tab
 - Settings tab
 
@@ -43,18 +43,19 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - `darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92)` — user-controlled via Settings > Appearance > Panel Opacity slider
 - Same pattern must be applied in `MobileChatRoute` (and any other pushed full-screen route) since pushed routes fully cover the shell
 
-### Floating Pill Layering
-`MobileShell` wraps its `Scaffold` in a `Stack` with `MobileNotificationBanner`, `MobileActiveCallPill`, and `MobileVoiceChannelPill` on top. These pills are also placed in `MobileChatRoute`'s Stack so they remain visible on pushed chat routes. Full-screen voice/call routes use `PageRouteBuilder` (slide-from-bottom) and cover the pills by being pushed on top in the navigator stack. **CRITICAL:** Pills must NOT go in `app.dart` builder — that layer is above the navigator and no route can cover it.
+### The minimised call (was the floating pills)
+`MobileShell` wraps its `Scaffold` in a `Stack` with `MobileMinimisedCall()` on top: the call you are in, floating 12 px above the nav bar. `MobileChatRoute` DOCKS it under its header (`MobileMinimisedCall(floating: false)`) instead. Call routes are pushed on top and cover it. **CRITICAL:** never in the `app.dart` builder: that layer is above the navigator and no route can cover it. Only the incoming screen lives there. See wiki `ui_call_surfaces` (Phone).
 
 ### MobileChatsTab: the phone's Home (2026-09-24)
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart`
 
 The desktop Home inbox on a phone, plus the server list (a phone has no dock). Wiki `ui_home_dashboard` has the shared pieces.
 - **Title row:** `HomeGreeting` (the same greeting as desktop), then two 44 px icon actions: Conferences and New message (`LucideIcons.squarePen`, only once there is a friend; `showNewMessageDialog` with the phone's `onOpen` / `onAddFriend`). New message is an icon, not a filled button, because the nav bar's centre + already carries the accent.
-- **One `CustomScrollView`:** the first-run line, a search field (`Search conversations`, once there is any DM or server), `HomeAttention` and `HomeSetupChecklist` with `_MobileHomeActions` (touch layout; no update row, the stores update phones; add friend = `showMobileAddFriendSheet`, add server = `showNewConversationDialog`, profile = `openMobileProfileSettings`), the `HomeFilters` chips, then the list.
+- **One `CustomScrollView`:** the first-run line, a search field (`Search conversations`, once there is any DM or server), `HomeAttention` and `HomeSetupChecklist` with `_MobileHomeActions` (touch layout; no update row, the stores update phones; add friend = `showMobileAddFriendSheet`, add server = `showCreateServerDialog`, profile = `openMobileProfileSettings`), the `HomeFilters` chips, then the list.
 - **All:** Saved messages and parked joins pinned first, then DMs and servers ranked unread first, then newest, then by name (servers carry no time). **Unread:** the hot DMs and servers. **Mentions:** one `ConversationRow` per channel that mentioned us, which opens that channel. A server row carries its mention count (red, `@`) or else its unread count; mention rows are not repeated in All.
+- **Names follow local nicknames:** the shared `home_inbox.dart` rows `ref.watch(localNicknameProvider)` (`displayNameFor` reads the nickname cache), so a rename shows at once here and on desktop Home.
 - **Rows:** DMs, Saved messages and mentions are `ConversationRow(touch: true)` with 48 px leading, full-bleed, long press = the DM sheet. Servers are `_ServerRow` (`ServerAvatar(animate: expanded)`, members line, `HollowCountBadge`, chevron) expanding into the channel tree; the tree's rows use `HollowCountBadge` and a success `HollowBadge` for voice occupants. Geometry constants `_kAvatar` 48, `_kTreeIndent`, `_kTreeLeft`.
-- **Active Now** (2026-09-24): above the chips, only while a voice room has people in it: a `HollowSectionHeader` + up to two `HomeVoiceRoomTile(touch: true, onOpen:)` (then "and N more rooms"), from `homeVoiceRooms(ref)`; Join goes through the tab's own `_openVoiceChannel` (leave-your-call toast, switch confirm, chat + voice routes). News and Relay are NOT here: rendered at the end of the list and rejected by Vitalik ("takes so much space"); they close mobile Settings instead.
+- **Active Now** (2026-09-24): above the chips, only while a voice room has people in it: a `HollowSectionHeader` + up to two `HomeVoiceRoomTile(touch: true, onOpen:)` (then "and N more rooms"), from `homeVoiceRooms(ref)`; Join goes through the tab's own `_openVoiceChannel` (leave-your-call toast, `confirmVoiceRoomSwitch` which asks only while you are in a room with others, chat + voice routes). News and Relay are NOT here: rendered at the end of the list and rejected by Vitalik ("takes so much space"); they close mobile Settings instead.
 - `AmbientBackground` still wraps the tab (draws nothing unless the Ambient opt-in is on). The old teal "Hollow" wordmark and `_HeaderShimmerLine` are gone.
 
 ### Pending Join Row (pending joins rung 1, 2026-08-29)
@@ -72,12 +73,12 @@ Expanded server channel list shows tree-style connectors (├── / └──)
 
 ### Channel Long-Press Context Sheet
 **File:** `lib/src/ui/mobile/mobile_channel_actions.dart`
-Long-press on a channel row in the expanded accordion opens `showMobileChannelActions()`:
-- Channel name header with type icon (hash/volume)
-- If `canManage` (Permission.manageChannels): **Rename** (pops sheet, opens `showHollowDialog`), **Visibility** (radio: Everyone/Mod+/Admin+), **Who Can Post** (same; text channels only since #71, a voice channel shows Visibility and Temporary Access), **Delete** (inline confirmation)
-- If not admin: read-only channel info only
-- Uses `AnimatedSize` view switching (actions → deleteConfirm → visibility → posting)
-- `onChanged` callback triggers `_loadChannels()` to refresh the accordion
+Long-press on a channel row in the expanded accordion opens `showMobileChannelActions()` (rows = touch `HollowListRow`s with grey icons, the desktop channel menu's labels):
+- `HollowSheetTitle(channel.name)`
+- Text channels: Mark as read, Mute channel / Unmute channel (a voice channel has neither)
+- If `canManage` (Permission.manageChannels): Rename channel (`renameChannelFlow`, the desktop prompt), Visibility and Who can post (text channels only) as drill-in views with the current setting as a trailing hint, Temporary access (not on a public channel; `showChannelGrantsDialog`), a divider, Delete channel (`confirmDeleteChannel`, the desktop confirm; no inline confirm view any more)
+- Visibility / Who can post views: a back row, then Everyone / Moderator and above / Admin and above (`accessTierLabel`) and "Require access labels" or "Edit access labels (N)" (`showAccessLabelPicker(gate:, target:)`). A plain tier on a label-gated channel asks `confirmClearLabelGate`, the same wording as desktop.
+- `AnimatedSize` switching between actions, visibility and posting; `onChanged` refreshes the accordion
 
 ### Layout-Aware Channel List
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_ChannelList`)
@@ -92,24 +93,11 @@ Channel accordion now respects layout ordering + categories:
 - **CRITICAL — rows are keyed by item identity** (`ValueKey('srv-${id}')` / `ValueKey('dm-${id}')` in the conversation ListView) and `_ChannelList` reloads in `didUpdateWidget` when `serverId` changes. The list mixes DMs and servers and reorders constantly; without keys Flutter re-parented row State across DIFFERENT conversations — a newly joined server displayed ANOTHER server's channel structure while every logged ID looked correct. Any row widget holding per-item loaded state needs both protections.
 
 ### Server Long-Press Context Sheet
-**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_ServerContextSheet`)
-Long-press on a server row opens `showHollowSheet` with:
-- Handle bar + server name header
-- **Server Settings** → pushes `MobileServerSettingsRoute`
-- **Create Channel** → `showCreateChannelDialog()` (gated by `Permission.manageChannels`)
-- **Invite** → `showInviteDialog()` with the web-form invite `webServerInviteLink(serverId)` (`https://hollow.anonlisten.com/join#server=`)
-- **Copy Server ID** → clipboard + toast
-- **Leave/Delete Server** → confirmation dialog (`showHollowDialog`). Owner sees Delete, others see Leave. Post-action clears `selectedServerProvider`, `selectedChannelProvider`, `channelListProvider`.
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_showServerSheet`)
+Long-press on a server row opens `showHollowSheet` with the desktop strip menu's rows, minus folders (a phone has none): `HollowSheetTitle(serverName)`, Mark as read, Mute server / Unmute server, Invite people (`showInviteDialog` with `webServerInviteLink(serverId, relay:)`), Create channel (Permission.manageChannels), Server settings (pushes `MobileServerSettingsRoute`), Copy server ID, a divider, then Delete server for the owner or Leave server for everyone else, through the shared `confirmDeleteServer` / `confirmLeaveServer` (wiki `ui_server_settings`). Rows are `_sheetRow` (touch `HollowListRow`, the sheet closes first); failures toast through `_report`.
 
-### Channel Layout Editor in Server Settings
-**File:** `lib/src/ui/mobile/mobile_server_settings_route.dart` (`_ChannelLayoutEditor`)
-New "Channels" section (gated by `Permission.manageChannels`) with:
-- Centered action buttons: + Channel, + Category, + Break
-- `ReorderableListView.builder` (shrinkWrap, NeverScrollableScrollPhysics) with drag handles
-- Category rows (accent bg), channel rows (elevated bg), separator rows (divider)
-- Rename/delete via `showHollowDialog` dialogs
-- Dirty state tracking with Save Layout / Discard buttons
-- Listens to `serverListProvider.select()` for auto-refresh on channel events
+### Channel editing in Server settings
+The phone's server settings are the desktop pages under `SettingsDensity(touch: true)` (wiki `ui_server_settings`); the old `_ChannelLayoutEditor` is gone.
 
 ---
 
@@ -158,7 +146,7 @@ Scaffold
 ├── SafeArea (inside EmoteScope)
 │   └── Column
 │       ├── _MobileChatHeader (back, name, status, users icon, pins, search icon, mute bell)
-│       ├── MobileCallStatusStrip (DM) / _VoiceChannelStatusStrip
+│       ├── MobileMinimisedCall(floating: false) (the call or room you are in, docked)
 │       ├── _buildSearchBar (channel only, when _searchOpen)
 │       ├── _buildSyncIndicator (channel only)
 │       ├── Expanded → Stack   (or _buildNoReadPermission when read gate denies)
@@ -201,9 +189,9 @@ Wraps each message bubble. Provides:
 - `pinnedProvider` loaded after channel history loads in `initState` `.then()` callback
 - `_MobileChatHeader` title: DM → friend display name + Online/Offline subtitle; channel → `# channelName` + the **server name** as a subtitle (read from `serverListProvider.select((m) => m[serverId]?.name)`, ellipsis-truncated) so the user knows which server the channel belongs to
 - `_MobileChatHeader` shows pin icon with count badge when `pinnedProvider[key]` is non-empty (between members icon and search icon)
-- Tapping pin icon opens `_showPinnedMessagesSheet()` — bottom sheet with sender name, time, text preview for each pinned message
+- Tapping pin icon opens `_showPinnedMessagesSheet()`, which calls the shared `showPinnedMessages(touch: true)` (wiki `ui_chat_channel`, "Pinned Messages"): a sheet with `HollowSheetTitle('Pinned messages')`, rows that jump to the message, Unpin always visible for whoever may pin, and the sheet closes when the last pin goes
 - `_showChannelActions()` wires `onPin` callback — permission-gated (`Permission.manageChannels`), toggles `crdt_api.pinMessage()`/`unpinMessage()`
-- `isPinned` param passed to bottom sheet for "Pin Message"/"Unpin Message" label toggle
+- `isPinned` param passed to bottom sheet for the "Pin message" / "Unpin message" label
 
 ### Action Callbacks Wired
 Both DM and channel builders wire:
@@ -235,59 +223,23 @@ The smiley inside the composer (`_toggleExpressions`) swaps the software keyboar
 
 ---
 
-## MobileSettingsTab (Restructured)
+## MobileSettingsTab
 
 **File:** `lib/src/ui/mobile/tabs/mobile_settings_tab.dart`
-**Purpose:** Settings ROOT LIST that pushes full-screen subpages (iOS-Settings style). The old pill-tab bar + AnimatedSwitcher design was removed (2026-06).
-
-### Root List (`MobileSettingsTab` — `ConsumerWidget`)
-- "Settings" heading + **profile card** (HollowAvatar 48px, display name via `displayNameFor`, "Name, status, avatar & banner" caption, chevron) → pushes the Profile subpage.
-- Divider (`hollow.textSecondary` @ 0.35 alpha) separates the profile card from the nav tiles.
-- `_SettingsNavTile` rows (accent icon box 36px + title + subtitle + chevron). **Restructured 2026-06-21** to mirror the desktop category split: **Help**, **Appearance**, **Network**, **Audio & Video**, **Files & Storage**, **Security**, **Devices**, **Backup**, **About**. (The old single "System" and "Security" tiles were split.)
-- `_push()` → `Navigator.push(MaterialPageRoute(_SettingsSubPage(title, child)))`.
-- **Bottom of the list (2026-09-24):** `HomeStatusCard` (the website-driven system-status card from `system_status_banner.dart`; the mobile banner only pushes problems, this is the pull surface), then the desktop Home rail's `HomeNewsCard` (latest post, the whole card opens it; "What's new in X" link; "Updated to X" after an update) and `HomeRelayCard(loadBars: mobileTab == 3)` (relay name, connection, load bars, online count; the bars and their 7 s poll run only while Settings is the visible tab, every tab stays mounted). The old Your Stats card moved to Devices as the shared `SyncCheckCard`; the hand-drawn Relay Server card and Online counter are gone.
-
-### _SettingsSubPage
-Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Column[back-arrow header row (HollowPressable + heading), Divider, Expanded(child)]`. The bodies are: `_ProfileTab`, `_AppearanceTab`, `_NetworkTab` (formerly `_SystemTab`, trimmed to Peer ID + relay), `_AudioTab`, `_FilesTab`, `_SecurityTab` (trimmed to App Lock + Device Protection + Recovery), `_DevicesTab`, `_BackupTab`, `_AboutTab`. The new tabs (`_AppearanceTab`/`_AudioTab`/`_FilesTab`/`_DevicesTab`/`_BackupTab`) are thin compositions of the same already-modular section widgets (`_ThemeToggleRow`, `_AccentHueSection`, `_BackgroundSection`, `_AudioQualityPicker`, `_RingtonePicker`, `_ImageQualityPicker`, `_AutoDownloadSlider`, `_CacheCapSlider`, `_DevicesSectionMobile`, `_LinkDeviceButton`, `_ResetDeviceListButton`, `_BackupExportButton`). `_AutoDownloadSlider` (previously unused) is now wired into `_FilesTab`.
-
-### Profile Tab
-- **Live preview card** — bordered container (`surface` bg, `border` outline, `radiusMd`) with:
-  - Banner (100px, tappable to change, long-press to clear)
-  - Avatar (64px, overlapping banner, tappable/long-press)
-  - Display name (bold, live-updates on keystroke)
-  - Status (italic, live-updates)
-  - Divider + "About me" label + about text (live-updates)
-  - Peer ID footer (faded short ID)
-- Text fields below: Display Name (32), Status (48), About Me (128, 3 lines)
-- Save Profile button
-- Twitch connection row (disconnect works, connect deferred to desktop)
-- `_populated` flag ensures fields fill from `profileProvider` on first available build (not stale `initState`)
-
-### System Tab (`_SystemTab` — `ConsumerStatefulWidget`)
-Every settings subpage titles its groups with the shared `HollowSectionHeader` (Title Case, e.g. "Peer ID", "Offline Delivery", "Display Size", "Cache Limits", "Identity Backup"); there is no private section-label class. Sections in order:
-1. **Peer ID** — copyable (mono font, accent color, tap → clipboard)
-2. **Network** — relay domain management:
-   - Relay list from `savedRelayListProvider` (radio-style selection, official badge on default)
-   - Add relay: inline TextField + Add/Cancel
-   - Remove relay: X button on non-default relays
-   - "Apply & Close App" (conditional) → `relayDomainProvider.setDomain()` → `notifyShutdown()` → `SystemNavigator.pop()`
-3. **Appearance** — `_ThemeToggleRow` (dark/light switch, immediate apply via `themeModeProvider`), `_AccentHueSection` (rainbow slider 0-359° via `RainbowSliderTrackShape`, preset swatches 28x28 in Wrap, long-press to remove, + to save), `_BackgroundSection` (file picker → mobile crop 9:16 → `backgroundProvider.setImage()`, opacity slider 0.0–0.92), `_InvisibleToggleRow` (`invisibleModeProvider`, under its own **Presence** header since 2026-09-19, it used to sit under a lone "Layout"). **Reduce Motion moved out of Appearance** (2026-06-24) into a new **Accessibility** nav tile → `_AccessibilityTab`: a **Display Size** section (`InterfaceScaleControl` + `ChatTextScaleControl` imported from `settings_shared.dart` — the SAME widgets the desktop dialog uses, so the two surfaces cannot drift) + `_ReduceMotionRow` (tri-state Auto/On/Off `_MobileSegment` → `reduceMotionProvider`/`ReduceMotionController`) + `_ReduceTransparencyRow` (`reduceTransparencyProvider`)
-4. **Voice & Audio** — audio quality chips, mic gain slider, audio processing info
-5. **Files** — `_ImageQualityPicker` (`SettingsFieldLabel` + a `Wrap` of Lossless/Balanced/Small `HollowChip`s via `imageQualityProvider`), `_AutoDownloadSlider` (34-2048 MB), `_CacheCapSlider` (256-10240 MB, formatted as GB when ≥1024)
-6. **Ringtone** — ringtone picker + volume slider
+Since the Settings rebuild (2026-09-24) the tab is a ROOT LIST whose rows push the SHARED desktop page widgets under `SettingsDensity(touch: true)` (`MobileSettingsSubPage`); the old phone-only `_ProfileTab` / `_SystemTab` / `_AppearanceTab` / `_AccessibilityTab` / `_AudioTab` / `_FilesTab` / `_DevicesTab` / `_BackupTab` / `_AboutTab` bodies and their private rows are gone. Pages, groups and rows: wiki `ui_user_settings`. The list ends with `HomeStatusCard`, `HomeNewsCard` and `HomeRelayCard(loadBars: mobileTab == 3)` (the bars and their 7 s poll run only while Settings is the visible tab).
 
 ### Security Tab (App Lock: PIN / password / biometric)
-- **App Lock row**: status "PIN enabled" / "Password enabled" / "Not set". Enable → `_chooseLockType()` bottom sheet (`_LockTypeOption` rows: PIN 4-8 digits / Password / a THIRD grayed-out "Fingerprint / face unlock" entry, `onTap: null` → 0.55 opacity, no chevron, not pressable, subtitle "Available once a PIN or password is set" — biometric is a layer on top of a PIN/password, not its own lock type) → `_askSecret()` dialog (numeric keyboard + `FilteringTextInputFormatter.digitsOnly` + maxLength 8 for PIN, confirm field, min-4-digit check) → `identity_api.enablePasswordProtection` (PIN = numeric secret through the SAME Rust Argon2id flow) + `AppLockService.setLockType` + `sessionSecret` cache. Remove → ask current secret → `removePasswordProtection` + `AppLockService.clearAll()`. **Enable/Remove run Argon2id (~seconds)** → the button is swapped for an inline 18px `CircularProgressIndicator` while busy (`_appLockBusy` flag, reset in `finally`).
+- **App lock** (the shared `SecurityAppLockSection` in `settings/security_section.dart`, phone branch): Enable → `_chooseLockType()` sheet ("Choose a lock": touch `HollowListRow`s PIN "4 to 8 digits, quick to type" / Password "Anything you like, stronger" / a third, inert row naming the biometric, "Available once a PIN or password is set": a biometric is a layer on top of a PIN/password, not its own lock type) → `askSecretDialog(ask: SecretAsk.create, isPin:)`, whose `onSubmit` runs `identity_api.enablePasswordProtection` (PIN = numeric secret through the SAME Rust Argon2id flow) + `AppLockService` bookkeeping INSIDE the dialog: the confirm loads through the seconds of Argon2id, a wrong current secret lands on its field, nothing typed is lost. Change and "Turn off the app lock" (confirm "Turn off", a filled button, not red: it deletes no data) use the same dialog with `SecretAsk.change` / `.current`.
 - **Biometric row** (mobile + lock enabled + `canUseBiometrics()`): Switch (`activeThumbColor`). ON → needs the secret (`sessionSecret` or re-ask) → one live `promptBiometric()` check → `enableBiometric(secret)` stores it in flutter_secure_storage. See `lib/src/core/services/app_lock_service.dart`. (`canUseBiometrics()` requires `getAvailableBiometrics().isNotEmpty` — some Pixels report Face Unlock as class-2/weak and return empty even with enrolled biometrics; relax that check if the Switch never appears.)
 - Device Protection: enable/disable OS keychain (Windows/macOS only)
 - Recovery Phrase button (loads from identity or storage API)
-- **Verify a Proof** section (2026-07-02): full port of the desktop `_VerifyProofSection` at the end of the Security tab — paste/import a proof JSON (FilePicker `withData: true`; mobile pickers may return bytes without a path), envelope validation (version/protocol/algorithm), canonical-payload tamper reconstruction, `network_api.verifyMessageProof`, VERIFIED/INVALID result card.
-- **Identity Backup** (renamed from "Account Backup" — all user-facing "account" wording is now "identity"; lives in the separate Backup tab, subtitle "Export identity") section (`_BackupExportButton`): exports a passphrase-encrypted `.hollow` file. Toggles for "Include downloaded files" / "Include vault shards". Since Rust `exportBackup` writes to a path it owns, mobile exports to a temp file under `hollowDataDir`, reads the bytes, hands them to `FilePicker.saveFile(bytes:)` (required on Android/iOS), then deletes the temp file. Passphrase via `_askBackupPassphrase` (HollowDialog with confirm field). IMPORT is NOT here — it lives in the first-launch welcome dialog (`welcome_dialog.dart`), since `importBackup` overwrites the data dir and must run before the node starts; that picker uses `FileType.any` on mobile (`.hollow` isn't a recognized iOS/Android UTI, so `FileType.custom` hides it).
-- Unlock-at-launch flow lives in `hollow_shell.dart _showPasswordUnlockDialog`: biometric prompt FIRST, then PIN/password dialog (fingerprint retry button); all unlock/recovery dialogs use `(screenWidth - padding).clamp(0, maxW)` widths.
+- **Check a message proof**: the shared `VerifyProofSection` (Security, Advanced) on both platforms.
+- **Backup file** (`BackupFileRow`, `settings/backup_section.dart`): "Export a backup" dialog with its options inside ("Include downloaded files", "Include files you keep for your servers"). Rust `exportBackup` writes to a path it owns, so a phone exports to a temp file under `hollowDataDir`, reads the bytes, hands them to `FilePicker.saveFile(bytes:)` (required on Android/iOS), then deletes the temp file. IMPORT is NOT here: it lives in the first-launch welcome dialog (`welcome_dialog.dart`), since `importBackup` overwrites the data dir and must run before the node starts; that picker uses `FileType.any` on mobile (`.hollow` isn't a recognized iOS/Android UTI, so `FileType.custom` hides it).
+- Unlock-at-launch flow lives in `hollow_shell.dart _showPasswordUnlockDialog`: biometric prompt FIRST, then `UnlockDialog` (`shell/identity_unlock_dialogs.dart`: PIN or password, a biometric retry, "Forgot PIN?" / "Forgot password?"; a wrong secret reopens it with the error ON THE FIELD, never a toast, since the lock cover silences toasts) and `RecoveryPhraseDialog` (24 words checked by count, recovery runs inside the dialog, the phrase kept on failure).
 - **Unlocking… spinner** (`_UnlockingOverlay`, flag-driven `Stack` over the shell — NOT a dialog, so nothing races it dismissed): the post-unlock Argon2id derivation (~1.5-3s) + the local DB load can't begin until unlock finishes (the SQLCipher passphrase is derived from the just-unlocked identity — local-first render can't help). `_unlocking` is set the instant a secret is in hand (both `tryBiometric` and the password-entry path) and cleared after `profileProvider`/`friendsProvider` load in `_bootstrap` (conversation list renderable). Only shows when an App Lock is active; wrong-secret + identity-error paths clear it. See `feedback_app_lock_unlock_ux` memory.
 
 ### About Tab
-See "About Tab (Info + Links + Legal)" below.
+See "Audio, ringtone and About on the phone" below.
 
 ---
 
@@ -300,22 +252,18 @@ See "About Tab (Info + Links + Legal)" below.
 `HollowTextField` with search icon at top. Filters accepted friends by name (case-insensitive substring via `_resolvedName`).
 
 ### Sections (in order)
-Each section is headed by `_sectionHeaderSliver(title, count)`, a `SliverToBoxAdapter` around `HollowSectionHeader(title, count:, dense: true)`.
+Each section is headed by `_sectionHeaderSliver(title, count)`, a `SliverToBoxAdapter` around `HollowSectionHeader(title, count:, dense: true)`. Requests hide while searching.
 
-1. **Requests** (if any pending) — incoming + outgoing with accept/reject/cancel buttons
-2. **Favourites** — starred friends pinned above online, ordered by `favouriteFriendsProvider` list order. Star icon on row.
-3. **Online** — sorted alphabetically by resolved name
-4. **Offline** — sorted alphabetically
+1. **Received**: incoming requests, Decline + Accept (`_PendingRow`)
+2. **Sent**: outgoing requests, Cancel request
+3. **Favourites**: starred friends in `favouriteFriendsProvider` order
+4. **All friends**: everyone else. Empty: "No friends yet" / "No friends match".
 
-### Add Friend Dialog (`_AddFriendDialog`)
-Unified input: auto-detects peer ID (`12D3KooW` prefix) vs temporary nickname. Below the input, a "Your temporary nickname" section lets users claim/release an ephemeral relay-scoped nickname (watches `temporaryNicknameProvider`). Shows claim input (3-20 chars), claimed badge with Release button, or error state (taken/invalid).
+### Add friend (`showMobileAddFriendSheet`, `_AddFriendSheet`)
+A sheet, not a dialog: "Add friend", "User ID or nickname" (`kAddFriendHint`, mono) with `kAddFriendNote` under it, a full-width filled "Send request" directly below, then `HowOthersAddYou` (the temporary-nickname claim). Opened from the tab's "Add friend" button and the Chats tab's add-friend action.
 
 ### Long-Press Actions (bottom sheet with `SafeArea`)
-- Message → navigate to DM
-- View Profile → `showMobileProfileSheet`
-- Favourite / Unfavourite → `favouriteFriendsProvider.toggle()`
-- Set Nickname → dialog (32 chars, "only visible to you")
-- Remove Friend → confirmation dialog → `friendsProvider.removeFriend()`
+The desktop person menu's labels, as touch `HollowListRow`s under `HollowSheetTitle(name)`: Message, Start a call (online, no call up; `startMobileDmCall`), Profile (`showMobileProfileSheet`), Add to favourites / Remove favourite, Move up / Move down (favourites only, the keyboard-free reorder), Set nickname / Edit nickname (`showLocalNicknameDialog`, THE nickname dialog), a divider, Remove friend (`confirmRemoveFriend`, THE remove confirm, run inside the dialog).
 
 ---
 
@@ -325,7 +273,9 @@ Unified input: auto-detects peer ID (`12D3KooW` prefix) vs temporary nickname. B
 
 ## Bottom Sheet SafeArea Pattern
 
-**CRITICAL:** All `showHollowSheet` builders must wrap content in `SafeArea(child: ...)` for Android 3-button navigation bar compatibility. The canonical pattern is `mobile_chats_tab.dart:_showServerSheet`. For `DraggableScrollableSheet`, use `viewPadding.bottom + HollowSpacing.xl` in ListView padding instead.
+**CRITICAL:** All `showHollowSheet` builders must wrap content in `SafeArea(child: ...)` for Android 3-button navigation bar compatibility. The canonical pattern is `mobile_chats_tab.dart:_showServerSheet`.
+
+**`HollowSheetTitle(title, {subtitle})`** (`components/hollow_sheet.dart`, 2026-09-25): the name at the top of every phone action sheet (the person, server, channel or message the rows act on), start-aligned `subheading`, one line, full width so it starts on the rows' leading edge even in a centring column. Rows under it are touch `HollowListRow`s with grey 20 px icons; destructive rows carry no red, the confirm they open does. Used by the DM, server, channel, friend, pinned-messages, pending-join and archive-filter sheets. For `DraggableScrollableSheet`, use `viewPadding.bottom + HollowSpacing.xl` in ListView padding instead.
 
 ---
 
@@ -337,36 +287,32 @@ Unified input: auto-detects peer ID (`12D3KooW` prefix) vs temporary nickname. B
 ### Bottom Sheet Layout
 ```
 Column (mainAxisSize: min)
-├── Drag handle (32×4px)
 ├── _MessagePreview (sender name + truncated text + timestamp)
-├── _QuickReactionsRow (top 6 emojis + "More..." button)
-├── Divider
-└── Action rows (HollowPressable, icon + label)
-    ├── Reply (LucideIcons.reply)
-    ├── Edit message (LucideIcons.pencil) — own messages only, no file (2026-09-24: sentence-case labels, 52 px rows, grouped like the desktop menu, Delete message alone at the end)
-    ├── Copy Text (LucideIcons.copy) — text messages only
-    ├── Save File (LucideIcons.download) — file messages only
-    ├── Message Info (LucideIcons.shieldCheck) — shows proof dialog
-    ├── Pin/Unpin Message (LucideIcons.pin) — manageChannels permission, channel only
-    └── Delete Message (LucideIcons.trash2, error color) — own messages only
+├── _QuickReactionsRow (kQuickReactionEmojis + "More reactions")
+└── Groups split by HollowDivider, the desktop message menu's order (_ActionRow = touch HollowListRow, grey icon)
+    ├── Reply
+    ├── Copy text, the file row (Save file / Try again / Stop waiting via fileBarAction), Pin message / Unpin message, Edit message
+    ├── Message proof
+    └── Delete message (own messages; runs at once, no confirm)
 ```
 
-### Three Views (AnimatedSize transitions)
-1. **actions** — default view with action rows
-2. **allEmojis** — full 30-emoji grid (6 columns), triggered by "More..." button. Back button returns to actions.
-3. **deleteConfirm** — inline confirmation: warning icon + "Delete this message? This can't be undone." + Cancel/Delete buttons
+### Two Views (AnimatedSize transitions)
+1. **actions**: default view with action rows
+2. **allEmojis**: back row + "Add a reaction" over `EmojiPickerBody` (half the screen height). Back returns to actions.
+
+**A single message's delete never asks** (Vitalik, 2026-09-25, as on desktop): the old inline `deleteConfirm` view is gone. An album row still asks once, in the caller (`confirmDeleteAlbum`).
 
 ### Parameters
 All action callbacks are nullable — only shown when non-null:
 - `onReply`, `onEdit`, `onDelete`, `onCopy`, `onDownload`, `onPin` — `VoidCallback?`
 - `onReaction` — `void Function(String emoji)?`
 - `onInfo` — `VoidCallback?`
-- `isPinned` — `bool` (toggles "Pin Message"/"Unpin Message" label)
+- `isPinned`: `bool` (toggles "Pin message" / "Unpin message")
 
 Note: `onCopyImage` was removed — `super_clipboard` image operations don't work on Android. "Save File" covers the use case.
 
 ### Emoji Source
-Imports `kReactionEmojis` from `lib/src/ui/chat/emoji_picker.dart` (30 curated emojis). Does NOT use the desktop's `showEmojiPicker()` overlay — embeds the grid directly in the sheet to avoid raw `OverlayEntry`.
+The quick row reads `kQuickReactionEmojis`; "More reactions" embeds `EmojiPickerBody` (`chat/emoji_picker.dart`, with the server's emotes via `serverId`) in the sheet. It does NOT use the desktop's `showEmojiPicker()` overlay, to avoid a raw `OverlayEntry`.
 
 ---
 
@@ -390,105 +336,18 @@ All FFI-dependent providers are overridden with mock notifiers that return stati
 
 ---
 
-## MobileVoiceChannelRoute
+## Phone call screens (rebuilt 2026-09-25, session 23)
 
-**File:** `lib/src/ui/mobile/mobile_voice_channel_route.dart`
-**Class:** `MobileVoiceChannelRoute extends ConsumerStatefulWidget`
-**Purpose:** Full-screen voice channel view (participants, video, controls). Pushed as `PageRouteBuilder` with slide-from-bottom transition.
+`MobileCallScreen` (DM, `mobile_call_video_view.dart`), `MobileVoiceChannelRoute` (voice room and meeting), `MobileMinimisedCall`, `MobileIncomingCallOverlay`, `MobileShareFullscreen` and the shared pieces in `mobile_call_chrome.dart`. Built on the desktop adapters (`DmCallStageSource`, `VcCallStageSource`). Full description in wiki `ui_call_surfaces`, section "Phone". Deleted: `mobile_active_call_pill.dart`, `mobile_voice_channel_pill.dart`, `mobile_source_switch_pill.dart`, `mobile_voice_avatars.dart` (`MobileClusteredAvatars`, `MobileSpeakingAvatar`, `MobileControlButton`), `components/speaking_border.dart`, `MobileCallStatusStrip`, `_VoiceChannelStatusStrip`.
 
-### Constructor
-| Parameter | Type | Description |
-|---|---|---|
-| `serverId` | `String` | Server ID |
-| `channelId` | `String` | Voice channel ID |
-| `channelName` | `String` | Display name |
-
-### Layout
-- Top bar: chevron-down (pops route) + `# channelName` + duration MM:SS
-- Center: `MobileClusteredAvatars` (audio mode) or video grid (camera/screen share mode)
-- Bottom controls: mute, deafen, speaker (mobile), camera, share screen (mobile), flip camera (mobile+camera on), leave (red)
-- Share screen button (also on the DM call screen, `mobile_call_video_view.dart`): toggles `startScreenShare`/`stopScreenShare` via `showMobileScreenShareSheet` (`mobile_screen_share_sheet.dart` — bottom sheet with a "Share device audio" toggle + platform notes; no source picking on mobile, caps passed as 1080x1920@30)
-- Auto-pops when `voiceChannelProvider` changes to different channel or leaves
-
-### Video Modes
-1. **Remote screen share**: full-bleed `RTCVideoView` with `ObjectFitContain` + local camera PiP
-2. **Single local camera**: full self-view with mirror
-3. **Single remote camera**: full remote + local PiP
-4. **Multi-camera grid**: `Wrap` layout, tiles adapt to count
-
-A SELF screen share is deliberately NOT previewed on mobile (`_hasVideo` ignores a self-share focus) — the phone shares its own screen, so a preview would mirror-recurse; the avatar view + accent share button convey the sharing state.
-
-### Navigation Pattern
-Voice channel tap in accordion (`mobile_chats_tab.dart`) pushes TWO routes:
-1. `MobileChatRoute` (text chat) — underneath
-2. `MobileVoiceChannelRoute` (voice view) — on top via `PageRouteBuilder` slide-from-bottom
-
-Popping the voice route reveals the text chat. User can then read/send messages in the channel.
+### Navigation pattern (unchanged)
+A voice channel tap in the Chats tab pushes TWO routes: `MobileChatRoute` (the channel's text chat) underneath, `MobileVoiceChannelRoute` on top (slide up). "Open the chat" on the call screen pops back to that chat, or opens it when the call was reached from elsewhere (`openMobileCallChat`).
 
 ---
 
-## MobileVoiceChannelPill
+## Audio, ringtone and About on the phone
 
-**File:** `lib/src/ui/mobile/mobile_voice_channel_pill.dart`
-**Class:** `MobileVoiceChannelPill extends ConsumerStatefulWidget`
-**Purpose:** Floating draggable pill shown when in a voice channel. Tap body returns to voice route.
-
-### Layering
-Lives in BOTH `MobileShell` Stack (visible on tabs) AND `MobileChatRoute` Stack (visible on chats). The voice route's `PageRouteBuilder` slide covers it when the full-screen view is active. **Never put in `app.dart` builder** — that layer is above the navigator and uncoverable.
-
-### Visibility
-- `vcState.isInVoiceChannel && callState.status == CallStatus.idle`
-- Channel name from `vcState.currentChannelName` (NOT `channelListProvider`)
-
-### Layout
-`Positioned(bottom: 80)` → draggable Container (height 48, pill shape, green border, shadow) with:
-- StatusDot (green, pulse) + `# channelName` + duration MM:SS + mute/deafen/leave buttons
-
----
-
-## MobileVoiceAvatars (Shared Widgets)
-
-**File:** `lib/src/ui/mobile/mobile_voice_avatars.dart`
-**Purpose:** Shared avatar and control widgets extracted from `mobile_call_video_view.dart`, used by both DM calls and voice channels.
-
-### MobileClusteredAvatars
-Adaptive grid layout based on participant count (1→single, 2→row, 3→2+1, 4→2+2, 5→2+1+2, 6+→3 cols). Avatar size: 96 (≤2), 80 (≤4), 64 (>4).
-
-### MobileSpeakingAvatar
-`ConsumerStatefulWidget` with animated teal glow border (300ms easeOut). 3px border + 16px blur shadow when speaking. Muted badge (red micOff) at bottom-right.
-
-### MobileControlButton
-Circular button (configurable size/color). `AnimatedOpacity` 0.4 when disabled.
-
----
-
-## Voice Channel Status Strip
-
-**Widget:** `_VoiceChannelStatusStrip` (private, in `mobile_chat_route.dart`)
-**Purpose:** Cross-server green strip shown in any chat when user is in a voice channel.
-
-### Layout
-Green bar (success color, 0.1 alpha background): dot + "In voice: #channelName" + "Tap to return" + chevronUp. Taps push `MobileVoiceChannelRoute` via `PageRouteBuilder` slide-from-bottom.
-
-### Visibility
-- `vcState.isInVoiceChannel` — shown in both DM and channel chats
-- Channel name from `vcState.currentChannelName`
-
----
-
-## Audio Settings (System Tab)
-
-Added to `_SystemTab` in `mobile_settings_tab.dart`:
-
-### Voice & Audio Section
-- **Audio quality picker**: `SettingsFieldLabel('Audio quality')` + a `Wrap` of 3 `HollowChip`s (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
-- **Mic gain slider** (`_MicGainSlider`): 83 divisions, with a caption line. Reads/writes `micGainProvider` (linear multiplier, clamped 0.68–4.0, key `mic_gain_v2`; **default 1.0 = "50%"**). Display = `(gain / kMicGainDisplayUnit(2.0) * 100)%` → 34%–200%. With Voice Enhancement ON it's the chain's input trim (2.0 = unity); OFF = legacy flat gain. **Dims + disables + shows "Auto" while Dynamic mode is on.** Drives `Helper.setCaptureGain()`, live mid-call
-- **Voice Enhancement** (`_VoiceEnhanceToggle`): Switch for `voiceEnhanceProvider` (the native EQ+compressor+limiter chain, default ON) + a **Dynamic Mode** Switch (`voiceEnhanceDynamicProvider`, default ON — auto-level servo, "any microphone lands at the same natural loudness") + a **Strength** slider (`voiceEnhanceStrengthProvider`, 0–150%, default 30%, 30 divisions = compressor makeup). Strength dims/locks ("Auto") while Dynamic is on or enhancement is off
-- **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
-
-### Ringtone Section
-- **Ringtone picker**: file name + Choose button + clear (X). Reads/writes `ringtonePathProvider`
-- **Ringtone volume slider**: 0.0–1.0, reads/writes `ringtoneVolumeProvider`
+The Audio & Video and About pages are the shared `settings/audio_section.dart` and `settings/about_section.dart` at touch density (wiki `ui_user_settings`); the phone-only `_MicGainSlider`, `_VoiceEnhanceToggle`, `_InfoRow`, `_MobileBrandIcon` and friends are gone. Provider semantics (mic gain, Voice Enhancement, ringtone keys): wiki `providers_event_settings`. The ringtone row's Trim opens `showRingtoneClipEditor()`, whose waveform is REAL since 2026-09-25: `loadRingtoneWaveform` asks Rust `audio_waveform(path, buckets)` (`api/waveform.rs` over `audio_peaks.rs`, symphonia) for the decoded duration and per-bucket min/max + RMS, drawn by `RingtoneWaveformPainter`; a format symphonia lacks (Opus in Ogg) falls back to the player's duration with no waveform, so it still trims by time. Legal documents open in `_showLegalSheet` (`about_section.dart`).
 
 ---
 
@@ -530,7 +389,7 @@ Manual `_scale`, `_offsetX`, `_offsetY` state (no `InteractiveViewer`). On every
 ## MobileStorageRoute
 
 **File:** `lib/src/ui/mobile/mobile_storage_route.dart`
-**Purpose:** Full-screen server storage dashboard, pushed from server settings Management section.
+**Purpose:** Full-screen server storage dashboard, pushed from the phone server settings list ("Storage on this phone").
 
 ### Data Loading
 - `crdt_api.getStorageStats(serverId:)` → `StorageStatsFfi`
@@ -539,14 +398,16 @@ Manual `_scale`, `_offsetX`, `_offsetY` state (no `InteractiveViewer`). On every
 ### Sections
 Each section box is titled `HollowSectionHeader(title, dense: true)`, no section icon.
 
-1. **Server Storage** — colored bar (green/yellow/red by fill %), used/total, vault mode label, member count. Full replication (<6) vs erasure coding (6+) with redundancy factor.
-2. **Your Storage** (6+ members) — pledge amount with edit button (HollowDialog), usage bar.
-3. **Retention Policy** — messages + files retention display. Admin can tap to edit (HollowDialog with radio-style options). Records `_since` timestamp for forward-only pruning.
+1. **Server Storage**: vault mode label, member count. Full replication (<6): the server's data against THIS phone's free space (`freeBytesAt(hollowDataDir)`, `core/services/disk_space.dart`), "X used · Y free", and no bar at all until a free-space reading exists (the old bar sat at 0%). Erasure coding (6+) with redundancy factor.
+2. **Your Storage** (6+ members): pledge amount with edit button, usage bar.
+3. **Retention Policy**: messages + files retention display. Admin can tap to edit. Records `_since` timestamp for forward-only pruning.
+
+Pledge and retention edits are the DESKTOP storage dashboard's own flows (`editStoragePledge`: a `promptForName` in MB with a validator, at least 512; `editRetentionPolicy`: `_RetentionPicker`), both writing inside their dialog; the phone only toasts "Pledge saved" / "Retention saved" and reloads. `StorageUsageBar` is shared too.
 4. **Vault Health** — StatusDot + status text + shard count. Pulse animation on active transfers.
 5. **Member Pledges** (6+ members) — member count + average pledge.
 
 ### Navigation
-Added as `_NavRow(icon: LucideIcons.hardDrive, label: 'Storage')` in `MobileServerSettingsRoute` Management section, visible to all members.
+The "Storage on this phone" row of `MobileServerSettingsRoute`, visible to all members.
 
 ---
 
@@ -668,28 +529,15 @@ None of its own: the rows render in place and the sheet's own slide (`showHollow
 
 ## DM Long-Press Context Menu
 
-**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_DmContextSheet`)
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_showDmSheet`)
 **Trigger:** `onLongPress` on a DM's `ConversationRow` in the Chats tab list.
 
-### Actions
-- Mute/Unmute Notifications — toggles `notificationSettingsProvider.setDmEnabled`
-- Export Archive — opens `showExportArchiveDialog` (messageCount: 0, count hidden)
-- Hide/Show in Archive — toggles `hiddenArchiveDmsProvider`
-- Copy Peer ID — clipboard + toast
-
-### Pattern
-Reuses existing `_SheetAction` widget (same as server context sheet). `showHollowSheet` (its shared handle) + peer name header.
+### Actions (the desktop person menu's labels for a DM tile)
+`HollowSheetTitle(name)`, then Mark as read (`markDmSeenLatest(master)`), Mute conversation / Unmute conversation (`notificationSettingsProvider.setDmEnabled`), Export conversation (`showExportArchiveDialog`, messageCount: 0), Hide from archive / Show in archive (`hiddenArchiveDmsProvider`), Copy user ID (the MASTER id). Rows are the tab's `_sheetRow` (same as the server sheet); failures toast through `_report`.
 
 ## Notification Levels (Server Settings)
 
-**File:** `lib/src/ui/mobile/mobile_server_settings_route.dart` (`_NotificationSection`)
-**Purpose:** Server-wide + per-channel notification level control.
-
-### Server-Wide Level
-3 pills in a Row: All Messages (bell, accent) / Mentions Only (atSign, warning) / Nothing (bellOff, error). Uses `notificationSettingsProvider.setServerLevel()`.
-
-### Per-Channel Overrides
-List of channels with current level badge. Tap → bottom sheet with 4 options: Default / All / Mentions / Nothing. Uses `notificationSettingsProvider.setChannelOverride()`.
+The phone shows the desktop Notifications page (server level chips + `ChannelOverrideDropdown`) under `SettingsDensity(touch: true)`: wiki `ui_server_settings`. The old `_NotificationSection` is gone.
 
 ## Vault Files Tab (Archive)
 
@@ -705,39 +553,15 @@ List of channels with current level badge. Tap → bottom sheet with 4 options: 
 - Long-press on server header (or tap ellipsis icon): bottom sheet with Export Shards, Import Shards, Start Recovery Pool actions
 - Shard export uses mobile file save pattern (temp dir → FFI → bytes → `FilePicker.saveFile(bytes:)`) on Android/iOS
 
-## About Tab (Info + Links + Legal)
-
-**File:** `lib/src/ui/mobile/tabs/mobile_settings_tab.dart` (`_AboutTab`)
-
-### Info Section
-`_InfoRow` widgets: Version (0.4.2), Platform (`Platform.operatingSystem` — dynamic), License (AGPL-3.0).
-
-The Relay box and the three-post News list left About on 2026-09-24 (they duplicated the News + Relay cards that now close the Settings list); the root row's subtitle reads "Version, contact & legal".
-
-### Contact Section
-`HollowButton.ghost` with icons: email (copies to clipboard), website (opens external browser), GitHub (opens `github.com/VitalikPro13/HOLLOW` externally). Uses `BrandIcons.github` for GitHub icon.
-
-### Follow & Support Section
-Row header: "Follow" and "Support" (`label`, textSecondary) with a plain `HollowDivider` between them.
-Brand icon row: YouTube, X, Twitch, Kick | `HollowDivider` | Patreon, Ko-Fi. `_MobileBrandIcon` widgets in bordered containers, tap opens external browser.
-
-### Legal Section
-`HollowButton.ghost` with icons: Privacy Policy, Terms of Use (open `_showLegalSheet` — `DraggableScrollableSheet` with `Markdown` widget from `flutter_markdown_plus`, styled `MarkdownStyleSheet` matching desktop), Open-Source Licenses (Flutter's built-in `showLicensePage`).
-
-### System Tab Notes
-- Auto-Download slider removed (Share system is N/A on mobile, setting has no effect)
-- Ringtone picker: resets `ringtoneStart`/`ringtoneEnd` and probes duration via `AudioPlayer` when new file selected (matches desktop pattern). "Trim" button opens shared `showRingtoneClipEditor()` dialog.
-- Accent swatches (`_MobileColorSwatch` + save-preset button) are 36×36 (touch-target minimum; were 28×28).
-
 ## Mobile Call Screens — Audio Routing, Badges, Proximity, Wakelock, Screen Share
 
 Implemented 2026-06 across `mobile_call_video_view.dart` (1:1) and `mobile_voice_channel_route.dart` (VC).
 
-### Control rows (identical order in 1:1 and VC)
-mute, deafen (headphones, red when active), audio device (see below), camera, [flip — VC only when camera on], hang up. VC row shrinks buttons 56→46px when ≥6 buttons (Row overflow on 360dp). The 1:1 remote-volume sheet was REMOVED from mobile (desktop volume popup remains).
+### Control rows (session 23: one row, `MobileCallControlRow`)
+Mute, Deafen, Speaker (phones), Camera, Share, [Flip while the camera is on, phones], then End (DM; Cancel while ringing out) or Leave (room). Round 56 px buttons with the word UNDER each (`caption`, `textSecondary`); a seventh shrinks the row to 48, a narrow phone shrinks it to fit. Tones: rest = `hover` fill, on = `textPrimary` fill, muted/deafened = error 18%, End/Leave = error fill. The visible word is short ("Camera"), the semantics label says the purpose ("Turn on camera", "Leave the call", "Leave the room", "Leave the meeting").
 
 ### Share-audio volume (2026-07-17)
-When a REMOTE peer is sharing, both call TOP BARS (not the crowded control rows) show a `ShareVolumeButton` (`ui/components/share_volume_control.dart`) — opens a bottom sheet with the received-share-audio volume slider (0–200%, persisted `shareAudioVolumeProvider`; 100% = −6 dB calibration, 200% = source loudness) + "Quieter when people talk" duck toggle (`shareAudioDuckProvider`). Gates: 1:1 = `call.remoteScreenSharing`; VC = `peerScreenSharing.values.any`. Values flow through the `ShareAudioLevel` bus (see providers_voice_files.md).
+While you watch a share, a "Share volume" scrim button sits bottom-left on the live share (`MobileLiveShare`), opening `showShareVolumeSheet`: the received-share-audio volume slider (0 to 200%, persisted `shareAudioVolumeProvider`; 100% = -6 dB calibration, 200% = source loudness) and "Quieter when people talk" (`shareAudioDuckProvider`). Values flow through the `ShareAudioLevel` bus (see providers_voice_files.md).
 
 ### Audio routing + device picker (mobile-gated)
 Defaults: 1:1 voice → earpiece, 1:1 video → speaker, camera-on mid-call → auto-switch to speaker (BOTH DM `toggleVideo` and VC `toggleCamera` since 2026-07-20), VC join → speaker. Reset to earpiece in `_cleanup()` / `onLocalLeft()` so the next call never inherits a stale route. State: `CallState.isSpeakerOn` / `VoiceChannelState.isSpeakerOn` (= "hands-free", not "the phone's loudspeaker").
@@ -750,23 +574,20 @@ Defaults: 1:1 voice → earpiece, 1:1 video → speaker, camera-on mid-call → 
 
 **Route DURABILITY (2026-07-20, device-confirmed):** iOS makes the route durable by baking it into libwebrtc's session template (`AudioUtils setSpeakerphoneOn:` sets `DefaultToSpeaker` + mode `videoChat`/`voiceChat` on `webRTCConfiguration` — audio-unit restarts then re-apply OUR route, not WebRTC's earpiece default) plus a native self-heal (`healSpeakerRouteIfClobbered`: any route change landing output on the RECEIVER while `_speakerOn` → re-assert; also fired from `startScreenAudioPlayer` so an incoming share can't drag audio to the earpiece). Since 2026-08-15 it heals the MIRROR case too — output pinned to the built-in speaker while a headset is attached = stale override, release it. Dart re-assert points: VC join re-asserts after `startAudio` + at +1200ms (the early set runs before the service exists); DM `toggleVideo` / VC `toggleCamera` re-assert at +1200ms after ANY camera flip. Full story: memory `feedback_mobile_call_audio_route`.
 
-### Mute/deafen badges (convention everywhere)
-Muted badge = bottom-LEFT, deafened badge = bottom-RIGHT (red box, white icon, `micOff`/`headphoneOff`). Widgets: `_AvatarBadge` in `mobile_voice_avatars.dart` (`MobileSpeakingAvatar.isMuted/isDeafened`, `MobileClusteredAvatars.mutedSet/deafenedSet`), desktop 1:1 `_badgedCallAvatar` in `chat_pane.dart`. Data: VC = `peerAudioStates`; 1:1 = `CallState.isMuted/isDeafened/remoteMuted/remoteDeafened` (synced via the `audio_state` call signal — see providers_voice_files.md).
+### Mute/deafen marks
+Session 23: the phone uses the desktop's marks, the red mic-off beside the name (`MobileCallFace`, `CallPersonTile`). Data: VC = `peerAudioStates`; 1:1 = `CallState.isMuted/isDeafened/remoteMuted/remoteDeafened` (synced via the `audio_state` call signal, see providers_voice_files.md).
 
 ### Proximity + wakelock
-**Proximity is GLOBAL (since 2026-06-21), not per-screen.** `CallProximityController` (`lib/src/ui/mobile/call_proximity_controller.dart`) — a pure side-effect `ConsumerWidget` mounted in `app.dart`'s mobile `Stack` (next to `IncomingCallOverlay`, always alive) — watches BOTH `callProvider` and `voiceChannelProvider` and engages `proximity_sensor` screen-off whenever EITHER is in earpiece mode (active call/VC, no local/remote video; `_vcHasVideo` mirrors the VC route's `_hasVideo`). **Earpiece is decided by the ACTUAL route** (`audioRouteProvider.activeKind == earpiece`) since 2026-08-15, falling back to `!isSpeakerOn` only when the platform can't name it — headphones in a voice call leave that flag false while audio is nowhere near the ear, and the screen blanked at every passing object. This blanks the screen on ear-hold from ANY screen, not just the call sheet (the old per-screen `_syncProximity` only ran while that widget was built). Android needs WAKE_LOCK (present); iOS blanks natively while the events stream is subscribed. **Wakelock stays screen-scoped:** `_syncWakelock` in each call screen uses `wakelock_plus` (^1.5.2 — 1.6+ conflicts with file_picker via win32) to keep the screen on while video/screen share is displayed; disabled in dispose.
+**Proximity is GLOBAL (since 2026-06-21), not per-screen.** `CallProximityController` (`lib/src/ui/mobile/call_proximity_controller.dart`) — a pure side-effect `ConsumerWidget` mounted in `app.dart`'s mobile `Stack` (next to `MobileIncomingCallOverlay`, always alive) — watches BOTH `callProvider` and `voiceChannelProvider` and engages `proximity_sensor` screen-off whenever EITHER is in earpiece mode (active call/VC, no local/remote video; `_vcHasVideo` mirrors the VC route's `_hasVideo`). **Earpiece is decided by the ACTUAL route** (`audioRouteProvider.activeKind == earpiece`) since 2026-08-15, falling back to `!isSpeakerOn` only when the platform can't name it — headphones in a voice call leave that flag false while audio is nowhere near the ear, and the screen blanked at every passing object. This blanks the screen on ear-hold from ANY screen, not just the call sheet (the old per-screen `_syncProximity` only ran while that widget was built). Android needs WAKE_LOCK (present); iOS blanks natively while the events stream is subscribed. **Wakelock stays screen-scoped:** `_syncWakelock` in each call screen uses `wakelock_plus` (^1.5.2 — 1.6+ conflicts with file_picker via win32) to keep the screen on while video/screen share is displayed; disabled in dispose.
 
-### Incoming screen share on mobile (1:1)
-`_hasRealVideo` and `_buildVideoView` check `call.remoteScreenSharing && notifier.screenShareRenderer?.srcObject != null`; the share renders full-bleed inside `InteractiveViewer(maxScale: 6)` (pinch-zoom), with the local camera PiP on top. The VC screen-share view got the same InteractiveViewer wrap. (Before 2026-06 the mobile 1:1 view was camera-only and silently ignored an incoming share.) Since 2026-07-10 the remote-screen > remote-cam > local-cam priority is only the FALLBACK — an explicit pill focus wins (below).
+### Shares on the phone (session 23)
+Opt-in (#38) on both screens: an offer is `MobileShareOffer` (a card in a room, "Sharing their screen" + Watch under the name in a DM, also over the video in a DM with a camera on, which used to hide it). Watching puts `MobileLiveShare` (`ShareTile` large: name, quality, Stop watching) on top with the people as a row of faces; tap it or Full screen for `MobileShareFullscreen` (landscape via `FullscreenMediaChrome` + `toggleForcedLandscape`, pinch zoom through `ZoomSurface`, which is `media_zoom_view.dart`'s re-anchoring viewer extracted; a tap toggles the controls, they fade after 2 s, Reduce motion keeps them). Your own share is never previewed (the phone would film itself): `MobileOwnShare` says who is watching and offers Stop sharing. The source-switch pill is gone. Starting a share on a phone opens `showMobileScreenShareSheet` (`mobile_screen_share_sheet.dart`): "Share your screen", a "Share audio" switch that starts OFF (Vitalik 2026-09-25, desktop's picker too) with the platform note under it (Android 10+ for audio; apps that block capture stay silent), Cancel + Share.
 
-### Source-switch pill (2026-07-10)
-`MobileSourceSwitchPill` (`mobile/mobile_source_switch_pill.dart`) — horizontal-scroll port of the desktop switcher chips (type icon + avatar + name), overlaid top-center on both call surfaces. **1:1** (`mobile_call_video_view.dart`): shown when 2+ sources are active; taps write `focusedDmSourceProvider` (the SAME provider desktop's chat_pane pill writes) and `_buildVideoView` resolves the big tile from it, falling back to the old priority when the focused source isn't available. **VC** (`mobile_voice_channel_route.dart`): shown only in mixed mode (`remoteSharers.isNotEmpty && sources.length > 1` — a camera-only grid already shows every camera); taps call `vcNotifier.setFocusedSource(peerId, type)`; a focused CAMERA renders full-bleed (new branch), and the screen branch validates the focused peer against `peerScreenSharing` (focus may point at a camera peer) before falling back to the first remote sharer. `_hasVideo` now checks `peerScreenSharing` directly, not `focusedScreenSharePeerId`. Local SCREEN shares are never offered as tabs (no self-preview — infinite mirror).
-
-### PiP drag bounds
-Both screens clamp the camera PiP to `dy: 0..(screenHeight - 260)` (was hard-coded 400 — PiP got stuck mid-screen on tall phones).
+### PiP
+In a DM with both cameras on, yours is a 90x120 `CallPersonTile(strip)` in a corner you drag, clamped inside the video area.
 
 ### Drag-to-minimize (2026-07)
-Both call screens are wrapped in `MobileSheetDragToMinimize` (`mobile_sheet_drag.dart`): swipe down anywhere pulls the sheet with the finger (chat visible behind), release past 30% or a downward fling pops the route (status strip/pill remains), otherwise it springs back. Mechanism = Cupertino back-swipe vertically: `onVerticalDrag*` drives the enclosing route's `TransitionRoute.controller` (`// ignore: invalid_use_of_protected_member` — no public API), guarded on `route.isCurrent && animation.isCompleted`, with `navigator.didStart/StopUserGesture`. Zero paint cost at rest (routes stay opaque); the labeled Minimize chevron remains the accessible path. Descendant gestures (InteractiveViewer pinch, PiP pan, buttons) win the arena where present.
+Both call screens are wrapped in `MobileSheetDragToMinimize` (`mobile_sheet_drag.dart`): swipe down anywhere pulls the sheet with the finger (chat visible behind), release past 30% or a downward fling pops the route (the minimised call remains), otherwise it springs back. Mechanism = Cupertino back-swipe vertically: `onVerticalDrag*` drives the enclosing route's `TransitionRoute.controller` (`// ignore: invalid_use_of_protected_member` — no public API), guarded on `route.isCurrent && animation.isCompleted`, with `navigator.didStart/StopUserGesture`. Zero paint cost at rest (routes stay opaque); the labelled "Minimise the call" chevron remains the accessible path. Descendant gestures (InteractiveViewer pinch, PiP pan, buttons) win the arena where present.
 
 ### Speaking state + duration (2026-07 perf)
 VAD speaking flags live in `speaking_provider.dart` (`callSpeakingProvider` record, `vcSpeakingProvider` Set) — NOT in CallState/VoiceChannelState (a flip used to rebuild both whole call Scaffolds 1-4x/sec). The avatar clusters are wrapped in scoped `Consumer`s watching those providers. Call/VC duration renders via `CallDurationText` (`ui/components/call_duration_text.dart`), a self-ticking leaf Text — the old per-second `setState` rebuilt the entire screen (and kept ticking while backgrounded). `_statusText`'s active branch returns '' (the duration widget takes over).
@@ -779,13 +600,13 @@ VAD speaking flags live in `speaking_provider.dart` (`callSpeakingProvider` reco
 One-pass fixes from the production-readiness audit:
 
 - **Keyboard-aware dialogs (global):** `showHollowDialog` wraps every pageBuilder in `AnimatedPadding(MediaQuery.viewInsetsOf)` + `MediaQuery.removeViewInsets` (mirrors Flutter's Dialog). NEVER add viewInsets padding inside a dialog builder — double-pad. `HollowDialog` itself: full-width-minus-padding under 600px, content in `Flexible > SingleChildScrollView`, actions in `Wrap`.
-- **Add Friend** is a bottom sheet (`_AddFriendSheet` in mobile_friends_tab.dart): input + full-width Send Friend Request directly below, temporary-nickname claim boxed off in a separate "Want them to add you instead?" card. `isScrollControlled` + manual viewInsets bottom padding + SafeArea.
+- **Add friend** is a bottom sheet (`_AddFriendSheet` in mobile_friends_tab.dart): input + full-width "Send request" directly below, the temporary-nickname claim (`HowOthersAddYou`) under it. `isScrollControlled` + manual viewInsets bottom padding + SafeArea.
 - **Send jump fix (mobile_chat_route.dart):** sending uses post-frame `_jumpToBottom()` (instant), never animated scrollTo — the animated path raced the chatProvider listener auto-scroll + the input bar collapsing after `clear()` (the iOS "jump for a second"). `_scrollToBottom` (incoming messages) is post-frame-safe with mounted/isAttached guards.
 - **In-channel search:** results box sizes to `(visible height - keyboard) * 0.35` clamped 120–360 (was fixed 200px).
 - **Inline edit:** `_startEditing` scrolls the editor to alignment 0.15 after a 300ms delay (post keyboard animation) so it's never hidden behind the keyboard.
 - **Message actions sheet:** `isScrollControlled` + 85%-height cap + internal `SingleChildScrollView` (emoji grid clipped on short phones).
 - **Toast position:** `HollowToast` bottom = 32 + keyboard inset + (width<600 ? 56 + viewPadding.bottom : 0) — floats above the nav bar and keyboard.
-- **Pills:** both `MobileActiveCallPill` and `MobileVoiceChannelPill` clamp `_dragOffset` (dx ±(w/2−80), dy −(h−136−topInset)..0) — can't be dragged into the nav or off-screen.
+- **Minimised call:** no longer draggable (session 23): it spans the width 12 px in from each side above the nav bar, and its body opens the call.
 - **Image crop:** portrait orientation lock while open (rotation reset the crop), decode capped at `targetWidth: 2048, allowUpscaling: false` (raw RGBA OOM guard).
 - **Welcome dialog:** compact-aware minWidth + internal scroll.
 - **iOS:** `audio` added to UIBackgroundModes (calls survive backgrounding).

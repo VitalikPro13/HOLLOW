@@ -1,22 +1,27 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
-import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/local_nickname_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/attachment_image.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/ui/chat/message_row.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Data needed to display and export a message's cryptographic proof.
 class MessageProofData {
@@ -81,19 +86,27 @@ void showMessageProofDialog(BuildContext context, MessageProofData proof) {
   );
 }
 
-class _MessageProofDialogContent extends StatefulWidget {
+/// What the check found. [notHere] is not a verdict on the message: the row
+/// this device would check against is missing, which says nothing about the
+/// sender, so it must never read as [invalid].
+enum ProofStatus { checking, verified, invalid, unsigned, notHere, failed }
+
+class _MessageProofDialogContent extends ConsumerStatefulWidget {
   final MessageProofData proof;
   const _MessageProofDialogContent({required this.proof});
 
   @override
-  State<_MessageProofDialogContent> createState() =>
+  ConsumerState<_MessageProofDialogContent> createState() =>
       _MessageProofDialogContentState();
 }
 
 class _MessageProofDialogContentState
-    extends State<_MessageProofDialogContent>
-{
-  bool? _verified;
+    extends ConsumerState<_MessageProofDialogContent> {
+  late ProofStatus _status =
+      _hasSig ? ProofStatus.checking : ProofStatus.unsigned;
+
+  /// Why the check itself failed, for [ProofStatus.failed].
+  String? _failure;
 
   /// The v2 verification result when the row is in the local DB; null means
   /// there is nothing exportable.
@@ -103,6 +116,7 @@ class _MessageProofDialogContentState
   /// everything else has no payload to put in the file.
   bool get _canExport => _v2 != null;
   MessageProofData get proof => widget.proof;
+  bool get _hasSig => proof.signature != null && proof.publicKey != null;
 
   @override
   void initState() {
@@ -111,12 +125,12 @@ class _MessageProofDialogContentState
   }
 
   Future<void> _verifySignature() async {
-    if (proof.signature == null || proof.publicKey == null) return;
+    if (!_hasSig) return;
     // Archive rows carry the loader's verdict: there is no local DB row, and
     // Dart must not rebuild a payload of its own.
     final pre = proof.preverified;
     if (pre != null) {
-      setState(() => _verified = pre);
+      _status = pre ? ProofStatus.verified : ProofStatus.invalid;
       return;
     }
     // Rust builds and verifies the canonical v2 payload, so the grammar stays
@@ -124,7 +138,7 @@ class _MessageProofDialogContentState
     // signature reports unverified, which is the truth about it.
     final mid = proof.messageId;
     if (mid == null || mid.isEmpty) {
-      setState(() => _verified = false);
+      _status = ProofStatus.notHere;
       return;
     }
     try {
@@ -134,15 +148,26 @@ class _MessageProofDialogContentState
         senderPeerId: proof.senderPeerId,
         messageId: mid,
       );
-      if (mounted) {
-        setState(() {
-          _v2 = r;
-          _verified = r.valid;
-        });
-      }
-    } catch (_) {
-      // No row found, so there is nothing verifiable.
-      if (mounted) setState(() => _verified = false);
+      if (!mounted) return;
+      setState(() {
+        _v2 = r;
+        _status = r.valid
+            ? ProofStatus.verified
+            : r.hasSignature
+                ? ProofStatus.invalid
+                : ProofStatus.unsigned;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        if (e.toString().toLowerCase().contains('not found')) {
+          _status = ProofStatus.notHere;
+        } else {
+          _status = ProofStatus.failed;
+          _failure = friendlyError(e,
+              fallback: "Hollow couldn't check this signature. Try again.");
+        }
+      });
     }
   }
 
@@ -222,32 +247,69 @@ class _MessageProofDialogContentState
       if (context.mounted) {
         HollowToast.show(
           context,
-          'Export failed: $e',
+          friendlyError(e, fallback: "Couldn't export the proof. Try again."),
           type: HollowToastType.error,
         );
       }
     }
   }
 
-  Widget _buildStatus(bool hasSig) {
-    final verified = _verified;
-    if (hasSig && verified == null) {
-      return const SizedBox.shrink(key: ValueKey('pending'));
-    }
-    final (label, kind) = !hasSig
-        ? ('Unsigned', HollowBadgeKind.neutral)
-        : verified!
-            ? ('Verified', HollowBadgeKind.success)
-            : ('Invalid', HollowBadgeKind.error);
-    return HollowBadge(label, key: ValueKey(label), kind: kind);
-  }
+  (String, HollowBadgeKind, String?) _statusWords() => switch (_status) {
+        ProofStatus.checking => ('Checking', HollowBadgeKind.neutral, null),
+        ProofStatus.verified => (
+            'Verified',
+            HollowBadgeKind.success,
+            "Signed with the sender's key, and unchanged since it was sent.",
+          ),
+        ProofStatus.invalid => (
+            'Invalid',
+            HollowBadgeKind.error,
+            "The signature doesn't match this message. It was changed after "
+                'it was signed, or signed by an older version of Hollow.',
+          ),
+        ProofStatus.unsigned => (
+            'Unsigned',
+            HollowBadgeKind.neutral,
+            'This message carries no signature, so there is nothing to check.',
+          ),
+        ProofStatus.notHere => (
+            'Not on this device',
+            HollowBadgeKind.neutral,
+            "This message isn't saved on this device, so its signature can't "
+                'be checked here. Check it on a device that has the '
+                'conversation, or ask the sender for an exported proof.',
+          ),
+        ProofStatus.failed => ('Not checked', HollowBadgeKind.neutral, _failure),
+      };
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final hasSig = proof.signature != null && proof.publicKey != null;
-    final timestamp = DateTime.fromMillisecondsSinceEpoch(proof.timestampMs);
     final fingerprint = proof.publicKeyFingerprint;
+    final (label, kind, explanation) = _statusWords();
+    final timestamp = DateTime.fromMillisecondsSinceEpoch(proof.timestampMs);
+    final links = ref.watch(deviceLinkProvider);
+    final me = links.identityOf(ref.watch(identityProvider).peerId ?? '');
+    final signature = proof.signature;
+    // A proof names who SIGNED: their own profile name, then what you call
+    // them, never the nickname alone.
+    final sender = links.identityOf(proof.senderPeerId);
+    final ownName =
+        ref.watch(profileProvider.select((p) => p[sender]?.displayName)) ?? '';
+    final yourName = ref.watch(localNicknameProvider.select((n) => n[sender]));
+    final senderLine = [
+      if (ownName.isNotEmpty) ownName,
+      if (yourName != null && yourName.isNotEmpty && yourName != ownName)
+        'you call them $yourName',
+    ].join(', ');
+
+    Widget field(String label, String value, {String? copyValue}) => Padding(
+          padding: const EdgeInsets.only(top: HollowSpacing.md),
+          child: HollowCopyField(
+            label: label,
+            value: value,
+            copyValue: copyValue,
+          ),
+        );
 
     return HollowDialog(
       title: 'Message proof',
@@ -255,62 +317,62 @@ class _MessageProofDialogContentState
       maxWidth: 520,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AnimatedSwitcher(
-            duration: HollowDurations.normal,
-            transitionBuilder: (child, anim) =>
-                FadeTransition(opacity: anim, child: child),
-            child: _buildStatus(hasSig),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowBadge(label, key: ValueKey(label), kind: kind),
           ),
-          const SizedBox(height: HollowSpacing.md),
-          _MessagePreview(hollow: hollow, proof: proof),
+          if (explanation != null) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            HollowDialogText(explanation),
+          ],
           const SizedBox(height: HollowSpacing.lg),
-          _InfoRow(
-            hollow: hollow,
-            label: 'Sender peer ID',
-            value: proof.senderPeerId,
-            mono: true,
-            copyable: true,
+          // The one message row, read-only here: no reactions, no reply. Its
+          // own inset bleeds out so the avatar sits on the dialog's text edge.
+          HollowBleed(
+            horizontal: MessageRow.horizontalInset,
+            child: MessageRow(
+              messageId: proof.messageId,
+              senderId: proof.senderPeerId,
+              isMe: links.identityOf(proof.senderPeerId) == me,
+              text: proof.text,
+              timestamp: timestamp,
+              editedAt: null,
+              replyToMid: null,
+              reactions: const {},
+              fileAttachment: proof.fileAttachment,
+              linkPreview: null,
+              showHeader: true,
+            ),
           ),
-          const SizedBox(height: HollowSpacing.sm),
-          _InfoRow(
-            hollow: hollow,
-            label: 'Timestamp',
-            value:
-                '${timestamp.toUtc().toIso8601String()} (${proof.timestampMs})',
-          ),
-          if (proof.messageId != null) ...[
-            const SizedBox(height: HollowSpacing.sm),
-            _InfoRow(
-              hollow: hollow,
-              label: 'Message ID',
-              value: proof.messageId!,
-              mono: true,
-              copyable: true,
+          const SizedBox(height: HollowSpacing.xl),
+          const HollowSectionHeader('Details', dense: true),
+          if (senderLine.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.md),
+              child: HollowCopyField(
+                label: 'Sender',
+                value: senderLine,
+                copyValue: ownName.isNotEmpty ? ownName : yourName,
+                mono: false,
+              ),
             ),
-          ],
-          if (fingerprint != null) ...[
-            const SizedBox(height: HollowSpacing.sm),
-            _InfoRow(
-              hollow: hollow,
-              label: 'Public key fingerprint',
-              value: fingerprint,
-              mono: true,
-              copyable: true,
+          field("Sender's user ID", proof.senderPeerId),
+          field('Time (UTC)', timestamp.toUtc().toIso8601String(),
+              copyValue: '${timestamp.toUtc().toIso8601String()} '
+                  '(${proof.timestampMs})'),
+          if (proof.messageId != null) field('Message ID', proof.messageId!),
+          if (fingerprint != null) field('Key fingerprint', fingerprint),
+          if (signature != null && _hasSig)
+            field(
+              'Signature',
+              signature.length > 48
+                  ? '${signature.substring(0, 24)}...'
+                      '${signature.substring(signature.length - 24)}'
+                  : signature,
+              copyValue: signature,
             ),
-          ],
-          if (hasSig) ...[
-            const SizedBox(height: HollowSpacing.sm),
-            _InfoRow(
-              hollow: hollow,
-              label: 'Ed25519 signature',
-              value: proof.signature!,
-              mono: true,
-              copyable: true,
-              truncate: true,
-            ),
-          ],
         ],
       ),
       // Copy and Export need Rust's canonical v2 payload, so they key on
@@ -322,7 +384,7 @@ class _MessageProofDialogContentState
               Clipboard.setData(ClipboardData(text: _proofJsonString()));
               HollowToast.show(
                 context,
-                'Proof copied to clipboard',
+                'Proof copied',
                 type: HollowToastType.success,
               );
             },
@@ -335,201 +397,6 @@ class _MessageProofDialogContentState
             child: const Text('Export proof'),
           ),
         ],
-      ],
-    );
-  }
-}
-
-/// Chat-style message preview.
-class _MessagePreview extends StatelessWidget {
-  final HollowTheme hollow;
-  final MessageProofData proof;
-
-  const _MessagePreview({required this.hollow, required this.proof});
-
-  @override
-  Widget build(BuildContext context) {
-    final timestamp = DateTime.fromMillisecondsSinceEpoch(proof.timestampMs);
-    final timeStr =
-        '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
-    final file = proof.fileAttachment;
-    final hasMedia = file != null && file.diskPath != null;
-    final isImage = file != null && file.isImage;
-    final isVideo = file != null && file.videoThumb != null;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          HollowAvatar(
-            peerId: proof.senderPeerId,
-            size: 32,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        proof.senderDisplayName,
-                        style: HollowTypography.label.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.xs),
-                    Text(
-                      timeStr,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textTertiary,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                if (hasMedia && (isImage || isVideo)) ...[
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    child: SizedBox(
-                      width: 48,
-                      height: 48,
-                      child: AttachmentImage(
-                        path: file.diskPath!,
-                        fit: BoxFit.cover,
-                        errorWidget: Container(
-                          color: hollow.elevated,
-                          child: Icon(
-                            isVideo ? LucideIcons.film : LucideIcons.image,
-                            size: 20,
-                            color: hollow.textSecondary,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (proof.text.isNotEmpty &&
-                      !proof.text.startsWith('[file:'))
-                    const SizedBox(height: 4),
-                ],
-                if (file != null && !isImage && !isVideo) ...[
-                  Row(
-                    children: [
-                      Icon(LucideIcons.paperclip,
-                          size: 12, color: hollow.textSecondary),
-                      const SizedBox(width: 4),
-                      Flexible(
-                        child: Text(
-                          file.fileName,
-                          style: HollowTypography.bodySmall
-                              .copyWith(color: hollow.textSecondary),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (proof.text.isNotEmpty &&
-                      !proof.text.startsWith('[file:'))
-                    const SizedBox(height: 4),
-                ],
-                if (proof.text.isNotEmpty && !proof.text.startsWith('[file:'))
-                  Text(
-                    proof.text.length > 200
-                        ? '${proof.text.substring(0, 200)}...'
-                        : proof.text,
-                    style: HollowTypography.body
-                        .copyWith(color: hollow.textPrimary),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A single info row, with an optional copy button.
-class _InfoRow extends StatelessWidget {
-  final HollowTheme hollow;
-  final String label;
-  final String value;
-  final bool mono;
-  final bool copyable;
-  final bool truncate;
-
-  const _InfoRow({
-    required this.hollow,
-    required this.label,
-    required this.value,
-    this.mono = false,
-    this.copyable = false,
-    this.truncate = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Row(
-          children: [
-            Expanded(
-              child: SelectableText(
-                truncate && value.length > 48
-                    ? '${value.substring(0, 24)}...${value.substring(value.length - 24)}'
-                    : value,
-                style: (mono ? HollowTypography.monoSmall : HollowTypography.bodySmall)
-                    .copyWith(color: hollow.textPrimary),
-                maxLines: 2,
-              ),
-            ),
-            if (copyable)
-              MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: value));
-                    HollowToast.show(
-                      context,
-                      'Copied to clipboard',
-                      type: HollowToastType.success,
-                    );
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.copy,
-                      size: 12,
-                      color: hollow.textSecondary,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
       ],
     );
   }

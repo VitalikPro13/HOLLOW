@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
@@ -230,6 +231,9 @@ void main() {
               ),
       ),
     );
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      _pinViewFocus(tester);
+    }
     // Identity unlock, DB open and the first channel load all happen here.
     //
     // UI_PROBE_TRACE=1 narrates the three boot awaits. It exists because a
@@ -287,6 +291,27 @@ void main() {
           'Artifacts in $outDir (fail-*.png, map-fail-*.md, results.jsonl).');
     }
   });
+}
+
+/// Keeps the probe's view focused in the framework's eyes and never asks the
+/// OS for window focus.
+///
+/// A fleet runs beside a person using this machine. Every field the probe
+/// taps would ask the engine to focus the window, Windows grants it whenever
+/// the foreground lock allows, and the person's keystrokes then land in the
+/// probe ("links", "low", "encrypted blobs!" typed over a scenario's values)
+/// instead of their own window. When it is refused, the engine reports the
+/// view unfocused, focus parks at the root and Escape reaches nothing. The
+/// probe's input is synthetic, so the OS's opinion of focus is never needed.
+void _pinViewFocus(WidgetTester tester) {
+  final engine = ui.PlatformDispatcher.instance;
+  final framework = engine.onViewFocusChange;
+  engine.onViewFocusChange = (_) {};
+  framework?.call(ui.ViewFocusEvent(
+    viewId: tester.view.viewId,
+    state: ui.ViewFocusState.focused,
+    direction: ui.ViewFocusDirection.undefined,
+  ));
 }
 
 /// The step list, from a file or from the environment, or null when neither

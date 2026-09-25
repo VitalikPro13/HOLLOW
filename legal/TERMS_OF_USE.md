@@ -1,6 +1,6 @@
 # Hollow: Terms of Use
 
-**Last updated: September 7, 2026**
+**Last updated: September 25, 2026**
 
 These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms.
 
@@ -30,7 +30,7 @@ You agree to use Hollow only for lawful purposes and in a manner consistent with
 - Engage in targeted harassment, stalking, or threats of violence against individuals
 - Distribute malware, viruses, or other harmful software
 - Attempt to compromise, disrupt, or gain unauthorized access to Hollow's relay infrastructure or other users' devices
-- Circumvent or attempt to circumvent the fair use limits, access controls, or abuse-prevention measures described in Section 8
+- Circumvent or attempt to circumvent the fair use limits or abuse-prevention measures described in Section 8
 - Use automated means to create accounts, send messages, or interact with the Services in bulk
 - Resell or sublicense Hollow in a manner that violates the applicable license terms
 
@@ -48,7 +48,7 @@ Individual Hollow servers are created and managed by their owners. Server owners
 
 ### Reporting
 
-If you become aware of any use of Hollow that violates these Terms, you may report it to us at **privacy@anonlisten.com**. Hollow also includes in-app tools: you can block users (stored only on your device) and report users. Reports are transmitted anonymously and stored only as aggregate counters per reported account. No message content is or can be included, and we never learn who filed a report.
+If you become aware of any use of Hollow that violates these Terms, you may report it to us at **privacy@anonlisten.com**. Hollow also includes in-app tools: you can block users (stored only on your device) and report users. Reports are stored only as counters per reported account, and the relay keeps no readable record of who filed a report. No message content is or can be included.
 
 Due to the encrypted nature of the platform, our ability to investigate reports is limited. Where reports or other signals indicate violations of these Terms, we may take the actions available to us at the infrastructure level, such as revoking access to our hosted relay.
 
@@ -81,8 +81,6 @@ We will make reasonable efforts to maintain service availability but do not guar
 ### Fair use limits
 
 To keep the shared relay infrastructure available to everyone, we apply technical fair-use measures per IP address. These currently include caps on simultaneous connections and on the rate of new connections, and fair sharing of the relay's network capacity whenever it is saturated, so that no single connection can crowd out others. There is no data volume quota, so you are never disconnected for the amount of data you transfer, and none of these measures affect your account, your keys, or your data. In practice, ordinary messaging uses a negligible amount of relay capacity, and voice and video calls and large file transfers are designed to travel peer-to-peer. The relay's TURN service carries traffic only between Hollow clients; it cannot be used to reach other hosts. We may adjust these measures over time to preserve service quality.
-
-During limited-access phases, access to our hosted relay may additionally require an access key, which we may revoke for violations of these Terms. Revocation or disconnection applies only to our hosted infrastructure, never to your copy of the application, your identity, or your data. You are always free to self-host your own relay; the software is open source.
 
 ## 9. Disclaimers
 

@@ -1,21 +1,29 @@
-﻿import 'package:flutter/material.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/server_settings/delete_channel_confirm.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
-import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/ui/shell/channel_context_menus.dart'
+    show accessTierLabel, confirmClearLabelGate, renameChannelFlow;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+/// The phone's long-press sheet for a channel: the desktop channel menu's rows.
+/// A voice channel has nothing for someone who cannot manage it (no messages
+/// to read or mute), so it opens no sheet at all.
 void showMobileChannelActions({
   required BuildContext context,
   required String serverId,
@@ -23,10 +31,12 @@ void showMobileChannelActions({
   required bool canManage,
   VoidCallback? onChanged,
 }) {
+  if (!canManage && channel.channelType == ChannelType.voice) return;
   showHollowSheet(
     context: context,
     scrollControlled: true,
     builder: (_) => _ChannelActionsSheet(
+      hostContext: context,
       serverId: serverId,
       channel: channel,
       canManage: canManage,
@@ -35,15 +45,19 @@ void showMobileChannelActions({
   );
 }
 
-enum _SheetView { actions, deleteConfirm, visibility, posting }
+enum _SheetView { actions, visibility, posting }
 
-class _ChannelActionsSheet extends StatefulWidget {
+class _ChannelActionsSheet extends ConsumerStatefulWidget {
+  /// The screen that opened the sheet: dialogs and toasts started from a row
+  /// outlive the sheet, so they run against it.
+  final BuildContext hostContext;
   final String serverId;
   final ChannelInfo channel;
   final bool canManage;
   final VoidCallback? onChanged;
 
   const _ChannelActionsSheet({
+    required this.hostContext,
     required this.serverId,
     required this.channel,
     required this.canManage,
@@ -51,10 +65,11 @@ class _ChannelActionsSheet extends StatefulWidget {
   });
 
   @override
-  State<_ChannelActionsSheet> createState() => _ChannelActionsSheetState();
+  ConsumerState<_ChannelActionsSheet> createState() =>
+      _ChannelActionsSheetState();
 }
 
-class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
+class _ChannelActionsSheetState extends ConsumerState<_ChannelActionsSheet> {
   _SheetView _view = _SheetView.actions;
   late String _visibility;
   late String _posting;
@@ -70,9 +85,10 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     _postingLabels = List.of(widget.channel.postingLabels);
   }
 
+  BuildContext get _host => widget.hostContext;
+
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -81,14 +97,13 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
             duration: HollowDurations.fast,
             curve: HollowCurves.enter,
             child: switch (_view) {
-              _SheetView.actions => _buildActionsView(hollow),
-              _SheetView.deleteConfirm => _buildDeleteConfirmView(hollow),
+              _SheetView.actions => _buildActionsView(),
               _SheetView.visibility => _buildAccessView(
-                  hollow, 'Visibility', _visibility, _setVisibility,
+                  'Visibility', _visibility, _setVisibility,
                   gateLabels: _visibilityLabels,
                   onCustom: () => _editGateLabels(forVisibility: true)),
               _SheetView.posting => _buildAccessView(
-                  hollow, 'Who Can Post', _posting, _setPosting,
+                  'Who can post', _posting, _setPosting,
                   gateLabels: _postingLabels,
                   onCustom: () => _editGateLabels(forVisibility: false)),
             },
@@ -99,23 +114,161 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     );
   }
 
-  Widget _buildActionsView(HollowTheme hollow) {
-    final isVoice = widget.channel.channelType == ChannelType.voice;
-    final icon = isVoice ? LucideIcons.volume2 : LucideIcons.hash;
+  Widget _row(IconData icon, String label, VoidCallback onTap,
+      {String? trailing}) {
+    final hollow = HollowTheme.of(context);
+    return HollowListRow(
+      touch: true,
+      title: label,
+      leading: Icon(icon, size: 20, color: hollow.textSecondary),
+      trailing: trailing == null
+          ? null
+          : Text(trailing,
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textSecondary)),
+      onTap: onTap,
+    );
+  }
+
+  /// A row that closes the sheet, then acts on the screen beneath it.
+  Widget _closingRow(IconData icon, String label, VoidCallback onTap) =>
+      _row(icon, label, () {
+        Navigator.pop(context);
+        onTap();
+      });
+
+  String _accessSummary(String tier, List<String> labels) => labels.isNotEmpty
+      ? '${labels.length} label${labels.length == 1 ? '' : 's'}'
+      : accessTierLabel(tier);
+
+  Widget _buildActionsView() {
+    final channel = widget.channel;
+    final isVoice = channel.channelType == ChannelType.voice;
+    final notifications = ref.read(notificationSettingsProvider.notifier);
+    ref.watch(notificationSettingsProvider);
+    final isMuted =
+        notifications.channelOverride(widget.serverId, channel.channelId) ==
+            ChannelNotificationLevel.nothing;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        HollowSheetTitle(channel.name),
+        // A voice channel carries no messages, so read state and muting mean
+        // nothing for it.
+        if (!isVoice) ...[
+          _closingRow(LucideIcons.checkCheck, 'Mark as read', _markRead),
+          _closingRow(
+            isMuted ? LucideIcons.bell : LucideIcons.bellOff,
+            isMuted ? 'Unmute channel' : 'Mute channel',
+            () => notifications.setChannelOverride(
+              widget.serverId,
+              channel.channelId,
+              isMuted
+                  ? ChannelNotificationLevel.inherit
+                  : ChannelNotificationLevel.nothing,
+            ),
+          ),
+        ],
+        if (widget.canManage) ...[
+          if (!isVoice) const HollowDivider(),
+          _closingRow(LucideIcons.pencil, 'Rename channel', () {
+            renameChannelFlow(_host, ref, widget.serverId, channel,
+                onRenamed: widget.onChanged);
+          }),
+          _row(
+            LucideIcons.eye,
+            'Visibility',
+            () => setState(() => _view = _SheetView.visibility),
+            trailing: _accessSummary(_visibility, _visibilityLabels),
+          ),
+          if (!isVoice)
+            _row(
+              LucideIcons.messageSquare,
+              'Who can post',
+              () => setState(() => _view = _SheetView.posting),
+              trailing: _accessSummary(_posting, _postingLabels),
+            ),
+          if (!channel.isPublic)
+            _closingRow(LucideIcons.userPlus, 'Temporary access', () {
+              showChannelGrantsDialog(
+                _host,
+                serverId: widget.serverId,
+                channelId: channel.channelId,
+                channelName: channel.name,
+              );
+            }),
+          const HollowDivider(),
+          _closingRow(LucideIcons.trash2, 'Delete channel', _delete),
+        ],
+      ],
+    );
+  }
+
+  void _markRead() {
+    final key = '${widget.serverId}:${widget.channel.channelId}';
+    final msgs = ref.read(channelChatProvider)[key];
+    final latestId =
+        (msgs != null && msgs.isNotEmpty) ? msgs.last.messageId : null;
+    ref
+        .read(unreadProvider.notifier)
+        .markChannelSeen(widget.serverId, widget.channel.channelId, latestId);
+  }
+
+  Future<void> _delete() async {
+    final onChanged = widget.onChanged;
+    final deleted = await confirmDeleteChannel(
+      _host,
+      serverId: widget.serverId,
+      channelId: widget.channel.channelId,
+      channelName: widget.channel.name,
+    );
+    if (deleted) onChanged?.call();
+  }
+
+  Widget _buildAccessView(
+    String title,
+    String currentValue,
+    void Function(String) onSelect, {
+    required List<String> gateLabels,
+    required VoidCallback onCustom,
+  }) {
+    final hollow = HollowTheme.of(context);
+    final gated = gateLabels.isNotEmpty;
+    // A label gate outranks the tier, so no tier reads as chosen while one is
+    // set.
+    Widget option(String label, bool selected, VoidCallback onTap) =>
+        HollowListRow(
+          touch: true,
+          title: label,
+          selected: selected,
+          trailing: selected
+              ? Icon(LucideIcons.check, size: 20, color: hollow.accentText)
+              : null,
+          onTap: onTap,
+        );
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          padding: const EdgeInsets.fromLTRB(
+              HollowSpacing.xs, 0, HollowSpacing.lg, HollowSpacing.xs),
           child: Row(
             children: [
-              Icon(icon, size: 18, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
+              HollowIconButton(
+                icon: LucideIcons.arrowLeft,
+                label: 'Back',
+                size: 44,
+                onPressed: () => setState(() => _view = _SheetView.actions),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
               Expanded(
                 child: Text(
-                  widget.channel.name,
-                  style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
+                  title,
+                  style: HollowTypography.subheading
+                      .copyWith(color: hollow.textPrimary),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -123,210 +276,29 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
             ],
           ),
         ),
-        const SizedBox(height: HollowSpacing.lg),
-        if (widget.canManage) ...[
-          _ActionRow(
-            icon: LucideIcons.pencil,
-            label: 'Rename Channel',
-            onTap: () {
-              Navigator.pop(context);
-              _showRenameDialog();
-            },
-          ),
-          _ActionRow(
-            icon: LucideIcons.eye,
-            label: 'Visibility',
-            trailing: _visibilityLabels.isNotEmpty
-                ? '${_visibilityLabels.length} label${_visibilityLabels.length == 1 ? '' : 's'}'
-                : _accessLabel(_visibility),
-            onTap: () => setState(() => _view = _SheetView.visibility),
-          ),
-          if (!isVoice)
-            _ActionRow(
-              icon: LucideIcons.messageSquare,
-              label: 'Who Can Post',
-              trailing: _postingLabels.isNotEmpty
-                  ? '${_postingLabels.length} label${_postingLabels.length == 1 ? '' : 's'}'
-                  : _accessLabel(_posting),
-              onTap: () => setState(() => _view = _SheetView.posting),
-            ),
-          if (!widget.channel.isPublic)
-            _ActionRow(
-              icon: LucideIcons.userPlus,
-              label: 'Temporary Access',
-              onTap: () {
-                Navigator.pop(context);
-                showChannelGrantsDialog(
-                  context,
-                  serverId: widget.serverId,
-                  channelId: widget.channel.channelId,
-                  channelName: widget.channel.name,
-                );
-              },
-            ),
-          const SizedBox(height: HollowSpacing.sm),
-          const HollowDivider(indent: HollowSpacing.lg, endIndent: HollowSpacing.lg),
-          const SizedBox(height: HollowSpacing.sm),
-          _ActionRow(
-            icon: LucideIcons.trash2,
-            label: 'Delete Channel',
-            color: hollow.error,
-            onTap: () => setState(() => _view = _SheetView.deleteConfirm),
-          ),
-        ],
-      ],
-    );
-  }
-
-  void _showRenameDialog() {
-    final controller = TextEditingController(text: widget.channel.name);
-    showHollowDialog(
-      context: context,
-      builder: (ctx) {
-        Future<void> submit() async {
-          final name = controller.text.trim();
-          Navigator.pop(ctx);
-          if (name.isEmpty || name == widget.channel.name) return;
-          try {
-            await crdt_api.renameChannel(
-              serverId: widget.serverId,
-              channelId: widget.channel.channelId,
-              newName: name,
-            );
-          } catch (_) {
-            if (mounted) {
-              HollowToast.show(context, 'Could not rename channel',
-                  type: HollowToastType.error);
-            }
-            return;
-          }
-          widget.onChanged?.call();
-          if (mounted) {
-            HollowToast.show(context, 'Channel renamed',
-                type: HollowToastType.success);
-          }
-        }
-
-        return HollowDialog(
-          title: 'Rename channel',
-          width: 420,
-          content: HollowTextField(
-            controller: controller,
-            hintText: 'Channel name',
-            autofocus: true,
-            maxLength: 32,
-            onSubmitted: (_) => submit(),
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: submit,
-              child: const Text('Rename'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildDeleteConfirmView(HollowTheme hollow) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.alertTriangle, size: 32, color: hollow.error),
-          const SizedBox(height: HollowSpacing.md),
-          Text(
-            'Delete #${widget.channel.name}?',
-            style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'This cannot be undone.',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Row(
-            children: [
-              Expanded(
-                child: HollowButton.ghost(
-                  onPressed: () => setState(() => _view = _SheetView.actions),
-                  child: const Text('Cancel'),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.md),
-              Expanded(
-                child: HollowButton.danger(
-                  onPressed: _doDelete,
-                  child: const Text('Delete'),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAccessView(
-    HollowTheme hollow,
-    String title,
-    String currentValue,
-    void Function(String) onSelect, {
-    required List<String> gateLabels,
-    required VoidCallback onCustom,
-  }) {
-    final gated = gateLabels.isNotEmpty;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-          child: _BackHeader(
-            label: title,
-            onBack: () => setState(() => _view = _SheetView.actions),
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        _AccessOptionRow(
-          label: 'Everyone',
-          isSelected: !gated && currentValue == 'everyone',
-          onTap: () => onSelect('everyone'),
-        ),
-        _AccessOptionRow(
-          label: 'Moderator+',
-          isSelected: !gated && currentValue == 'moderator',
-          onTap: () => onSelect('moderator'),
-        ),
-        _AccessOptionRow(
-          label: 'Admin+',
-          isSelected: !gated && currentValue == 'admin',
-          onTap: () => onSelect('admin'),
-        ),
-        _AccessOptionRow(
-          label: gated
-              ? 'Custom (${gateLabels.length} label${gateLabels.length == 1 ? '' : 's'})'
-              : 'Custom…',
-          isSelected: gated,
-          onTap: onCustom,
+        for (final tier in const ['everyone', 'moderator', 'admin'])
+          option(accessTierLabel(tier), !gated && currentValue == tier,
+              () => onSelect(tier)),
+        option(
+          gated
+              ? 'Edit access labels (${gateLabels.length})'
+              : 'Require access labels',
+          gated,
+          onCustom,
         ),
       ],
     );
   }
 
   /// Opens the access-label picker for this channel. Setting labels stamps the
-  /// tier to Admin+ Rust-side.
+  /// tier to Admin and above Rust-side.
   Future<void> _editGateLabels({required bool forVisibility}) async {
     final initial = forVisibility ? _visibilityLabels : _postingLabels;
     final picked = await showAccessLabelPicker(
       context: context,
       serverId: widget.serverId,
-      title: forVisibility ? 'Custom visibility' : 'Custom posting',
+      gate: forVisibility ? AccessLabelGate.see : AccessLabelGate.post,
+      target: '#${widget.channel.name}',
       initial: initial.toSet(),
     );
     if (picked == null || !mounted) return;
@@ -346,10 +318,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
         );
       }
     } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not update channel',
-            type: HollowToastType.error);
-      }
+      _failed();
       return;
     }
     if (!mounted) return;
@@ -365,30 +334,20 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     widget.onChanged?.call();
   }
 
-  Future<void> _doDelete() async {
-    Navigator.pop(context);
-    try {
-      await crdt_api.removeChannel(
-        serverId: widget.serverId,
-        channelId: widget.channel.channelId,
-      );
-    } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not delete channel',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-    widget.onChanged?.call();
+  void _failed() {
     if (mounted) {
-      HollowToast.show(context, 'Channel deleted', type: HollowToastType.success);
+      HollowToast.show(context, 'Could not update channel',
+          type: HollowToastType.error);
     }
   }
 
   Future<void> _setVisibility(String value) async {
     // A plain tier clears any label gate; Rust authors that op too.
     if (_visibilityLabels.isNotEmpty &&
-        !await _confirmClearLabelGate(value)) {
+        !await confirmClearLabelGate(context,
+            channelName: widget.channel.name,
+            tier: value,
+            forVisibility: true)) {
       return;
     }
     try {
@@ -398,10 +357,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
         visibility: value,
       );
     } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not update channel',
-            type: HollowToastType.error);
-      }
+      _failed();
       return;
     }
     if (!mounted) return;
@@ -413,7 +369,11 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
   }
 
   Future<void> _setPosting(String value) async {
-    if (_postingLabels.isNotEmpty && !await _confirmClearLabelGate(value)) {
+    if (_postingLabels.isNotEmpty &&
+        !await confirmClearLabelGate(context,
+            channelName: widget.channel.name,
+            tier: value,
+            forVisibility: false)) {
       return;
     }
     try {
@@ -423,10 +383,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
         posting: value,
       );
     } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not update channel',
-            type: HollowToastType.error);
-      }
+      _failed();
       return;
     }
     if (!mounted) return;
@@ -435,141 +392,5 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
       _postingLabels = const [];
     });
     widget.onChanged?.call();
-  }
-
-  /// Confirms dropping a label gate, which widens access.
-  Future<bool> _confirmClearLabelGate(String tier) async {
-    return showHollowConfirm(
-      context: context,
-      title: 'Remove label requirement?',
-      message: '#${widget.channel.name} will use tier-based access '
-          '(${_accessLabel(tier)}) instead of its access labels.',
-      confirmLabel: 'Remove',
-    );
-  }
-
-  static String _accessLabel(String value) {
-    return switch (value) {
-      'moderator' => 'Mod+',
-      'admin' => 'Admin+',
-      _ => 'Everyone',
-    };
-  }
-}
-
-class _BackHeader extends StatelessWidget {
-  final String label;
-  final VoidCallback onBack;
-
-  const _BackHeader({required this.label, required this.onBack});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Row(
-      children: [
-        HollowPressable(
-          onTap: onBack,
-          semanticLabel: 'Back',
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          child: Icon(LucideIcons.arrowLeft, size: 20, color: hollow.textPrimary),
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(
-          label,
-          style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
-        ),
-      ],
-    );
-  }
-}
-
-class _ActionRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final Color? color;
-  final String? trailing;
-
-  const _ActionRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.color,
-    this.trailing,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final c = color ?? hollow.textPrimary;
-    return HollowPressable(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg,
-          vertical: HollowSpacing.sm + 2,
-        ),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: c),
-            const SizedBox(width: HollowSpacing.md),
-            Expanded(
-              child: Text(label, style: HollowTypography.body.copyWith(color: c)),
-            ),
-            if (trailing != null)
-              Text(
-                trailing!,
-                style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AccessOptionRow extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _AccessOptionRow({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg,
-          vertical: HollowSpacing.md,
-        ),
-        child: Row(
-          children: [
-            Icon(
-              isSelected ? LucideIcons.checkCircle2 : LucideIcons.circle,
-              size: 20,
-              color: isSelected ? hollow.accent : hollow.textSecondary,
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            Text(
-              label,
-              style: HollowTypography.body.copyWith(
-                color: isSelected ? hollow.accent : hollow.textPrimary,
-                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

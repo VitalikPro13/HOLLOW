@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
@@ -99,7 +100,8 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _switching = false);
-      HollowToast.show(context, 'Could not switch relays: $e',
+      HollowToast.show(context, friendlyError(e,
+              fallback: "Couldn't switch relays. Try again."),
           type: HollowToastType.error);
     }
   }

@@ -84,7 +84,7 @@ class _DevicesCategoryViewState extends ConsumerState<DevicesCategoryView> {
             const SyncCheckCard(),
             SettingsRow(
               title: 'Reset the device list',
-              subtitle: "Signs out every other device. Use it when ghost "
+              subtitle: "Signs out every other device. Use it when old "
                   "devices won't go away.",
               trailing: HollowButton.outline(
                 danger: true,
@@ -158,6 +158,7 @@ class _DeviceRow extends ConsumerWidget {
                     HollowMenuItem(
                       icon: LucideIcons.refreshCw,
                       label: 'Sync servers and friends from this device',
+                      enabled: device.online,
                       onTap: () => syncFromDeviceFlow(context, ref, device),
                     ),
                     HollowMenuItem(

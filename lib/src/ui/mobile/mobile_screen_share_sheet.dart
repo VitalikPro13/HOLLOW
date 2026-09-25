@@ -8,7 +8,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// What the user picked in the mobile share sheet.
 class MobileScreenShareChoice {
@@ -36,7 +35,7 @@ class _ScreenShareSheet extends StatefulWidget {
 }
 
 class _ScreenShareSheetState extends State<_ScreenShareSheet> {
-  bool _shareAudio = true;
+  bool _shareAudio = false;
 
   @override
   void initState() {
@@ -53,12 +52,12 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
 
   String _audioHelperText(bool audioBlocked) {
     if (audioBlocked) {
-      return 'Sharing device audio needs Android 10 or newer. Your screen '
-          'still shares, and your mic stays on so you can talk.';
+      return 'Sharing audio needs Android 10 or newer. Your screen still '
+          'shares, and your mic stays on so you can talk.';
     }
     if (Platform.isAndroid) {
       return 'Your mic stays on, so you can talk over the shared audio. '
-          'Apps that block capture (some DRM/streaming apps) stay silent.';
+          'Apps that block capture, like some streaming apps, stay silent.';
     }
     return 'Your mic stays on, so you can talk over the shared audio. '
         'Pick Hollow in the broadcast menu and tap Start Broadcast to begin.';
@@ -75,30 +74,17 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(LucideIcons.monitor, size: 20, color: hollow.textPrimary),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'Share your screen',
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textPrimary),
-                ),
-              ],
+            Text(
+              'Share your screen',
+              style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
             ),
             const SizedBox(height: HollowSpacing.lg),
             Row(
               children: [
-                Icon(LucideIcons.volume2,
-                    size: 18,
-                    color: audioBlocked
-                        ? hollow.textTertiary
-                        : hollow.textPrimary),
-                const SizedBox(width: HollowSpacing.md),
                 Expanded(
                   child: Text(
-                    'Share device audio',
-                    style: HollowTypography.body.copyWith(
+                    'Share audio',
+                    style: HollowTypography.bodyTouch.copyWith(
                         color: audioBlocked
                             ? hollow.textTertiary
                             : hollow.textPrimary),
@@ -106,6 +92,7 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
                 ),
                 HollowToggle(
                   value: audioBlocked ? false : _shareAudio,
+                  semanticLabel: 'Share audio',
                   onChanged: audioBlocked
                       ? null
                       : (v) => setState(() => _shareAudio = v),
@@ -115,27 +102,29 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
             const SizedBox(height: HollowSpacing.sm),
             Text(
               _audioHelperText(audioBlocked),
-              style:
-                  HollowTypography.caption.copyWith(color: hollow.textTertiary),
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.lg),
             Row(
               children: [
                 Expanded(
                   child: HollowButton.ghost(
+                    touch: true,
                     onPressed: () => Navigator.pop(context),
                     child: const Text('Cancel'),
                   ),
                 ),
-                const SizedBox(width: HollowSpacing.md),
+                const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: HollowButton.filled(
+                    touch: true,
                     onPressed: () => Navigator.pop(
                       context,
                       MobileScreenShareChoice(
                           shareAudio: audioBlocked ? false : _shareAudio),
                     ),
-                    child: const Text('Start sharing'),
+                    child: const Text('Share'),
                   ),
                 ),
               ],

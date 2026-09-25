@@ -193,7 +193,7 @@ void main() {
       expect(find.text('Received'), findsOneWidget);
       expect(find.bySemanticsLabel(RegExp('Accept friend request')),
           findsOneWidget);
-      expect(find.bySemanticsLabel(RegExp('Reject friend request')),
+      expect(find.bySemanticsLabel(RegExp('Decline friend request')),
           findsOneWidget);
       expect(tester.getTopLeft(find.text('Decline')).dx,
           lessThan(tester.getTopLeft(find.text('Accept')).dx),

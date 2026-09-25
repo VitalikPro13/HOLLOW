@@ -215,7 +215,7 @@ For self, reads `vcState.isMuted` and `vcState.isDeafened` directly. For remote 
 - `isCameraOn` -- self: `vcState.isCameraOn`; remote: `vcState.peerCameraOn[peerId] ?? false`.
 
 **Row layout:**
-- `SpeakingAvatarOutline` wrapping `HollowAvatar` (`kVoiceParticipantAvatarSize` = 22px) -- the speaking cue is an accent outline hugging the avatar, drawn OUTSIDE its edge and costing ZERO layout (see `speaking_border.dart`). It replaced a trailing teal `_SpeakingDot` in 2026-07: the cue now sits on the thing it identifies and a long display name cannot push it out of view.
+- `SpeakingRing.dense` wrapping `HollowAvatar` (`kVoiceParticipantAvatarSize` = 22px) -- the speaking cue is a ring in the person's own name colour, drawn OUTSIDE the avatar's edge and costing ZERO layout (see "Voice Activity Indicator" below). It replaced a trailing teal `_SpeakingDot` in 2026-07: the cue sits on the thing it identifies and a long display name cannot push it out of view.
 - Display name in `HollowTypography.label` (13px), `hollow.textSecondary`, with ellipsis overflow.
 - Trailing status icons (all `kVoiceParticipantIconSize` = 14px, with `HollowSpacing.xxs` left padding each):
   - Screen sharing icon -- `LucideIcons.monitor`, green. Conditionally rendered.
@@ -245,14 +245,7 @@ The slider's `onChanged` calls `voiceChannelProvider.notifier.setPeerVolume(peer
 
 ## Voice Activity Indicator
 
-REMOVED 2026-07 (issue #37): the trailing teal `_SpeakingDot` is gone. The cue is now an accent outline around the participant's avatar, via `SpeakingAvatarOutline` from `lib/src/ui/components/speaking_border.dart`.
-
-Three speaking widgets exist; pick by context:
-- `SpeakingRing` -- VIDEO tiles. Overlay on top, inside edge. **Never give it a `boxShadow`**: a shadow on a decoration with no background paints a FILLED blurred rect, which washes the whole tile.
-- `SpeakingBorder` -- avatars WITH room around them (mobile's clustered `MobileSpeakingAvatar`). Pads the child outward; grows by `2 * (padding + borderWidth)`.
-- `SpeakingAvatarOutline` -- avatars in DENSE rows (this sidebar). A sibling painted BEHIND the avatar, inset negatively by one border width inside a `Clip.none` Stack: zero layout cost, and the ring's inner edge lands exactly on the avatar edge (no gap). Radius is `radiusMd + borderWidth` so it stays concentric with the avatar's corner.
-
-An outline drawn INSIDE the avatar bounds lands on the avatar art and vanishes against a green avatar -- it must be outside. Guarded by `test/widget/speaking_avatar_outline_test.dart`.
+REMOVED 2026-07 (issue #37): the trailing teal `_SpeakingDot` is gone. Since the call surfaces pass (sessions 22 and 23) there is ONE speaking cue everywhere, `SpeakingRing` (`lib/src/ui/call/speaking_ring.dart`): a ring in the person's own name colour (yours the accent), painted OUTSIDE its child with a gap, so a flip never re-lays anything out. `SpeakingRing.dense` (1.5/1.5) on this sidebar's 20 px avatars, the default (2/2) on tiles, `SpeakingRing.large` (3/3) on the phone's big call avatar. `components/speaking_border.dart` (`SpeakingBorder`, `SpeakingOverlayRing`, `SpeakingAvatarOutline`) is deleted.
 
 ## _HomeContent -- DM Friends List
 
@@ -267,7 +260,7 @@ Watches `friendsProvider` and splits friends into three lists:
 **Accepted friends sorting:** Online first (present in `peers` map), then alphabetical by `peerId`.
 
 **Layout structure (`Column`):**
-1. "Add Friend" button -- `HollowButton.outline` with `LucideIcons.userPlus`, full width (`expand: true`). Tapping calls `_showAddFriendDialog()`.
+1. "Add friend" button -- `HollowButton.outline` with `LucideIcons.userPlus`, full width (`expand: true`). Tapping opens the Friends Manager on its Add tab (`showFriendsManager(addFriend: true)`).
 2. Divider.
 3. Pending section (conditional, only if `hasPending`):
    - `HollowSectionHeader('Pending', dense: true, count: incoming + outgoing)`.
@@ -279,13 +272,9 @@ Watches `friendsProvider` and splits friends into three lists:
    - If empty and no pending: empty state with `LucideIcons.users` (48px, 30% opacity), "No friends yet" heading, "Add a friend by their peer ID" caption.
    - Otherwise: `ListView.builder` rendering `PeerCard` for each accepted friend. Each `PeerCard` receives: `peerId`, `isSelected`, `isEncrypted` (from peer info, defaults false), `isOnline` (presence in peers map), `lastMessage`, `formatTime`, `onTap`.
 
-## Add Friend Dialog
+## Add Friend Dialog (removed)
 
-`file:_HomeContent._showAddFriendDialog()` opens `_SidebarAddFriendDialog` via `showHollowDialog`.
-
-`_SidebarAddFriendDialog` is a `ConsumerStatefulWidget` with a unified input field (hint: "Peer ID or nickname..."). Auto-detects input type: if it starts with `12D3KooW`, sends as peer ID via `friendsProvider.notifier.sendRequest()`; otherwise resolves as a temporary nickname via `network_api.sendFriendRequestByNickname()`. The send is AWAITED: on failure the dialog stays open with a "Could not send request" error toast (no false success); only on success does it pop and toast "Friend request sent" / "Looking up nickname..." on `widget.parentContext` (guarded by that exact context's `mounted`).
-
-Actions: "Cancel" ghost button, "Send Request" filled button.
+`_SidebarAddFriendDialog` is gone (design language session 24): the sidebar's button opens the Friends Manager's Add tab, so there is one add-friend form (wiki `ui_home_dashboard`).
 
 ## _PendingRequestTile -- Friend Request Display
 
@@ -313,7 +302,7 @@ When a channel is selected (via `onChannelSelected`), the shell's callback calls
 
 Text channel selection is straightforward: tapping a `_ChannelTile` calls `onTap`, which is wired by `_ServerContentState` to `onChannelSelected(channel.channelId)`. In the shell's `_buildChannelSidebar()`, this sets `selectedChannelProvider.notifier.state`, updates `lastChannelPerServerProvider` (remembers last channel per server), and marks the channel as read.
 
-Voice channel selection differs: tapping a `_VoiceChannelTile` either joins the voice channel (if not already connected) or selects it as the active channel in the main pane (if already connected). Voice channels do NOT appear as "selected" in the text-channel sense -- their highlight comes from the `isConnected` state tied to `voiceChannelProvider`.
+Voice channel selection differs: tapping a `_VoiceChannelTile` either joins the voice channel (if not already connected) or selects it as the active channel in the main pane (if already connected). A join first asks `confirmVoiceRoomSwitch` (`shell/voice_room_switch.dart`): "Switch voice room?" appears ONLY when `voiceSwitchLeavesPeople` is true (you are in another room with someone else in it; the DEVICE-keyed participant set is checked minus both your master and device ids). Moving from an empty room, or into the room you are in, never asks. The same call guards every voice join on desktop and phone (this tile, the room preview's Join in `voice_channel_pane.dart`, Home's Active Now in `home_rail.dart`, the phone Chats tab). A failed join toasts "Couldn't join the voice room". Voice channels do NOT appear as "selected" in the text-channel sense -- their highlight comes from the `isConnected` state tied to `voiceChannelProvider`.
 
 ## Permission Gating -- Create Channel Button
 
@@ -331,7 +320,7 @@ Built in `lib/src/ui/shell/channel_context_menus.dart` on the shared `showHollow
 
 Every one of them is opened through **`ContextMenuTarget`** (`hollow_menu.dart`), never a bare `onSecondaryTapUp`: it handles the right click AND adds Menu / Shift+F10 while the row has keyboard focus plus a "Show menu" `CustomSemanticsAction`. `test/context_menu_keyboard_route_guard_test.dart` fails the build on a regression.
 
-**Channel tile** (`_ChannelTile` and `_VoiceChannelTile`, both gained a `canManage` prop and an `onSecondaryTapUp` wrapper): Mark as read, Mute/Unmute, Rename, Visibility, Who can post, Temporary access, Delete. Visibility and Who-can-post are drill-in submenus offering the three tiers plus the access-label gate; picking a plain tier on a label-gated channel still confirms, because it widens access. Voice tiles omit Mark as read, Mute and Who can post -- a channel with no messages has no read state to clear and no posting gate. Since #71 (2026-09-10) the other three surfaces follow the same rule: the desktop channels tab, the mobile server-settings channel editor and the mobile long-press sheet show Visibility and Temporary access for a voice channel and hide Who can post (Rust consults the posting gate for messages and files only).
+**Channel tile** (`_ChannelTile` and `_VoiceChannelTile`, both gained a `canManage` prop and an `onSecondaryTapUp` wrapper): Mark as read, Mute/Unmute, Rename, Visibility, Who can post, Temporary access, Delete. Visibility and Who-can-post are drill-in submenus offering the three tiers (`accessTierLabel`: Everyone / Moderator and above / Admin and above, trailing hint `accessTrailing`) plus the access-label gate (`showAccessLabelPicker(gate:, target: '#x')`); picking a plain tier on a label-gated channel still confirms, because it widens access: `confirmClearLabelGate` ("Drop the access labels?", "Anyone at Moderator and above can see #x, not only people with its access labels.", confirm "Open to everyone" / "Open to <tier>"), shared with the phone sheet. Rename = `renameChannelFlow` (a `promptForName` that stays open while the rename runs, keeps the typed name on failure, toasts "Channel renamed" on the root overlay); Delete = `confirmDeleteChannel` (wiki `ui_server_settings`). Both are shared with the phone sheet. Voice tiles omit Mark as read, Mute and Who can post -- a channel with no messages has no read state to clear and no posting gate. Since #71 (2026-09-10) the other three surfaces follow the same rule: the desktop channels tab, the mobile server-settings channel editor and the mobile long-press sheet show Visibility and Temporary access for a voice channel and hide Who can post (Rust consults the posting gate for messages and files only).
 
 **Category header** (`_CategoryHeader`, which gained `layoutIndex` / `serverId` / `layoutJson` / `canManage`): Collapse/Expand, Create channel here, Rename, Set access for all channels, Delete. Categories are addressed by **layout POSITION, never by name** -- duplicate names are legal. "Create channel here" works because `showCreateChannelDialog`'s `onCreated` now hands back the new channel id, so it can be placed inside the category instead of landing unsorted at the bottom.
 
@@ -341,7 +330,7 @@ Every one of them is opened through **`ContextMenuTarget`** (`hollow_menu.dart`)
 
 **DM tiles** in home mode (`PeerCard`, `sidebar/peer_card.dart`) open the same user menu with the `dmTile` surface. See `ui_member_panel.md`.
 
-`markServerRead` and the shared name prompt moved to `lib/src/ui/shell/server_context_menus.dart` so the strip menus can use the same definitions; this file imports them rather than keeping a second copy.
+`markServerRead` lives in `lib/src/ui/shell/server_context_menus.dart` so the strip menus can use the same definition. The shared name prompt is `promptForName` in `components/hollow_dialog.dart` (autofocus, Enter submits, `onSubmit` runs inside the dialog with the error on the field, `validator`, `maxLength`, `allowEmpty`).
 
 Management rows appear only with `Permission.manageChannels`; Rust re-checks every op regardless. Layout edits go through `ChannelLayoutNotifier.mutate` -- never a direct `updateChannelLayout` (see `providers_server.md`). "Set access for all channels" shares `runCategoryBulkAccess` with the settings editor, so the two cannot disagree about what a category contains.
 

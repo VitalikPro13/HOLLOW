@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -19,30 +21,83 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 Future<void> showVerifyProofDialog(BuildContext context) {
   return showHollowDialog<void>(
     context: context,
-    builder: (ctx) => const HollowDialog(
+    builder: (ctx) => const _VerifyProofDialog(),
+  );
+}
+
+/// The checker with Import and Verify in the dialog's own action row.
+class _VerifyProofDialog extends StatefulWidget {
+  const _VerifyProofDialog();
+
+  @override
+  State<_VerifyProofDialog> createState() => _VerifyProofDialogState();
+}
+
+class _VerifyProofDialogState extends State<_VerifyProofDialog> {
+  final _section = GlobalKey<VerifyProofSectionState>();
+
+  @override
+  Widget build(BuildContext context) {
+    final section = _section.currentState;
+    return HollowDialog(
       title: 'Check a message proof',
       width: 560,
       showClose: true,
-      content: VerifyProofSection(),
-    ),
-  );
+      content: VerifyProofSection(
+        key: _section,
+        showActions: false,
+        onChanged: () => setState(() {}),
+      ),
+      leadingActions: [
+        HollowButton.ghost(
+          onPressed: () => _section.currentState?.importFile(),
+          icon: const Icon(LucideIcons.fileUp, size: 16),
+          child: const Text('Import file'),
+        ),
+      ],
+      actions: [
+        HollowButton.filled(
+          onPressed: (section?.canVerify ?? false)
+              ? () => _section.currentState?.verifyPasted()
+              : null,
+          loading: section?.verifying ?? false,
+          child: const Text('Verify'),
+        ),
+      ],
+    );
+  }
 }
 
 /// Verify a proof: paste or import a proof JSON and check it with the same
 /// Ed25519 verification as the Message Proof dialog. One implementation shared
 /// by the desktop Security page and the mobile Settings tab.
 class VerifyProofSection extends StatefulWidget {
-  const VerifyProofSection({super.key});
+  /// False when a dialog carries Import and Verify in its action row.
+  final bool showActions;
+
+  /// Called when the pasted text or the running check changes, so a host
+  /// holding the actions can rebuild them.
+  final VoidCallback? onChanged;
+
+  const VerifyProofSection({super.key, this.showActions = true, this.onChanged});
 
   @override
-  State<VerifyProofSection> createState() => _VerifyProofSectionState();
+  State<VerifyProofSection> createState() => VerifyProofSectionState();
 }
 
-class _VerifyProofSectionState extends State<VerifyProofSection> {
+class VerifyProofSectionState extends State<VerifyProofSection> {
   final _controller = TextEditingController();
   final _resultKey = GlobalKey();
   _ProofResult? _result;
   bool _verifying = false;
+
+  bool get verifying => _verifying;
+  bool get canVerify => !_verifying && _controller.text.trim().isNotEmpty;
+
+  void _setState(VoidCallback fn) {
+    setState(fn);
+    widget.onChanged?.call();
+  }
 
   void _scrollToResult() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -60,7 +115,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     super.dispose();
   }
 
-  Future<void> _importFile() async {
+  Future<void> importFile() async {
     try {
       final result = await FilePicker.platform.pickFiles(
         dialogTitle: 'Import proof JSON',
@@ -82,20 +137,20 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       _verify(content);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Failed to read file: $e',
+        HollowToast.show(context, "Couldn't read that file. Pick a proof .json.",
             type: HollowToastType.error);
       }
     }
   }
 
   Future<void> _verify(String jsonStr) async {
-    setState(() {
+    _setState(() {
       _verifying = true;
       _result = null;
     });
 
     void fail(String error) {
-      setState(() {
+      _setState(() {
         _verifying = false;
         _result = _ProofResult(valid: false, error: error);
       });
@@ -174,7 +229,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       );
 
       if (!mounted) return;
-      setState(() {
+      _setState(() {
         _verifying = false;
         _result = _ProofResult(
           valid: isValid,
@@ -192,7 +247,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       fail('Invalid JSON format.');
     } catch (e) {
       if (!mounted) return;
-      fail('Verification failed: $e');
+      fail(friendlyError(e,
+          fallback: "Couldn't check this proof. Check it and try again."));
     }
   }
 
@@ -243,13 +299,10 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     return contextType; // pass through delete types as-is
   }
 
-  void _onVerifyPressed() {
+  /// Checks what is in the field; nothing to check is a disabled Verify.
+  void verifyPasted() {
     final text = _controller.text.trim();
-    if (text.isEmpty) {
-      HollowToast.show(context, 'Paste a proof first',
-          type: HollowToastType.info);
-      return;
-    }
+    if (text.isEmpty) return;
     _verify(text);
   }
 
@@ -261,10 +314,9 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
+        const HollowDialogText(
           'Paste a proof or import its .json file to check that the sender '
           'really signed the message.',
-          style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.md),
         HollowTextField(
@@ -273,23 +325,26 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
           maxLines: 5,
           hintText: 'Paste a proof here',
           style: HollowTypography.monoSmall.copyWith(color: hollow.textPrimary),
+          onChanged: (_) => _setState(() {}),
         ),
-        const SizedBox(height: HollowSpacing.md),
-        Row(
-          children: [
-            HollowButton.ghost(
-              onPressed: _importFile,
-              icon: const Icon(LucideIcons.fileUp, size: 16),
-              child: const Text('Import file'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              onPressed: _onVerifyPressed,
-              loading: _verifying,
-              child: const Text('Verify'),
-            ),
-          ],
-        ),
+        if (widget.showActions) ...[
+          const SizedBox(height: HollowSpacing.md),
+          Row(
+            children: [
+              HollowButton.ghost(
+                onPressed: importFile,
+                icon: const Icon(LucideIcons.fileUp, size: 16),
+                child: const Text('Import file'),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.filled(
+                onPressed: canVerify ? verifyPasted : null,
+                loading: _verifying,
+                child: const Text('Verify'),
+              ),
+            ],
+          ),
+        ],
         if (_result != null) ...[
           const SizedBox(height: HollowSpacing.lg),
           KeyedSubtree(key: _resultKey, child: _buildResult(hollow)),
@@ -357,7 +412,9 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
               ),
             if (timestamp != null)
               Text(
-                timestamp.toUtc().toIso8601String(),
+                'Sent ${calendarDateLabel(timestamp)} at '
+                '${timestamp.hour.toString().padLeft(2, '0')}:'
+                '${timestamp.minute.toString().padLeft(2, '0')}',
                 style: HollowTypography.bodySmall
                     .copyWith(color: hollow.textSecondary),
               ),

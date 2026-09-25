@@ -35,6 +35,9 @@ class HollowPressable extends StatefulWidget {
   /// which stays actionable without it.
   final bool semanticButton;
 
+  /// For a group that moves focus itself (arrow keys across chip tabs).
+  final FocusNode? focusNode;
+
   const HollowPressable({
     super.key,
     required this.child,
@@ -49,6 +52,7 @@ class HollowPressable extends StatefulWidget {
     this.subtle = false,
     this.semanticLabel,
     this.semanticButton = true,
+    this.focusNode,
   });
 
   @override
@@ -216,6 +220,7 @@ class _HollowPressableState extends State<HollowPressable>
       child: HollowFocusRing(
         borderRadius: widget.borderRadius ?? BorderRadius.zero,
         onActivate: widget.onTap,
+        focusNode: widget.focusNode,
         child: result,
       ),
     );

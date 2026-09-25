@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show ImageFilter;
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
@@ -732,7 +733,7 @@ Future<void> startManualAttachmentDownload(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, 'Download failed: $e',
+      HollowToast.show(context, friendlyError(e, fallback: "Couldn't download the file. Try again."),
           type: HollowToastType.error);
     }
   }

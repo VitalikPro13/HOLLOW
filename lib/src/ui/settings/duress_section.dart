@@ -15,10 +15,9 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 
 /// Wire values of the destroy scope. They are persisted and read by Rust, so
 /// they are never derived from a label.
@@ -45,9 +44,7 @@ String _scopeEffect(String scope) => switch (scope) {
       kDuressScopeDeviceRevoke =>
         "Deletes this device's data and unlinks it from your identity, so your "
             'other devices drop it.',
-      kDuressScopeIdentity =>
-        'Deletes your data on every device, online now or the next time it '
-            'connects.',
+      kDuressScopeIdentity => 'Deletes your data on every device.',
       _ => "Deletes this device's data. Your other devices keep theirs.",
     };
 
@@ -114,8 +111,6 @@ class DuressCodeCard extends ConsumerStatefulWidget {
 class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
   static const _title = 'Duress code';
 
-  bool _busy = false;
-
   @override
   Widget build(BuildContext context) {
     final status = ref.watch(duressStatusProvider);
@@ -149,8 +144,7 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
                 'opening Hollow',
         trailing: HollowButton.outline(
           compact: true,
-          onPressed: _busy ? null : _setCode,
-          loading: _busy,
+          onPressed: _setCode,
           child: const Text('Set up'),
         ),
       );
@@ -164,14 +158,13 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
         children: [
           HollowButton.ghost(
             compact: true,
-            onPressed: _busy ? null : _setCode,
-            loading: _busy,
+            onPressed: _setCode,
             child: const Text('Change'),
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.ghost(
             compact: true,
-            onPressed: _busy ? null : _removeCode,
+            onPressed: _removeCode,
             child: const Text('Remove'),
           ),
         ],
@@ -181,7 +174,7 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
 
   Future<void> _setCode() async {
     final current = ref.read(duressStatusProvider).valueOrNull;
-    final entry = await showHollowDialog<_DuressEntry>(
+    final saved = await showHollowDialog<bool>(
       context: context,
       builder: (ctx) => _DuressCodeDialog(
         wideScopes: widget.wideScopes,
@@ -190,58 +183,35 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
             : kDuressScopeDevice,
         initialNotifyFriends: current?.notifyFriends ?? false,
         isChange: current?.enabled ?? false,
+        onSave: (entry) => identity_api.setDuressCode(
+          password: entry.password,
+          duressCode: entry.code,
+          scope: entry.scope,
+          notifyFriends: entry.notifyFriends,
+        ),
       ),
     );
-    if (entry == null || !mounted) return;
-
-    setState(() => _busy = true);
-    try {
-      await identity_api.setDuressCode(
-        password: entry.password,
-        duressCode: entry.code,
-        scope: entry.scope,
-        notifyFriends: entry.notifyFriends,
-      );
-      ref.invalidate(duressStatusProvider);
-      if (!mounted) return;
-      HollowToast.show(context, 'Duress code saved',
-          type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Could not save the duress code: ${_reason(e)}',
-          type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (saved != true || !mounted) return;
+    ref.invalidate(duressStatusProvider);
+    HollowToast.show(context, 'Duress code saved',
+        type: HollowToastType.success);
   }
 
   Future<void> _removeCode() async {
-    final password = await showHollowDialog<String>(
+    final removed = await showHollowDialog<bool>(
       context: context,
-      builder: (ctx) => const _PasswordPromptDialog(
+      builder: (ctx) => _PasswordPromptDialog(
         title: 'Remove duress code',
         message: 'Enter your app password to remove the duress code.',
         confirmLabel: 'Remove',
-        destructive: true,
+        onSubmit: (password) =>
+            identity_api.clearDuressCode(password: password),
       ),
     );
-    if (password == null || !mounted) return;
-
-    setState(() => _busy = true);
-    try {
-      await identity_api.clearDuressCode(password: password);
-      ref.invalidate(duressStatusProvider);
-      if (!mounted) return;
-      HollowToast.show(context, 'Duress code removed',
-          type: HollowToastType.info);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Could not remove the duress code: '
-          '${_reason(e)}',
-          type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (removed != true || !mounted) return;
+    ref.invalidate(duressStatusProvider);
+    HollowToast.show(context, 'Duress code removed',
+        type: HollowToastType.info);
   }
 }
 
@@ -296,36 +266,29 @@ class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
   }
 
   Future<void> _destroy(String initialScope) async {
-    final choice = await showHollowDialog<_DestroyChoice>(
+    final destroyed = await showHollowDialog<bool>(
       context: context,
-      builder: (ctx) => _DestroyDialog(initialScope: initialScope),
+      builder: (ctx) => _DestroyDialog(
+        initialScope: initialScope,
+        onDestroy: (choice) => wipe_api.destroyWithScope(
+          scope: choice.scope,
+          notifyFriends: choice.notifyFriends,
+        ),
+      ),
     );
-    if (choice == null || !mounted) return;
-
+    if (destroyed != true || !mounted) return;
     setState(() => _busyScope = initialScope);
-    try {
-      await wipe_api.destroyWithScope(
-        scope: choice.scope,
-        notifyFriends: choice.notifyFriends,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _busyScope = null);
-      HollowToast.show(context, 'Could not destroy the data: ${_reason(e)}',
-          type: HollowToastType.error);
-      return;
-    }
     await clearLocalSecretsAfterDestroy();
     await relaunchApp();
   }
 }
 
-/// Strips the Rust `anyhow`/FFI wrapper so a toast reads as a sentence.
-String _reason(Object e) {
-  final text = e.toString();
-  final marker = text.lastIndexOf(': ');
-  return marker == -1 ? text : text.substring(marker + 2);
-}
+/// True when [error] says the typed app password does not open the identity.
+bool isWrongPasswordError(Object error) =>
+    error.toString().toLowerCase().contains('wrong password');
+
+/// What the password field says when the typed password is not the app's.
+const String kWrongPasswordText = "That password isn't right.";
 
 class _DuressEntry {
   final String password;
@@ -336,30 +299,37 @@ class _DuressEntry {
   const _DuressEntry(this.password, this.code, this.scope, this.notifyFriends);
 }
 
+/// Sets or changes the code. The save runs inside, so a wrong password lands
+/// on its field and nothing typed is lost.
 class _DuressCodeDialog extends StatefulWidget {
   final bool wideScopes;
   final String initialScope;
   final bool initialNotifyFriends;
   final bool isChange;
+  final Future<void> Function(_DuressEntry entry) onSave;
 
   const _DuressCodeDialog({
     required this.wideScopes,
     required this.initialScope,
     required this.initialNotifyFriends,
     required this.isChange,
+    required this.onSave,
   });
 
   @override
   State<_DuressCodeDialog> createState() => _DuressCodeDialogState();
 }
 
-class _DuressCodeDialogState extends State<_DuressCodeDialog> {
+class _DuressCodeDialogState extends State<_DuressCodeDialog>
+    with HollowDialogAction {
   final _password = TextEditingController();
   final _code = TextEditingController();
   final _repeat = TextEditingController();
   late String _scope = widget.initialScope;
   late bool _notifyFriends = widget.initialNotifyFriends;
-  String? _error;
+  String? _passwordError;
+  String? _codeError;
+  String? _repeatError;
 
   @override
   void dispose() {
@@ -369,22 +339,61 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
     super.dispose();
   }
 
-  void _submit() {
+  bool get _filled =>
+      _password.text.trim().isNotEmpty &&
+      _code.text.trim().isNotEmpty &&
+      _repeat.text.trim().isNotEmpty;
+
+  Future<void> _submit() async {
+    if (actionRunning || !_filled) return;
     final password = _password.text.trim();
     final code = _code.text.trim();
-    if (password.isEmpty || code.isEmpty) return;
     if (code != _repeat.text.trim()) {
-      setState(() => _error = "The codes don't match.");
+      setState(() => _repeatError = "The codes don't match.");
       return;
     }
     if (code == password) {
-      setState(() => _error = 'The duress code must be different from your '
-          'password.');
+      setState(() => _codeError =
+          'The duress code has to be different from your password.');
       return;
     }
-    Navigator.of(context).pop(
-      _DuressEntry(password, code, _scope, _notifyFriends),
-    );
+    Object? raw;
+    final ok = await runDialogAction(() async {
+      try {
+        await widget
+            .onSave(_DuressEntry(password, code, _scope, _notifyFriends));
+      } catch (e) {
+        raw = e;
+        rethrow;
+      }
+    });
+    if (!mounted) return;
+    if (ok) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    final error = raw;
+    if (error == null) return;
+    if (isWrongPasswordError(error)) {
+      setState(() {
+        _passwordError = kWrongPasswordText;
+        actionError = null;
+      });
+    } else if (error.toString().contains('different from your password')) {
+      setState(() {
+        _codeError = actionError;
+        actionError = null;
+      });
+    }
+  }
+
+  void _clearErrors() {
+    setState(() {
+      _passwordError = null;
+      _codeError = null;
+      _repeatError = null;
+      actionError = null;
+    });
   }
 
   @override
@@ -394,39 +403,44 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
     return HollowDialog(
       title: widget.isChange ? 'Change duress code' : 'Set a duress code',
       width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const HollowDialogText(
             'Typed at the unlock prompt, this code deletes your data and '
-            'restarts Hollow at first-time setup. It never shows an error.',
+            'restarts Hollow at first-time setup. It never shows an error, and '
+            'there is no undo.',
           ),
-          const SizedBox(height: HollowSpacing.md),
+          const SizedBox(height: HollowSpacing.lg),
+          const SettingsFieldLabel(label: 'App password'),
+          const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _password,
             obscureText: true,
             autofocus: true,
-            isDense: true,
-            hintText: 'Your app password',
-            onChanged: (_) => _clearError(),
+            errorText: _passwordError,
+            onChanged: (_) => _clearErrors(),
           ),
           const SizedBox(height: HollowSpacing.md),
+          const SettingsFieldLabel(label: 'Duress code'),
+          const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _code,
             obscureText: true,
-            isDense: true,
-            hintText: 'Duress code',
-            onChanged: (_) => _clearError(),
+            errorText: _codeError,
+            onChanged: (_) => _clearErrors(),
           ),
           const SizedBox(height: HollowSpacing.md),
+          const SettingsFieldLabel(label: 'Repeat the duress code'),
+          const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _repeat,
             obscureText: true,
-            isDense: true,
-            hintText: 'Repeat the duress code',
-            errorText: _error,
-            onChanged: (_) => _clearError(),
+            errorText: _repeatError,
+            onChanged: (_) => _clearErrors(),
             onSubmitted: (_) => _submit(),
           ),
           const SizedBox(height: HollowSpacing.lg),
@@ -439,55 +453,26 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
               onNotifyFriends: (value) => setState(() => _notifyFriends = value),
               note: _scopeNote,
             )
-          else ...[
+          else
             Text(
-              _scopeEffect(kDuressScopeDevice),
-              style: HollowTypography.caption
+              '${_scopeEffect(kDuressScopeDevice)} $_localOnlyNote',
+              style: HollowTypography.bodySmall
                   .copyWith(color: hollow.textSecondary),
             ),
-            const SizedBox(height: HollowSpacing.xxs),
-            Text(
-              _localOnlyNote,
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary),
-            ),
-          ],
-          const SizedBox(height: HollowSpacing.lg),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(top: HollowSpacing.xxs),
-                child: Icon(LucideIcons.triangleAlert,
-                    size: 14, color: hollow.warning),
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              Expanded(
-                child: Text(
-                  'Typing this code destroys your data. There is no undo.',
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.warning),
-                ),
-              ),
-            ],
-          ),
         ],
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _submit,
+          onPressed: _filled ? _submit : null,
+          loading: actionRunning,
           child: Text(widget.isChange ? 'Change code' : 'Set code'),
         ),
       ],
     );
-  }
-
-  void _clearError() {
-    if (_error != null) setState(() => _error = null);
   }
 }
 
@@ -500,14 +485,16 @@ class _DestroyChoice {
 
 class _DestroyDialog extends StatefulWidget {
   final String initialScope;
+  final Future<void> Function(_DestroyChoice choice) onDestroy;
 
-  const _DestroyDialog({required this.initialScope});
+  const _DestroyDialog({required this.initialScope, required this.onDestroy});
 
   @override
   State<_DestroyDialog> createState() => _DestroyDialogState();
 }
 
-class _DestroyDialogState extends State<_DestroyDialog> {
+class _DestroyDialogState extends State<_DestroyDialog>
+    with HollowDialogAction {
   final _confirm = TextEditingController();
   late String _scope = widget.initialScope;
   bool _notifyFriends = false;
@@ -518,15 +505,26 @@ class _DestroyDialogState extends State<_DestroyDialog> {
     super.dispose();
   }
 
+  Future<void> _destroy() async {
+    final ok = await runDialogAction(
+      () => widget.onDestroy(_DestroyChoice(_scope, _notifyFriends)),
+      fallback: "Couldn't destroy the data. Try again.",
+    );
+    if (ok && mounted) Navigator.of(context).pop(true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final ready = _confirm.text.trim() == _confirmWord;
 
     return HollowDialog(
       title: 'Destroy your data',
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const HollowDialogText(
             'Hollow deletes your messages, files and keys, then restarts and '
@@ -541,12 +539,11 @@ class _DestroyDialogState extends State<_DestroyDialog> {
             onNotifyFriends: (value) => setState(() => _notifyFriends = value),
           ),
           const SizedBox(height: HollowSpacing.lg),
-          const HollowDialogText('Type $_confirmWord to confirm.'),
-          const SizedBox(height: HollowSpacing.sm),
+          const SettingsFieldLabel(label: 'Type $_confirmWord to confirm'),
+          const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _confirm,
             autofocus: true,
-            isDense: true,
             hintText: _confirmWord,
             onChanged: (_) => setState(() {}),
           ),
@@ -554,14 +551,12 @@ class _DestroyDialogState extends State<_DestroyDialog> {
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.danger(
-          onPressed: ready
-              ? () => Navigator.of(context)
-                  .pop(_DestroyChoice(_scope, _notifyFriends))
-              : null,
+          onPressed: ready ? _destroy : null,
+          loading: actionRunning,
           child: const Text('Destroy'),
         ),
       ],
@@ -578,7 +573,7 @@ class _ScopePicker extends StatelessWidget {
   final ValueChanged<String> onScope;
   final ValueChanged<bool> onNotifyFriends;
 
-  /// One line under the chips explaining when a wider scope can reach anything.
+  /// When a wider scope can reach anything; said only once one is chosen.
   final String? note;
 
   const _ScopePicker({
@@ -593,75 +588,48 @@ class _ScopePicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final effect = [
+      _scopeEffect(scope),
+      if (scope == kDuressScopeIdentity) _identityDelivery,
+      if (note != null && scope != kDuressScopeDevice) note!,
+    ].join(' ');
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'What gets destroyed',
-          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
-        ),
+        const SettingsFieldLabel(label: 'What gets destroyed'),
         const SizedBox(height: HollowSpacing.sm),
         Wrap(
           spacing: HollowSpacing.sm,
           runSpacing: HollowSpacing.sm,
           children: [
             for (final (value, label) in choices)
-              HollowChip(
-                label: label,
+              Semantics(
                 selected: scope == value,
-                onTap: () => onScope(value),
+                inMutuallyExclusiveGroup: true,
+                child: HollowChip(
+                  label: label,
+                  selected: scope == value,
+                  onTap: () => onScope(value),
+                ),
               ),
           ],
         ),
         const SizedBox(height: HollowSpacing.sm),
         Text(
-          _scopeEffect(scope),
-          style: HollowTypography.caption
-              .copyWith(color: hollow.textSecondary),
+          effect,
+          style:
+              HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
         ),
         if (scope == kDuressScopeIdentity) ...[
-          const SizedBox(height: HollowSpacing.xxs),
-          Text(
-            _identityDelivery,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary),
-          ),
-        ],
-        if (note != null) ...[
           const SizedBox(height: HollowSpacing.sm),
-          Text(
-            note!,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary),
-          ),
-        ],
-        if (scope == kDuressScopeIdentity) ...[
-          const SizedBox(height: HollowSpacing.md),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Tell my friends',
-                      style: HollowTypography.label
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    const SizedBox(height: HollowSpacing.xxs),
-                    Text(
-                      'Their chat with you carries a note that this identity '
-                      'was destroyed, and their verification of you is cleared.',
-                      style: HollowTypography.caption
-                          .copyWith(color: hollow.textSecondary),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.md),
-              HollowToggle(value: notifyFriends, onChanged: onNotifyFriends),
-            ],
+          SettingsSwitchRow(
+            title: 'Tell my friends',
+            subtitle: 'Their chat with you shows a note that this identity '
+                'was destroyed, and their verification of you is cleared.',
+            value: notifyFriends,
+            onChanged: onNotifyFriends,
           ),
         ],
       ],
@@ -669,25 +637,29 @@ class _ScopePicker extends StatelessWidget {
   }
 }
 
+/// Asks for the app password and runs [onSubmit] with it inside, so a wrong
+/// password lands on the field instead of closing the dialog.
 class _PasswordPromptDialog extends StatefulWidget {
   final String title;
   final String message;
   final String confirmLabel;
-  final bool destructive;
+  final Future<void> Function(String password) onSubmit;
 
   const _PasswordPromptDialog({
     required this.title,
     required this.message,
     required this.confirmLabel,
-    this.destructive = false,
+    required this.onSubmit,
   });
 
   @override
   State<_PasswordPromptDialog> createState() => _PasswordPromptDialogState();
 }
 
-class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
+class _PasswordPromptDialogState extends State<_PasswordPromptDialog>
+    with HollowDialogAction {
   final _controller = TextEditingController();
+  String? _fieldError;
 
   @override
   void dispose() {
@@ -695,10 +667,30 @@ class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
     super.dispose();
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     final value = _controller.text.trim();
-    if (value.isEmpty) return;
-    Navigator.of(context).pop(value);
+    if (value.isEmpty || actionRunning) return;
+    Object? raw;
+    final ok = await runDialogAction(() async {
+      try {
+        await widget.onSubmit(value);
+      } catch (e) {
+        raw = e;
+        rethrow;
+      }
+    });
+    if (!mounted) return;
+    if (ok) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    final error = raw;
+    setState(() {
+      _fieldError = error != null && isWrongPasswordError(error)
+          ? kWrongPasswordText
+          : actionError;
+      actionError = null;
+    });
   }
 
   @override
@@ -706,9 +698,10 @@ class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
     return HollowDialog(
       title: widget.title,
       width: 420,
+      busy: actionRunning,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           HollowDialogText(widget.message),
           const SizedBox(height: HollowSpacing.md),
@@ -716,26 +709,23 @@ class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
             controller: _controller,
             obscureText: true,
             autofocus: true,
-            isDense: true,
             hintText: 'App password',
+            errorText: _fieldError,
+            onChanged: (_) => setState(() => _fieldError = null),
             onSubmitted: (_) => _submit(),
           ),
         ],
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        widget.destructive
-            ? HollowButton.danger(
-                onPressed: _submit,
-                child: Text(widget.confirmLabel),
-              )
-            : HollowButton.filled(
-                onPressed: _submit,
-                child: Text(widget.confirmLabel),
-              ),
+        HollowButton.filled(
+          onPressed: _controller.text.trim().isEmpty ? null : _submit,
+          loading: actionRunning,
+          child: Text(widget.confirmLabel),
+        ),
       ],
     );
   }

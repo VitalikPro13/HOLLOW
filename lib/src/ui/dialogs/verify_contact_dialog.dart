@@ -1,8 +1,8 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
@@ -12,11 +12,16 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart'
+    show MobileSettingsSubPage;
+import 'package:hollow/src/ui/settings/settings_shared.dart'
+    show SettingsFieldLabel;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Opens the Verify Contact screen for [peerId], which may be a device or a
@@ -59,42 +64,11 @@ class MobileVerifyContactRoute extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Scaffold(
-      backgroundColor: hollow.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                HollowSpacing.xs, HollowSpacing.sm,
-                HollowSpacing.lg, HollowSpacing.sm,
-              ),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: Icon(Icons.arrow_back, color: hollow.textPrimary),
-                    tooltip: 'Back',
-                  ),
-                  Text(
-                    'Verify contact',
-                    style: HollowTypography.subheading.copyWith(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(HollowSpacing.lg),
-                child: VerifyContactBody(peerId: peerId),
-              ),
-            ),
-          ],
-        ),
+    return MobileSettingsSubPage(
+      title: 'Verify contact',
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(HollowSpacing.lg),
+        child: VerifyContactBody(peerId: peerId),
       ),
     );
   }
@@ -153,7 +127,9 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
       setState(() => _number = n);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = '$e');
+      setState(() => _error = friendlyError(e,
+          fallback: "Hollow couldn't work out a safety number for this "
+              'contact. Try again later.'));
     }
   }
 
@@ -221,7 +197,7 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
         const SizedBox(height: HollowSpacing.lg),
 
         if (_error != null)
-          _ErrorBox(hollow: hollow, message: _error!)
+          _ErrorLine(hollow: hollow, message: _error!)
         else if (_number == null)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: HollowSpacing.xl),
@@ -230,39 +206,16 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
             ),
           )
         else ...[
-          _NumberBlock(hollow: hollow, number: _number!),
-          const SizedBox(height: HollowSpacing.md),
-          Row(
-            children: [
-              HollowButton.ghost(
-                onPressed: () async {
-                  await Clipboard.setData(ClipboardData(
-                    text: verification_api.formatSafetyNumber(number: _number!),
-                  ));
-                  if (context.mounted) {
-                    HollowToast.show(context, 'Safety number copied');
-                  }
-                },
-                icon: const Icon(LucideIcons.copy, size: 14),
-                compact: true,
-                child: const Text('Copy'),
-              ),
-            ],
-          ),
+          _numberField(_number!),
           const SizedBox(height: HollowSpacing.lg),
 
           // 60 digits is a lot to check by eye, and the machine cannot miss a
           // mismatch through fatigue.
-          Text(
-            'Or paste what they read you',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
+          const SettingsFieldLabel(label: 'Their number'),
           const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _compareController,
-            hintText: 'Their number',
+            hintText: 'Paste the number they sent you',
             onChanged: _onCompareChanged,
             maxLines: 2,
             minLines: 1,
@@ -297,60 +250,20 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
       ],
     );
   }
-}
 
-/// The number itself. Selectable so it can be copied by hand, and big enough to
-/// read aloud without losing your place.
-class _NumberBlock extends StatelessWidget {
-  final HollowTheme hollow;
-  final String number;
-
-  const _NumberBlock({required this.hollow, required this.number});
-
-  @override
-  Widget build(BuildContext context) {
-    final groups = verification_api
-        .formatSafetyNumber(number: number)
-        .split(' ');
-    final rows = <List<String>>[];
-    for (var i = 0; i < groups.length; i += 4) {
-      rows.add(groups.sublist(i, (i + 4).clamp(0, groups.length)));
-    }
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.md,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: SelectionArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final row in rows)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final g in row)
-                      Text(
-                        g,
-                        style: HollowTypography.subheading.copyWith(
-                          color: hollow.textPrimary,
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
+  /// Four groups to a line, so a person reading it aloud keeps their place;
+  /// the copy is one line.
+  Widget _numberField(String number) {
+    final formatted = verification_api.formatSafetyNumber(number: number);
+    final groups = formatted.split(' ');
+    final lines = [
+      for (var i = 0; i < groups.length; i += 4)
+        groups.sublist(i, (i + 4).clamp(0, groups.length)).join('  '),
+    ];
+    return HollowCopyField(
+      label: 'Safety number',
+      value: lines.join('\n'),
+      copyValue: formatted,
     );
   }
 }
@@ -459,83 +372,65 @@ class _VerifiedRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            isVerified ? LucideIcons.shieldCheck : LucideIcons.shield,
-            size: 16,
-            color: isVerified ? hollow.success : hollow.textSecondary,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              isVerified
-                  ? 'You verified $name.'
-                  : 'Not verified yet.',
-              style: HollowTypography.label.copyWith(
-                color: hollow.textPrimary,
-              ),
+    return Row(
+      children: [
+        Icon(
+          isVerified ? LucideIcons.shieldCheck : LucideIcons.shield,
+          size: 16,
+          color: isVerified ? hollow.success : hollow.textSecondary,
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Text(
+            isVerified
+                ? 'You verified $name.'
+                : 'Not verified yet.',
+            style: HollowTypography.label.copyWith(
+              color: hollow.textPrimary,
             ),
           ),
-          const SizedBox(width: HollowSpacing.sm),
-          // The row exists for this one action, so it is a compact outline;
-          // removing trust is cautionary, hence the danger tint.
-          if (isVerified)
-            HollowButton.outline(
-              onPressed: () => onChanged(false),
-              compact: true,
-              danger: true,
-              loading: busy,
-              child: const Text('Remove'),
-            )
-          else
-            HollowButton.outline(
-              onPressed: () => onChanged(true),
-              compact: true,
-              loading: busy,
-              child: const Text('Mark verified'),
-            ),
-        ],
-      ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        // The row exists for this one action, so it is a compact outline;
+        // removing trust is cautionary, hence the danger tint.
+        if (isVerified)
+          HollowButton.outline(
+            onPressed: () => onChanged(false),
+            compact: true,
+            danger: true,
+            loading: busy,
+            child: const Text('Remove verification'),
+          )
+        else
+          HollowButton.outline(
+            onPressed: () => onChanged(true),
+            compact: true,
+            loading: busy,
+            child: const Text('Mark verified'),
+          ),
+      ],
     );
   }
 }
 
-class _ErrorBox extends StatelessWidget {
+/// The number could not be derived: say so, and show nothing that looks like
+/// a number.
+class _ErrorLine extends StatelessWidget {
   final HollowTheme hollow;
   final String message;
 
-  const _ErrorBox({required this.hollow, required this.message});
+  const _ErrorLine({required this.hollow, required this.message});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
+    return Semantics(
+      liveRegion: true,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(LucideIcons.circleAlert, size: 16, color: hollow.error),
           const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              "Couldn't build a safety number for this contact.\n$message",
-              style: HollowTypography.bodySmall.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-          ),
+          Expanded(child: HollowDialogText(message)),
         ],
       ),
     );

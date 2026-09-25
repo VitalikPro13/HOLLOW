@@ -11,11 +11,12 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
+import 'package:hollow/src/ui/server_settings/delete_channel_confirm.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart'
-    show markServerRead, promptForName;
+    show markServerRead;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Right-click menus for the channel sidebar (issue #61), driving the same FFI
@@ -123,12 +124,12 @@ List<HollowMenuEntry> _channelTileEntries(
       HollowMenuItem(
         icon: LucideIcons.pencil,
         label: 'Rename channel',
-        onTap: () => _renameChannel(context, serverId, channel),
+        onTap: () => renameChannelFlow(context, ref, serverId, channel),
       ),
       HollowMenuItem(
         icon: LucideIcons.eye,
         label: 'Visibility',
-        trailing: _accessTrailing(channel.visibility, channel.visibilityLabels),
+        trailing: accessTrailing(channel.visibility, channel.visibilityLabels),
         submenu: _accessSubmenu(
           context: context,
           ref: ref,
@@ -141,7 +142,7 @@ List<HollowMenuEntry> _channelTileEntries(
         HollowMenuItem(
           icon: LucideIcons.messageSquare,
           label: 'Who can post',
-          trailing: _accessTrailing(channel.posting, channel.postingLabels),
+          trailing: accessTrailing(channel.posting, channel.postingLabels),
           submenu: _accessSubmenu(
             context: context,
             ref: ref,
@@ -166,7 +167,12 @@ List<HollowMenuEntry> _channelTileEntries(
         icon: LucideIcons.trash2,
         label: 'Delete channel',
         isDanger: true,
-        onTap: () => _confirmDeleteChannel(context, serverId, channel),
+        onTap: () => confirmDeleteChannel(
+          context,
+          serverId: serverId,
+          channelId: channel.channelId,
+          channelName: channel.name,
+        ),
       ),
     ],
   ];
@@ -186,7 +192,8 @@ void _markChannelRead(WidgetRef ref, String serverId, String channelId) {
       .markChannelSeen(serverId, channelId, latestId);
 }
 
-String? _accessTrailing(String tier, List<String> labels) {
+/// The short form beside a menu row: the tier, or how many labels gate it.
+String accessTrailing(String tier, List<String> labels) {
   if (labels.isNotEmpty) {
     return '${labels.length} label${labels.length == 1 ? '' : 's'}';
   }
@@ -225,9 +232,8 @@ List<HollowMenuEntry> _accessSubmenu({
       );
 
   return [
-    tier('everyone', 'Everyone'),
-    tier('moderator', 'Moderator and above'),
-    tier('admin', 'Admin and above'),
+    for (final value in const ['everyone', 'moderator', 'admin'])
+      tier(value, accessTierLabel(value)),
     const HollowMenuDivider(),
     HollowMenuItem(
       icon: LucideIcons.tag,
@@ -257,7 +263,8 @@ Future<void> _setAccessTier(
   // Dropping a label gate WIDENS access, so it confirms first, like the
   // settings editor and the mobile sheet.
   if (labels.isNotEmpty) {
-    final ok = await _confirmClearLabelGate(context, channel.name, tier);
+    final ok = await confirmClearLabelGate(context,
+        channelName: channel.name, tier: tier, forVisibility: forVisibility);
     if (!ok) return;
   }
 
@@ -311,7 +318,8 @@ Future<void> _editAccessLabels(
   final picked = await showAccessLabelPicker(
     context: context,
     serverId: serverId,
-    title: forVisibility ? 'Custom visibility' : 'Custom posting',
+    gate: forVisibility ? AccessLabelGate.see : AccessLabelGate.post,
+    target: '#${channel.name}',
     initial: initial,
   );
   if (picked == null) return;
@@ -357,80 +365,66 @@ Future<void> _editAccessLabels(
   }
 }
 
-Future<bool> _confirmClearLabelGate(
-    BuildContext context, String channelName, String tier) async {
-  final tierLabel = switch (tier) {
-    'moderator' => 'Moderator and above',
-    'admin' => 'Admin and above',
-    _ => 'Everyone',
-  };
+/// What a tier is called wherever a person picks one.
+String accessTierLabel(String tier) => switch (tier) {
+      'moderator' => 'Moderator and above',
+      'admin' => 'Admin and above',
+      _ => 'Everyone',
+    };
+
+/// Asks before a plain tier replaces a channel's access labels, which lets
+/// more people in. One wording for the desktop menu and the phone sheet.
+Future<bool> confirmClearLabelGate(
+  BuildContext context, {
+  required String channelName,
+  required String tier,
+  required bool forVisibility,
+}) {
+  final who = tier == 'everyone'
+      ? 'Everyone'
+      : 'Anyone at ${accessTierLabel(tier)}';
+  final can = forVisibility ? 'can see' : 'can post in';
   return showHollowConfirm(
     context: context,
-    title: 'Remove label requirement?',
-    message: '#$channelName will use tier-based access ($tierLabel) instead '
-        'of its access labels.',
-    confirmLabel: 'Remove',
+    title: 'Drop the access labels?',
+    message: '$who $can #$channelName, not only people with its access '
+        'labels.',
+    confirmLabel: tier == 'everyone'
+        ? 'Open to everyone'
+        : 'Open to ${accessTierLabel(tier)}',
   );
 }
 
-void _renameChannel(
-    BuildContext context, String serverId, ChannelInfo channel) {
+/// Renames a channel from a one-field prompt. The prompt stays open while the
+/// rename runs and keeps the typed name when it fails. Desktop menu and phone
+/// sheet both call it.
+void renameChannelFlow(BuildContext context, WidgetRef ref, String serverId,
+    ChannelInfo channel,
+    {VoidCallback? onRenamed}) {
+  final channels = ref.read(channelListProvider.notifier);
+  final host = Overlay.maybeOf(context, rootOverlay: true);
   promptForName(
     context: context,
     title: 'Rename channel',
     hintText: 'Channel name',
     initial: channel.name,
     confirmLabel: 'Rename',
+    maxLength: 32,
     onSubmit: (name) async {
       if (name == channel.name) return;
-      try {
-        await crdt_api.renameChannel(
-          serverId: serverId,
-          channelId: channel.channelId,
-          newName: name,
-        );
-      } catch (_) {
-        if (context.mounted) {
-          HollowToast.show(context, 'Could not rename channel',
-              type: HollowToastType.error);
-        }
-        return;
-      }
-      if (context.mounted) {
-        HollowToast.show(context, 'Channel renamed',
-            type: HollowToastType.success);
+      await crdt_api.renameChannel(
+        serverId: serverId,
+        channelId: channel.channelId,
+        newName: name,
+      );
+      channels.onChannelRenamed(serverId, channel.channelId, name);
+      onRenamed?.call();
+      if (host != null && host.mounted) {
+        HollowToast.show(host.context, 'Channel renamed',
+            type: HollowToastType.success, overlayState: host);
       }
     },
   );
-}
-
-Future<void> _confirmDeleteChannel(
-    BuildContext context, String serverId, ChannelInfo channel) async {
-  final confirmed = await showHollowConfirm(
-    context: context,
-    title: 'Delete #${channel.name}?',
-    message: 'This cannot be undone. Its messages stay on the devices that '
-        'already have them, but the channel disappears for everyone.',
-    confirmLabel: 'Delete',
-    destructive: true,
-  );
-  if (!confirmed) return;
-  try {
-    await crdt_api.removeChannel(
-      serverId: serverId,
-      channelId: channel.channelId,
-    );
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not delete channel',
-          type: HollowToastType.error);
-    }
-    return;
-  }
-  if (context.mounted) {
-    HollowToast.show(context, 'Channel deleted',
-        type: HollowToastType.success);
-  }
 }
 
 /// The right-click menu for a category header.

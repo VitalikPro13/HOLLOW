@@ -1,3 +1,4 @@
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -27,11 +28,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Settings > Profile on its own page, from outside the Settings tab.
 void openMobileProfileSettings(BuildContext context) =>
-    _openCategory(context, SettingsCategory.profile);
+    openMobileSettingsPage(context, SettingsCategory.profile);
 
 /// Pushes the shared page for [category], the same widget the desktop rail
-/// shows, at touch density.
-void _openCategory(BuildContext context, SettingsCategory category) {
+/// shows, at touch density: the phone's `openSettings`, usable from outside
+/// the Settings tab.
+void openMobileSettingsPage(BuildContext context, SettingsCategory category) {
   if (category == SettingsCategory.storage) {
     // Read during the push, so the page lands with its figures.
     warmStorageBreakdown(ProviderScope.containerOf(context, listen: false));
@@ -76,7 +78,7 @@ class MobileSettingsTab extends ConsumerWidget {
     Widget row(SettingsCategory c) => MobileSettingsNavRow(
           icon: c.icon,
           title: c.label,
-          onTap: () => _openCategory(context, c),
+          onTap: () => openMobileSettingsPage(context, c),
         );
 
     return ListView(
@@ -356,7 +358,7 @@ class _ProfileSaveActions extends ConsumerWidget {
                   } catch (e) {
                     if (context.mounted) {
                       HollowToast.show(
-                          context, 'Could not save your profile: $e',
+                          context, friendlyError(e, fallback: "Couldn't save your profile. Try again."),
                           type: HollowToastType.error);
                     }
                   }

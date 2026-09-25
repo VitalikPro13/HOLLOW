@@ -16,16 +16,14 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
+import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart'
+    show confirmDeleteServer, confirmLeaveServer;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -59,8 +57,8 @@ List<HollowMenuEntry> _serverIconEntries(
   String serverId,
   VoidCallback onOpenSettings,
 ) {
-  final server = menuRef.watch(serverListProvider)[serverId];
-  final name = server?.name ?? 'this server';
+  final isOwner =
+      menuRef.watch(myRoleProvider(serverId)).valueOrNull == 'owner';
   final muted = menuRef
       .watch(notificationSettingsProvider)
       .isServerMuted(serverId);
@@ -114,13 +112,21 @@ List<HollowMenuEntry> _serverIconEntries(
       submenu: _folderSubmenu(context, menuRef, ref, serverId),
     ),
     const HollowMenuDivider(),
-    HollowMenuItem(
-      icon: LucideIcons.logOut,
-      label: 'Leave server',
-      isDanger: true,
-      onTap: () => confirmAndLeaveServer(context, ref,
-          serverId: serverId, serverName: name),
-    ),
+    // An owner cannot leave (Rust refuses it); they delete instead.
+    if (isOwner)
+      HollowMenuItem(
+        icon: LucideIcons.trash2,
+        label: 'Delete server',
+        isDanger: true,
+        onTap: () => confirmDeleteServer(context, ref, serverId),
+      )
+    else
+      HollowMenuItem(
+        icon: LucideIcons.logOut,
+        label: 'Leave server',
+        isDanger: true,
+        onTap: () => confirmLeaveServer(context, ref, serverId),
+      ),
   ];
 }
 
@@ -166,7 +172,6 @@ List<HollowMenuEntry> _folderSubmenu(
         context: context,
         title: 'New folder',
         hintText: 'Folder name',
-        initial: 'Folder',
         confirmLabel: 'Create',
         onSubmit: (name) => ref
             .read(serverStripLayoutProvider.notifier)
@@ -283,95 +288,5 @@ Future<void> _markAllDmsRead(BuildContext context, WidgetRef ref) async {
         ? 'No unread direct messages'
         : 'Marked $cleared conversation${cleared == 1 ? '' : 's'} as read',
     type: HollowToastType.success,
-  );
-}
-
-/// Confirms, then leaves [serverId] and navigates away from it.
-///
-/// The same flow the Danger Zone tab runs. Rust re-checks the op; this handles
-/// only the UI side of leaving.
-Future<void> confirmAndLeaveServer(
-  BuildContext context,
-  WidgetRef ref, {
-  required String serverId,
-  required String serverName,
-}) async {
-  final confirmed = await showHollowConfirm(
-    context: context,
-    title: 'Leave server',
-    message: 'Are you sure you want to leave "$serverName"? You will need a '
-        'new invite to rejoin.',
-    confirmLabel: 'Leave server',
-    destructive: true,
-  );
-  if (!confirmed || !context.mounted) return;
-
-  try {
-    await crdt_api.leaveServer(serverId: serverId);
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-    if (ref.read(selectedServerProvider) == serverId) {
-      ref.read(selectedServerProvider.notifier).state = null;
-      ref.read(selectedChannelProvider.notifier).state = null;
-      ref.read(channelListProvider.notifier).clear();
-    }
-    if (context.mounted) {
-      HollowToast.show(context, 'Left "$serverName"',
-          type: HollowToastType.info);
-    }
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Failed to leave server: $e',
-          type: HollowToastType.error);
-    }
-  }
-}
-
-/// One small "type a name" dialog, submitting on Enter as well as the button.
-///
-/// Public because the strip menus and the folder flows both need it and neither
-/// can see into `channel_context_menus.dart`.
-void promptForName({
-  required BuildContext context,
-  required String title,
-  required String hintText,
-  required String initial,
-  required String confirmLabel,
-  required FutureOr<void> Function(String name) onSubmit,
-}) {
-  final controller = TextEditingController(text: initial);
-  showHollowDialog(
-    context: context,
-    builder: (ctx) {
-      Future<void> submit() async {
-        final name = controller.text.trim();
-        Navigator.of(ctx).pop();
-        if (name.isEmpty) return;
-        await onSubmit(name);
-      }
-
-      return HollowDialog(
-        title: title,
-        width: 420,
-        content: Padding(
-          padding: const EdgeInsets.only(top: HollowSpacing.xs),
-          child: HollowTextField(
-            controller: controller,
-            hintText: hintText,
-            autofocus: true,
-            onSubmitted: (_) => submit(),
-          ),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: submit,
-            child: Text(confirmLabel),
-          ),
-        ],
-      );
-    },
   );
 }

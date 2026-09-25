@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
@@ -228,7 +229,8 @@ class _UnsavedProfileBar extends ConsumerWidget {
           }
         } catch (e) {
           if (context.mounted) {
-            HollowToast.show(context, 'Could not save your profile: $e',
+            HollowToast.show(context, friendlyError(e,
+                    fallback: "Couldn't save your profile. Try again."),
                 type: HollowToastType.error);
           }
         }

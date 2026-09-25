@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/changelog.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -52,7 +53,8 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
       await ref.read(updaterProvider.notifier).installAndRestart();
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not start the update: $e',
+        HollowToast.show(context, friendlyError(e,
+                fallback: "Couldn't start the update. Try again."),
             type: HollowToastType.error);
       }
     } finally {

@@ -213,12 +213,12 @@ try {
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
 
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'text:Add Friend'; index = 0 }
+    Step a @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
     # Assert the id really IS in the field before sending: enter_text has
     # reported success into this field while it held only a fragment.
-    Step a @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_B}' }
+    Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_B}' }
     Step a @{ op = 'wait_for'; target = 'text:${PEER_B}'; timeout_ms = 15000 }
-    Step a @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+    Step a @{ op = 'tap'; target = 'text:Send request'; index = 0 }
     # Close the dialog before anything waits on a name: a friend row and a
     # dialog row read identically to the probe, so an open dialog turns the
     # next wait_for into a match on itself.
@@ -226,7 +226,7 @@ try {
     Step a @{ op = 'wait_for'; gone = 'type:HollowDialog'; timeout_ms = 15000 }
 
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'text:Incoming'; index = 0 }
+    Step b @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
     Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
     Step b @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step b @{ op = 'key'; value = 'escape' }

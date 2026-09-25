@@ -69,11 +69,9 @@ import 'package:hollow/src/core/services/desktop_notification_service.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/notification_overlay.dart';
@@ -109,6 +107,7 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/ui/guides/help_panel.dart';
+import 'package:hollow/src/ui/shell/identity_unlock_dialogs.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -352,7 +351,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Your license key is in use on another device. Hollow keeps retrying.',
+        'Your access key is in use on another device. Hollow keeps retrying.',
         type: HollowToastType.info,
         duration: const Duration(seconds: 6),
       );
@@ -363,9 +362,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     ref.read(licenseErrorProvider.notifier).state = null;
 
     final friendlyMessage = switch (reason) {
-      'invalid_license_key' => 'Invalid license key',
-      'license_key_required' => 'A license key is required to connect',
-      _ => 'License error: $reason',
+      'invalid_license_key' =>
+        "The relay didn't accept that access key. Check it and try again.",
+      'license_key_required' => 'Enter an access key to connect.',
+      _ => "The relay turned down this access key. Enter it again, or ask "
+          'whoever runs the relay.',
     };
 
     if (!mounted) return;
@@ -505,73 +506,38 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
       // Anything else (a corrupted file) falls back to recovery.
       if (mounted) {
-        return _showDeviceBoundRecoveryDialog(
-          errorMessage: 'Failed to unlock identity: $msg',
-        );
+        return _showDeviceBoundRecoveryDialog(unreadable: true);
       }
       return false;
     }
   }
 
-  /// Full-screen blocking dialog for an identity copied to another machine. The
-  /// 24-word mnemonic is the only way out.
-  Future<bool> _showDeviceBoundRecoveryDialog({String? errorMessage}) async {
-    final controller = TextEditingController();
+  /// Full-screen blocking dialog for an identity copied to another machine, or
+  /// one whose file would not open ([unreadable]). The 24-word phrase is the
+  /// only way out.
+  Future<bool> _showDeviceBoundRecoveryDialog({bool unreadable = false}) async {
     final result = await showHollowDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) {
-        return HollowDialog(
-          title: 'Identity locked',
-          width: 420,
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              HollowDialogText(
-                errorMessage ?? 'This identity was bound to another device and cannot be used here. Enter your 24-word recovery phrase to unlock your identity on this device.',
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              HollowTextField(
-                controller: controller,
-                autofocus: true,
-                hintText: 'Enter 24-word recovery phrase',
-              ),
-            ],
-          ),
-          actions: [
-            HollowButton.filled(
-              onPressed: () async {
-                final phrase = controller.text.trim();
-                final words = phrase.split(RegExp(r'\s+'));
-                if (words.length != 24) {
-                  // The lock cover is up while this runs, and it
-                  // silences every other toast.
-                  HollowToast.show(ctx, 'Must be exactly 24 words',
-                      type: HollowToastType.error,
-                      allowWhileLocked: true);
-                  return;
-                }
-                try {
-                  await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
-                  await identity_api.unlockIdentity();
-                  // Reset to plaintext, so the App Lock marker and
-                  // biometric secret are stale.
-                  await AppLockService().clearAll();
-                  if (ctx.mounted) Navigator.of(ctx).pop(true);
-                } catch (e) {
-                  if (ctx.mounted) {
-                    HollowToast.show(ctx, 'Recovery failed: $e',
-                        type: HollowToastType.error,
-                        allowWhileLocked: true);
-                  }
-                }
-              },
-              child: const Text('Recover identity'),
-            ),
-          ],
-        );
-      },
+      builder: (_) => RecoveryPhraseDialog(
+        title: 'Identity locked',
+        paragraphs: [
+          unreadable
+              ? "Hollow couldn't open your identity file on this device."
+              : "This identity is tied to another device, so it can't open "
+                  'here.',
+          'Enter your 24-word recovery phrase to use it on this device.',
+        ],
+        confirmLabel: 'Recover identity',
+        cancellable: false,
+        onRecover: (phrase) async {
+          await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
+          await identity_api.unlockIdentity();
+          // Reset to plaintext, so the App Lock marker and biometric secret
+          // are stale.
+          await AppLockService().clearAll();
+        },
+      ),
     );
     return result == true;
   }
@@ -606,9 +572,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (hasBiometric && await tryBiometric()) return true;
     if (!mounted) return false;
 
-    final secretLabel = isPin ? 'PIN' : 'password';
-    final controller = TextEditingController();
-    var attempts = 0;
+    var wrong = false;
     while (true) {
       // Statement-level, not just the loop condition, so the gap after the
       // previous iteration's awaits is covered.
@@ -616,81 +580,27 @@ class _HollowShellState extends ConsumerState<HollowShell>
       final result = await showHollowDialog<String>(
         context: context,
         barrierDismissible: false,
-        builder: (ctx) {
-          final hollow = HollowTheme.of(ctx);
-          return HollowDialog(
-            title: 'Unlock Hollow',
-            width: 420,
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                HollowDialogText(
-                  'Enter your app $secretLabel to unlock your identity.',
-                ),
-                if (attempts > 0) ...[
-                  const SizedBox(height: HollowSpacing.xs),
-                  Text(
-                    'Wrong ${isPin ? 'PIN' : 'password'}. Try again.',
-                    style: HollowTypography.body.copyWith(color: hollow.error),
-                  ),
-                ],
-                const SizedBox(height: HollowSpacing.lg),
-                HollowTextField(
-                  controller: controller,
-                  obscureText: true,
-                  autofocus: true,
-                  hintText: isPin ? 'PIN' : 'Password',
-                  keyboardType: isPin ? TextInputType.number : null,
-                  onSubmitted: (val) {
-                    if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-                  },
-                ),
-              ],
-            ),
-            leadingActions: [
-              HollowButton.ghost(
-                onPressed: () => Navigator.of(ctx).pop('__recover__'),
-                child: const Text('Recover with phrase'),
-              ),
-            ],
-            actions: [
-              if (hasBiometric)
-                HollowTooltip(
-                  message: 'Unlock with biometrics',
-                  child: HollowButton.ghost(
-                    compact: true,
-                    semanticLabel: 'Unlock with biometrics',
-                    onPressed: () => Navigator.of(ctx).pop('__biometric__'),
-                    child: const Icon(LucideIcons.fingerprint, size: 16),
-                  ),
-                ),
-              HollowButton.filled(
-                onPressed: () {
-                  final pass = controller.text.trim();
-                  if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
-                },
-                child: const Text('Unlock'),
-              ),
-            ],
-          );
-        },
+        builder: (_) => UnlockDialog(
+          isPin: isPin,
+          hasBiometric: hasBiometric,
+          wrong: wrong,
+        ),
       );
 
       if (result == null || !mounted) return false;
 
-      if (result == '__recover__') {
-        final recovered = await _recoverWithMnemonic();
+      if (result == kUnlockRecover) {
+        final recovered = await _recoverWithMnemonic(isPin: isPin);
         if (recovered) {
           // Reset to plaintext, so the lock state is stale.
           await AppLockService().clearAll();
           return true;
         }
-        controller.clear();
+        wrong = false;
         continue;
       }
 
-      if (result == '__biometric__') {
+      if (result == kUnlockBiometric) {
         if (await tryBiometric()) return true;
         continue;
       }
@@ -711,66 +621,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
         }
         // Wrong secret: let the dialog re-prompt.
         _setUnlocking(false);
-        attempts++;
-        controller.clear();
+        wrong = true;
         continue;
       }
     }
-    return false;
   }
 
-  Future<bool> _recoverWithMnemonic() async {
-    final controller = TextEditingController();
+  Future<bool> _recoverWithMnemonic({required bool isPin}) async {
+    final lock = isPin ? 'PIN' : 'password';
     final result = await showHollowDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) {
-        return HollowDialog(
-          title: 'Recover identity',
-          width: 420,
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const HollowDialogText(
-                'Enter your 24-word recovery phrase to reset your identity. This will remove the existing password.',
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              HollowTextField(
-                controller: controller,
-                autofocus: true,
-                hintText: 'Enter 24-word recovery phrase',
-              ),
-            ],
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: () async {
-                final phrase = controller.text.trim();
-                final words = phrase.split(RegExp(r'\s+'));
-                if (words.length != 24) {
-                  HollowToast.show(ctx, 'Must be exactly 24 words', type: HollowToastType.error);
-                  return;
-                }
-                try {
-                  await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
-                  await identity_api.unlockIdentity();
-                  if (ctx.mounted) Navigator.of(ctx).pop(true);
-                } catch (e) {
-                  if (ctx.mounted) {
-                    HollowToast.show(ctx, 'Recovery failed: $e', type: HollowToastType.error);
-                  }
-                }
-              },
-              child: const Text('Recover'),
-            ),
-          ],
-        );
-      },
+      builder: (_) => RecoveryPhraseDialog(
+        title: 'Recover identity',
+        paragraphs: [
+          'Enter your 24-word recovery phrase to get back into this identity.',
+          'This turns off your app $lock. You can set a new one in Settings.',
+        ],
+        confirmLabel: 'Recover',
+        onRecover: (phrase) async {
+          await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
+          await identity_api.unlockIdentity();
+        },
+      ),
     );
     return result == true;
   }
@@ -1109,7 +982,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (moved) ref.read(profileProvider.notifier).loadAll();
     }).catchError((e) {
       debugPrint('[HOLLOW] Profile media migration skipped: $e');
-      return false;
     });
 
     final serverIds = ref.read(serverListProvider).keys.toList();

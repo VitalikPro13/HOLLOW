@@ -425,7 +425,7 @@ function Close-Settings($peer) {
 function Remove-Friendship($peer, $friendName) {
     Close-Settings $peer
     Open-Friends $peer
-    Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:_TabButton>text:Friends'; index = 0 } | Out-Null
+    Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:HollowChip>text:Friends'; index = 0 } | Out-Null
     if (-not (Test-Target $peer 'semantics:Remove friend' 10000)) {
         Add-Note "$peer's Friends tab shows no Remove friend control for $friendName"
         Close-Friends $peer
@@ -731,12 +731,12 @@ try {
             Say 'a and c become friends so there is someone to call'
             Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
             Open-Friends c
-            Step c @{ op = 'tap'; target = 'text:Add Friend'; index = 0 }
-            Step c @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = "$($script:FleetVars['PEER_A'])" }
-            Step c @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+            Step c @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+            Step c @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = "$($script:FleetVars['PEER_A'])" }
+            Step c @{ op = 'tap'; target = 'text:Send request'; index = 0 }
             Open-Friends a
             # The Accept button only exists on the INCOMING tab.
-            Step a @{ op = 'tap'; target = 'text:Incoming'; index = 0 }
+            Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
             Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
             Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
             Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 60000 }
@@ -749,12 +749,12 @@ try {
         Step c @{ op = 'tap'; target = 'tooltip:probe-a' }
         Step c @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
         Step c @{ op = 'tap'; target = 'semantics:Start voice call'; index = 0 }
-        Step c @{ op = 'wait_for'; target = 'dialog > text:Always relay calls needs a TURN server'; timeout_ms = 30000 }
+        Step c @{ op = 'wait_for'; target = 'dialog > text:This relay can''t carry your call'; timeout_ms = 30000 }
         Step c @{ op = 'shot'; name = "relay-$runTag-c-turn-refusal" }
         # The refusal has one way out and the wording is the app's, so the
         # dismiss is tried by name and falls back to Escape.
         $dismissed = $false
-        foreach ($label in @('OK', 'Close', 'Got it')) {
+        foreach ($label in @('Close', 'Got it', 'OK')) {
             $count = Get-MatchCount c "dialog > text:$label"
             if ($count -gt 0) {
                 Invoke-TopDialogTap c $label
@@ -763,7 +763,7 @@ try {
             }
         }
         if (-not $dismissed) { Invoke-SoftStep c @{ op = 'key'; value = 'escape' } | Out-Null }
-        Invoke-SoftStep c @{ op = 'wait_for'; gone = 'dialog > text:Always relay calls needs a TURN server'; timeout_ms = 15000 } | Out-Null
+        Invoke-SoftStep c @{ op = 'wait_for'; gone = 'dialog > text:This relay can''t carry your call'; timeout_ms = 15000 } | Out-Null
         Set-Gate 'G5b Always relay calls refuses a call without TURN' 'PASS'
         Say 'PASS G5b: the call was refused, not attempted' 'Green'
 

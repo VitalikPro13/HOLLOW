@@ -423,6 +423,69 @@ pub fn get_banner(peer_id: String) -> Result<Option<Vec<u8>>, String> {
     ms.load_banner(&peer_id)
 }
 
+// ── Call records ──────────────────────────────────────────────
+
+/// One ended DM call, as this device saw it. Local only: it never rides the wire,
+/// and it lives outside the message table so no sync, count or export reads it.
+pub struct CallRecord {
+    pub call_id: String,
+    /// The conversation's MASTER id.
+    pub peer_id: String,
+    pub outgoing: bool,
+    pub video: bool,
+    /// How it ended: answered, missed, declined, cancelled, unanswered, failed.
+    pub outcome: String,
+    /// When it began ringing, in milliseconds.
+    pub started_at: i64,
+    /// When it connected; `None` for a call that never did.
+    pub connected_at: Option<i64>,
+    pub ended_at: i64,
+}
+
+fn call_record_from_row(r: crate::storage::CallRecordRow) -> CallRecord {
+    CallRecord {
+        call_id: r.call_id,
+        peer_id: r.peer_id,
+        outgoing: r.outgoing,
+        video: r.video,
+        outcome: r.outcome,
+        started_at: r.started_at,
+        connected_at: r.connected_at,
+        ended_at: r.ended_at,
+    }
+}
+
+/// Stores an ended DM call. A call id already stored is left unchanged.
+#[frb]
+pub fn record_dm_call(record: CallRecord) -> Result<(), String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.record_dm_call(&crate::storage::CallRecordRow {
+        call_id: record.call_id,
+        peer_id: record.peer_id,
+        outgoing: record.outgoing,
+        video: record.video,
+        outcome: record.outcome,
+        started_at: record.started_at,
+        connected_at: record.connected_at,
+        ended_at: record.ended_at,
+    })
+}
+
+/// The newest `limit` calls with `peer_id` (a MASTER id), oldest first.
+#[frb]
+pub fn load_dm_call_records(peer_id: String, limit: u32) -> Result<Vec<CallRecord>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms
+        .load_dm_call_records(&peer_id, limit)?
+        .into_iter()
+        .map(call_record_from_row)
+        .collect())
+}
+
 // ── App Settings ──────────────────────────────────────────────
 
 /// Save a key-value setting to the local database.

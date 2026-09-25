@@ -40,12 +40,17 @@ class CallPersonTile extends ConsumerWidget {
   final VoidCallback? onTap;
   final VoidCallback? onDoubleTap;
 
+  /// A [CallTileSize.large] tile's avatar, in place of the size it would take
+  /// from the tile's width (the phone's room grid draws a fixed 56).
+  final double? avatarSize;
+
   const CallPersonTile({
     super.key,
     required this.person,
     required this.size,
     this.onTap,
     this.onDoubleTap,
+    this.avatarSize,
   });
 
   @override
@@ -178,8 +183,7 @@ class CallPersonTile extends ConsumerWidget {
             // 48 to 72 by the tile's width, less when a crowded grid makes
             // the tile short, so the name always fits under it.
             final byHeight = box.maxHeight - HollowSpacing.xxl - HollowSpacing.lg;
-            final avatar = (box.maxWidth * 0.18)
-                .clamp(48.0, 72.0)
+            final avatar = (avatarSize ?? (box.maxWidth * 0.18).clamp(48.0, 72.0))
                 .clamp(24.0, byHeight < 24 ? 24.0 : byHeight)
                 .roundToDouble();
             children.add(Center(

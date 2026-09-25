@@ -350,8 +350,13 @@ lot at once, and a persistent journal would outlive the messages it mentions.
 
 The one thing the relay does write is a count of user reports, in
 `/data/reports.json` inside its volume, so you can see which peers have been
-reported and act on it. It records the reported peer and the category, never who
-reported it.
+reported and act on it. It records the reported peer and the category. To stop
+one person's report counting twice it also keeps a one-way fingerprint of each
+report, made with a random key the relay creates on its first start in
+`reports.json.key` beside it. Without that key the reports file can't confirm
+who reported whom, so leave the key out of any copy you share. A reports file
+from before the key loses its fingerprints on the next start and keeps its
+counts.
 
 ## Starting on boot
 

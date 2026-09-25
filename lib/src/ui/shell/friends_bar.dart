@@ -5,12 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
-import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
-import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -25,7 +23,6 @@ import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_link.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -425,30 +422,4 @@ class _FriendAvatar extends StatelessWidget {
       ],
     );
   }
-}
-
-/// Removes a friend and closes whatever still shows them: the favourite, the
-/// open DM, the split pane. Toasts on failure.
-Future<void> removeFriendAndTidy(
-    BuildContext context, WidgetRef ref, String peerId) async {
-  // Captured up front: the awaited removal rebuilds the friends list and may
-  // unmount the caller before the cleanup below runs.
-  final favourites = ref.read(favouriteFriendsProvider.notifier);
-  final selectedPeer = ref.read(selectedPeerProvider.notifier);
-  final wasSelected = ref.read(selectedPeerProvider) == peerId;
-  final splitView = ref.read(splitViewProvider.notifier);
-  final split = ref.read(splitViewProvider);
-  final shownInSplit = split.isSplit && split.rightPane?.peerId == peerId;
-  try {
-    await ref.read(friendsProvider.notifier).removeFriend(peerId);
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not remove friend',
-          type: HollowToastType.error);
-    }
-    return;
-  }
-  favourites.remove(peerId);
-  if (wasSelected) selectedPeer.state = null;
-  if (shownInSplit) splitView.closeSplit();
 }

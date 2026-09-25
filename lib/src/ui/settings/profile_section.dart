@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -278,7 +279,8 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = _TwitchBusy.none);
-      HollowToast.show(context, 'Could not verify Twitch: $e',
+      HollowToast.show(context, friendlyError(e,
+              fallback: "Couldn't verify Twitch. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -319,7 +321,8 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
     } catch (e) {
       if (mounted) {
         setState(() => _busy = _TwitchBusy.none);
-        HollowToast.show(context, 'Failed to disconnect: $e',
+        HollowToast.show(context, friendlyError(e,
+                fallback: "Couldn't disconnect Twitch. Try again."),
             type: HollowToastType.error);
       }
     }

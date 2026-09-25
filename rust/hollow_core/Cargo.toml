@@ -82,6 +82,9 @@ unsafe-libopus = "0.2"
 # the capture-processor ports bind lives in src/dfn_ffi.rs; the engine +
 # offline harness live in the sibling crate.
 hollow_dfn = { path = "../hollow_dfn" }
+# Ringtone trim waveform (audio_peaks.rs): pure-Rust decode of the formats the
+# ringtone picker accepts, so it rides every cross-compile with no native lib.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "ogg", "vorbis", "wav", "pcm", "adpcm", "flac"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 # JNI exports for the fork's DfnBridge.java (see dfn_ffi.rs).
@@ -144,6 +147,19 @@ opt-level = 3
 [profile.dev.package.webp-animation]
 opt-level = 3
 [profile.dev.package.libwebp-sys2]
+opt-level = 3
+
+# Ringtone waveform decode: same dev-profile trap as the image pipeline, the
+# trim dialog waits on this decode.
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
 opt-level = 3
 
 # AI noise suppression (hollow_dfn → nnnoiseless / deep_filter → tract):

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -11,7 +10,6 @@ import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
-import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -19,6 +17,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/call/call_ringtone.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -41,7 +40,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   late Animation<double> _fadeAnim;
 
   bool _wasVisible = false;
-  AudioPlayer? _ringtonePlayer;
+  final _ringtone = CallRingtone();
   Timer? _countdownTimer;
   int _secondsLeft = 30;
 
@@ -68,7 +67,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
 
   @override
   void dispose() {
-    _stopRingtone();
+    _ringtone.stop();
     _stopCountdown();
     _controller.dispose();
     super.dispose();
@@ -88,49 +87,6 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   void _stopCountdown() {
     _countdownTimer?.cancel();
     _countdownTimer = null;
-  }
-
-  Future<void> _startRingtone() async {
-    final ringtonePath = await ref.read(ringtonePathProvider.future);
-    final volume = await ref.read(ringtoneVolumeProvider.future);
-    final startSec = await ref.read(ringtoneStartProvider.future);
-    final endSec = await ref.read(ringtoneEndProvider.future);
-    // The call may have been answered or declined while the providers loaded.
-    if (!mounted || !_wasVisible) return;
-
-    final hasCustom = ringtonePath != null &&
-        ringtonePath.isNotEmpty &&
-        File(ringtonePath).existsSync();
-    final clipDuration = endSec - startSec;
-
-    if (!hasCustom || clipDuration <= 0) {
-      // The bundled default loops the whole file: no trim range applies.
-      _ringtonePlayer = AudioPlayer();
-      await _ringtonePlayer!.setVolume(volume);
-      await _ringtonePlayer!.setReleaseMode(ReleaseMode.loop);
-      await _ringtonePlayer!.play(AssetSource('sounds/default_ringtone.wav'));
-      return;
-    }
-
-    _ringtonePlayer = AudioPlayer();
-    await _ringtonePlayer!.setVolume(volume);
-    // Looping is manual, within the clip range.
-    await _ringtonePlayer!.play(DeviceFileSource(ringtonePath));
-    await _ringtonePlayer!.seek(Duration(milliseconds: (startSec * 1000).round()));
-
-    _ringtonePlayer!.onPositionChanged.listen((pos) {
-      final posSeconds = pos.inMilliseconds / 1000.0;
-      if (posSeconds >= endSec || posSeconds < startSec - 0.5) {
-        _ringtonePlayer?.seek(
-            Duration(milliseconds: (startSec * 1000).round()));
-      }
-    });
-  }
-
-  Future<void> _stopRingtone() async {
-    await _ringtonePlayer?.stop();
-    await _ringtonePlayer?.dispose();
-    _ringtonePlayer = null;
   }
 
   void _accept() {
@@ -172,12 +128,12 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
     if (isVisible && !_wasVisible) {
       _controller.duration = HollowDurations.normal;
       _controller.forward(from: 0);
-      _startRingtone();
+      _ringtone.start(ref, stillRinging: () => mounted && _wasVisible);
       _startCountdown();
     } else if (!isVisible && _wasVisible) {
       _controller.reverseDuration = HollowDurations.fast;
       _controller.reverse();
-      _stopRingtone();
+      _ringtone.stop();
       _stopCountdown();
     }
     _wasVisible = isVisible;

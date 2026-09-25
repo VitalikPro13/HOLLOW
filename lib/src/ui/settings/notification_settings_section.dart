@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -117,7 +118,8 @@ class _SystemPermissionRowState extends ConsumerState<_SystemPermissionRow> {
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not ask for permission: $e',
+        friendlyError(e,
+            fallback: "Couldn't ask for permission. Try again."),
         type: HollowToastType.error,
       );
     } finally {
@@ -141,7 +143,8 @@ class _SystemPermissionRowState extends ConsumerState<_SystemPermissionRow> {
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not open the system notification settings: $e',
+        friendlyError(e,
+            fallback: "Couldn't open the system notification settings."),
         type: HollowToastType.error,
       );
     } finally {
@@ -164,7 +167,8 @@ class _SystemPermissionRowState extends ConsumerState<_SystemPermissionRow> {
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not send the test notification: $e',
+        friendlyError(e,
+            fallback: "Couldn't send the test notification. Try again."),
         type: HollowToastType.error,
       );
     } finally {
@@ -291,7 +295,8 @@ class _PushDeliverySectionState extends ConsumerState<_PushDeliverySection> {
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not switch the push service: $e',
+        friendlyError(e,
+            fallback: "Couldn't switch the push service. Try again."),
         type: HollowToastType.error,
       );
     } finally {
@@ -439,7 +444,8 @@ class _ServerNotificationRowState
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not save the notification level: $e',
+        friendlyError(e,
+            fallback: "Couldn't save the notification level. Try again."),
         type: HollowToastType.error,
       );
     }
@@ -455,7 +461,8 @@ class _ServerNotificationRowState
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not save the channel override: $e',
+        friendlyError(e,
+            fallback: "Couldn't save the channel setting. Try again."),
         type: HollowToastType.error,
       );
     }
@@ -680,7 +687,8 @@ class _MutedConversationRowState extends ConsumerState<_MutedConversationRow> {
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not unmute this conversation: $e',
+        friendlyError(e,
+            fallback: "Couldn't unmute this conversation. Try again."),
         type: HollowToastType.error,
       );
     } finally {

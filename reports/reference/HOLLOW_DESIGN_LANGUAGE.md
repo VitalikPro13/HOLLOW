@@ -237,6 +237,8 @@ If it is clickable it is a chip. If it is not, it is a badge. There is no third 
 
 Optional slots, the same on every chip: `icon` (an `IconData` at 14) or `leading` (any glyph, such as a platform logo, sized 14 by the caller); `hint`, quiet `textTertiary` text after the label for the one fact that tells two choices apart; `trailingIcon`, a chevron when the chip opens a menu or an arrow when it leaves the app. A badge takes `icon` or `leading` too. A chip that opens a menu opens `showHollowMenu`, never a Material `PopupMenuButton`: `settings/channel_access_pickers.dart` is the pattern. A trigger at the trailing edge of its panel passes `alignEnd: true` with an anchor at its bottom-right, so the menu opens under it instead of across the next panel. An add action beside a scrolling row of chips sits outside the scroller, so it never scrolls out of reach. A key combination is `HollowKeyCombo`, one mono badge per key.
 
+**Every tab row is chips** (decided 2026-09-25, Vitalik), in a dialog, a page or a place header: `HollowChipTabs<T>` (`tabs`, `selected`, `onSelected`; a quiet total in `hint`, something waiting on the person in `count`, a count badge; arrow keys, Home and End move the selection; `expand: true` for equal widths on a phone). No underline tab, no local `_Tab`. A label is `LabelChip` when it toggles and `LabelBadge` when it is worn, both led by the label's colour (`LabelSwatch`); `HollowDurationPicker` is the one "for how long" choice, a chip row whose null is "Until I remove it", never a red "Permanent".
+
 A chip's label is always `Flexible` and ellipsizes. A row of equal-width sub-tabs (`expand: true` inside `Expanded`) divides the width between them, and at a large text scale the longest label has to give somewhere; without this it overflows its own chip.
 
 ### 4.2 Buttons
@@ -260,6 +262,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 - **The primary can move.** When a later state owns the commit (an update ready to install), the earlier primary (Check for updates) steps down to ghost in the same build: `HollowButton(variant: ...)`.
 - A missing permission is the region's primary (Request permission filled); once granted, the test and settings actions stay ghost.
 - Buttons in a row are `sm` 8 apart. Always.
+- A **disabled** button goes neutral at full opacity (label `textTertiary`, a faint neutral fill for filled and danger, a `textTertiary` hairline for outline), never a faded accent; say why it is disabled next to it when the reason is not obvious.
 - While a request runs the button shows **loading, not disabled** (`HollowButton(loading: true)`: same width, same colours, a spinner in the variant foreground, presses ignored), and the success toast fires after the await.
 - An icon-only button carries a tooltip and a `semanticLabel`.
 
@@ -297,7 +300,11 @@ One route, one frame, one action rule.
 - **Body.** Prose is `HollowDialogText` (`body` in `textSecondary`); a field's label is `SettingsFieldLabel`; groups inside a big dialog are `HollowSectionHeader`.
 - **Actions.** Trailing, 8 apart, primary LAST: ghost Cancel, then ONE `filled` confirm, or `danger` when the confirm destroys something (delete, leave, remove, wipe, revoke). `outline` only for a second alternative beside the filled. Ghost extras that are not the answer (Forgot password, Reset, Copy) go in `leadingActions`. A busy confirm is `loading: true`.
 - **Close.** A dialog with a Cancel needs no X. A dialog with nothing to confirm (a viewer, a status, an info card) takes `showClose: true` (the ghost X at the title's edge, `HollowDialogCloseButton` in a custom layout) and no Done button; an acknowledgement the person must read (a recovery phrase, a warning) ends with ONE filled button instead ("I saved it", "Got it").
-- **A yes-or-no question** is `showHollowConfirm()`, never a hand-built pair. A one-field name prompt is `promptForName()`.
+- **A yes-or-no question** is `showHollowConfirm()`, never a hand-built pair. A one-field name prompt is `promptForName()` (it owns its controller; `description`, `maxLength`, `validator`).
+- **A confirm that runs an action runs it inside the dialog**: pass `onConfirm` (`onSubmit` for `promptForName`, `showHollowDurationDialog` for a length). The dialog stays open with the confirm loading and Cancel disabled, closes on success, and on a throw shows the reason inside it (a prompt's on its field, keeping the text) so the person can retry. A dialog of its own gets the same through `HollowDialogAction` plus `HollowDialog(busy:, error:)`. Never pop first and await after.
+- **Errors people read** go through `friendlyError(e)` (`core/friendly_error.dart`): one sentence with a next step, the raw text to the log. A raw `$e` in a toast or dialog is guarded; throw `FriendlyException` for a specific sentence.
+- **A value to copy** (a link, a code, an id) is `HollowCopyField`: the value in `textPrimary` on `elevated`, mono unless `mono: false`, a labelled copy button that toasts "Copied". It is the one legitimate well; never a card, never accent text.
+- **On a phone** the action row and the close button grow to 44 on their own; a call site never passes `touch:` to a dialog's actions. A dialog that scrolls itself passes `scrollable: false`.
 - Keyboard insets are handled by `showHollowDialog()`; a builder never pads by `viewInsets` itself.
 
 ### 4.5 Surfaces that already have one law
@@ -336,6 +343,7 @@ Every screen pass starts with four lines, written down and agreed before code:
 - **Max widths are for prose only:** a dialog body, a news post, a long description, 50 to 75 characters a line. Lists, grids and panes fill their region. When a wide row puts two related things far apart (a name and its time), move them together in the row; do not shrink the pane.
 - **A main region plus at most one side panel.** Three regions of equal weight have no winner. The side panel holds secondary, glanceable things and never the screen's job. It is built like a server's member panel: `surface`, a hairline on its inner edge, 280 to 300 wide, full height. A navigation sidebar is 240.
 - **Narrow widths drop the side panel, never squeeze it.** Below the width where the main region stops being readable (Home: 840 px of pane), the panel leaves or folds into the main region; nothing overflows.
+- **Even proportions: move whole, never squeeze one side.** When chrome floats over a surface (the window controls over a full-window route, a notch, a docked bar), the row it would cover moves clear of it AS A WHOLE, usually down by the chrome's height (`windowChromeTop()`), keeping the same margin on every side and its pieces level with each other. Shifting only the end that collides leaves a lopsided row, one side hugging the edge and the other pulled in (the media viewer's bar under the window controls, 2026-09-25, Vitalik: "making it weird is not the best option"). Margins that face each other match: left equals right, top equals the gap between siblings.
 - **Proximity carries the grouping** (the gap ramp in 3.5): items inside a group 4 to 8 apart, rows 4 to 12, groups 24 to 32. A line only where spacing cannot do it.
 
 ### 5.2.1 A mockup is not the screen

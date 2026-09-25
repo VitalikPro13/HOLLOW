@@ -25,7 +25,9 @@ void main() {
       'lib/src/ui/call/share_tile.dart',
       'lib/src/ui/call/dm_call_row.dart',
       'lib/src/ui/mobile/mobile_call_video_view.dart',
-      'lib/src/ui/mobile/mobile_voice_avatars.dart',
+      'lib/src/ui/mobile/mobile_call_chrome.dart',
+      'lib/src/ui/mobile/mobile_minimised_call.dart',
+      'lib/src/ui/mobile/mobile_voice_channel_route.dart',
     ];
 
     final failures = <String>[];

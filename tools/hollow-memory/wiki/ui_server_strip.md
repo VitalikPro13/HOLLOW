@@ -379,14 +379,7 @@ Two entry points:
    therefore no way to dissolve a folder at all.
 2. **Pencil button** in the folder popup header.
 
-Both call `showFolderRenameDialog()` which opens `showHollowDialog` containing `_FolderRenameDialog`.
-
-`_FolderRenameDialog` is a `ConsumerStatefulWidget`:
-- 280px wide container with `HollowSpacing.xl` padding.
-- Title: `'Rename Folder'`.
-- `HollowTextField` with `maxLength: 32`, autofocus, submit-on-enter.
-- Cancel (ghost button) / Save (filled button) row.
-- Save trims input, calls `serverStripLayoutProvider.notifier.renameFolder(folder.id, name)`, then pops.
+Both call `showFolderRenameDialog()` (`server_folder_popup.dart`): the shared `promptForName` ("Rename folder", hint "Folder name", 32 characters, confirm "Rename"), whose `onSubmit` calls `serverStripLayoutProvider.notifier.renameFolder(folder.id, name)` inside the dialog. It reads the notifier from the provider CONTAINER, since a menu's ref dies with the menu. `_FolderRenameDialog` is gone.
 
 ## Context Menus (issue #61 phase 4)
 
@@ -394,17 +387,18 @@ Built in `lib/src/ui/shell/server_context_menus.dart` on the shared `showHollowM
 through `ContextMenuTarget` so each one also answers Menu / Shift+F10 and a "Show menu" screen-reader action.
 **Both shells call this file**, so a row that exists in Classic and not in Dock is impossible by construction.
 
-**Server icon** — Mark as read, Mute/Unmute server, Invite people, Server settings, **Move to folder**, Leave
-server. Before this the strip had no menu at all and folder membership was drag-only.
+**Server icon** — Mark as read, Mute/Unmute server, Invite people, Server settings, **Move to folder**, then
+Delete server for the owner (an owner cannot leave; Rust refuses it) or Leave server for everyone else. Before this the strip had no menu at all and folder membership was drag-only.
 - `Mark as read` uses the shared `markServerRead(ref, serverId)` (also used by the channel sidebar's background
   menu): the watermark per channel is the LAST message of the in-memory list, the ms-timestamp rule.
 - `Server settings` goes through each shell's `_openServerSettings`, which **selects the server first**. The
   settings panel reads the SELECTED server, so flipping `serverSettingsOpenProvider` alone would open the
   settings of whatever was already on screen.
 - `Move to folder` is a drill-in submenu: every existing folder (check-marked if it is the current one), `New
-  folder` (prompts for a name → `createFolderWith`), and `Remove from folder` when it is in one.
-- `Leave server` uses `confirmAndLeaveServer`, the same flow as the Danger Zone tab, reachable without opening
-  settings first.
+  folder` (`promptForName` "New folder", confirm "Create" → `createFolderWith`, starts empty), and `Remove from folder` when it is in one.
+- `Delete server` / `Leave server` call `confirmDeleteServer` / `confirmLeaveServer` (`server_settings_catalog.dart`),
+  THE confirms the settings danger zones and the phone sheet use too; the FFI runs inside the dialog.
+  `confirmAndLeaveServer` is gone.
 
 **Folder icon** — Mark all as read, Rename folder, Dissolve folder. The rows read the folder LIVE out of
 `serverStripLayoutProvider`, so a rename that lands while the menu is open shows.

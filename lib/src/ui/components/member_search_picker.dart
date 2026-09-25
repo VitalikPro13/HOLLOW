@@ -2,10 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -88,57 +87,30 @@ class _MemberSearchPickerState extends State<MemberSearchPicker> {
         else
           ConstrainedBox(
             constraints: BoxConstraints(maxHeight: widget.maxListHeight),
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: filtered.length,
-              itemBuilder: (_, i) {
-                final m = filtered[i];
-                final name = widget.nameOf(m);
-                return HollowPressable(
-                  onTap: widget.onTapMember == null
-                      ? null
-                      : () => widget.onTapMember!(m),
-                  // List rows, not buttons: the row's own text names it and
-                  // trailing icons carry any state label.
-                  semanticButton: false,
-                  subtle: true,
-                  // No horizontal padding, so rows stay flush with the caption
-                  // and search field above them.
-                  padding:
-                      const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-                  child: Row(
-                    children: [
-                      HollowAvatar(peerId: m.peerId, size: 28),
-                      const SizedBox(width: HollowSpacing.md),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: HollowTypography.body.copyWith(
-                                color: hollow.textPrimary,
-                              ),
-                            ),
-                            Text(
-                              shortPeerIdSuffix(m.peerId),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textTertiary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.md),
-                      widget.trailingOf(m),
-                    ],
-                  ),
-                );
-              },
+            // Widened by the rows' bleed so the list's clip leaves their hover
+            // whole while their content stays on the search field's edge.
+            child: HollowBleed(
+              horizontal: HollowListRow.insetOf(),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.symmetric(
+                    horizontal: HollowListRow.insetOf()),
+                itemCount: filtered.length,
+                itemBuilder: (_, i) {
+                  final m = filtered[i];
+                  return HollowListRow(
+                    key: ValueKey(m.peerId),
+                    flush: true,
+                    onTap: widget.onTapMember == null
+                        ? null
+                        : () => widget.onTapMember!(m),
+                    leading: HollowAvatar(peerId: m.peerId, size: 28),
+                    title: widget.nameOf(m),
+                    subtitle: shortPeerIdSuffix(m.peerId),
+                    trailing: widget.trailingOf(m),
+                  );
+                },
+              ),
             ),
           ),
       ],

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -11,6 +12,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 
 /// Kept for the legacy settings dialog, which still names it.
 typedef BackupCategoryView = BackupFileRow;
@@ -60,7 +62,11 @@ class _BackupFileRowState extends State<BackupFileRow> {
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Export failed: $e', type: HollowToastType.error);
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't export the backup. Try again."),
+          type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _exporting = false);
     }
@@ -93,7 +99,11 @@ class _BackupFileRowState extends State<BackupFileRow> {
     } catch (e) {
       await _removeStaged(tmpPath);
       if (!mounted) return;
-      HollowToast.show(context, 'Export failed: $e', type: HollowToastType.error);
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't export the backup. Try again."),
+          type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _exporting = false);
     }
@@ -151,19 +161,20 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
     super.dispose();
   }
 
+  bool get _filled =>
+      _passphrase.text.trim().isNotEmpty && _repeat.text.trim().isNotEmpty;
+
   void _submit() {
+    if (!_filled) return;
     final pass = _passphrase.text.trim();
-    if (pass.isEmpty) return;
     if (pass != _repeat.text.trim()) {
-      setState(() => _error = "Passphrases don't match");
+      setState(() => _error = "The passphrases don't match.");
       return;
     }
     Navigator.of(context).pop(_BackupOptions(pass, _includeFiles, _includeVault));
   }
 
-  void _clearError() {
-    if (_error != null) setState(() => _error = null);
-  }
+  void _changed() => setState(() => _error = null);
 
   @override
   Widget build(BuildContext context) {
@@ -178,33 +189,36 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
             'The file is encrypted with a passphrase you choose. You need it '
             'to restore the backup.',
           ),
-          const SizedBox(height: HollowSpacing.sm),
+          const SizedBox(height: HollowSpacing.lg),
+          const SettingsFieldLabel(label: 'Passphrase'),
+          const SizedBox(height: HollowSpacing.xs),
+          HollowTextField(
+            controller: _passphrase,
+            obscureText: true,
+            autofocus: true,
+            onChanged: (_) => _changed(),
+            onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          const SettingsFieldLabel(label: 'Repeat the passphrase'),
+          const SizedBox(height: HollowSpacing.xs),
+          HollowTextField(
+            controller: _repeat,
+            obscureText: true,
+            errorText: _error,
+            onChanged: (_) => _changed(),
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: HollowSpacing.md),
           SettingsSwitchRow(
             title: 'Include downloaded files',
             value: _includeFiles,
             onChanged: (v) => setState(() => _includeFiles = v),
           ),
           SettingsSwitchRow(
-            title: 'Include vault shard data',
+            title: 'Include files you keep for your servers',
             value: _includeVault,
             onChanged: (v) => setState(() => _includeVault = v),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          HollowTextField(
-            controller: _passphrase,
-            obscureText: true,
-            autofocus: true,
-            hintText: 'Passphrase',
-            onChanged: (_) => _clearError(),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          HollowTextField(
-            controller: _repeat,
-            obscureText: true,
-            hintText: 'Repeat the passphrase',
-            errorText: _error,
-            onChanged: (_) => _clearError(),
-            onSubmitted: (_) => _submit(),
           ),
         ],
       ),
@@ -214,7 +228,7 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _submit,
+          onPressed: _filled ? _submit : null,
           child: const Text('Export'),
         ),
       ],

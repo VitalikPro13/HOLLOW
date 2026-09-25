@@ -6,8 +6,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/slashed_icon.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
@@ -62,7 +62,7 @@ void showMobileMessageActions({
   );
 }
 
-enum _SheetView { actions, allEmojis, deleteConfirm }
+enum _SheetView { actions, allEmojis }
 
 class _MessageActionsSheet extends StatefulWidget {
   final String messageText;
@@ -129,7 +129,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
                   child: switch (_view) {
                     _SheetView.actions => _buildActionsView(hollow),
                     _SheetView.allEmojis => _buildAllEmojisView(hollow),
-                    _SheetView.deleteConfirm => _buildDeleteConfirmView(hollow),
                   },
                 ),
               ),
@@ -220,11 +219,12 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
       ],
       [
         if (widget.onDelete != null)
+          // One message goes without asking, as on desktop; an album asks
+          // once, in the caller.
           _ActionRow(
             icon: LucideIcons.trash2,
             label: 'Delete message',
-            color: hollow.error,
-            onTap: () => setState(() => _view = _SheetView.deleteConfirm),
+            onTap: () => run(widget.onDelete!),
           ),
       ],
     ].where((g) => g.isNotEmpty).toList();
@@ -294,53 +294,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildDeleteConfirmView(HollowTheme hollow) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Delete this message?',
-            style:
-                HollowTypography.subheading.copyWith(color: hollow.textPrimary),
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            "This can't be undone.",
-            style: HollowTypography.bodyTouch
-                .copyWith(color: hollow.textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Row(
-            children: [
-              Expanded(
-                child: HollowButton.ghost(
-                  expand: true,
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Cancel'),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: HollowButton.danger(
-                  expand: true,
-                  onPressed: () {
-                    Navigator.pop(context);
-                    widget.onDelete!();
-                  },
-                  child: const Text('Delete'),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-        ],
-      ),
     );
   }
 }
@@ -447,11 +400,11 @@ class _QuickReactionsRow extends StatelessWidget {
   }
 }
 
+/// One sheet row, [HollowListRow] at touch size.
 class _ActionRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
-  final Color? color;
 
   /// Cuts the icon the way Lucide's `*Off` glyphs are cut. Lucide has no
   /// `downloadOff`, and a `ban` or an `x` here would read as delete.
@@ -461,42 +414,25 @@ class _ActionRow extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onTap,
-    this.color,
     this.slashed = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final iconColor = color ?? hollow.textSecondary;
-    return HollowPressable(
+    return HollowListRow(
+      touch: true,
+      title: label,
+      leading: slashed
+          ? SlashedIcon(
+              icon: icon,
+              size: 20,
+              color: hollow.textSecondary,
+              // The sheet's own surface, so the slash cuts the glyph.
+              backgroundColor: hollow.overlay,
+            )
+          : Icon(icon, size: 20, color: hollow.textSecondary),
       onTap: onTap,
-      child: SizedBox(
-        height: 52,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-          child: Row(
-            children: [
-              if (slashed)
-                SlashedIcon(
-                  icon: icon,
-                  size: 20,
-                  color: iconColor,
-                  // The sheet's own surface, so the slash cuts the glyph.
-                  backgroundColor: hollow.overlay,
-                )
-              else
-                Icon(icon, size: 20, color: iconColor),
-              const SizedBox(width: HollowSpacing.lg),
-              Text(
-                label,
-                style: HollowTypography.bodyTouch
-                    .copyWith(color: color ?? hollow.textPrimary),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

@@ -240,9 +240,10 @@ void main() {
       extra: overrides(turn: false, alwaysRelay: true),
       onOpen: (context, ref) => ensureTurnForCall(context, ref),
     );
-    expect(
-        find.text('Always relay calls needs a TURN server'), findsOneWidget);
-    expect(find.text('OK'), findsOneWidget);
+    expect(find.text(kNoTurnDialogTitle), findsOneWidget);
+    // The acknowledgement is a real next step, never a bare OK.
+    expect(find.text('Open Security settings'), findsOneWidget);
+    expect(find.text('OK'), findsNothing);
     await capture(tester, 'no_turn_dialog');
   });
 
@@ -257,7 +258,7 @@ void main() {
       },
     );
     expect(answer, isTrue);
-    expect(find.text('Always relay calls needs a TURN server'), findsNothing);
+    expect(find.text(kNoTurnDialogTitle), findsNothing);
   });
 
   testWidgets('settings relay rows carry the no-TURN note', (tester) async {

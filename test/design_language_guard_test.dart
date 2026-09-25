@@ -162,6 +162,66 @@ void main() {
             'the other becomes outline (an alternative) or ghost '
             '(HOLLOW_DESIGN_LANGUAGE.md 4.2):\n  ${hits.join('\n  ')}');
   });
+
+  test('toasts do not show a raw exception', () {
+    // A ratchet like _rules, but over a whole call: a toast's message often
+    // spans lines. `'Failed: $e'` puts a Rust debug string in front of a
+    // person; friendlyError(e) gives them a sentence and logs the raw text.
+    final call = RegExp(r'\b\w*[Tt]oast\w*(?:\.\w+)?\s*\(');
+    final raw = RegExp(r'\$\{?\s*(e|err|error)\b(?!\s*\()');
+    final hits = <String>[];
+    for (final entity in Directory('lib/src/ui').listSync(recursive: true)) {
+      if (entity is! File || !entity.path.endsWith('.dart')) continue;
+      final path = entity.path.replaceAll(r'\', '/');
+      final source = _blankComments(entity.readAsStringSync());
+      for (final m in call.allMatches(source)) {
+        final args = _balancedArgs(source, m.end - 1);
+        for (final r in raw.allMatches(args)) {
+          final at = m.end + r.start;
+          final lineStart = source.lastIndexOf('\n', at) + 1;
+          final lineEnd = source.indexOf('\n', at);
+          if (source
+              .substring(lineStart, lineEnd < 0 ? source.length : lineEnd)
+              .contains('design-ignore:')) {
+            continue;
+          }
+          hits.add('$path:${'\n'.allMatches(source.substring(0, at)).length + 1}');
+        }
+      }
+    }
+    if (printMode) {
+      // ignore: avoid_print
+      print("\n  toast-raw-exception: ${hits.length},");
+      return;
+    }
+    expect(hits.length, lessThanOrEqualTo(_rawExceptionToastBaseline),
+        reason: 'New toasts interpolate a raw exception. Show '
+            'friendlyError(e) instead (lib/src/core/friendly_error.dart), or '
+            'run the action inside the dialog with onConfirm:\n  '
+            '${hits.join('\n  ')}');
+    expect(hits.length, _rawExceptionToastBaseline,
+        reason: 'Raw-exception toasts went DOWN. Lower '
+            '_rawExceptionToastBaseline to ${hits.length} in the same commit.');
+  });
+}
+
+/// Toasts that interpolate `$e`, `${e}`, `$err` or `$error`, the day the rule
+/// landed. May fall, never rise.
+const _rawExceptionToastBaseline = 6;
+
+/// The text between the `(` at [open] and its matching `)`.
+String _balancedArgs(String source, int open) {
+  var depth = 0;
+  for (var i = open; i < source.length; i++) {
+    final c = source[i];
+    if (c == '(') {
+      depth++;
+    } else if (c == ')') {
+      depth--;
+      if (depth == 0) return source.substring(open + 1, i);
+    }
+  }
+  return source.substring(open + 1);
 }
 
 /// Offset of the `[` that opens the list literal holding [pos], or -1 when a
@@ -206,7 +266,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 187,
+    baseline: 159,
   ),
   _Rule(
     id: 'material-colors',
@@ -214,7 +274,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 102,
+    baseline: 84,
   ),
   _Rule(
     id: 'color-literal',
@@ -223,7 +283,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 91,
+    baseline: 88,
   ),
   _Rule(
     id: 'radius-literal',
@@ -231,7 +291,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 43,
+    baseline: 31,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -350,7 +410,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 81,
+    baseline: 69,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -359,7 +419,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 71,
+    baseline: 56,
   ),
   _Rule(
     id: 'gradient',
@@ -378,7 +438,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'blurRadius\s*:\s*(\d+(?:\.\d+)?)'),
     threshold: 12,
     excludeDirs: [_theme],
-    baseline: 7,
+    baseline: 4,
   ),
   _Rule(
     id: 'raw-dialog',
@@ -398,7 +458,7 @@ final _rules = <_Rule>[
         'a documented overlay host is the only exception',
     pattern: RegExp(r'(?<![\w.])Material\('),
     excludeDirs: [_theme, _components],
-    baseline: 19,
+    baseline: 17,
   ),
 ];
 

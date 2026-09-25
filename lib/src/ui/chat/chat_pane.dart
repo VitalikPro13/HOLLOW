@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
@@ -18,6 +19,8 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/providers/call_records_provider.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
@@ -647,7 +650,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Save failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't save the file. Try again."), type: HollowToastType.error);
       }
     } finally {
       _isPicking = false;
@@ -703,7 +706,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       );
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'File request failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't request the file. Try again."), type: HollowToastType.error);
       }
     }
   }
@@ -1197,6 +1200,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// it failed, and the start of the conversation when there is none yet.
   Widget _buildConversationStart() {
     if (!_historyLoaded) return const SizedBox.shrink();
+    final calls = ref.watch(dmCallRecordsProvider(_callPeer));
+    if (!_historyFailed && calls.isNotEmpty) {
+      return CallRecordsOnly(records: calls);
+    }
     if (_historyFailed) {
       return HollowEmptyState(
         glyph: LucideIcons.circleAlert,
@@ -1249,6 +1256,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // Computed once per build against the list actually on screen, so the
     // reversed index handed to the rail and the chronological one handed to the
     // rows cannot disagree (issue #54).
+    final calls = ref.watch(dmCallRecordsProvider(_callPeer));
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
       entrySeenId: _albumRowId(
@@ -1282,10 +1290,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         profiles,
         localPeerId,
         unreadIndex,
+        calls,
       ),
       ),
     );
   }
+
+  /// The DM's person, whose calls the list places between its rows.
+  String get _callPeer => ref.read(deviceLinkProvider).identityOf(widget.peerId);
 
   /// What the media viewer may do to a message of this conversation.
   MediaViewerActions _mediaActions() => MediaViewerActions(
@@ -1327,13 +1339,25 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     Map<String, storage_api.UserProfile> profiles,
     String localPeerId,
     int? unreadIndex,
+    List<DmCallRecord> callRecords,
   ) {
     // Map the reversed builder index back to chronological order; all row logic
     // below stays in chronological terms.
     final index = messages.length - 1 - revIndex;
     final msg = messages[index];
     final isAlbum = _albums.itemsFor(msg.messageId) != null;
+    final calls = callRecordsAround(
+      records: callRecords,
+      previous: index > 0 ? messages[index - 1].timestamp : null,
+      current: msg.timestamp,
+      isNewest: index == messages.length - 1,
+      historyComplete:
+          (ref.read(chatProvider)[widget.peerId]?.length ?? 0) <
+              kCallRecordWindow,
+    );
+    // A call line between two messages breaks the run, like a new sender.
     final showHeader = index == 0 ||
+        calls.before.isNotEmpty ||
         !shouldGroup(
           currentIsMe: msg.isMe,
           previousIsMe: messages[index - 1].isMe,
@@ -1379,6 +1403,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       // back and keeps its two ends level.
       railGutter: true,
       unreadDivider: index == unreadIndex,
+      callsBefore: calls.before,
+      callsAfter: calls.after,
       child: wrapper,
     );
   }
@@ -1618,7 +1644,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               sequential: false,
             ).catchError((e) {
           if (context.mounted) {
-            HollowToast.show(context, 'Download failed: $e',
+            HollowToast.show(context, friendlyError(e, fallback: "Couldn't download the file. Try again."),
                 type: HollowToastType.error);
           }
         });

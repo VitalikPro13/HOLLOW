@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -10,7 +11,6 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
@@ -62,7 +62,12 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
   late final TextEditingController _code;
   _Step _step = _Step.entering;
   shop.RedeemLookup? _lookup;
-  String? _problem;
+
+  /// Why the code could not be looked up: on the field.
+  String? _codeProblem;
+
+  /// Why the redeem failed: above the actions.
+  String? _redeemProblem;
 
   @override
   void initState() {
@@ -80,15 +85,13 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
     super.dispose();
   }
 
-  String _clean(Object e) =>
-      e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-
   Future<void> _lookUp() async {
     final code = _code.text.trim();
     if (code.isEmpty) return;
     setState(() {
       _step = _Step.looking;
-      _problem = null;
+      _codeProblem = null;
+      _redeemProblem = null;
     });
     try {
       final looked = await shop.redeemLookup(code: code);
@@ -99,7 +102,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
         ref.invalidate(shop.keptRedeemCodesProvider);
         setState(() {
           _step = _Step.entering;
-          _problem = looked.message;
+          _codeProblem = looked.message;
         });
         return;
       }
@@ -111,7 +114,9 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       if (!mounted) return;
       setState(() {
         _step = _Step.entering;
-        _problem = _clean(e);
+        _codeProblem = friendlyError(e,
+            fallback: "Couldn't reach the shop. Check your connection and "
+                'try again.');
       });
     }
   }
@@ -120,7 +125,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
     final code = _code.text.trim();
     setState(() {
       _step = _Step.redeeming;
-      _problem = null;
+      _redeemProblem = null;
     });
     shop.RedeemOutcome outcome;
     try {
@@ -129,7 +134,8 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       if (!mounted) return;
       setState(() {
         _step = _Step.found;
-        _problem = _clean(e);
+        _redeemProblem = friendlyError(e,
+            fallback: "Couldn't redeem the code. Try again.");
       });
       return;
     }
@@ -173,17 +179,17 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
                   '${outcome.artistName} is on your profile.',
                 ),
                 const SizedBox(height: HollowSpacing.md),
-                HollowDialogText(
-                  'The pack did not arrive: ${outcome.packError}. Import the '
-                  '.hollowpack from your Ko-fi download to wear the art; the '
-                  'mark lights up the moment you wear it.',
+                const HollowDialogText(
+                  "The art didn't download with it. Import the .hollowpack "
+                  'from your Ko-fi download to wear the art. The mark lights '
+                  'up as soon as you do.',
                 ),
               ],
             ),
             actions: [
               HollowButton.filled(
                 onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('OK'),
+                child: const Text('Got it'),
               ),
             ],
           );
@@ -203,70 +209,49 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
         controller: _code,
         hintText: 'The code from your receipt',
         autofocus: widget.initialCode.isEmpty,
+        errorText: _codeProblem,
+        onChanged: (_) {
+          setState(() => _codeProblem = null);
+        },
         onSubmitted: busy ? null : (_) => _lookUp(),
         style: HollowTypography.mono,
       ),
-      if (_problem != null) ...[
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          _problem!,
-          style: HollowTypography.caption.copyWith(color: hollow.error),
-        ),
-      ],
-      if (_step == _Step.entering && _problem == null) ...[
+      if (_step == _Step.entering && _codeProblem == null) ...[
         const SizedBox(height: HollowSpacing.md),
         const HollowDialogText(
-          'Redeeming mints a support mark for your profile through a blind '
-          'signature: the shop signs it without learning who you are. Hollow '
-          'then fetches the art and puts it in your library.',
+          'Redeeming adds a support mark to your profile. The shop signs it '
+          'without learning who you are, then Hollow puts the art in your '
+          'library.',
         ),
       ],
       if (looked != null && _step != _Step.entering) ...[
-        const SizedBox(height: HollowSpacing.md),
+        const SizedBox(height: HollowSpacing.lg),
         Text(
           looked.title,
-          style: HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-            fontWeight: FontWeight.w600,
-          ),
+          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
         ),
-        const SizedBox(height: 2),
+        const SizedBox(height: HollowSpacing.xxs),
         Text(
           'by ${looked.artistName}'
-          '${looked.kinds.isEmpty ? '' : '  ${looked.kinds.join(', ')}'}',
+          '${looked.kinds.isEmpty ? '' : ', ${looked.kinds.join(', ')}'}',
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.md),
         if (looked.alreadySupported)
-          Text(
-            'You already own this item. A second redemption changes '
-            'nothing on your profile: keep the code and gift it instead, '
-            'or redeem it anyway.',
-            style: HollowTypography.body.copyWith(color: hollow.warning),
+          const HollowDialogText(
+            'You already own this. Redeeming it again changes nothing on '
+            'your profile, so you could keep the code and give it to someone '
+            'instead.',
           )
         else
           const HollowDialogText(
             'Once redeemed, the mark lives in your profile and its backup. '
-            'It cannot be minted again for another identity, and the code '
-            'is spent.',
+            "The code is spent, so it can't be used again.",
           ),
-        if (_step == _Step.redeeming) ...[
-          const SizedBox(height: HollowSpacing.md),
-          Row(
-            children: [
-              const HollowSpinner(),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'Minting your support mark and fetching the art',
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary),
-              ),
-            ],
-          ),
-        ],
       ],
     ];
 
+    final hasCode = _code.text.trim().isNotEmpty;
     final copyCode = HollowButton.ghost(
       onPressed: () async {
         await Clipboard.setData(ClipboardData(text: _code.text.trim()));
@@ -292,7 +277,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
         )
       else
         HollowButton.filled(
-          onPressed: busy ? null : _lookUp,
+          onPressed: busy || !hasCode ? null : _lookUp,
           loading: _step == _Step.looking,
           child: const Text('Look up'),
         ),
@@ -306,7 +291,14 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: children,
       ),
-      leadingActions: [copyCode],
+      busy: busy,
+      error: _step == _Step.entering ? null : _redeemProblem,
+      // Only beside Look up: on a phone the found step's Cancel and
+      // Redeem anyway need the whole row.
+      leadingActions: [
+        if (hasCode && (_step == _Step.entering || _step == _Step.looking))
+          copyCode,
+      ],
       actions: actions,
     );
   }

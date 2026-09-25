@@ -2452,7 +2452,8 @@ pub fn claim_nickname(nickname: String) -> Result<(), String> {
 
 /// File a user report with the relay ("spam", "harassment", "illegal_content" or
 /// "impersonation"). Fire-and-forget: the relay keeps only per-(target, category)
-/// counts, dedups via hashed keys, and never stores who reported whom.
+/// counts, deduped by fingerprints keyed with a relay secret kept outside its
+/// reports file, so that file alone cannot confirm who reported whom.
 #[frb]
 pub fn report_user(target: String, category: String) -> Result<(), String> {
     let node = get_node();

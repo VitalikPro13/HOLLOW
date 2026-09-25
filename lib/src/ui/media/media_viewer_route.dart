@@ -22,6 +22,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
+import 'package:hollow/src/ui/shell/window_chrome_insets.dart';
 import 'package:hollow/src/ui/media/media_info_panel.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_strip.dart';
@@ -889,7 +890,12 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
                   ],
                 ),
               ),
-              if (_infoOpen && !isMobileMediaPlatform) _buildInfo(),
+              if (_infoOpen && !isMobileMediaPlatform)
+                Padding(
+                  // The window controls float over this column's top.
+                  padding: EdgeInsets.only(top: windowChromeTop(ref)),
+                  child: _buildInfo(),
+                ),
             ],
           ),
         ),
@@ -965,8 +971,12 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
   Widget _buildTopBar(List<MediaControlSpec> specs, double fade) {
     final mobile = isMobileMediaPlatform;
     final visible = fade > 0;
+    // Below the floating window controls in the Dock layout: the whole row
+    // moves down, so its gaps stay even on every side; a tighter gap there,
+    // since the band above already reads as space.
+    final chromeTop = windowChromeTop(ref);
     return Positioned(
-      top: HollowSpacing.lg,
+      top: chromeTop > 0 ? chromeTop + HollowSpacing.sm : HollowSpacing.lg,
       left: HollowSpacing.lg,
       right: HollowSpacing.lg,
       child: AnimatedOpacity(

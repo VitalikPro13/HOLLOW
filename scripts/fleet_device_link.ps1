@@ -517,7 +517,7 @@ function Close-Friends($peer) {
 }
 
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:_TabButton>text:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:HollowChip>text:$tab"; index = 0 }
 }
 
 function Open-Dm($peer, $friendName) {
@@ -828,16 +828,16 @@ try {
         # ---- G1: give a something worth inheriting -------------------------
         Say '1/7 a and c become friends, DM both ways, and share a server'
         Open-Friends a
-        Show-FriendsTab a 'Add Friend'
+        Show-FriendsTab a 'Add friend'
         # Assert the id really IS in the field before sending: enter_text has
         # reported success into this field while it held only a fragment.
-        Step a @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_C}' }
+        Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_C}' }
         Step a @{ op = 'wait_for'; target = 'text:${PEER_C}'; timeout_ms = 15000 }
-        Step a @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+        Step a @{ op = 'tap'; target = 'text:Send request'; index = 0 }
 
         # The Accept button only exists on the INCOMING tab.
         Open-Friends c
-        Show-FriendsTab c 'Incoming'
+        Show-FriendsTab c 'Requests'
         Step c @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
         Step c @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
         Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 90000 }

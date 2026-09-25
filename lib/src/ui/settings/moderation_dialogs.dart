@@ -1,4 +1,4 @@
-/// The four member-moderation confirms (change role, kick, mute, ban) in ONE
+/// The member-moderation confirms (change role, kick, mute, ban) in ONE
 /// place (issue #61, phase 3): three copies of a destructive confirm is three
 /// chances to skip a check or word a warning differently.
 ///
@@ -9,25 +9,15 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart'
     show mutedMembersProvider;
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_duration_picker.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-/// Mute durations offered by [showMuteMemberDialog]; 0 means permanent.
-const kMuteDurationOptions = <(String, int)>[
-  ('10 minutes', 600),
-  ('1 hour', 3600),
-  ('24 hours', 86400),
-  ('7 days', 604800),
-  ('Permanent', 0),
-];
 
 /// Refreshes everything a moderation op can change: the member list carries
 /// role AND mute state and the muted-members section reads its own provider, so
@@ -37,204 +27,178 @@ void _refresh(WidgetRef ref, String serverId) {
   ref.invalidate(mutedMembersProvider(serverId));
 }
 
-/// Runs [op] and reports the outcome, so no call site has to.
-Future<void> _run(
+/// Asks, runs [op] inside the confirm (a failure shows there, with a retry),
+/// then refreshes and reports the success, so no call site has to. True once
+/// the op is done.
+Future<bool> _confirmAndRun(
   BuildContext context,
   WidgetRef ref,
   String serverId, {
+  required String title,
+  required String message,
+  required String confirmLabel,
+  bool destructive = false,
   required Future<void> Function() op,
   required String success,
-  required String failure,
 }) async {
-  try {
-    await op();
-    _refresh(ref, serverId);
-    if (context.mounted) {
-      HollowToast.show(context, success, type: HollowToastType.success);
-    }
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, '$failure: $e', type: HollowToastType.error);
-    }
-  }
+  final done = await showHollowConfirm(
+    context: context,
+    title: title,
+    message: message,
+    confirmLabel: confirmLabel,
+    destructive: destructive,
+    onConfirm: op,
+  );
+  // A ref from a widget that has gone throws, so the context gates both.
+  if (!done || !context.mounted) return done;
+  _refresh(ref, serverId);
+  HollowToast.show(context, success, type: HollowToastType.success);
+  return true;
 }
 
-/// Change [peerId]'s role to [newRole] after a confirm.
-Future<void> showChangeRoleDialog(
+/// Change [peerId]'s role to [newRole] after a confirm. THE role confirm:
+/// the Members page, the member menu and Manage member all call it.
+/// [currentRole], when known, lets the message say what changes.
+Future<bool> showChangeRoleDialog(
   BuildContext context,
   WidgetRef ref, {
   required String serverId,
   required String peerId,
   required String displayName,
   required String newRole,
-}) async {
+  String? currentRole,
+}) {
   final roleName = roleDisplayName(newRole);
-  final ok = await showHollowConfirm(
-    context: context,
-    title: 'Change role',
-    message: 'Change $displayName\'s role to $roleName?',
-    confirmLabel: 'Change',
-  );
-  if (!ok || !context.mounted) return;
-  await _run(
+  return _confirmAndRun(
     context,
     ref,
     serverId,
+    title: 'Make $displayName ${_withArticle(newRole)}?',
+    message: currentRole == null
+        ? 'What they can do in this server changes with their role.'
+        : 'They go from ${roleDisplayName(currentRole)} to $roleName, which '
+            'changes what they can do here.',
+    confirmLabel: 'Make ${roleName.toLowerCase()}',
     op: () => crdt_api.changeMemberRole(
       serverId: serverId,
       peerId: peerId,
       newRole: newRole,
     ),
     success: '$displayName is now $roleName',
-    failure: 'Failed to change role',
   );
 }
 
+String _withArticle(String role) => switch (role) {
+      'owner' => 'the owner',
+      'admin' => 'an admin',
+      _ => 'a $role',
+    };
+
 /// Kick [peerId] from [serverId] after a confirm.
-Future<void> showKickMemberDialog(
+Future<bool> showKickMemberDialog(
   BuildContext context,
   WidgetRef ref, {
   required String serverId,
   required String peerId,
   required String displayName,
-}) async {
-  final ok = await showHollowConfirm(
-    context: context,
-    title: 'Kick member',
-    message: 'Are you sure you want to kick $displayName from the server? '
-        'They can rejoin with an invite.',
-    confirmLabel: 'Kick',
-    destructive: true,
-  );
-  if (!ok || !context.mounted) return;
-  await _run(
+}) {
+  return _confirmAndRun(
     context,
     ref,
     serverId,
+    title: 'Kick $displayName?',
+    message: "They're removed from the server and can rejoin with an invite.",
+    confirmLabel: 'Kick',
+    destructive: true,
     op: () => crdt_api.kickMember(serverId: serverId, peerId: peerId),
-    success: '$displayName has been kicked',
-    failure: 'Failed to kick member',
+    success: '$displayName was kicked',
   );
 }
 
 /// Ban [peerId] from [serverId] after a confirm.
-Future<void> showBanMemberDialog(
+Future<bool> showBanMemberDialog(
   BuildContext context,
   WidgetRef ref, {
   required String serverId,
   required String peerId,
   required String displayName,
-}) async {
-  final ok = await showHollowConfirm(
-    context: context,
-    title: 'Ban member',
-    message: 'Are you sure you want to ban $displayName? They will be removed '
-        'and unable to rejoin.',
-    confirmLabel: 'Ban',
-    destructive: true,
-  );
-  if (!ok || !context.mounted) return;
-  await _run(
+}) {
+  return _confirmAndRun(
     context,
     ref,
     serverId,
+    title: 'Ban $displayName?',
+    message: "They're removed from the server and can't rejoin, even with an "
+        'invite.',
+    confirmLabel: 'Ban',
+    destructive: true,
     op: () => crdt_api.banMember(serverId: serverId, peerId: peerId),
-    success: '$displayName has been banned',
-    failure: 'Failed to ban member',
+    success: '$displayName was banned',
   );
 }
 
 /// Pick a duration, then mute [peerId] for it.
 ///
 /// The duration IS the confirmation: picking a length is already deliberate and
-/// a mute is reversible from the Members tab.
-Future<void> showMuteMemberDialog(
+/// a mute is reversible from the Members page. The write runs inside the
+/// dialog, so a failure shows there and the moderator can retry.
+Future<bool> showMuteMemberDialog(
   BuildContext context,
   WidgetRef ref, {
   required String serverId,
   required String peerId,
   required String displayName,
 }) async {
-  final picked = await showHollowDialog<(String, int)>(
+  Duration? chosen;
+  final muted = await showHollowDurationDialog(
     context: context,
-    builder: (ctx) {
-      final hollow = HollowTheme.of(ctx);
-      return HollowDialog(
-        title: 'Mute member',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            HollowDialogText(
-              '$displayName will not be able to send messages in any channel '
-              'of this server. How long?',
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            for (final option in kMuteDurationOptions)
-              Padding(
-                padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-                child: HollowButton.ghost(
-                  onPressed: () => Navigator.of(ctx).pop(option),
-                  expand: true,
-                  child: Text(
-                    option.$1,
-                    style: HollowTypography.body.copyWith(
-                      color: option.$2 == 0 ? hollow.error : hollow.textPrimary,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-        ],
+    title: 'Mute $displayName',
+    message: "They won't be able to post, edit or react anywhere in this "
+        'server. For how long?',
+    confirmLabel: 'Mute',
+    onConfirm: (duration) async {
+      chosen = duration;
+      await crdt_api.muteMember(
+        serverId: serverId,
+        peerId: peerId,
+        durationSecs: duration?.inSeconds ?? 0,
       );
     },
   );
-  if (picked == null || !context.mounted) return;
-
-  final (label, durationSecs) = picked;
-  await muteMemberFor(
+  if (!muted || !context.mounted) return muted;
+  _refresh(ref, serverId);
+  HollowToast.show(
     context,
-    ref,
-    serverId: serverId,
-    peerId: peerId,
-    displayName: displayName,
-    durationSecs: durationSecs,
-    label: label,
+    chosen == null
+        ? '$displayName is muted until someone unmutes them'
+        : '$displayName is muted for ${hollowDurationLabel(chosen)}',
+    type: HollowToastType.success,
   );
+  return true;
 }
 
-/// Applies a mute the caller has already had confirmed.
-///
-/// Mobile picks the duration in a bottom sheet instead of the dialog above. The
-/// PICKER may differ; the write, the invalidations and the wording must not, so
-/// both funnel through here.
-Future<void> muteMemberFor(
+/// Lifts [peerId]'s mute at once: undoing a mute needs no confirm.
+Future<void> unmuteMember(
   BuildContext context,
   WidgetRef ref, {
   required String serverId,
   required String peerId,
   required String displayName,
-  required int durationSecs,
-  required String label,
-}) {
-  return _run(
-    context,
-    ref,
-    serverId,
-    op: () => crdt_api.muteMember(
-      serverId: serverId,
-      peerId: peerId,
-      durationSecs: durationSecs,
-    ),
-    success: durationSecs <= 0
-        ? '$displayName is now muted (permanent)'
-        : '$displayName is muted for $label',
-    failure: 'Failed to mute member',
-  );
+}) async {
+  try {
+    await crdt_api.unmuteMember(serverId: serverId, peerId: peerId);
+  } catch (e) {
+    if (context.mounted) {
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't unmute $displayName. Try again."),
+          type: HollowToastType.error);
+    }
+    return;
+  }
+  if (!context.mounted) return;
+  _refresh(ref, serverId);
+  HollowToast.show(context, '$displayName can post again',
+      type: HollowToastType.success);
 }

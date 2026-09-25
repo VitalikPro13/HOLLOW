@@ -29,23 +29,15 @@ bool inActiveConferenceCall(WidgetRef ref) {
 /// Asks first, then ends the meeting for everyone. The room and its link stay.
 Future<void> endConferenceMeeting(BuildContext context, WidgetRef ref) async {
   final notifier = ref.read(conferenceProvider.notifier);
-  final confirmed = await showHollowConfirm(
+  await showHollowConfirm(
     context: context,
     title: 'End the meeting?',
     message: 'Everyone in it is disconnected. The room and its link stay, '
         'so you can start it again.',
     confirmLabel: 'End meeting',
     destructive: true,
+    onConfirm: notifier.endMeeting,
   );
-  if (!confirmed) return;
-  try {
-    await notifier.endMeeting();
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, "Couldn't end the meeting",
-          type: HollowToastType.error);
-    }
-  }
 }
 
 /// Leaves someone else's meeting, toasting when the leave fails.
@@ -80,22 +72,14 @@ void copyConferenceInviteLink(
 Future<void> confirmDeleteConferenceRoom(
     BuildContext context, WidgetRef ref, ConferenceRoom room) async {
   final notifier = ref.read(conferenceProvider.notifier);
-  final confirmed = await showHollowConfirm(
+  await showHollowConfirm(
     context: context,
-    title: 'Delete room?',
-    message: 'Delete "${room.name}"? Its invite link stops working forever.',
-    confirmLabel: 'Delete',
+    title: 'Delete ${room.name}?',
+    message: 'Its invite link stops working for good.',
+    confirmLabel: 'Delete room',
     destructive: true,
+    onConfirm: () => notifier.deleteRoom(room.confId),
   );
-  if (!confirmed) return;
-  try {
-    await notifier.deleteRoom(room.confId);
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, "Couldn't delete the room",
-          type: HollowToastType.error);
-    }
-  }
 }
 
 /// The room's More menu, from its button, a right click or a long press.

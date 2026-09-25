@@ -18,6 +18,7 @@ void showNewsPostDialog(BuildContext context, NewsPost post) {
         title: post.title,
         showClose: true,
         width: 560,
+        scrollable: false,
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -34,9 +35,10 @@ void showNewsPostDialog(BuildContext context, NewsPost post) {
                   data: post.body,
                   selectable: true,
                   onTapLink: (text, href, title) {
-                    if (href != null) {
-                      launchUrl(Uri.parse(href),
-                          mode: LaunchMode.externalApplication);
+                    final uri = href == null ? null : Uri.tryParse(href);
+                    if (uri != null) {
+                      launchUrl(uri, mode: LaunchMode.externalApplication)
+                          .catchError((_) => false);
                     }
                   },
                   styleSheet: MarkdownStyleSheet(

@@ -321,6 +321,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
               hint: 'A short personal blurb (optional)',
               maxLength: 200,
               initial: block.gameBlurb,
+              editing: true,
             )) ??
             block.gameBlurb;
         edited = ShowcaseBlock(type: block.type, data: {
@@ -349,6 +350,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
           hint: 'Optional caption',
           maxLength: 100,
           initial: block.artworkCaption,
+          editing: true,
         );
         if (caption == null) break;
         edited = ShowcaseBlock(type: block.type, data: {
@@ -477,9 +479,9 @@ class _SideEditor extends StatelessWidget {
                 child: child,
               );
             },
+            // onReorderItem already reports newIndex after the removal.
             onReorderItem: (oldIndex, newIndex) {
               final next = [...blocks];
-              if (newIndex > oldIndex) newIndex--;
               final moved = next.removeAt(oldIndex);
               next.insert(newIndex, moved);
               onChanged(next);
@@ -1203,12 +1205,17 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
 }
 
 /// One-field prompt, returning the trimmed text or null on cancel.
+///
+/// [editing] makes the secondary action Cancel (null, keep what is there)
+/// rather than Skip (empty): skipping an edit must not erase the caption or
+/// blurb it opened with. Clearing is an emptied field and Save.
 Future<String?> _promptText(
   BuildContext context, {
   required String title,
   required String hint,
   required int maxLength,
   String initial = '',
+  bool editing = false,
 }) {
   final controller = TextEditingController(text: initial);
   return showHollowDialog<String>(
@@ -1226,8 +1233,8 @@ Future<String?> _promptText(
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(''),
-          child: const Text('Skip'),
+          onPressed: () => Navigator.of(ctx).pop(editing ? null : ''),
+          child: Text(editing ? 'Cancel' : 'Skip'),
         ),
         HollowButton.filled(
           onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),

@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
@@ -64,7 +65,10 @@ Future<void> saveArchivedAttachment(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, "Couldn't save the file: $e",
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't save the file. Try another folder."),
           type: HollowToastType.error);
     }
   } finally {

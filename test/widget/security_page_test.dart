@@ -12,6 +12,7 @@ import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/settings/pages/security_page.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 
@@ -117,7 +118,25 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Include downloaded files'), findsOneWidget);
-    expect(find.text('Include vault shard data'), findsOneWidget);
+    expect(find.text('Include files you keep for your servers'), findsOneWidget);
+  });
+
+  testWidgets('Export waits for both passphrase fields', (tester) async {
+    await pumpPage(tester);
+    await tester.tap(find.text('Export'));
+    await tester.pumpAndSettle();
+
+    final export = find.widgetWithText(HollowButton, 'Export').last;
+    expect(tester.widget<HollowButton>(export).onPressed, isNull);
+    await tester.enterText(find.byType(TextField).at(0), 'correct horse');
+    await tester.pump();
+    expect(tester.widget<HollowButton>(export).onPressed, isNull);
+    await tester.enterText(find.byType(TextField).at(1), 'wrong horse');
+    await tester.pump();
+    await tester.tap(export);
+    await tester.pumpAndSettle();
+    expect(find.text("The passphrases don't match."), findsOneWidget);
+    expect(find.text('Export a backup'), findsOneWidget);
   });
 
   testWidgets('the proof checker opens as a dialog without a v1 hint',
@@ -132,6 +151,12 @@ void main() {
     expect(find.text('Check a message proof'), findsNWidgets(2));
     expect(find.text('Paste a proof here'), findsOneWidget);
     expect(find.textContaining('"version":1'), findsNothing);
+    // Nothing pasted is nothing to verify, not a toast after the tap.
+    final verify = find.widgetWithText(HollowButton, 'Verify');
+    expect(tester.widget<HollowButton>(verify).onPressed, isNull);
+    await tester.enterText(find.byType(TextField).last, '{}');
+    await tester.pump();
+    expect(tester.widget<HollowButton>(verify).onPressed, isNotNull);
   });
 
   testWidgets('fits a phone at touch density', (tester) async {

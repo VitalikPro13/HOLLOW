@@ -5,7 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -35,18 +34,23 @@ class RelaySwitch {
     final current = _read(relayDomainProvider);
     if (normalizeRelayHost(current) == target) return true;
 
-    final confirmed = await showHollowDialog<bool>(
+    // The switch runs inside the dialog: it stays open loading, and a failed
+    // write shows there instead of vanishing behind a closed dialog.
+    await showHollowDialog<void>(
       context: context,
-      builder: (dialogContext) =>
-          _RelaySwitchDialog(link: link, target: target, current: current),
+      builder: (dialogContext) => _RelaySwitchDialog(
+        link: link,
+        target: target,
+        current: current,
+        onSwitch: () async {
+          await storage_api.saveSetting(
+              key: kPendingInviteAfterSwitchKey, value: link.fullUrl);
+          await _read(relayDomainProvider.notifier).setDomain(target);
+          await _read(savedRelayListProvider.notifier).addRelay(target);
+          await exitForRelaySwitch();
+        },
+      ),
     );
-    if (confirmed != true) return false;
-
-    await storage_api.saveSetting(
-        key: kPendingInviteAfterSwitchKey, value: link.fullUrl);
-    await _read(relayDomainProvider.notifier).setDomain(target);
-    await _read(savedRelayListProvider.notifier).addRelay(target);
-    await exitForRelaySwitch();
     return false;
   }
 }
@@ -83,51 +87,70 @@ String _titleFor(HollowLinkType type) => switch (type) {
       _ => 'This server lives on another relay',
     };
 
-class _RelaySwitchDialog extends StatelessWidget {
+class _RelaySwitchDialog extends StatefulWidget {
   const _RelaySwitchDialog({
     required this.link,
     required this.target,
     required this.current,
+    required this.onSwitch,
   });
 
   final HollowLink link;
   final String target;
   final String current;
+  final Future<void> Function() onSwitch;
+
+  @override
+  State<_RelaySwitchDialog> createState() => _RelaySwitchDialogState();
+}
+
+class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
+    with HollowDialogAction {
+  Future<void> _switch() async {
+    // A switch that succeeds ends the process; one that returns anyway (a
+    // test, a relaunch that was refused) still closes the dialog.
+    if (await runDialogAction(widget.onSwitch,
+            fallback: "Couldn't switch relays. Try again.") &&
+        mounted) {
+      Navigator.of(context).pop();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final body = HollowTypography.body.copyWith(color: hollow.textSecondary);
-    final host = body.copyWith(
-        color: hollow.textPrimary, fontWeight: FontWeight.w600);
+    // Relay names are what the protocol produces: the console voice.
+    final host = HollowTypography.mono.copyWith(color: hollow.textPrimary);
 
     return HollowDialog(
-      title: _titleFor(link.type),
-      content: Padding(
-        padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-        child: Text.rich(
-          TextSpan(children: [
-            const TextSpan(text: 'It is on '),
-            TextSpan(text: target, style: host),
-            const TextSpan(text: '. You are connected to '),
-            TextSpan(text: current, style: host),
-            TextSpan(
-              text: '. Switching restarts Hollow, and your servers and '
-                  'friends there go quiet until you switch back. '
-                  '${_isMobile ? 'Reopen Hollow to finish joining.' : 'Hollow '
-                      'finishes this join after the restart.'}',
-            ),
-          ]),
-          style: body,
-        ),
+      title: _titleFor(widget.link.type),
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
+      content: Text.rich(
+        TextSpan(children: [
+          const TextSpan(text: 'It is on '),
+          TextSpan(text: widget.target, style: host),
+          const TextSpan(text: '. You are connected to '),
+          TextSpan(text: widget.current, style: host),
+          TextSpan(
+            text: '. Switching restarts Hollow, and your servers and '
+                'friends there go quiet until you switch back. '
+                '${_isMobile ? 'Reopen Hollow to finish joining.' : 'Hollow '
+                    'finishes this join after the restart.'}',
+          ),
+        ]),
+        style: body,
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(false),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: () => Navigator.of(context).pop(true),
+          onPressed: _switch,
+          loading: actionRunning,
           child: Text(_isMobile ? 'Switch and close app' : 'Switch and restart'),
         ),
       ],

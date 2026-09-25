@@ -282,7 +282,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         _OptionCard(
           icon: LucideIcons.smartphone,
           title: 'Link a device',
-          subtitle: 'Sync from your other device with a 6-digit code',
+          subtitle: 'Sync from your other device with a 6-character code',
           hollow: hollow,
           onTap: () {
             if (!_relayIsUsable()) return;

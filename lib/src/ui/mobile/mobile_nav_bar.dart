@@ -136,7 +136,7 @@ class _AddButton extends StatelessWidget {
     return Expanded(
       child: Semantics(
         button: true,
-        label: 'New conversation',
+        label: 'Add a server',
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: onTap,

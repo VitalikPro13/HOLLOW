@@ -3,8 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
@@ -19,32 +17,21 @@ const _reportCategories = <(String, String)>[
   ('impersonation', 'Impersonation'),
 ];
 
-/// Shows the "Report user" dialog for [masterId], then files the report.
-///
-/// The dialog only picks a category; the FFI call and toast run against
-/// [context], which outlives it. Reports are deduped server-side, so a repeat
-/// submission is safe.
+/// Shows the "Report user" dialog for [masterId]. The report is sent from
+/// inside the dialog, so a failure shows there with the pick kept. Reports are
+/// deduped server-side, so a repeat submission is safe.
 Future<void> showReportUserDialog(
   BuildContext context, {
   required String masterId,
   String? displayName,
 }) async {
-  final category = await showHollowDialog<String>(
+  final sent = await showHollowDialog<bool>(
     context: context,
-    builder: (_) => _ReportUserDialog(displayName: displayName),
+    builder: (_) =>
+        _ReportUserDialog(masterId: masterId, displayName: displayName),
   );
-  if (category == null || !context.mounted) return;
-  try {
-    await network_api.reportUser(target: masterId, category: category);
-    if (context.mounted) {
-      HollowToast.show(context, 'Report submitted',
-          type: HollowToastType.success);
-    }
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, "Couldn't send report",
-          type: HollowToastType.error);
-    }
+  if (sent == true && context.mounted) {
+    HollowToast.show(context, 'Report sent', type: HollowToastType.success);
   }
 }
 
@@ -57,7 +44,7 @@ Future<void> confirmAndBlockUser(
   required String displayName,
 }) async {
   final container = ProviderScope.containerOf(context, listen: false);
-  final confirmed = await showHollowConfirm(
+  final blocked = await showHollowConfirm(
     context: context,
     title: 'Block $displayName?',
     message: "They won't be able to send you friend requests, direct messages, "
@@ -65,17 +52,11 @@ Future<void> confirmAndBlockUser(
         'They are not notified.',
     confirmLabel: 'Block',
     destructive: true,
+    onConfirm: () => container.read(blockedUsersProvider.notifier).block(masterId),
   );
-  if (!confirmed || !context.mounted) return;
-  try {
-    await container.read(blockedUsersProvider.notifier).block(masterId);
-    if (context.mounted) {
-      HollowToast.show(context, 'User blocked', type: HollowToastType.success);
-    }
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Failed to block', type: HollowToastType.error);
-    }
+  if (blocked && context.mounted) {
+    HollowToast.show(context, 'Blocked $displayName',
+        type: HollowToastType.success);
   }
 }
 
@@ -86,28 +67,42 @@ Future<void> unblockUser(BuildContext context, {required String masterId}) async
     await container.read(blockedUsersProvider.notifier).unblock(masterId);
   } catch (_) {
     if (context.mounted) {
-      HollowToast.show(context, 'Failed to unblock',
+      HollowToast.show(context, "Couldn't unblock them. Try again.",
           type: HollowToastType.error);
     }
   }
 }
 
 class _ReportUserDialog extends StatefulWidget {
+  final String masterId;
   final String? displayName;
-  const _ReportUserDialog({this.displayName});
+  const _ReportUserDialog({required this.masterId, this.displayName});
 
   @override
   State<_ReportUserDialog> createState() => _ReportUserDialogState();
 }
 
-class _ReportUserDialogState extends State<_ReportUserDialog> {
+class _ReportUserDialogState extends State<_ReportUserDialog>
+    with HollowDialogAction {
   String? _selected;
+
+  Future<void> _send() async {
+    final category = _selected;
+    if (category == null) return;
+    final sent = await runDialogAction(
+      () => network_api.reportUser(target: widget.masterId, category: category),
+      fallback: "Couldn't send the report. Try again.",
+    );
+    if (sent && mounted) Navigator.of(context).pop(true);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return HollowDialog(
       title: 'Report user',
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -126,29 +121,28 @@ class _ReportUserDialogState extends State<_ReportUserDialog> {
                 HollowChip(
                   label: label,
                   selected: _selected == value,
-                  onTap: () => setState(() => _selected = value),
+                  onTap: actionRunning
+                      ? null
+                      : () => setState(() => _selected = value),
                 ),
             ],
           ),
           const SizedBox(height: HollowSpacing.lg),
-          Text(
-            'Reports are anonymous: the relay only keeps a per-category '
-            'counter, never who reported whom.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
+          const HollowDialogText(
+            'The relay sees your report arrive. It keeps a count per '
+            'category, plus a one-way fingerprint only it can check, so the '
+            "same report isn't counted twice.",
           ),
         ],
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _selected == null
-              ? null
-              : () => Navigator.of(context).pop(_selected),
+          onPressed: _selected == null ? null : _send,
+          loading: actionRunning,
           child: const Text('Report'),
         ),
       ],

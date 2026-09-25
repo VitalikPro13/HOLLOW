@@ -2,9 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
@@ -34,130 +32,72 @@ void refreshMyDevices(WidgetRef ref) {
 /// Label edit dialog, persisted through [deviceLabelProvider].
 Future<void> renameDeviceFlow(
     BuildContext context, WidgetRef ref, MyDevice device) async {
-  final controller = TextEditingController(text: device.label);
-  final saved = await showHollowDialog<bool>(
+  final notifier = ref.read(deviceLabelProvider.notifier);
+  final name = await promptForName(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Rename device',
-      content: HollowTextField(
-        controller: controller,
-        hintText: "e.g. My Pixel",
-        autofocus: true,
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Save'),
-        ),
-      ],
-    ),
+    title: 'Rename device',
+    confirmLabel: 'Rename',
+    hintText: 'Device name',
+    initial: device.label,
+    maxLength: 32,
+    onSubmit: (name) => notifier.setLabel(device.peerId, name),
   );
-  if (saved != true) return;
-  try {
-    await ref
-        .read(deviceLabelProvider.notifier)
-        .setLabel(device.peerId, controller.text.trim());
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not rename the device: $e',
-          type: HollowToastType.error);
-    }
-  }
+  if (name == null || !context.mounted) return;
+  HollowToast.show(context, 'Device renamed', type: HollowToastType.success);
 }
 
-/// Confirms, then pulls servers and friends FROM an online sibling onto this
-/// device.
+/// Pulls servers and friends FROM an online sibling onto this device, after a
+/// confirm. An offline device is refused before anything is asked.
 Future<void> syncFromDeviceFlow(
     BuildContext context, WidgetRef ref, MyDevice device) async {
   final name = deviceTitle(device);
-  final confirmed = await showHollowConfirm(
-    context: context,
-    title: 'Sync from this device?',
-    message:
-        'Pull servers and friends FROM "$name" onto THIS device. Use this if a '
-        'server or friend exists on "$name" but is missing here. It only adds '
-        'what\'s missing. Nothing is removed, and your messages are unaffected.\n\n'
-        '"$name" must be online.',
-    confirmLabel: 'Sync now',
-  );
-  if (confirmed != true) return;
   if (!device.online) {
-    if (context.mounted) {
-      HollowToast.show(context, '"$name" is offline. Bring it online first',
-          type: HollowToastType.error);
-    }
+    HollowToast.show(context, '"$name" is offline. Bring it online first.',
+        type: HollowToastType.error);
     return;
   }
-  try {
-    await network_api.requestStateSync(sourceDeviceId: device.peerId);
-    if (context.mounted) {
-      HollowToast.show(context, 'Syncing from "$name"…',
-          type: HollowToastType.info);
-    }
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Sync failed: $e', type: HollowToastType.error);
-    }
-  }
+  final confirmed = await showHollowConfirm(
+    context: context,
+    title: 'Sync from "$name"?',
+    message: 'Copies any servers and friends "$name" has that this device is '
+        'missing. Nothing is removed, and your messages stay as they are.',
+    confirmLabel: 'Sync now',
+    onConfirm: () => network_api.requestStateSync(sourceDeviceId: device.peerId),
+  );
+  if (!confirmed || !context.mounted) return;
+  HollowToast.show(context, 'Syncing from "$name". New servers and friends '
+      'appear as they arrive.',
+      type: HollowToastType.info);
 }
 
 /// Confirms, then permanently revokes the device.
 Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
   final name = deviceTitle(device);
-  final confirmed = await showHollowConfirm(
+  final removed = await showHollowConfirm(
     context: context,
-    title: 'Remove this device?',
-    message: 'This permanently removes "$name" '
-        'from your identity. It will stop receiving your messages and is removed '
-        'from your servers. This cannot be undone from the removed device.',
+    title: 'Remove "$name"?',
+    message: '"$name" leaves your identity for good. It stops getting your '
+        'messages and is taken off your servers.',
     confirmLabel: 'Remove device',
     destructive: true,
+    onConfirm: () => network_api.revokeDevice(devicePeerId: device.peerId),
   );
-  if (confirmed != true) return;
-  try {
-    await network_api.revokeDevice(devicePeerId: device.peerId);
-    if (context.mounted) {
-      HollowToast.show(context, 'Device removed', type: HollowToastType.success);
-    }
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Failed to remove: $e',
-          type: HollowToastType.error);
-    }
-  }
+  if (!removed || !context.mounted) return;
+  HollowToast.show(context, 'Device removed', type: HollowToastType.success);
 }
 
 /// Confirms, then drops ALL other linked devices.
 Future<void> resetDeviceListsFlow(BuildContext context) async {
-  final confirmed = await showHollowConfirm(
+  final reset = await showHollowConfirm(
     context: context,
-    title: 'Reset device list?',
-    message:
-        'This permanently removes ALL your other linked devices, not just '
-        'this one. Each is signed out and wiped, and your friends stop '
-        'seeing them. Only this device stays. To use another device again, '
-        'link it fresh.\n\nUse this to clean up leftover or ghost devices.',
-    confirmLabel: 'Reset',
+    title: 'Remove every other device?',
+    message: 'Every device except this one is signed out and wiped, and your '
+        'friends stop seeing them. To use one again, link it fresh.',
+    confirmLabel: 'Remove other devices',
     destructive: true,
+    onConfirm: network_api.resetDeviceLists,
   );
-  if (confirmed != true) return;
-  try {
-    await network_api.resetDeviceLists();
-    if (context.mounted) {
-      HollowToast.show(
-        context,
-        'Device list reset. All other devices were removed.',
-        type: HollowToastType.success,
-      );
-    }
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Reset failed: $e',
-          type: HollowToastType.error);
-    }
-  }
+  if (!reset || !context.mounted) return;
+  HollowToast.show(context, 'Every other device was removed.',
+      type: HollowToastType.success);
 }

@@ -1,7 +1,7 @@
-﻿import 'dart:io';
-
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/disk_space.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
@@ -9,15 +9,13 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void showStorageDashboardDialog(BuildContext context, String serverId) {
@@ -92,24 +90,10 @@ class _StorageDashboardContentState
     } catch (_) {}
   }
 
-  Future<int> _getDiskFreeBytes() async {
-    try {
-      if (Platform.isWindows) {
-        final result = await Process.run('powershell', [
-          '-Command',
-          r"(Get-PSDrive C).Free",
-        ]);
-        return int.tryParse(result.stdout.toString().trim()) ?? 0;
-      } else if (Platform.isLinux || Platform.isMacOS) {
-        final result = await Process.run('df', ['-B1', '--output=avail', '/']);
-        final lines = result.stdout.toString().trim().split('\n');
-        if (lines.length >= 2) {
-          return int.tryParse(lines.last.trim()) ?? 0;
-        }
-      }
-    } catch (_) {}
-    return 0;
-  }
+  // The drive that holds the data root, which a profile or portable mode can
+  // put anywhere; never a fixed C: or /.
+  Future<int> _getDiskFreeBytes() async =>
+      (await freeBytesAt(hollowDataDir)) ?? 0;
 
   String _formatBytes(BigInt bytes) {
     final b = bytes.toDouble();
@@ -357,60 +341,11 @@ class _StorageDashboardContentState
   }
 
   Future<void> _editPledge(HollowTheme hollow) async {
-    final currentMb = (_stats?.myPledgeBytes.toDouble() ?? 512 * 1024 * 1024) / (1024 * 1024);
-    final controller = TextEditingController(text: currentMb.toInt().toString());
-
-    final result = await showHollowDialog<int>(
-      context: context,
-      builder: (ctx) {
-        void save() {
-          final mb = int.tryParse(controller.text);
-          if (mb != null && mb >= 512) Navigator.pop(ctx, mb);
-        }
-
-        return HollowDialog(
-          title: 'Set storage pledge',
-          width: 420,
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SettingsFieldLabel(label: 'Pledge in MB'),
-              const SizedBox(height: HollowSpacing.sm),
-              HollowTextField(
-                controller: controller,
-                keyboardType: TextInputType.number,
-                autofocus: true,
-                hintText: 'Min 512',
-                onSubmitted: (_) => save(),
-              ),
-            ],
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: save,
-              child: const Text('Save'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (result != null) {
-      try {
-        await crdt_api.setStoragePledge(
-          serverId: widget.serverId,
-          pledgeBytes: BigInt.from(result) * BigInt.from(1024 * 1024),
-        );
-        _loadData();
-      } catch (e) {
-        debugPrint('[HOLLOW] Failed to set pledge: $e');
-      }
-    }
+    final saved = await editStoragePledge(
+        context, widget.serverId, _stats?.myPledgeBytes);
+    if (!saved || !mounted) return;
+    HollowToast.show(context, 'Pledge saved', type: HollowToastType.success);
+    _loadData();
   }
 
   Widget _buildYourStorage(HollowTheme hollow) {
@@ -502,62 +437,12 @@ class _StorageDashboardContentState
     );
   }
 
-  static const _retentionOptions = [
-    ('permanent', 'Permanent'),
-    ('30d', '30 days'),
-    ('90d', '90 days'),
-    ('180d', '180 days'),
-    ('365d', '365 days'),
-  ];
-
   Future<void> _editRetention(HollowTheme hollow, String key, String currentValue) async {
-    final title = key == 'retention_files'
-        ? 'File retention'
-        : key == 'retention_messages'
-            ? 'Message retention'
-            : 'Voice retention';
-    final result = await showHollowDialog<String>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: title,
-        showClose: true,
-        content: Wrap(
-          spacing: HollowSpacing.sm,
-          runSpacing: HollowSpacing.sm,
-          children: [
-            for (final (value, label) in _retentionOptions)
-              HollowChip(
-                label: label,
-                selected: value == currentValue ||
-                    (currentValue == '' && value == 'permanent'),
-                onTap: () => Navigator.pop(ctx, value),
-              ),
-          ],
-        ),
-      ),
-    );
-
-    if (result != null && result != currentValue) {
-      try {
-        await crdt_api.updateServerSetting(
-          serverId: widget.serverId,
-          key: key,
-          value: result,
-        );
-        // Forward-only: the stamp is what keeps pruning off anything created
-        // before the policy changed.
-        final sinceKey = '${key}_since';
-        final nowSecs = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
-        await crdt_api.updateServerSetting(
-          serverId: widget.serverId,
-          key: sinceKey,
-          value: nowSecs,
-        );
-        _loadData();
-      } catch (e) {
-        debugPrint('[HOLLOW] Failed to update retention: $e');
-      }
-    }
+    final saved =
+        await editRetentionPolicy(context, widget.serverId, key, currentValue);
+    if (!saved || !mounted) return;
+    HollowToast.show(context, 'Retention saved', type: HollowToastType.success);
+    _loadData();
   }
 
   Widget _buildRetentionPolicy(HollowTheme hollow) {
@@ -690,6 +575,152 @@ class _StorageDashboardContentState
   }
 
   Widget _storageBar(double fraction, Color color, HollowTheme hollow) {
+    return StorageUsageBar(fraction: fraction, color: color);
+  }
+}
+
+/// Asks for this device's storage pledge and saves it, in the dialog: loading
+/// while the write runs, the reason at the field when it fails or the number
+/// is too small. True once saved. Desktop and phone both ask through this.
+Future<bool> editStoragePledge(
+    BuildContext context, String serverId, BigInt? currentBytes) async {
+  final currentMb = currentBytes == null
+      ? 512
+      : currentBytes ~/ BigInt.from(1024 * 1024);
+  final saved = await promptForName(
+    context: context,
+    title: 'Set storage pledge',
+    confirmLabel: 'Save',
+    hintText: 'At least 512',
+    initial: '$currentMb',
+    description: "The space, in MB, this device keeps for this server's files.",
+    validator: (text) {
+      final mb = int.tryParse(text);
+      if (mb == null) return 'Enter a number of MB, like 1024.';
+      if (mb < kMinPledgeMb) return 'Pledge at least $kMinPledgeMb MB.';
+      return null;
+    },
+    onSubmit: (text) => crdt_api.setStoragePledge(
+      serverId: serverId,
+      pledgeBytes: BigInt.from(int.parse(text)) * BigInt.from(1024 * 1024),
+    ),
+  );
+  return saved != null;
+}
+
+/// The smallest pledge a member can make, in MB.
+const kMinPledgeMb = 512;
+
+const _retentionOptions = [
+  ('permanent', 'Permanent'),
+  ('30d', '30 days'),
+  ('90d', '90 days'),
+  ('180d', '180 days'),
+  ('365d', '365 days'),
+];
+
+/// Picks a retention policy and saves it, in the dialog: the pick loads,
+/// closes on success and says why it failed otherwise. True once saved.
+/// Desktop and phone both ask through this.
+Future<bool> editRetentionPolicy(BuildContext context, String serverId,
+    String key, String currentValue) async {
+  final saved = await showHollowDialog<bool>(
+    context: context,
+    builder: (_) => _RetentionPicker(
+      serverId: serverId,
+      settingKey: key,
+      currentValue: currentValue,
+    ),
+  );
+  return saved ?? false;
+}
+
+class _RetentionPicker extends StatefulWidget {
+  final String serverId;
+  final String settingKey;
+  final String currentValue;
+
+  const _RetentionPicker({
+    required this.serverId,
+    required this.settingKey,
+    required this.currentValue,
+  });
+
+  @override
+  State<_RetentionPicker> createState() => _RetentionPickerState();
+}
+
+class _RetentionPickerState extends State<_RetentionPicker>
+    with HollowDialogAction {
+  String? _saving;
+
+  bool _isCurrent(String value) =>
+      value == widget.currentValue ||
+      (widget.currentValue.isEmpty && value == 'permanent');
+
+  Future<void> _pick(String value) async {
+    if (actionRunning) return;
+    if (_isCurrent(value)) {
+      Navigator.of(context).pop(false);
+      return;
+    }
+    setState(() => _saving = value);
+    final done = await runDialogAction(() async {
+      await crdt_api.updateServerSetting(
+        serverId: widget.serverId,
+        key: widget.settingKey,
+        value: value,
+      );
+      // Forward-only: the stamp is what keeps pruning off anything created
+      // before the policy changed.
+      await crdt_api.updateServerSetting(
+        serverId: widget.serverId,
+        key: '${widget.settingKey}_since',
+        value: (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString(),
+      );
+    }, fallback: "Couldn't save the retention policy. Try again.");
+    if (done && mounted) Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final key = widget.settingKey;
+    final title = key == 'retention_files'
+        ? 'File retention'
+        : key == 'retention_messages'
+            ? 'Message retention'
+            : 'Voice retention';
+    return HollowDialog(
+      title: title,
+      showClose: true,
+      busy: actionRunning,
+      error: actionError,
+      content: Wrap(
+        spacing: HollowSpacing.sm,
+        runSpacing: HollowSpacing.sm,
+        children: [
+          for (final (value, label) in _retentionOptions)
+            HollowChip(
+              label: label,
+              selected: actionRunning ? _saving == value : _isCurrent(value),
+              onTap: actionRunning ? null : () => _pick(value),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A server's share of a storage measure, drawn by desktop and phone alike.
+class StorageUsageBar extends StatelessWidget {
+  final double fraction;
+  final Color color;
+
+  const StorageUsageBar({super.key, required this.fraction, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     final clamped = fraction.clamp(0.0, 1.0);
     final barColor = fraction > 0.9
         ? hollow.error

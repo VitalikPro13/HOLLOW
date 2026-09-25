@@ -1,13 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -56,6 +55,7 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/chat/pinned_messages.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
@@ -391,10 +391,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     });
   }
 
-  /// HH:MM, shared by the search results and the pin dialog.
-  static String _hhmm(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
   /// A row's preview; an album row says what the whole album holds.
   String _messagePreviewText(ChannelChatMessage msg, {bool singleLine = true}) {
     final album = _albums.itemsFor(msg.messageId);
@@ -421,143 +417,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     return row;
   }
 
-  void _showPinnedMessages(
-    BuildContext context,
-    HollowTheme hollow,
-    List<String> pinnedIds,
-  ) {
-    final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
-    final pinnedMessages = pinnedIds
-        .map((id) => messages.where((m) => m.messageId == id).firstOrNull)
-        .whereType<ChannelChatMessage>()
-        .toList()
-      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-
-    showHollowDialog(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Pinned messages',
-        width: 420,
-        showClose: true,
-        content: pinnedMessages.isEmpty
-            ? const HollowEmptyState(
-                dense: true,
-                title: 'Pinned messages are further back than this view',
-              )
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  for (var i = 0; i < pinnedMessages.length; i++)
-                    _buildPinnedItem(hollow, pinnedMessages, i),
-                ],
-              ),
-      ),
-    );
-  }
-
-  /// One row of the pinned-messages dialog.
-  Widget _buildPinnedItem(
-    HollowTheme hollow,
-    List<ChannelChatMessage> pinnedMessages,
-    int index,
-  ) {
-    final msg = pinnedMessages[index];
-    final profiles = ref.read(profileProvider);
-    final nicknames = ref.read(serverNicknamesProvider(widget.serverId));
-    // Collapse device to master so a pinned row shows the person, not a raw
-    // device id.
-    final pinnedMaster =
-        ref.read(deviceLinkProvider).identityOf(msg.senderId);
-    final name = serverDisplayNameFor(
-      profiles,
-      pinnedMaster,
-      nickname: nicknames[pinnedMaster] ?? '',
-    );
-
-    final showDate = shouldShowDateSeparator(
-      msg.timestamp,
-      index > 0 ? pinnedMessages[index - 1].timestamp : null,
-    );
-
-    final msgWidget = Padding(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                name,
-                style: HollowTypography.label.copyWith(
-                  color: msg.isMe
-                      ? hollow.accentText
-                      : nameColorFor(pinnedMaster, hollow),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                _hhmm(msg.timestamp),
-                style: HollowTypography.monoSmall
-                    .copyWith(color: hollow.textTertiary),
-              ),
-            ],
-          ),
-          const SizedBox(height: 2),
-          _buildPinnedItemBody(hollow, msg),
-        ],
-      ),
-    );
-
-    if (showDate) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          DateSeparator(date: msg.timestamp),
-          msgWidget,
-        ],
-      );
-    }
-    if (index > 0) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-            child: HollowDivider(),
-          ),
-          msgWidget,
-        ],
-      );
-    }
-    return msgWidget;
-  }
-
-  Widget _buildPinnedItemBody(HollowTheme hollow, ChannelChatMessage msg) {
-    final attachment = msg.fileAttachment;
-    if (attachment != null) {
-      if (attachment.isImage &&
-          attachment.diskPath != null &&
-          File(attachment.diskPath!).existsSync()) {
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          child: gifAwareImage(attachment.diskPath!, height: 80),
-        );
-      }
-      return Text(
-        _messagePreviewText(msg),
-        style: HollowTypography.body.copyWith(
-          color: hollow.textSecondary,
-        ),
-      );
-    }
-    return Text(
-      _messagePreviewText(msg, singleLine: false),
-      style: HollowTypography.body.copyWith(
-        color: hollow.textPrimary,
-      ),
-      maxLines: 3,
-      overflow: TextOverflow.ellipsis,
+  void _showPinnedMessages(BuildContext context, List<String> pinnedIds) {
+    showPinnedMessages(
+      context,
+      serverId: widget.serverId,
+      channelId: widget.channelId,
+      pinnedIds: pinnedIds,
+      messages: ref.read(channelChatProvider)[_stateKey] ?? const [],
+      preview: (msg) => _messagePreviewText(msg, singleLine: false),
+      onJump: _jumpToMessageId,
     );
   }
 
@@ -804,7 +672,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                   c.subtitle!,
                                   style: HollowTypography.caption.copyWith(
                                     color: hollow.textSecondary,
-                                    fontSize: 11,
                                   ),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
@@ -1222,7 +1089,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       );
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'File request failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't request the file. Try again."), type: HollowToastType.error);
       }
     }
   }
@@ -1247,7 +1114,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       );
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Download failed: $e',
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't download the file. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -1312,7 +1179,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Save failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't save the file. Try again."), type: HollowToastType.error);
       }
     } finally {
       _isPicking = false;
@@ -1343,7 +1210,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       await _saveAttachmentAs(cachePath, attachment);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Download failed: $e',
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't download the file. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -1399,7 +1266,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Save failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't save the file. Try again."), type: HollowToastType.error);
       }
     } finally {
       _isPicking = false;
@@ -1659,7 +1526,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               count: '${pinnedIds.length}',
               label:
                   '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
-              onPressed: () => _showPinnedMessages(context, hollow, pinnedIds),
+              onPressed: () => _showPinnedMessages(context, pinnedIds),
             ),
           HollowIconButton(
             icon: LucideIcons.search,
@@ -2325,7 +2192,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               sequential: false,
             ).catchError((e) {
           if (context.mounted) {
-            HollowToast.show(context, 'Download failed: $e',
+            HollowToast.show(context, friendlyError(e, fallback: "Couldn't download the file. Try again."),
                 type: HollowToastType.error);
           }
         });

@@ -8,7 +8,7 @@ import 'package:hollow/src/ui/archive/my_data_view.dart';
 import 'package:hollow/src/ui/archive/recovery_pool_dashboard.dart';
 import 'package:hollow/src/ui/archive/vault_files_view.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/shell/place_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -35,20 +35,17 @@ class ArchiveDashboard extends ConsumerWidget {
           PlaceHeader(
             title: 'Archive',
             tabs: [
-              HollowChip(
-                label: 'Messages',
-                selected: section == ArchiveSection.messages,
-                onTap: () => show(ArchiveSection.messages),
-              ),
-              HollowChip(
-                label: 'Vault files',
-                selected: section == ArchiveSection.vault,
-                onTap: () => show(ArchiveSection.vault),
-              ),
-              HollowChip(
-                label: 'Imported',
-                selected: section == ArchiveSection.imported,
-                onTap: () => show(ArchiveSection.imported),
+              HollowChipTabs<ArchiveSection>(
+                selected: section,
+                onSelected: show,
+                tabs: const [
+                  HollowChipTab(
+                      value: ArchiveSection.messages, label: 'Messages'),
+                  HollowChipTab(
+                      value: ArchiveSection.vault, label: 'Vault files'),
+                  HollowChipTab(
+                      value: ArchiveSection.imported, label: 'Imported'),
+                ],
               ),
             ],
             actions: [

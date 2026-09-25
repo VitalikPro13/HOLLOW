@@ -108,7 +108,7 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 3. **NSFW badge** -- `_NsfwBadge` (small red "NSFW" pill), only when `serverIsNsfwProvider(serverId)` is true.
 4. **Connection status** -- `_ChannelConnectionStatus` widget (see below). Hidden when the header is under 280px wide.
 5. **Spacer**.
-5. **Pinned messages button** -- only shown when `pinnedIds.isNotEmpty`. Shows pin icon + count. Tooltip shows count. Taps open `_showPinnedMessages()` dialog.
+5. **Pinned messages button** -- only shown when `pinnedIds.isNotEmpty`. Shows pin icon + count. Tooltip shows count. Taps open `_showPinnedMessages()`, which calls the shared `showPinnedMessages` (below).
 6. **Search button** -- toggles `chatSearchOpenProvider`. Icon tints accent when search is open.
 7. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`) AND when the header is at least 200px wide (and never in a conference). Shows columns icon. When split is active, closes this pane; when not split, opens split.
 8. **Member panel toggle** (LAST, next to the panel it opens; hidden in a conference) -- `LucideIcons.users`, "Show members" / "Hide members", toggles `memberPanelProvider`.
@@ -142,11 +142,9 @@ Mobile has its own equivalent: `_MobileChannelStatus` in `mobile_chat_route.dart
 
 `_VaultHealthIndicator`: Only renders for servers with 6+ members (erasure coding threshold). Watches `vaultStatusProvider[serverId]`. Only shows when there are active uploads or downloads (not complete/failed). Shows a grey `LucideIcons.database` icon with a tooltip describing the activity count.
 
-## Pinned Messages Dialog
+## Pinned Messages (`chat/pinned_messages.dart`, 2026-09-25)
 
-`_showPinnedMessages()`: Opens a `showDialog` with the pinned messages list. Filters `pinnedIds` against current messages in memory, sorts by timestamp descending. Each entry shows sender name (via `serverDisplayNameFor`), time, and message content (text, image thumbnail via `Image.file` or `GifFileImage`, or file placeholder). Date separators between messages on different days via `shouldShowDateSeparator()`. Uses `DateSeparator` widget (imported from `chat_pane.dart`).
-
-The dialog is a `Dialog` with `hollow.elevated` background, rounded rectangle shape with border. Constrained to 420x400. Header row has pin icon + "Pinned Messages" title + close button. If no pinned messages are found in the current view, shows "Pinned messages not loaded in current view."
+`showPinnedMessages(context, serverId:, channelId:, pinnedIds:, messages:, preview:, onJump:, touch:)` is the ONE pinned list: a `HollowDialog` "Pinned messages" (420, close X) on desktop, a sheet with `HollowSheetTitle('Pinned messages')` on a phone (`touch: true`, from `mobile_chat_route.dart`). `resolvePinnedMessages` keeps the pins loaded in memory, newest first; pins further back read as `pinnedMissingLine` ("1 more pinned message is further back in this channel."); none at all: "Nothing is pinned here". Each `PinnedMessageRow` shows the sender (device collapsed to master), the time, the `preview` text (an album reads as the whole album) and an image thumbnail; tapping the row closes the list and jumps to the message (`onJump`). Whoever may pin (`canPinIn`: MANAGE_CHANNELS, never in a conference) gets a grey Unpin on each row, on hover or keyboard focus on desktop, always on a phone: the row leaves at once (`pinnedProvider.applyUnpin`), comes back with a `friendlyError` toast on failure, and **unpinning the last pin closes the list** (the header button has already gone, so an empty list would be a dead end).
 
 ## In-Channel Search
 

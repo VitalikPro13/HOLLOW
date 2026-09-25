@@ -1,16 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 
 /// What the category bulk-access dialog resolved to. `visLabels`/`postLabels`
@@ -34,7 +34,7 @@ class CategoryBulkAccess {
 }
 
 /// Shows the bulk-access dialog for [channelIds] and applies the result to all
-/// of them.
+/// of them, inside the dialog: "Apply" loads until the last write lands.
 ///
 /// Shared by the Channels settings editor and the sidebar's category
 /// right-click menu (issue #61), so the two cannot drift on what "apply to the
@@ -53,97 +53,115 @@ Future<void> runCategoryBulkAccess({
     HollowToast.show(context, 'No channels in this category');
     return;
   }
+  // The container, not [ref]: a menu that opened this may be gone by the
+  // time the writes run.
+  final read = ProviderScope.containerOf(context, listen: false).read;
 
   final result = await showCategoryBulkAccessDialog(
     context,
     serverId: serverId,
     categoryName: categoryName,
     channelCount: channelIds.length,
+    onApply: (access) => applyCategoryBulkAccess(
+      read: read,
+      serverId: serverId,
+      channelIds: channelIds,
+      access: access,
+    ),
   );
   if (result == null || !context.mounted) return;
+  HollowToast.show(
+      context,
+      channelIds.length == 1
+          ? 'Access changed on 1 channel'
+          : 'Access changed on ${channelIds.length} channels',
+      type: HollowToastType.success);
+}
 
-  final notifier = ref.read(channelListProvider.notifier);
+/// Writes [access] to each of [channelIds], optimistically, one at a time.
+/// Throws a [FriendlyException] naming the channels that did not change; the
+/// others keep their new setting.
+Future<void> applyCategoryBulkAccess({
+  required ProviderRead read,
+  required String serverId,
+  required List<String> channelIds,
+  required CategoryBulkAccess access,
+}) async {
+  final notifier = read(channelListProvider.notifier);
   final failed = <String>[];
 
   for (final id in channelIds) {
-    final info = ref.read(channelListProvider)[id];
+    final info = read(channelListProvider)[id];
     if (info == null) continue;
     final prev = info;
     try {
-      if (result.changeVisibility) {
-        if (result.visLabels.isNotEmpty) {
+      if (access.changeVisibility) {
+        if (access.visLabels.isNotEmpty) {
           notifier.updateChannel(
               id,
               (ch) => ch.copyWith(
-                  visibilityLabels: result.visLabels, visibility: 'admin'));
+                  visibilityLabels: access.visLabels, visibility: 'admin'));
           await crdt_api.setChannelVisibilityLabels(
             serverId: serverId,
             channelId: id,
-            labels: result.visLabels,
+            labels: access.visLabels,
           );
         } else {
           notifier.updateChannel(
               id,
               (ch) => ch.copyWith(
-                  visibility: result.visMode, visibilityLabels: const []));
+                  visibility: access.visMode, visibilityLabels: const []));
           await crdt_api.setChannelVisibility(
             serverId: serverId,
             channelId: id,
-            visibility: result.visMode,
+            visibility: access.visMode,
           );
         }
       }
       // Voice channels have no posting gate to set.
-      if (result.changePosting && info.channelType != ChannelType.voice) {
-        if (result.postLabels.isNotEmpty) {
+      if (access.changePosting && info.channelType != ChannelType.voice) {
+        if (access.postLabels.isNotEmpty) {
           notifier.updateChannel(
               id,
               (ch) => ch.copyWith(
-                  postingLabels: result.postLabels, posting: 'admin'));
+                  postingLabels: access.postLabels, posting: 'admin'));
           await crdt_api.setChannelPostingLabels(
             serverId: serverId,
             channelId: id,
-            labels: result.postLabels,
+            labels: access.postLabels,
           );
         } else {
           notifier.updateChannel(
               id,
               (ch) => ch.copyWith(
-                  posting: result.postMode, postingLabels: const []));
+                  posting: access.postMode, postingLabels: const []));
           await crdt_api.setChannelPosting(
             serverId: serverId,
             channelId: id,
-            posting: result.postMode,
+            posting: access.postMode,
           );
         }
       }
     } catch (_) {
       notifier.updateChannel(id, (_) => prev);
-      failed.add(prev.name);
+      failed.add('#${prev.name}');
     }
   }
 
-  if (!context.mounted) return;
-  if (failed.isEmpty) {
-    HollowToast.show(context, 'Access applied to ${channelIds.length} channels',
-        type: HollowToastType.success);
-  } else {
-    HollowToast.show(
-        context,
-        'Applied to ${channelIds.length - failed.length} of '
-        '${channelIds.length} channels. Failed: '
-        "${failed.map((n) => '#$n').join(', ')}",
-        type: HollowToastType.error);
+  if (failed.isNotEmpty) {
+    throw FriendlyException("${failed.join(', ')} didn't change. Try again.");
   }
 }
 
-/// Picks access settings to stamp onto every channel of a category. Pure UI:
-/// the caller resolves the channel set and does the writes. Null on cancel.
+/// Picks access settings to stamp onto every channel of a category. With
+/// [onApply] the dialog runs it before closing; without, it only picks. Null on
+/// cancel.
 Future<CategoryBulkAccess?> showCategoryBulkAccessDialog(
   BuildContext context, {
   required String serverId,
   required String categoryName,
   required int channelCount,
+  Future<void> Function(CategoryBulkAccess access)? onApply,
 }) {
   return showHollowDialog<CategoryBulkAccess>(
     context: context,
@@ -151,6 +169,7 @@ Future<CategoryBulkAccess?> showCategoryBulkAccessDialog(
       serverId: serverId,
       categoryName: categoryName,
       channelCount: channelCount,
+      onApply: onApply,
     ),
   );
 }
@@ -159,11 +178,13 @@ class _CategoryBulkAccessDialog extends StatefulWidget {
   final String serverId;
   final String categoryName;
   final int channelCount;
+  final Future<void> Function(CategoryBulkAccess access)? onApply;
 
   const _CategoryBulkAccessDialog({
     required this.serverId,
     required this.categoryName,
     required this.channelCount,
+    required this.onApply,
   });
 
   @override
@@ -171,7 +192,8 @@ class _CategoryBulkAccessDialog extends StatefulWidget {
       _CategoryBulkAccessDialogState();
 }
 
-class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
+class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog>
+    with HollowDialogAction {
   bool _changeVisibility = false;
   String _visMode = 'everyone';
   List<String> _visLabels = const [];
@@ -179,28 +201,46 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
   String _postMode = 'everyone';
   List<String> _postLabels = const [];
 
+  CategoryBulkAccess get _access => CategoryBulkAccess(
+        changeVisibility: _changeVisibility,
+        visMode: _visMode,
+        visLabels: _visLabels,
+        changePosting: _changePosting,
+        postMode: _postMode,
+        postLabels: _postLabels,
+      );
+
+  Future<void> _apply() async {
+    final access = _access;
+    final onApply = widget.onApply;
+    if (onApply != null && !await runDialogAction(() => onApply(access))) {
+      return;
+    }
+    if (mounted) Navigator.of(context).pop(access);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final canApply = _changeVisibility || _changePosting;
+    final n = widget.channelCount;
 
     return HollowDialog(
-      title: 'Apply access: ${widget.categoryName}',
+      title: 'Set access for ${widget.categoryName}',
+      width: 480,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           HollowDialogText(
-            'Applies to ${widget.channelCount} '
-            'channel${widget.channelCount == 1 ? '' : 's'} in this '
-            'category. Each channel keeps its own setting afterwards. '
-            'Nothing stays linked to the category.',
+            'Changes the $n channel${n == 1 ? '' : 's'} in this category now. '
+            "Nothing stays linked, so a channel added later won't follow this "
+            'setting.',
           ),
-          const SizedBox(height: HollowSpacing.lg),
-          _section(
-            hollow: hollow,
-            title: 'Change visibility',
-            subtitle: 'Who can see these channels',
+          const SizedBox(height: HollowSpacing.md),
+          ..._section(
+            title: 'Change who can see them',
             enabled: _changeVisibility,
             onToggled: (v) => setState(() => _changeVisibility = v),
             mode: _visMode,
@@ -211,11 +251,8 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
             }),
             onCustom: () => _pickLabels(forVisibility: true),
           ),
-          const SizedBox(height: HollowSpacing.md),
-          _section(
-            hollow: hollow,
-            title: 'Change posting',
-            subtitle: 'Who can send messages',
+          ..._section(
+            title: 'Change who can post',
             enabled: _changePosting,
             onToggled: (v) => setState(() => _changePosting = v),
             mode: _postMode,
@@ -230,21 +267,13 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: canApply
-              ? () => Navigator.of(context).pop(CategoryBulkAccess(
-                    changeVisibility: _changeVisibility,
-                    visMode: _visMode,
-                    visLabels: _visLabels,
-                    changePosting: _changePosting,
-                    postMode: _postMode,
-                    postLabels: _postLabels,
-                  ))
-              : null,
-          child: Text('Apply to ${widget.channelCount}'),
+          onPressed: canApply ? _apply : null,
+          loading: actionRunning,
+          child: Text('Apply to $n'),
         ),
       ],
     );
@@ -254,7 +283,8 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
     final picked = await showAccessLabelPicker(
       context: context,
       serverId: widget.serverId,
-      title: forVisibility ? 'Custom visibility' : 'Custom posting',
+      gate: forVisibility ? AccessLabelGate.see : AccessLabelGate.post,
+      target: 'the channels in ${widget.categoryName}',
       initial: (forVisibility ? _visLabels : _postLabels).toSet(),
     );
     if (picked == null || picked.isEmpty || !mounted) return;
@@ -269,12 +299,9 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
     });
   }
 
-  /// One grouped section card, with the tier chips revealed inside the same card
-  /// when enabled so nothing floats at an arbitrary x-position.
-  Widget _section({
-    required HollowTheme hollow,
+  /// One switch row, with the tier chips under it once it is on.
+  List<Widget> _section({
     required String title,
-    required String subtitle,
     required bool enabled,
     required ValueChanged<bool> onToggled,
     required String mode,
@@ -282,76 +309,41 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
     required ValueChanged<String> onMode,
     required VoidCallback onCustom,
   }) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.lg),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
+    final locked = actionRunning;
+    return [
+      SettingsSwitchRow(
+        title: title,
+        value: enabled,
+        onChanged: locked ? null : onToggled,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: HollowSpacing.xxs),
-                    Text(
-                      subtitle,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textTertiary,
-                      ),
-                    ),
-                  ],
-                ),
+      if (enabled) ...[
+        Wrap(
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
+          children: [
+            for (final (value, text) in const [
+              ('everyone', 'Everyone'),
+              ('moderator', 'Mod+'),
+              ('admin', 'Admin+'),
+            ])
+              HollowChip(
+                label: text,
+                selected: labels.isEmpty && mode == value,
+                onTap: locked ? null : () => onMode(value),
               ),
-              const SizedBox(width: HollowSpacing.md),
-              HollowToggle(
-                value: enabled,
-                onChanged: onToggled,
-                semanticLabel: title,
-              ),
-            ],
-          ),
-          if (enabled) ...[
-            const SizedBox(height: HollowSpacing.md),
-            Wrap(
-              spacing: HollowSpacing.sm,
-              runSpacing: HollowSpacing.sm,
-              children: [
-                for (final (value, text) in const [
-                  ('everyone', 'Everyone'),
-                  ('moderator', 'Mod+'),
-                  ('admin', 'Admin+'),
-                ])
-                  _mode(text,
-                      selected: labels.isEmpty && mode == value,
-                      onTap: () => onMode(value)),
-                _mode(
-                  labels.isEmpty ? 'Custom…' : '${labels.length} labels',
-                  selected: labels.isNotEmpty,
-                  onTap: onCustom,
-                ),
-              ],
+            HollowChip(
+              label: labels.isEmpty
+                  ? 'Labels…'
+                  : labels.length == 1
+                      ? '1 label'
+                      : '${labels.length} labels',
+              selected: labels.isNotEmpty,
+              onTap: locked ? null : onCustom,
             ),
           ],
-        ],
-      ),
-    );
-  }
-
-  Widget _mode(String text,
-      {required bool selected, required VoidCallback onTap}) {
-    return HollowChip(label: text, selected: selected, onTap: onTap);
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+      ],
+    ];
   }
 }

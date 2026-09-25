@@ -60,21 +60,11 @@ class MediaZoomView extends StatefulWidget {
   State<MediaZoomView> createState() => _MediaZoomViewState();
 }
 
+
 class _MediaZoomViewState extends State<MediaZoomView> {
   Size? _imageSize;
   Size? _viewport;
   bool _missing = false;
-  Offset _lastTapDown = Offset.zero;
-
-  /// Where the pointer was last seen, in this view's own coordinates.
-  Offset? _pointerLocal;
-
-  bool _panZoomActive = false;
-  Offset? _zoomAnchor;
-  Offset? _zoomAnchorScene;
-  bool _applyingAnchor = false;
-  Timer? _settleTimer;
-  TransformationController? _settlingOn;
 
   @override
   void initState() {
@@ -83,17 +73,8 @@ class _MediaZoomViewState extends State<MediaZoomView> {
   }
 
   @override
-  void dispose() {
-    _endSettle();
-    super.dispose();
-  }
-
-  @override
   void didUpdateWidget(MediaZoomView old) {
     super.didUpdateWidget(old);
-    if (old.transform != widget.transform || old.isCurrent != widget.isCurrent) {
-      _endSettle();
-    }
     if (old.item.fileId != widget.item.fileId) {
       _imageSize = null;
       _missing = false;
@@ -142,6 +123,129 @@ class _MediaZoomViewState extends State<MediaZoomView> {
     final viewport = _viewport;
     if (image == null || viewport == null) return;
     widget.onGeometry?.call(viewport, image);
+  }
+
+  ImageProvider _provider(String path) {
+    final size = _imageSize;
+    final provider = AtRestImageProvider(path);
+    final longEdge =
+        size == null ? 0 : (size.width > size.height ? size.width : size.height);
+    if (longEdge <= kMediaDecodeCeiling) return provider;
+    return ResizeImage(
+      provider,
+      width: kMediaDecodeCeiling,
+      height: kMediaDecodeCeiling,
+      policy: ResizeImagePolicy.fit,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = widget.item.diskPath;
+    if (path == null || _missing) return const _MediaMissing();
+
+    Widget image;
+    if (widget.item.kind == MediaKind.gif) {
+      image = AttachmentImage(
+        path: path,
+        animated: true,
+        fit: BoxFit.contain,
+        errorWidget: const _MediaMissing(),
+      );
+    } else {
+      image = Image(
+        image: _provider(path),
+        fit: BoxFit.contain,
+        filterQuality: widget.filterQuality,
+        errorBuilder: (_, _, _) => const _MediaMissing(),
+      );
+    }
+
+    if (widget.quarterTurns % 4 != 0) {
+      image = RotatedBox(quarterTurns: widget.quarterTurns, child: image);
+    }
+
+    return ZoomSurface(
+      transform: widget.transform,
+      minScale: widget.minScale,
+      maxScale: widget.maxScale,
+      enabled: widget.isCurrent,
+      onViewport: (viewport) {
+        if (viewport == _viewport) return;
+        _viewport = viewport;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _publish();
+        });
+      },
+      onTapAt: widget.onTapAt,
+      onDoubleTapAt: widget.onDoubleTapAt,
+      onSecondaryTapAt: widget.onSecondaryTapAt,
+      child: Center(child: image),
+    );
+  }
+}
+
+/// Pan and zoom over any contained content: a still in the media viewer, a
+/// live screen share on the phone. Owns no zoom state: [transform] is the
+/// host's, so a readout or a reset speaks about the same matrix.
+class ZoomSurface extends StatefulWidget {
+  final TransformationController transform;
+  final double minScale;
+  final double maxScale;
+
+  /// False lays the content out with no gestures, for a neighbour page.
+  final bool enabled;
+  final ValueChanged<Size>? onViewport;
+  final void Function(Offset local)? onTapAt;
+  final void Function(Offset local)? onDoubleTapAt;
+
+  /// Window-space position of a right click, for the overflow menu.
+  final void Function(Offset global)? onSecondaryTapAt;
+  final Widget child;
+
+  const ZoomSurface({
+    super.key,
+    required this.transform,
+    required this.child,
+    this.minScale = 1.0,
+    this.maxScale = 8.0,
+    this.enabled = true,
+    this.onViewport,
+    this.onTapAt,
+    this.onDoubleTapAt,
+    this.onSecondaryTapAt,
+  });
+
+  @override
+  State<ZoomSurface> createState() => _ZoomSurfaceState();
+}
+
+class _ZoomSurfaceState extends State<ZoomSurface> {
+  Size? _viewport;
+  Offset _lastTapDown = Offset.zero;
+
+  /// Where the pointer was last seen, in this view's own coordinates.
+  Offset? _pointerLocal;
+
+  bool _panZoomActive = false;
+  Offset? _zoomAnchor;
+  Offset? _zoomAnchorScene;
+  bool _applyingAnchor = false;
+  Timer? _settleTimer;
+  TransformationController? _settlingOn;
+
+  @override
+  void dispose() {
+    _endSettle();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(ZoomSurface old) {
+    super.didUpdateWidget(old);
+    if (old.transform != widget.transform || old.enabled != widget.enabled) {
+      _endSettle();
+    }
   }
 
   void _panZoomStart(PointerPanZoomStartEvent event) {
@@ -226,7 +330,7 @@ class _MediaZoomViewState extends State<MediaZoomView> {
     _zoomAnchorScene = null;
   }
 
-  /// Keeps the image covering the viewport, the boundary InteractiveViewer
+  /// Keeps the content covering the viewport, the boundary InteractiveViewer
   /// enforces on every translation of its own.
   static double _clampAxis(double value, double extent, double scale) {
     final lower = extent * (1 - scale);
@@ -234,54 +338,14 @@ class _MediaZoomViewState extends State<MediaZoomView> {
     return value.clamp(lower, 0.0);
   }
 
-  ImageProvider _provider(String path) {
-    final size = _imageSize;
-    final provider = AtRestImageProvider(path);
-    final longEdge =
-        size == null ? 0 : (size.width > size.height ? size.width : size.height);
-    if (longEdge <= kMediaDecodeCeiling) return provider;
-    return ResizeImage(
-      provider,
-      width: kMediaDecodeCeiling,
-      height: kMediaDecodeCeiling,
-      policy: ResizeImagePolicy.fit,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final path = widget.item.diskPath;
-    if (path == null || _missing) return const _MediaMissing();
-
-    Widget image;
-    if (widget.item.kind == MediaKind.gif) {
-      image = AttachmentImage(
-        path: path,
-        animated: true,
-        fit: BoxFit.contain,
-        errorWidget: const _MediaMissing(),
-      );
-    } else {
-      image = Image(
-        image: _provider(path),
-        fit: BoxFit.contain,
-        filterQuality: widget.filterQuality,
-        errorBuilder: (_, _, _) => const _MediaMissing(),
-      );
-    }
-
-    if (widget.quarterTurns % 4 != 0) {
-      image = RotatedBox(quarterTurns: widget.quarterTurns, child: image);
-    }
-
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewport = Size(constraints.maxWidth, constraints.maxHeight);
         if (viewport != _viewport) {
           _viewport = viewport;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _publish();
-          });
+          widget.onViewport?.call(viewport);
         }
         Widget viewer = InteractiveViewer(
           transformationController: widget.transform,
@@ -290,13 +354,13 @@ class _MediaZoomViewState extends State<MediaZoomView> {
           // One wheel notch is e^(100/scaleFactor); 450 puts it at 1.25x, the
           // same step the zoom keys take.
           scaleFactor: 450,
-          panEnabled: widget.isCurrent,
-          scaleEnabled: widget.isCurrent,
+          panEnabled: widget.enabled,
+          scaleEnabled: widget.enabled,
           onInteractionStart: (_) => _endSettle(),
           onInteractionUpdate: _reanchorZoom,
-          child: Center(child: image),
+          child: widget.child,
         );
-        if (!widget.isCurrent) return viewer;
+        if (!widget.enabled) return viewer;
         viewer = Listener(
           onPointerHover: (e) => _pointerLocal = e.localPosition,
           onPointerDown: (e) => _pointerLocal = e.localPosition,
@@ -306,11 +370,14 @@ class _MediaZoomViewState extends State<MediaZoomView> {
           onPointerPanZoomEnd: _panZoomEnd,
           child: viewer,
         );
+        final onDoubleTapAt = widget.onDoubleTapAt;
         return GestureDetector(
           onTapDown: (d) => _lastTapDown = d.localPosition,
           onTapUp: (d) => widget.onTapAt?.call(d.localPosition),
           onDoubleTapDown: (d) => _lastTapDown = d.localPosition,
-          onDoubleTap: () => widget.onDoubleTapAt?.call(_lastTapDown),
+          // Null leaves single taps undelayed when nothing wants a double.
+          onDoubleTap:
+              onDoubleTapAt == null ? null : () => onDoubleTapAt(_lastTapDown),
           onSecondaryTapUp: (d) =>
               widget.onSecondaryTapAt?.call(d.globalPosition),
           child: viewer,

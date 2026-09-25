@@ -1,18 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/services/disk_space.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart'
+    show StorageUsageBar, editRetentionPolicy, editStoragePledge;
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -31,6 +31,10 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
   String _retentionMessages = 'permanent';
   bool _loading = true;
 
+  /// Free space on the volume holding the data root; null where the platform
+  /// cannot say (iOS).
+  int? _freeBytes;
+
   @override
   void initState() {
     super.initState();
@@ -38,6 +42,9 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
   }
 
   Future<void> _loadData() async {
+    freeBytesAt(hollowDataDir).then((free) {
+      if (mounted) setState(() => _freeBytes = free);
+    });
     try {
       final results = await Future.wait([
         crdt_api.getStorageStats(serverId: widget.serverId),
@@ -187,6 +194,10 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
     final totalUsed = stats?.totalUsedBytes.toDouble() ?? 0;
 
     if (memberCount < 6) {
+      // Full replication: the server's data against this phone's space, as on
+      // desktop. Without a free-space reading there is no honest bar to draw.
+      final free = _freeBytes;
+      final disk = free == null ? 0.0 : totalUsed + free;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -194,10 +205,16 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
               style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary, fontWeight: FontWeight.w500,
               )),
-          const SizedBox(height: HollowSpacing.sm),
-          _storageBar(0.0, hollow.accent, hollow),
+          if (disk > 0) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            _storageBar(totalUsed / disk, hollow.accent, hollow),
+          ],
           const SizedBox(height: HollowSpacing.xs),
-          Text(_formatBytes(stats?.totalUsedBytes ?? BigInt.zero),
+          Text(
+              free == null
+                  ? '${_formatBytes(stats?.totalUsedBytes ?? BigInt.zero)} used'
+                  : '${_formatBytes(stats?.totalUsedBytes ?? BigInt.zero)} used · '
+                      '${_formatBytes(BigInt.from(free))} free',
               style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
           const SizedBox(height: 2),
           Text('$memberCount members',
@@ -271,53 +288,11 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
   }
 
   Future<void> _editPledge(HollowTheme hollow) async {
-    final currentMb = (_stats?.myPledgeBytes.toDouble() ?? 512 * 1024 * 1024) / (1024 * 1024);
-    final controller = TextEditingController(text: currentMb.toInt().toString());
-
-    final result = await showHollowDialog<int>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Set storage pledge',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            HollowTextField(
-              controller: controller,
-              hintText: 'Min 512 MB',
-              autofocus: true,
-            ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () {
-              final mb = int.tryParse(controller.text);
-              if (mb != null && mb >= 512) Navigator.pop(ctx, mb);
-            },
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != null) {
-      try {
-        await crdt_api.setStoragePledge(
-          serverId: widget.serverId,
-          pledgeBytes: BigInt.from(result) * BigInt.from(1024 * 1024),
-        );
-        _loadData();
-      } catch (e) {
-        if (mounted) {
-          HollowToast.show(context, 'Failed to set pledge',
-              type: HollowToastType.error);
-        }
-      }
-    }
+    final saved = await editStoragePledge(
+        context, widget.serverId, _stats?.myPledgeBytes);
+    if (!saved || !mounted) return;
+    HollowToast.show(context, 'Pledge saved', type: HollowToastType.success);
+    _loadData();
   }
 
   Widget _buildRetention(HollowTheme hollow, bool canEdit) {
@@ -336,13 +311,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
     );
   }
 
-  static const _retentionOptions = [
-    ('permanent', 'Permanent'),
-    ('30d', '30 days'),
-    ('90d', '90 days'),
-    ('180d', '180 days'),
-    ('365d', '365 days'),
-  ];
 
   Widget _retentionRow(HollowTheme hollow, String label, String settingKey,
       String policy, {bool canEdit = true}) {
@@ -371,68 +339,11 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
   }
 
   Future<void> _editRetention(HollowTheme hollow, String key, String currentValue) async {
-    final result = await showHollowDialog<String>(
-      context: context,
-      builder: (ctx) {
-        return HollowDialog(
-          title: key == 'retention_files' ? 'File retention' : 'Message retention',
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final (value, label) in _retentionOptions)
-                HollowPressable(
-                  onTap: () => Navigator.pop(ctx, value),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.md, vertical: HollowSpacing.sm,
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        (value == currentValue || (currentValue == '' && value == 'permanent'))
-                            ? LucideIcons.circleCheck
-                            : LucideIcons.circle,
-                        size: 16,
-                        color: (value == currentValue || (currentValue == '' && value == 'permanent'))
-                            ? hollow.accent
-                            : hollow.textSecondary,
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Text(label, style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                      )),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (result != null && result != currentValue) {
-      try {
-        await crdt_api.updateServerSetting(
-          serverId: widget.serverId, key: key, value: result,
-        );
-        final sinceKey = '${key}_since';
-        final nowSecs = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
-        await crdt_api.updateServerSetting(
-          serverId: widget.serverId, key: sinceKey, value: nowSecs,
-        );
-        _loadData();
-      } catch (e) {
-        if (mounted) {
-          HollowToast.show(context, 'Failed to update', type: HollowToastType.error);
-        }
-      }
-    }
+    final saved =
+        await editRetentionPolicy(context, widget.serverId, key, currentValue);
+    if (!saved || !mounted) return;
+    HollowToast.show(context, 'Retention saved', type: HollowToastType.success);
+    _loadData();
   }
 
   Widget _buildVaultHealth(HollowTheme hollow, VaultServerStatus? status, int memberCount) {
@@ -514,38 +425,8 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
     ]);
   }
 
-  Widget _storageBar(double fraction, Color color, HollowTheme hollow) {
-    final clamped = fraction.clamp(0.0, 1.0);
-    final barColor = fraction > 0.9
-        ? hollow.error
-        : fraction > 0.7 ? hollow.warning : color;
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(4),
-      child: SizedBox(
-        height: 8,
-        child: Stack(children: [
-          Container(color: hollow.border),
-          TweenAnimationBuilder<double>(
-            tween: Tween(end: clamped),
-            duration: ReduceMotionController.instance.isReduced
-                ? Duration.zero
-                : const Duration(milliseconds: 500),
-            curve: Curves.easeOutCubic,
-            builder: (context, value, _) => FractionallySizedBox(
-              widthFactor: value,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: barColor,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              ),
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
+  Widget _storageBar(double fraction, Color color, HollowTheme hollow) =>
+      StorageUsageBar(fraction: fraction, color: color);
 }
 
 class _SectionCard extends StatelessWidget {

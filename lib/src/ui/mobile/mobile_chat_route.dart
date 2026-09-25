@@ -2,14 +2,15 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/providers/call_records_provider.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/album_grouping.dart';
@@ -53,7 +54,6 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -70,13 +70,14 @@ import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
-import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_keyboard_panel.dart';
-import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
-import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
+import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
+import 'package:hollow/src/ui/call/call_actions.dart' show startDmCallFlow;
+import 'package:hollow/src/ui/chat/pinned_messages.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_notification_banner.dart';
-import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
+import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -84,14 +85,11 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
-import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
@@ -1146,28 +1144,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   void _showAttachSheet() {
     final hollow = HollowTheme.of(context);
     Widget row(IconData icon, String label, VoidCallback onTap) {
-      return HollowPressable(
+      return HollowListRow(
+        touch: true,
+        title: label,
+        leading: Icon(icon, size: 20, color: hollow.textSecondary),
         onTap: () {
           Navigator.pop(context);
           onTap();
         },
-        child: SizedBox(
-          height: 52,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-            child: Row(
-              children: [
-                Icon(icon, size: 20, color: hollow.textSecondary),
-                const SizedBox(width: HollowSpacing.lg),
-                Text(
-                  label,
-                  style: HollowTypography.bodyTouch
-                      .copyWith(color: hollow.textPrimary),
-                ),
-              ],
-            ),
-          ),
-        ),
       );
     }
 
@@ -1250,7 +1234,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Save failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't save the file. Try again."), type: HollowToastType.error);
       }
     }
   }
@@ -1274,7 +1258,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'File request failed: $e', type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't request the file. Try again."), type: HollowToastType.error);
       }
     }
   }
@@ -1417,8 +1401,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               if (widget.isDm) SecurityAlertBanner(peerId: widget.peerId!),
               if (widget.isDm)
                 IdentityDestroyedBanner(peerId: widget.peerId!),
-              if (widget.isDm) MobileCallStatusStrip(peerId: widget.peerId!),
-              const _VoiceChannelStatusStrip(),
+              // The call you are in, from any chat: tap it to open the call.
+              const MobileMinimisedCall(floating: false),
               if (_searchOpen) _buildSearchBar(hollow),
               if (!widget.isDm) _buildSyncIndicator(hollow),
               if (!widget.isDm && !_canReadChannel)
@@ -1496,8 +1480,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             currentChannelId: widget.channelId,
             topOffset: MediaQuery.paddingOf(context).top + 64,
           ),
-          const MobileActiveCallPill(),
-          const MobileVoiceChannelPill(),
         ],
       ),
     );
@@ -1545,6 +1527,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       channelName: widget.channelName,
       searchOpen: _searchOpen,
       onSearchToggle: widget.isDm ? null : _toggleSearch,
+      onJumpToMessage: _jumpToMessageId,
     );
   }
 
@@ -1977,6 +1960,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
+  /// The DM's person, whose calls the list places between its rows.
+  String get _callPeer =>
+      ref.read(deviceLinkProvider).identityOf(widget.peerId!);
+
   Widget _buildDmMessages() {
     // Per-conversation select: the map is replaced wholesale on every insert, so
     // watching it rebuilds this list for activity in any conversation.
@@ -1987,6 +1974,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // Following re-pins to the newest row; reading history freezes the display.
     ref.listen<Map<String, List<ChatMessage>>>(
         chatProvider, _onDmMessagesChanged);
+
+    final calls = ref.watch(dmCallRecordsProvider(_callPeer));
+    if (messages.isEmpty && calls.isNotEmpty) {
+      return CallRecordsOnly(records: calls);
+    }
 
     return _buildMessageListShell<ChatMessage>(
       messages: messages,
@@ -2040,8 +2032,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final msg = messages[index];
     final prev = index > 0 ? messages[index - 1] : null;
     final profiles = ref.watch(profileProvider);
+    final calls = callRecordsAround(
+      records: ref.watch(dmCallRecordsProvider(_callPeer)),
+      previous: prev?.timestamp,
+      current: msg.timestamp,
+      isNewest: index == messages.length - 1,
+      historyComplete:
+          (ref.read(chatProvider)[widget.peerId!]?.length ?? 0) <
+              kCallRecordWindow,
+    );
 
+    // A call line between two messages breaks the run, like a new sender.
     final showHeader = prev == null ||
+        calls.before.isNotEmpty ||
         !shouldGroup(
           currentIsMe: msg.isMe,
           previousIsMe: prev.isMe,
@@ -2128,6 +2131,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       prevTimestamp: prev?.timestamp,
       showHeader: showHeader,
       unreadDivider: index == unreadIndex,
+      callsBefore: calls.before,
+      callsAfter: calls.after,
       child: bubble,
     );
   }
@@ -2520,7 +2525,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             .stopWaitingForFile(attachment.fileId);
       } catch (e) {
         if (!mounted) return;
-        HollowToast.show(context, 'Could not stop the request: $e',
+        HollowToast.show(context, friendlyError(e, fallback: "Couldn't stop the request. Try again."),
             type: HollowToastType.error);
       }
     };
@@ -2551,7 +2556,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               sequential: false,
             ).catchError((e) {
           if (mounted) {
-            HollowToast.show(context, 'Download failed: $e',
+            HollowToast.show(context, friendlyError(e, fallback: "Couldn't download the file. Try again."),
                 type: HollowToastType.error);
           }
         });
@@ -2865,6 +2870,9 @@ class _MobileChatHeader extends ConsumerWidget {
   final VoidCallback? onSearchToggle;
   final bool searchOpen;
 
+  /// Scrolls the chat to a message, for a pinned message tapped in the sheet.
+  final void Function(String messageId)? onJumpToMessage;
+
   const _MobileChatHeader({
     this.peerId,
     this.serverId,
@@ -2872,6 +2880,7 @@ class _MobileChatHeader extends ConsumerWidget {
     this.channelName,
     this.onSearchToggle,
     this.searchOpen = false,
+    this.onJumpToMessage,
   });
 
   @override
@@ -3045,106 +3054,17 @@ class _MobileChatHeader extends ConsumerWidget {
     String channelId,
     List<String> pinnedIds,
   ) {
-    final hollow = HollowTheme.of(context);
-    final messages =
-        ref.read(channelChatProvider)['$serverId:$channelId'] ?? [];
-    final profiles = ref.read(profileProvider);
-    final nicknames = ref.read(serverNicknamesProvider(serverId));
-
-    final pinnedMessages = pinnedIds
-        .map((id) => messages.where((m) => m.messageId == id).firstOrNull)
-        .where((m) => m != null)
-        .toList()
-      ..sort((a, b) => b!.timestamp.compareTo(a!.timestamp));
-
-    showHollowSheet(
-      context: context,
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              child: Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: Text(
-                  'Pinned messages',
-                  style: HollowTypography.subheading.copyWith(
-                    color: hollow.textPrimary,
-                  ),
-                ),
-              ),
-            ),
-            if (pinnedMessages.isEmpty)
-              const HollowEmptyState(
-                title: 'Pinned messages are further back than this view',
-              )
-            else
-              Flexible(
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: pinnedMessages.length,
-                  separatorBuilder: (_, _) =>
-                      const HollowDivider(),
-                  itemBuilder: (_, index) {
-                    final msg = pinnedMessages[index]!;
-                    // Collapse device to master so a pinned row shows the
-                    // person.
-                    final pinnedMaster = ref
-                        .read(deviceLinkProvider)
-                        .identityOf(msg.senderId);
-                    final name = serverDisplayNameFor(
-                      profiles,
-                      pinnedMaster,
-                      nickname: nicknames[pinnedMaster] ?? '',
-                    );
-                    final time = _hhmm(msg.timestamp);
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.md,
-                        vertical: HollowSpacing.sm,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Text(
-                                name,
-                                style: HollowTypography.label.copyWith(
-                                  color: msg.isMe
-                                      ? hollow.accentText
-                                      : nameColorFor(pinnedMaster, hollow),
-                                ),
-                              ),
-                              const SizedBox(width: HollowSpacing.sm),
-                              Text(
-                                time,
-                                style: HollowTypography.monoSmall
-                                    .copyWith(color: hollow.textTertiary),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            messagePreviewText(msg.text,
-                                attachment: msg.fileAttachment,
-                                singleLine: false),
-                            style: HollowTypography.bodyTouch
-                                .copyWith(color: hollow.textPrimary),
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-        ),
-      ),
+    showPinnedMessages(
+      context,
+      serverId: serverId,
+      channelId: channelId,
+      pinnedIds: pinnedIds,
+      messages: ref.read(channelChatProvider)['$serverId:$channelId'] ??
+          const [],
+      preview: (msg) => messagePreviewText(msg.text,
+          attachment: msg.fileAttachment, singleLine: false),
+      onJump: (id) => onJumpToMessage?.call(id),
+      touch: true,
     );
   }
 }
@@ -3225,83 +3145,47 @@ class _DmMuteButton extends ConsumerWidget {
 }
 
 /// Starts a DM call and opens the call screen: the one phone path, shared by
-/// the chat header and the Friends tab's sheet.
+/// the chat header and the Friends tab's sheet. The checks are the desktop's
+/// (TURN, the leave-the-room confirm), through [startDmCallFlow].
 Future<void> startMobileDmCall(
     BuildContext context, WidgetRef ref, String peerId,
     {bool withVideo = false}) async {
-  // Starting a DM call disconnects a server voice channel, so it is confirmed
-  // first (issue #49).
-  final vc = ref.read(voiceChannelProvider);
-  if (vc.isInVoiceChannel) {
-    final channelName = vc.currentChannelName ?? 'voice';
-    final confirmed = await showHollowConfirm(
-      context: context,
-      title: 'Start call?',
-      message: 'Starting this call will disconnect you from #$channelName.',
-      confirmLabel: 'Start call',
-    );
-    if (confirmed != true || !context.mounted) return;
-  }
-  if (!await ensureTurnForCall(context, ref)) return;
-  if (!context.mounted) return;
-  try {
-    await ref
-        .read(callProvider.notifier)
-        .startCall(peerId, withVideo: withVideo);
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not start the call',
-          type: HollowToastType.error);
-    }
-    return;
-  }
-  if (!context.mounted) return;
-  openMobileCallScreen(context, peerId);
+  final master = ref.read(deviceLinkProvider).identityOf(peerId);
+  final nav = Navigator.of(context, rootNavigator: true);
+  await startDmCallFlow(context, ref, master, withVideo: withVideo);
+  final call = ref.read(callProvider);
+  if (call.status == CallStatus.idle || call.peerId == null) return;
+  if (ref.read(deviceLinkProvider).identityOf(call.peerId!) != master) return;
+  openMobileDmCall(nav, master);
 }
 
-void openMobileCallScreen(BuildContext context, String peerId) =>
-    Navigator.of(context, rootNavigator: true).push(
-      hollowMobileRoute(
-        settings: const RouteSettings(name: 'call-screen'),
-        transition: HollowRouteTransition.slideUp,
-        builder: (_) => MobileCallScreen(peerId: peerId),
-      ),
-    );
-
+/// Voice and video call. They step aside while a call is up: the call bar
+/// under the header is how you get back to it.
 class _DmCallButtons extends ConsumerWidget {
   final String peerId;
   const _DmCallButtons({required this.peerId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final isOnline = identityIsOnline(ref, peerId);
-    final call = ref.watch(callProvider);
-    final isInCall = call.status != CallStatus.idle;
-    final isCallWithThisPeer = isInCall && call.peerId == peerId;
-    final canCall = isOnline && !isInCall;
-
-    void openCall() => openMobileCallScreen(context, peerId);
-
+    final inCall =
+        ref.watch(callProvider.select((c) => c.status != CallStatus.idle));
+    if (inCall) return const SizedBox.shrink();
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         HollowIconButton(
-          icon: isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
-          label: isCallWithThisPeer ? 'Open call' : 'Voice call',
+          icon: LucideIcons.phone,
+          label: 'Voice call',
           size: 44,
-          color: isCallWithThisPeer ? hollow.success : null,
-          onPressed: canCall
-              ? () => startMobileDmCall(context, ref, peerId)
-              : isCallWithThisPeer
-                  ? openCall
-                  : null,
+          onPressed:
+              isOnline ? () => startMobileDmCall(context, ref, peerId) : null,
         ),
         HollowIconButton(
           icon: LucideIcons.video,
           label: 'Video call',
           size: 44,
-          onPressed: canCall
+          onPressed: isOnline
               ? () => startMobileDmCall(context, ref, peerId, withVideo: true)
               : null,
         ),
@@ -3330,86 +3214,6 @@ class _TypingBar extends ConsumerWidget {
         .toSet()
         .toList();
     return TypingIndicatorHost(names: names, child: child);
-  }
-}
-
-// The green strip shown cross-server while in a voice channel.
-
-class _VoiceChannelStatusStrip extends ConsumerWidget {
-  const _VoiceChannelStatusStrip();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final vcState = ref.watch(voiceChannelProvider);
-    if (!vcState.isInVoiceChannel) return const SizedBox.shrink();
-
-    final hollow = HollowTheme.of(context);
-    final channelName = vcState.currentChannelName ?? 'Voice Channel';
-
-    return GestureDetector(
-      onTap: () {
-        Navigator.of(context).push(
-          hollowMobileRoute(
-            transition: HollowRouteTransition.slideUp,
-            builder: (_) => MobileVoiceChannelRoute(
-              serverId: vcState.currentServerId!,
-              channelId: vcState.currentChannelId!,
-              channelName: channelName,
-            ),
-          ),
-        );
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.sm,
-        ),
-        decoration: BoxDecoration(
-          color: hollow.success.withValues(alpha: 0.1),
-          border: Border(
-            bottom: BorderSide(
-              color: hollow.success.withValues(alpha: 0.3),
-            ),
-          ),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: hollow.success,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                'In voice: #$channelName',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.success,
-                  fontWeight: FontWeight.w500,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Text(
-              'Tap to return',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.success.withValues(alpha: 0.7),
-                fontSize: 11,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Icon(
-              LucideIcons.chevronUp,
-              size: 14,
-              color: hollow.success.withValues(alpha: 0.7),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
 

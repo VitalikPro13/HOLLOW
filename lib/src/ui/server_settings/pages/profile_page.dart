@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -56,7 +57,9 @@ class _ServerProfilePageState extends ConsumerState<ServerProfilePage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => on ? wearing.remove(label.labelId) : wearing.add(label.labelId));
-      HollowToast.show(context, 'Could not change that: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't change that. Try again."),
           type: HollowToastType.error);
     }
   }

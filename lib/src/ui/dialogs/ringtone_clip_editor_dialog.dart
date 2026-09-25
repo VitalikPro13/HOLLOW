@@ -1,16 +1,22 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/rust/api/waveform.dart' as waveform_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_progress_bar.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void showRingtoneClipEditor(BuildContext context, String filePath) {
@@ -23,9 +29,73 @@ void showRingtoneClipEditor(BuildContext context, String filePath) {
 /// Max clip length the ringtone can be trimmed to.
 const double _kMaxClip = 30.0;
 
+/// Decoded once at this resolution; the painter folds buckets into pixel
+/// columns, so any dialog width up to this many pixels shows every peak.
+const int _kWaveformBuckets = 2048;
+
+/// A ringtone file as the trim dialog sees it. [durationSecs] 0 = the file
+/// could not be read at all; null peaks = its length is known but it could
+/// not be decoded for drawing.
+class RingtoneWaveform {
+  final double durationSecs;
+  final Float32List? min;
+  final Float32List? max;
+  final Float32List? rms;
+
+  const RingtoneWaveform({
+    required this.durationSecs,
+    this.min,
+    this.max,
+    this.rms,
+  });
+
+  bool get hasPeaks => min != null && max != null && rms != null;
+}
+
+/// Decodes [path] in Rust for the real duration and peaks. A format the
+/// decoder lacks (Opus in Ogg) falls back to the player's duration with no
+/// waveform, so the file can still be trimmed by time.
+Future<RingtoneWaveform> loadRingtoneWaveform(String path) async {
+  try {
+    final w = await waveform_api.audioWaveform(
+        path: path, buckets: _kWaveformBuckets);
+    if (w.durationSecs > 0) {
+      return RingtoneWaveform(
+        durationSecs: w.durationSecs,
+        min: w.min,
+        max: w.max,
+        rms: w.rms,
+      );
+    }
+  } catch (e) {
+    debugPrint('[ringtone] waveform decode failed: $e');
+  }
+  final probe = AudioPlayer();
+  try {
+    await probe
+        .setSource(DeviceFileSource(path))
+        .timeout(const Duration(seconds: 5));
+    final d = await probe.getDuration();
+    return RingtoneWaveform(durationSecs: (d?.inMilliseconds ?? 0) / 1000.0);
+  } catch (e) {
+    debugPrint('[ringtone] duration probe failed: $e');
+    return const RingtoneWaveform(durationSecs: 0);
+  } finally {
+    unawaited(probe.dispose().catchError((_) {}));
+  }
+}
+
 class RingtoneClipEditorDialog extends ConsumerStatefulWidget {
   final String filePath;
-  const RingtoneClipEditorDialog({super.key, required this.filePath});
+
+  /// Replaced in tests, which have no Rust.
+  final Future<RingtoneWaveform> Function(String path) loadWaveform;
+
+  const RingtoneClipEditorDialog({
+    super.key,
+    required this.filePath,
+    this.loadWaveform = loadRingtoneWaveform,
+  });
 
   @override
   ConsumerState<RingtoneClipEditorDialog> createState() =>
@@ -33,86 +103,128 @@ class RingtoneClipEditorDialog extends ConsumerStatefulWidget {
 }
 
 class _RingtoneClipEditorDialogState
-    extends ConsumerState<RingtoneClipEditorDialog> {
+    extends ConsumerState<RingtoneClipEditorDialog> with HollowDialogAction {
   AudioPlayer? _player;
-  double _totalDuration = 60.0;
+  RingtoneWaveform? _wave;
   double _start = 0.0;
-  double _end = 30.0;
+  double _end = _kMaxClip;
   double _currentPos = 0.0;
   bool _isPlaying = false;
-  bool _loaded = false;
   StreamSubscription? _posSub;
 
-  // A deterministic pseudo-waveform, stable per file: the strip only gives the
-  // selection window visual context, so a real PCM decode is overkill.
-  late final List<double> _bars;
+  double get _total => _wave?.durationSecs ?? 0;
+  bool get _loaded => _wave != null;
+  bool get _readable => _total > 0;
 
   @override
   void initState() {
     super.initState();
-    _bars = _generateBars(widget.filePath, 64);
-    _loadDuration();
+    _load();
   }
 
-  List<double> _generateBars(String seedSource, int count) {
-    final rng = Random(seedSource.hashCode);
-    return List<double>.generate(count, (i) {
-      // A gentle envelope, so it reads as audio rather than noise.
-      final envelope = 0.35 + 0.65 * sin((i / count) * pi);
-      return (0.15 + rng.nextDouble() * 0.85) * envelope;
-    });
-  }
-
-  Future<void> _loadDuration() async {
-    _start = await ref.read(ringtoneStartProvider.future);
-    _end = await ref.read(ringtoneEndProvider.future);
-
-    final cached = await ref.read(ringtoneDurationProvider.future);
-    if (cached > 0) {
-      _totalDuration = cached;
+  Future<void> _load() async {
+    final wave = await widget.loadWaveform(widget.filePath);
+    double start = 0;
+    double end = _kMaxClip;
+    double cached = 0;
+    try {
+      start = await ref.read(ringtoneStartProvider.future);
+      end = await ref.read(ringtoneEndProvider.future);
+      cached = await ref.read(ringtoneDurationProvider.future);
+    } catch (e) {
+      debugPrint('[ringtone] could not read the saved trim: $e');
     }
-
-    if (_end > _totalDuration) _end = _totalDuration;
-    if (_start >= _end) _start = 0;
-    if (_end - _start > _kMaxClip) _end = _start + _kMaxClip;
-
-    if (mounted) setState(() => _loaded = true);
+    if (!mounted) return;
+    final total = wave.durationSecs;
+    if (total > 0) {
+      if (end > total) end = total;
+      if (start >= end) start = 0;
+      if (end - start > _kMaxClip) end = start + _kMaxClip;
+      if ((cached - total).abs() > 0.05) {
+        unawaited(ref
+            .read(ringtoneDurationProvider.notifier)
+            .setDuration(total)
+            .catchError((_) {}));
+      }
+    }
+    setState(() {
+      _wave = wave;
+      _start = start;
+      _end = end;
+    });
   }
 
   @override
   void dispose() {
-    _stopPreview();
+    _posSub?.cancel();
+    final player = _player;
+    _player = null;
+    if (player != null) {
+      unawaited(player.stop().then((_) => player.dispose()).catchError((_) {}));
+    }
     super.dispose();
   }
 
   Future<void> _startPreview() async {
     await _stopPreview();
-    _player = AudioPlayer();
-    final volume = await ref.read(ringtoneVolumeProvider.future);
-    await _player!.setVolume(volume);
-    await _player!.play(DeviceFileSource(widget.filePath));
-    await _player!.seek(Duration(milliseconds: (_start * 1000).round()));
-
-    _posSub = _player!.onPositionChanged.listen((pos) {
-      if (!mounted) return;
-      final posSeconds = pos.inMilliseconds / 1000.0;
-      setState(() => _currentPos = posSeconds);
-      if (posSeconds >= _end || posSeconds < _start - 0.5) {
-        _player?.seek(Duration(milliseconds: (_start * 1000).round()));
+    try {
+      final player = AudioPlayer();
+      _player = player;
+      final volume = await ref.read(ringtoneVolumeProvider.future);
+      await player.setVolume(volume);
+      await player.play(DeviceFileSource(widget.filePath));
+      await player.seek(Duration(milliseconds: (_start * 1000).round()));
+      _posSub = player.onPositionChanged.listen((pos) {
+        if (!mounted) return;
+        final posSeconds = pos.inMilliseconds / 1000.0;
+        setState(() => _currentPos = posSeconds);
+        if (posSeconds >= _end || posSeconds < _start - 0.5) {
+          _player?.seek(Duration(milliseconds: (_start * 1000).round()));
+        }
+      });
+      if (mounted) {
+        setState(() {
+          _isPlaying = true;
+          actionError = null;
+        });
       }
-    });
-
-    setState(() => _isPlaying = true);
+    } catch (e) {
+      await _stopPreview();
+      if (mounted) {
+        setState(() => actionError = friendlyError(e,
+            fallback: "Hollow couldn't play this file. Try another one."));
+      }
+    }
   }
 
   Future<void> _stopPreview() async {
     _posSub?.cancel();
     _posSub = null;
-    await _player?.stop();
-    await _player?.dispose();
+    final player = _player;
     _player = null;
-    if (mounted) setState(() => _isPlaying = false);
+    if (player != null) {
+      try {
+        await player.stop();
+        await player.dispose();
+      } catch (_) {
+        // Already torn down by the platform; nothing is playing either way.
+      }
+    }
+    if (mounted && _isPlaying) setState(() => _isPlaying = false);
   }
+
+  Future<void> _save() async {
+    final ok = await runDialogAction(() async {
+      await ref.read(ringtoneStartProvider.notifier).setStart(_start);
+      await ref.read(ringtoneEndProvider.notifier).setEnd(_end);
+    }, fallback: "Hollow couldn't save the trim. Try again.");
+    if (!ok || !mounted) return;
+    await _stopPreview();
+    if (mounted) Navigator.pop(context);
+  }
+
+  Widget _flexField(bool compact, Widget field) =>
+      compact ? field : Expanded(child: field);
 
   String _formatTime(double seconds) {
     final m = seconds ~/ 60;
@@ -125,8 +237,8 @@ class _RingtoneClipEditorDialogState
   /// maximum.
   void _setStart(double v) {
     setState(() {
-      _start = v.clamp(0.0, _totalDuration);
-      if (_start > _end - 0.1) _start = (_end - 0.1).clamp(0.0, _totalDuration);
+      _start = v.clamp(0.0, _total);
+      if (_start > _end - 0.1) _start = (_end - 0.1).clamp(0.0, _total);
       if (_end - _start > _kMaxClip) _end = _start + _kMaxClip;
     });
   }
@@ -135,8 +247,8 @@ class _RingtoneClipEditorDialogState
   /// maximum.
   void _setEnd(double v) {
     setState(() {
-      _end = v.clamp(0.0, _totalDuration);
-      if (_end < _start + 0.1) _end = (_start + 0.1).clamp(0.0, _totalDuration);
+      _end = v.clamp(0.0, _total);
+      if (_end < _start + 0.1) _end = (_start + 0.1).clamp(0.0, _total);
       if (_end - _start > _kMaxClip) _start = _end - _kMaxClip;
     });
   }
@@ -144,8 +256,8 @@ class _RingtoneClipEditorDialogState
   /// Shifts the whole window by [delta] seconds, preserving its length.
   void _nudgeWindow(double delta) {
     final len = _end - _start;
-    var newStart = (_start + delta).clamp(0.0, _totalDuration - len);
-    if (newStart < 0) newStart = 0;
+    final newStart =
+        (_start + delta).clamp(0.0, math.max(0.0, _total - len)).toDouble();
     setState(() {
       _start = newStart;
       _end = newStart + len;
@@ -156,142 +268,150 @@ class _RingtoneClipEditorDialogState
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final fileName = widget.filePath.split(RegExp(r'[\\/]')).last;
-    final clipDuration = (_end - _start).clamp(0.1, _kMaxClip);
 
+    if (_loaded && !_readable) {
+      return const HollowDialog(
+        title: 'Trim ringtone',
+        showClose: true,
+        content: HollowDialogText(
+          "Hollow can't read this file, so there's nothing to trim. Choose "
+          'another ringtone with Change.',
+        ),
+      );
+    }
+
+    final compact = HollowDialogSurface.isCompact(context);
+    final iconSize = compact ? 44.0 : 32.0;
+    const tabular = [FontFeature.tabularFigures()];
     return HollowDialog(
       title: 'Trim ringtone',
+      width: 520,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            '$fileName  ${_loaded ? _formatTime(_totalDuration) : ''}',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          if (!_loaded)
-            Padding(
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              child: Center(
+          Row(
+            children: [
+              Expanded(
                 child: Text(
-                  'Loading...',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                  ),
+                  fileName,
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
+              if (_loaded) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  _formatTime(_total),
+                  style: HollowTypography.monoSmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          if (!_loaded)
+            const SizedBox(
+              height: _WaveformSelectorState.height,
+              child: Center(child: HollowSpinner.medium()),
             )
           else ...[
-            Text(
-              'Drag the highlighted region (max ${_kMaxClip.toInt()}s)',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
             _WaveformSelector(
-              bars: _bars,
-              total: _totalDuration,
+              wave: _wave!,
               start: _start,
               end: _end,
               playhead: _isPlaying ? _currentPos : null,
-              accent: hollow.accent,
-              barColor: hollow.border,
               onStart: _setStart,
               onEnd: _setEnd,
               onWindow: (s) => _nudgeWindow(s - _start),
             ),
-            const SizedBox(height: HollowSpacing.md),
+            const SizedBox(height: HollowSpacing.sm),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: _NudgeField(
-                    label: 'Start',
-                    value: _formatTime(_start),
-                    onMinus: () => _setStart(_start - 0.5),
-                    onPlus: () => _setStart(_start + 0.5),
-                    hollow: hollow,
+                  child: Text(
+                    _wave!.hasPeaks
+                        ? 'Drag an edge to trim, or the middle to move the '
+                            'selection.'
+                        : "Hollow can't draw a waveform for this file. Trim "
+                            'it with the times below.',
+                    style: HollowTypography.caption
+                        .copyWith(color: hollow.textSecondary),
                   ),
                 ),
                 const SizedBox(width: HollowSpacing.sm),
-                Column(
-                  children: [
-                    Text(
-                      '${clipDuration.toStringAsFixed(1)}s',
-                      style: HollowTypography.label.copyWith(
-                        color: hollow.textPrimary,
-                        fontFeatures: const [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                    Text(
-                      'clip',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: _NudgeField(
-                    label: 'End',
-                    value: _formatTime(_end),
-                    onMinus: () => _setEnd(_end - 0.5),
-                    onPlus: () => _setEnd(_end + 0.5),
-                    hollow: hollow,
+                Text(
+                  '${(_end - _start).clamp(0.0, _kMaxClip).toStringAsFixed(1)}'
+                  ' s selected (${_kMaxClip.toInt()} s max)',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontFeatures: tabular,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: HollowSpacing.sm),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            const SizedBox(height: HollowSpacing.lg),
+            // Side by side, two touch-size fields leave the time too little
+            // room on a phone.
+            Flex(
+              direction: compact ? Axis.vertical : Axis.horizontal,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Move window',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                    )),
-                const SizedBox(width: HollowSpacing.sm),
-                _StepButton(
-                    icon: LucideIcons.chevronsLeft,
-                    onTap: () => _nudgeWindow(-5),
-                    label: 'Move window left 5 seconds',
-                    hollow: hollow),
-                _StepButton(
-                    icon: LucideIcons.chevronLeft,
-                    onTap: () => _nudgeWindow(-1),
-                    label: 'Move window left 1 second',
-                    hollow: hollow),
-                _StepButton(
-                    icon: LucideIcons.chevronRight,
-                    onTap: () => _nudgeWindow(1),
-                    label: 'Move window right 1 second',
-                    hollow: hollow),
-                _StepButton(
-                    icon: LucideIcons.chevronsRight,
-                    onTap: () => _nudgeWindow(5),
-                    label: 'Move window right 5 seconds',
-                    hollow: hollow),
+                _flexField(
+                  compact,
+                  _NudgeField(
+                    label: 'Start',
+                    value: _formatTime(_start),
+                    iconSize: iconSize,
+                    earlierLabel: 'Start half a second earlier',
+                    laterLabel: 'Start half a second later',
+                    onMinus: () => _setStart(_start - 0.5),
+                    onPlus: () => _setStart(_start + 0.5),
+                  ),
+                ),
+                const SizedBox(
+                    width: HollowSpacing.md, height: HollowSpacing.md),
+                _flexField(
+                  compact,
+                  _NudgeField(
+                    label: 'End',
+                    value: _formatTime(_end),
+                    iconSize: iconSize,
+                    earlierLabel: 'End half a second earlier',
+                    laterLabel: 'End half a second later',
+                    onMinus: () => _setEnd(_end - 0.5),
+                    onPlus: () => _setEnd(_end + 0.5),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            const SettingsFieldLabel(label: 'Move the selection'),
+            const SizedBox(height: HollowSpacing.xs),
+            Row(
+              children: [
+                for (var i = 0; i < _kMoves.length; i++) ...[
+                  if (i > 0) const SizedBox(width: HollowSpacing.xs),
+                  HollowIconButton(
+                    icon: _kMoves[i].$1,
+                    label: _kMoves[i].$3,
+                    size: iconSize,
+                    onPressed: () => _nudgeWindow(_kMoves[i].$2),
+                  ),
+                ],
               ],
             ),
             if (_isPlaying) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              SizedBox(
-                height: 3,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(2),
-                  child: LinearProgressIndicator(
-                    value: _end > _start
-                        ? ((_currentPos - _start) / (_end - _start))
-                            .clamp(0.0, 1.0)
-                        : 0,
-                    backgroundColor: hollow.border,
-                    valueColor: AlwaysStoppedAnimation<Color>(hollow.accent),
-                  ),
-                ),
+              const SizedBox(height: HollowSpacing.md),
+              HollowProgressBar(
+                value: _end > _start
+                    ? (_currentPos - _start) / (_end - _start)
+                    : 0,
+                semanticLabel: 'Preview position',
               ),
             ],
           ],
@@ -300,7 +420,9 @@ class _RingtoneClipEditorDialogState
       leadingActions: [
         if (_loaded)
           HollowButton.ghost(
-            onPressed: _isPlaying ? _stopPreview : _startPreview,
+            onPressed: actionRunning
+                ? null
+                : (_isPlaying ? _stopPreview : _startPreview),
             icon: Icon(
               _isPlaying ? LucideIcons.square : LucideIcons.play,
               size: 14,
@@ -309,77 +431,78 @@ class _RingtoneClipEditorDialogState
           ),
       ],
       actions: [
-        if (_loaded) ...[
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () {
-              ref.read(ringtoneStartProvider.notifier).setStart(_start);
-              ref.read(ringtoneEndProvider.notifier).setEnd(_end);
-              _stopPreview();
-              Navigator.pop(context);
-            },
-            child: const Text('Save'),
-          ),
-        ],
+        HollowButton.ghost(
+          onPressed: actionRunning ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _loaded ? _save : null,
+          loading: actionRunning,
+          child: const Text('Save'),
+        ),
       ],
     );
   }
 }
 
-/// A label and value box flanked by nudge buttons.
+const _kMoves = <(IconData, double, String)>[
+  (LucideIcons.chevronsLeft, -5.0, 'Move 5 seconds earlier'),
+  (LucideIcons.chevronLeft, -1.0, 'Move 1 second earlier'),
+  (LucideIcons.chevronRight, 1.0, 'Move 1 second later'),
+  (LucideIcons.chevronsRight, 5.0, 'Move 5 seconds later'),
+];
+
+/// A field label over a time flanked by nudge buttons.
 class _NudgeField extends StatelessWidget {
   final String label;
   final String value;
+  final double iconSize;
+  final String earlierLabel;
+  final String laterLabel;
   final VoidCallback onMinus;
   final VoidCallback onPlus;
-  final HollowTheme hollow;
 
   const _NudgeField({
     required this.label,
     required this.value,
+    required this.iconSize,
+    required this.earlierLabel,
+    required this.laterLabel,
     required this.onMinus,
     required this.onPlus,
-    required this.hollow,
   });
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            )),
-        const SizedBox(height: 2),
+        SettingsFieldLabel(label: label),
+        const SizedBox(height: HollowSpacing.xs),
         Row(
           children: [
-            _StepButton(
-                icon: LucideIcons.minus,
-                onTap: onMinus,
-                label: 'Decrease $label',
-                hollow: hollow),
+            HollowIconButton(
+              icon: LucideIcons.minus,
+              label: earlierLabel,
+              size: iconSize,
+              onPressed: onMinus,
+            ),
             Expanded(
-              child: Container(
-                alignment: Alignment.center,
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Text(
-                  value,
-                  style: HollowTypography.bodySmall.copyWith(
-                    color: hollow.textPrimary,
-                    fontFeatures: [const FontFeature.tabularFigures()],
-                  ),
+              child: Text(
+                value,
+                textAlign: TextAlign.center,
+                style: HollowTypography.mono.copyWith(
+                  color: hollow.textPrimary,
                 ),
               ),
             ),
-            _StepButton(
-                icon: LucideIcons.plus,
-                onTap: onPlus,
-                label: 'Increase $label',
-                hollow: hollow),
+            HollowIconButton(
+              icon: LucideIcons.plus,
+              label: laterLabel,
+              size: iconSize,
+              onPressed: onPlus,
+            ),
           ],
         ),
       ],
@@ -387,53 +510,22 @@ class _NudgeField extends StatelessWidget {
   }
 }
 
-class _StepButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-  final HollowTheme hollow;
-  final String? label;
-
-  const _StepButton({
-    required this.icon,
-    required this.onTap,
-    required this.hollow,
-    this.label,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(6),
-      semanticLabel: label,
-      child: Icon(icon, size: 16, color: hollow.textSecondary),
-    );
-  }
-}
-
 /// Waveform strip with a draggable selection window: near an edge the drag
 /// moves that handle, in the middle it pans the window.
 class _WaveformSelector extends StatefulWidget {
-  final List<double> bars;
-  final double total;
+  final RingtoneWaveform wave;
   final double start;
   final double end;
   final double? playhead;
-  final Color accent;
-  final Color barColor;
   final ValueChanged<double> onStart;
   final ValueChanged<double> onEnd;
   final ValueChanged<double> onWindow;
 
   const _WaveformSelector({
-    required this.bars,
-    required this.total,
+    required this.wave,
     required this.start,
     required this.end,
     required this.playhead,
-    required this.accent,
-    required this.barColor,
     required this.onStart,
     required this.onEnd,
     required this.onWindow,
@@ -444,19 +536,22 @@ class _WaveformSelector extends StatefulWidget {
 }
 
 class _WaveformSelectorState extends State<_WaveformSelector> {
-  static const double _height = 64;
+  static const double height = 80;
   // Which part of the window the active drag grabbed.
   int _drag = 0; // -1 start, 1 end, 2 window pan, 0 none
+  double _panAnchor = 0;
+
+  double get _total => widget.wave.durationSecs;
 
   double _xToSeconds(double dx, double width) {
-    if (width <= 0 || widget.total <= 0) return 0;
-    return (dx / width * widget.total).clamp(0.0, widget.total);
+    if (width <= 0 || _total <= 0) return 0;
+    return (dx / width * _total).clamp(0.0, _total);
   }
 
   void _onDown(Offset local, double width) {
     final t = _xToSeconds(local.dx, width);
-    final startX = widget.start / widget.total * width;
-    final endX = widget.end / widget.total * width;
+    final startX = widget.start / _total * width;
+    final endX = widget.end / _total * width;
     const edge = 18.0;
     if ((local.dx - startX).abs() < edge) {
       _drag = -1;
@@ -475,25 +570,21 @@ class _WaveformSelectorState extends State<_WaveformSelector> {
     }
   }
 
-  double _panAnchor = 0;
-
   void _onMove(Offset local, double width) {
     final t = _xToSeconds(local.dx, width);
     switch (_drag) {
       case -1:
         widget.onStart(t);
-        break;
       case 1:
         widget.onEnd(t);
-        break;
       case 2:
-        widget.onWindow((t - _panAnchor).clamp(0.0, widget.total));
-        break;
+        widget.onWindow((t - _panAnchor).clamp(0.0, _total));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
@@ -502,102 +593,163 @@ class _WaveformSelectorState extends State<_WaveformSelector> {
         // out of the semantics tree rather than being an unusable node.
         return ExcludeSemantics(
           child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onHorizontalDragStart: (d) => _onDown(d.localPosition, width),
-          onHorizontalDragUpdate: (d) => _onMove(d.localPosition, width),
-          onHorizontalDragEnd: (_) => _drag = 0,
-          onTapDown: (d) {
-            _onDown(d.localPosition, width);
-            _drag = 0;
-          },
-          child: SizedBox(
-            height: _height,
-            width: double.infinity,
-            child: CustomPaint(
-              painter: _WaveformPainter(
-                bars: widget.bars,
-                total: widget.total,
-                start: widget.start,
-                end: widget.end,
-                playhead: widget.playhead,
-                accent: widget.accent,
-                barColor: widget.barColor,
+            behavior: HitTestBehavior.opaque,
+            onHorizontalDragStart: (d) => _onDown(d.localPosition, width),
+            onHorizontalDragUpdate: (d) => _onMove(d.localPosition, width),
+            onHorizontalDragEnd: (_) => _drag = 0,
+            onTapDown: (d) {
+              _onDown(d.localPosition, width);
+              _drag = 0;
+            },
+            child: SizedBox(
+              height: height,
+              width: double.infinity,
+              child: CustomPaint(
+                painter: RingtoneWaveformPainter(
+                  wave: widget.wave,
+                  start: widget.start,
+                  end: widget.end,
+                  playhead: widget.playhead,
+                  accent: hollow.accent,
+                  muted: hollow.textTertiary,
+                  playheadColor: hollow.textPrimary,
+                ),
               ),
             ),
           ),
-        ),
         );
       },
     );
   }
 }
 
-class _WaveformPainter extends CustomPainter {
-  final List<double> bars;
-  final double total;
+/// Draws the peak envelope (min to max per pixel column) with the RMS body
+/// inside it, so drops and peaks read at a glance; the selection is accent.
+class RingtoneWaveformPainter extends CustomPainter {
+  final RingtoneWaveform wave;
   final double start;
   final double end;
   final double? playhead;
   final Color accent;
-  final Color barColor;
+  final Color muted;
+  final Color playheadColor;
 
-  _WaveformPainter({
-    required this.bars,
-    required this.total,
+  RingtoneWaveformPainter({
+    required this.wave,
     required this.start,
     required this.end,
     required this.playhead,
     required this.accent,
-    required this.barColor,
+    required this.muted,
+    required this.playheadColor,
   });
+
+  /// Envelope and RMS outlines, one vertex pair per pixel column.
+  (Path, Path) _paths(Size size) {
+    final peak = Path();
+    final body = Path();
+    final mid = size.height / 2;
+    final half = size.height / 2 - 1;
+    final cols = math.max(1, size.width.ceil());
+    final n = wave.max!.length;
+    final tops = List<double>.filled(cols, 0);
+    final bottoms = List<double>.filled(cols, 0);
+    final rmsH = List<double>.filled(cols, 0);
+    for (var c = 0; c < cols; c++) {
+      final from = (c * n / cols).floor();
+      final to = math.max(from + 1, ((c + 1) * n / cols).floor()).clamp(1, n);
+      var lo = 0.0;
+      var hi = 0.0;
+      var sq = 0.0;
+      for (var i = from; i < to; i++) {
+        lo = math.min(lo, wave.min![i]);
+        hi = math.max(hi, wave.max![i]);
+        sq += wave.rms![i] * wave.rms![i];
+      }
+      final r = math.sqrt(sq / (to - from));
+      // Half a pixel either side keeps silence a visible hairline.
+      tops[c] = math.min(mid - hi * half, mid - 0.5);
+      bottoms[c] = math.max(mid - lo * half, mid + 0.5);
+      rmsH[c] = math.max(r * half, 0.5);
+    }
+    double x(int c) => c + 0.5;
+    peak.moveTo(0, tops[0]);
+    body.moveTo(0, mid - rmsH[0]);
+    for (var c = 0; c < cols; c++) {
+      peak.lineTo(x(c), tops[c]);
+      body.lineTo(x(c), mid - rmsH[c]);
+    }
+    peak.lineTo(size.width, tops[cols - 1]);
+    peak.lineTo(size.width, bottoms[cols - 1]);
+    body.lineTo(size.width, mid - rmsH[cols - 1]);
+    body.lineTo(size.width, mid + rmsH[cols - 1]);
+    for (var c = cols - 1; c >= 0; c--) {
+      peak.lineTo(x(c), bottoms[c]);
+      body.lineTo(x(c), mid + rmsH[c]);
+    }
+    peak.lineTo(0, bottoms[0]);
+    body.lineTo(0, mid + rmsH[0]);
+    peak.close();
+    body.close();
+    return (peak, body);
+  }
+
+  void _drawSound(Canvas canvas, Size size, Path? peak, Path? body, Color c) {
+    if (peak == null || body == null) {
+      final mid = size.height / 2;
+      canvas.drawRect(
+          Rect.fromLTRB(0, mid - 0.5, size.width, mid + 0.5), Paint()..color = c);
+      return;
+    }
+    canvas.drawPath(peak, Paint()..color = c.withValues(alpha: 0.45));
+    canvas.drawPath(body, Paint()..color = c);
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (total <= 0) return;
+    final total = wave.durationSecs;
+    if (total <= 0 || size.width <= 0) return;
     final startX = (start / total) * size.width;
     final endX = (end / total) * size.width;
+    final window = Rect.fromLTRB(startX, 0, endX, size.height);
 
-    final mid = size.height / 2;
-    final barW = size.width / bars.length;
-    final inPaint = Paint()..color = accent;
-    final outPaint = Paint()..color = barColor;
+    final paths = wave.hasPeaks && wave.max!.isNotEmpty ? _paths(size) : null;
+    _drawSound(canvas, size, paths?.$1, paths?.$2, muted);
 
-    for (var i = 0; i < bars.length; i++) {
-      final x = i * barW;
-      final h = bars[i] * (size.height * 0.9);
-      final inWindow = (x + barW / 2) >= startX && (x + barW / 2) <= endX;
-      final r = RRect.fromRectAndRadius(
-        Rect.fromLTWH(x + barW * 0.2, mid - h / 2, barW * 0.6, h),
-        const Radius.circular(1.5),
-      );
-      canvas.drawRRect(r, inWindow ? inPaint : outPaint);
-    }
-
-    final winPaint = Paint()
-      ..color = accent.withValues(alpha: 0.12)
-      ..style = PaintingStyle.fill;
-    canvas.drawRect(Rect.fromLTRB(startX, 0, endX, size.height), winPaint);
+    canvas.drawRect(window, Paint()..color = accent.withValues(alpha: 0.12));
+    canvas.save();
+    canvas.clipRect(window);
+    _drawSound(canvas, size, paths?.$1, paths?.$2, accent);
+    canvas.restore();
 
     final handlePaint = Paint()
       ..color = accent
       ..strokeWidth = 2.5
       ..strokeCap = StrokeCap.round;
-    canvas.drawLine(Offset(startX, 4), Offset(startX, size.height - 4), handlePaint);
+    canvas.drawLine(
+        Offset(startX, 4), Offset(startX, size.height - 4), handlePaint);
     canvas.drawLine(Offset(endX, 4), Offset(endX, size.height - 4), handlePaint);
 
-    if (playhead != null) {
-      final px = (playhead!.clamp(0.0, total) / total) * size.width;
-      final pPaint = Paint()
-        ..color = Colors.white.withValues(alpha: 0.8)
-        ..strokeWidth = 1.5;
-      canvas.drawLine(Offset(px, 0), Offset(px, size.height), pPaint);
+    final head = playhead;
+    if (head != null) {
+      final px = (head.clamp(0.0, total) / total) * size.width;
+      canvas.drawLine(
+        Offset(px, 0),
+        Offset(px, size.height),
+        Paint()
+          ..color = playheadColor
+          ..strokeWidth = 1.5,
+      );
     }
   }
 
   @override
-  bool shouldRepaint(_WaveformPainter old) =>
+  bool shouldRepaint(RingtoneWaveformPainter old) =>
       old.start != start ||
       old.end != end ||
       old.playhead != playhead ||
-      old.total != total;
+      !identical(old.wave, wave) ||
+      old.accent != accent ||
+      old.muted != muted ||
+      old.playheadColor != playheadColor;
 }

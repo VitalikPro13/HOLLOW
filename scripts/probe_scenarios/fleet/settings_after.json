@@ -41,6 +41,12 @@
   },
   {
    "peer": "b",
+   "op": "tap",
+   "target": "type:HollowChip>text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
    "op": "shot",
    "name": "f-add"
   },
@@ -114,7 +120,7 @@
    "peer": "a",
    "op": "tap",
    "target": "type:_FriendsManager > text:Friends",
-   "index": 1
+   "index": 0
   },
   {
    "peer": "a",

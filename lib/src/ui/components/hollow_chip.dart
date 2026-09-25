@@ -3,6 +3,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 
@@ -29,6 +30,10 @@ class HollowChip extends StatelessWidget {
   /// apart ("light, instant" beside an engine name).
   final String? hint;
 
+  /// Something waiting on the person behind this chip (requests to answer),
+  /// as a [HollowCountBadge] after the label. A plain total is [hint].
+  final int? count;
+
   /// What a tap does beyond selecting: a chevron for a chip that opens a menu,
   /// an arrow for one that leaves the app.
   final IconData? trailingIcon;
@@ -46,6 +51,9 @@ class HollowChip extends StatelessWidget {
   /// wrong announcement.
   final String? semanticLabel;
 
+  /// For a group that moves focus itself, as [HollowChipTabs] does.
+  final FocusNode? focusNode;
+
   const HollowChip({
     super.key,
     required this.label,
@@ -54,10 +62,12 @@ class HollowChip extends StatelessWidget {
     this.icon,
     this.leading,
     this.hint,
+    this.count,
     this.trailingIcon,
     this.onRemove,
     this.expand = false,
     this.semanticLabel,
+    this.focusNode,
   });
 
   @override
@@ -86,6 +96,7 @@ class HollowChip extends StatelessWidget {
         vertical: HollowSpacing.xs,
       ),
       semanticLabel: semanticLabel,
+      focusNode: focusNode,
       child: Row(
         mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
         mainAxisAlignment:
@@ -113,6 +124,13 @@ class HollowChip extends StatelessWidget {
               style: HollowTypography.caption
                   .copyWith(color: hollow.textTertiary),
               maxLines: 1,
+            ),
+          ],
+          if (count != null && count! > 0) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            Semantics(
+              label: '$count waiting',
+              child: ExcludeSemantics(child: HollowCountBadge(count: count!)),
             ),
           ],
           if (trailingIcon != null) ...[

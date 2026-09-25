@@ -130,9 +130,14 @@ class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          const HollowSheetTitle('Show messages from'),
           Padding(
-            padding: const EdgeInsets.all(HollowSpacing.md),
+            padding: const EdgeInsets.only(
+                left: HollowSpacing.lg,
+                right: HollowSpacing.lg,
+                bottom: HollowSpacing.sm),
             child: HollowTextField(
               hintText: 'Search people',
               isDense: true,
@@ -146,6 +151,7 @@ class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
             leading:
                 Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
             trailing: widget.selectedSender == null ? check : null,
+            touch: true,
             onTap: () => _pick(null),
           ),
           const HollowDivider(),
@@ -154,7 +160,10 @@ class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
               maxHeight: MediaQuery.of(context).size.height * 0.4,
             ),
             child: shown.isEmpty
-                ? const HollowEmptyState(dense: true, title: 'No matches')
+                ? const Padding(
+                    padding: EdgeInsets.all(HollowSpacing.lg),
+                    child: HollowEmptyState(dense: true, title: 'No matches'),
+                  )
                 : ListView.builder(
                     padding:
                         const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
@@ -167,6 +176,7 @@ class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
                         leading: HollowAvatar(peerId: id, size: 28),
                         trailing:
                             widget.selectedSender == id ? check : null,
+                        touch: true,
                         onTap: () => _pick(id),
                       );
                     },

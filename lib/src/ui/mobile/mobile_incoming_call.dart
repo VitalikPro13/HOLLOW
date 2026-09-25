@@ -1,25 +1,32 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
-import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/call/call_ringtone.dart';
+import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
-import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Full-screen incoming call overlay for mobile, with a 30s countdown ring.
+/// The phone's incoming call: the whole screen, the caller large in their
+/// colour, a red Decline and a teal Accept. Accept opens the call screen.
+///
+/// Mounted above the app's navigator (`app.dart`), so it reaches the call
+/// screen through [hollowNavigatorKey].
 class MobileIncomingCallOverlay extends ConsumerStatefulWidget {
-  const MobileIncomingCallOverlay({super.key});
+  /// Where Accept opens the call; the app's navigator unless a test says.
+  final GlobalKey<NavigatorState>? navigatorKey;
+
+  const MobileIncomingCallOverlay({super.key, this.navigatorKey});
 
   @override
   ConsumerState<MobileIncomingCallOverlay> createState() =>
@@ -29,238 +36,173 @@ class MobileIncomingCallOverlay extends ConsumerStatefulWidget {
 class _MobileIncomingCallOverlayState
     extends ConsumerState<MobileIncomingCallOverlay>
     with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _fadeAnim;
-
+  late final AnimationController _controller =
+      AnimationController(vsync: this);
+  late final Animation<double> _fade = CurvedAnimation(
+      parent: _controller,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit);
+  final _ringtone = CallRingtone();
   bool _wasVisible = false;
-  AudioPlayer? _ringtonePlayer;
-  Timer? _countdownTimer;
-  int _secondsLeft = 30;
 
-  String _cachedPeerId = '';
-  String _cachedDisplayName = '';
-  bool _cachedIsVideoCall = false;
-  String? _cachedVcChannelName;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(vsync: this);
-    _fadeAnim = CurvedAnimation(parent: _controller, curve: HollowCurves.enter);
-  }
+  // Cached so the screen does not go blank during its exit.
+  String _master = '';
+  String _name = '';
+  bool _video = false;
+  String? _leavesRoom;
 
   @override
   void dispose() {
-    _stopRingtone();
-    _stopCountdown();
+    _ringtone.stop();
     _controller.dispose();
     super.dispose();
   }
 
-  void _startCountdown() {
-    _secondsLeft = 30;
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _secondsLeft = (_secondsLeft - 1).clamp(0, 30);
-      });
-    });
-  }
-
-  void _stopCountdown() {
-    _countdownTimer?.cancel();
-    _countdownTimer = null;
-  }
-
-  Future<void> _startRingtone() async {
-    final ringtonePath = await ref.read(ringtonePathProvider.future);
-    if (ringtonePath == null || ringtonePath.isEmpty) return;
-    if (!File(ringtonePath).existsSync()) return;
-
-    final volume = await ref.read(ringtoneVolumeProvider.future);
-    final startSec = await ref.read(ringtoneStartProvider.future);
-    final endSec = await ref.read(ringtoneEndProvider.future);
-    final clipDuration = endSec - startSec;
-    if (clipDuration <= 0) return;
-
-    _ringtonePlayer = AudioPlayer();
-    await _ringtonePlayer!.setVolume(volume);
-    await _ringtonePlayer!.play(DeviceFileSource(ringtonePath));
-    await _ringtonePlayer!
-        .seek(Duration(milliseconds: (startSec * 1000).round()));
-
-    _ringtonePlayer!.onPositionChanged.listen((pos) {
-      final posSeconds = pos.inMilliseconds / 1000.0;
-      if (posSeconds >= endSec || posSeconds < startSec - 0.5) {
-        _ringtonePlayer
-            ?.seek(Duration(milliseconds: (startSec * 1000).round()));
+  void _accept() {
+    final master = _master;
+    ref.read(callProvider.notifier).acceptCall().catchError((Object _) {
+      if (mounted) {
+        HollowToast.show(context, "Couldn't answer the call",
+            type: HollowToastType.error);
       }
     });
+    final nav = (widget.navigatorKey ?? hollowNavigatorKey).currentState;
+    if (nav != null && master.isNotEmpty) openMobileDmCall(nav, master);
   }
 
-  Future<void> _stopRingtone() async {
-    await _ringtonePlayer?.stop();
-    await _ringtonePlayer?.dispose();
-    _ringtonePlayer = null;
+  void _decline() {
+    ref.read(callProvider.notifier).rejectCall().catchError((Object _) {});
   }
 
   @override
   Widget build(BuildContext context) {
     final call = ref.watch(callProvider);
-    final isVisible = call.status == CallStatus.ringing &&
+    final visible = call.status == CallStatus.ringing &&
         call.direction == CallDirection.incoming;
 
-    if (isVisible) {
-      _cachedPeerId = call.peerId ?? '';
-      final callerProfile =
-          ref.watch(profileProvider.select((p) => p[_cachedPeerId]));
-      _cachedDisplayName =
-          displayNameForPeer(callerProfile, _cachedPeerId);
-      _cachedIsVideoCall = call.isVideoCall;
-      // Accepting auto-leaves a voice channel, so it is worth a warning
-      // (issue #49).
+    if (visible) {
+      // The invite carries the caller's DEVICE; names and colours are the
+      // person's.
+      _master = ref.watch(deviceLinkProvider).identityOf(call.peerId ?? '');
+      _name = dmCallPeerName(ref, _master);
+      _video = call.isVideoCall;
+      // Answering leaves the voice room (issue #49), so it says so.
       final vc = ref.watch(voiceChannelProvider);
-      _cachedVcChannelName =
+      _leavesRoom =
           vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
     }
 
-    // Durations read per start, so a live Reduce motion change applies.
-    _controller
-      ..duration = HollowDurations.normal
-      ..reverseDuration = HollowDurations.fast;
-    if (isVisible && !_wasVisible) {
+    if (visible && !_wasVisible) {
+      _controller.duration = HollowDurations.normal;
       _controller.forward(from: 0);
-      _startRingtone();
-      _startCountdown();
-    } else if (!isVisible && _wasVisible) {
+      _ringtone.start(ref, stillRinging: () => mounted && _wasVisible);
+    } else if (!visible && _wasVisible) {
+      _controller.reverseDuration = HollowDurations.fast;
       _controller.reverse();
-      _stopRingtone();
-      _stopCountdown();
+      _ringtone.stop();
     }
-    _wasVisible = isVisible;
+    _wasVisible = visible;
 
-    if (!isVisible && !_controller.isAnimating) {
-      return const SizedBox.shrink();
-    }
+    if (!visible && !_controller.isAnimating) return const SizedBox.shrink();
 
     final hollow = HollowTheme.of(context);
-
+    final kind = _video ? 'Video call' : 'Voice call';
     return Positioned.fill(
       child: FadeTransition(
-        opacity: _fadeAnim,
-        child: Container(
-          color: hollow.background.withValues(alpha: 0.95),
-          child: SafeArea(
-            child: Column(
-              children: [
-                const Spacer(flex: 2),
-                HollowAvatar(peerId: _cachedPeerId, size: 96),
-                const SizedBox(height: HollowSpacing.lg),
-                Text(
-                  _cachedDisplayName,
-                  style: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 22,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: HollowSpacing.sm),
-                Text(
-                  _cachedIsVideoCall
-                      ? 'Incoming video call...'
-                      : 'Incoming voice call...',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textSecondary,
-                  ),
-                ),
-                if (_cachedVcChannelName != null) ...[
-                  const SizedBox(height: HollowSpacing.xs),
-                  Text(
-                    'Answering will leave #$_cachedVcChannelName',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.warning,
-                    ),
-                    textAlign: TextAlign.center,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-                const SizedBox(height: HollowSpacing.lg),
-                SizedBox(
-                  width: 52,
-                  height: 52,
-                  child: Stack(
-                    alignment: Alignment.center,
+        opacity: _fade,
+        child: IgnorePointer(
+          ignoring: !visible,
+          // Above the navigator, outside any Scaffold: it brings its own
+          // canvas and text defaults.
+          child: ColoredBox(
+            color: hollow.background,
+            child: DefaultTextStyle(
+              style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+              child: SafeArea(
+                child: Semantics(
+                  container: true,
+                  liveRegion: true,
+                  label: '$kind from $_name',
+                  child: Column(
                     children: [
-                      SizedBox(
-                        width: 52,
-                        height: 52,
-                        child: CircularProgressIndicator( // design-ignore: countdown dial with the seconds inside, not a spinner
-                          value: _secondsLeft / 30.0,
-                          strokeWidth: 3,
-                          backgroundColor:
-                              hollow.border.withValues(alpha: 0.3),
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            _secondsLeft <= 5
-                                ? hollow.error
-                                : hollow.textSecondary,
+                      Expanded(
+                        child: Center(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: HollowSpacing.xl),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // Their frame stays: a ring has no speaking
+                                // cue to be mistaken for.
+                                HollowAvatar(
+                                  peerId: _master,
+                                  size: MobileCallMetrics.incomingAvatar,
+                                ),
+                                const SizedBox(height: HollowSpacing.lg),
+                                Text(
+                                  _name,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.center,
+                                  style: HollowTypography.display.copyWith(
+                                      color: nameColorFor(_master, hollow)),
+                                ),
+                                const SizedBox(height: HollowSpacing.xs),
+                                Text(
+                                  kind,
+                                  style: HollowTypography.bodyTouch
+                                      .copyWith(color: hollow.textSecondary),
+                                ),
+                                if (_leavesRoom != null) ...[
+                                  const SizedBox(height: HollowSpacing.sm),
+                                  Text(
+                                    'Answering will leave #$_leavesRoom',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                    style: HollowTypography.bodySmall
+                                        .copyWith(color: hollow.warning),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                      Text(
-                        '$_secondsLeft',
-                        style: HollowTypography.body.copyWith(
-                          color: _secondsLeft <= 5
-                              ? hollow.error
-                              : hollow.textSecondary,
-                          fontWeight: FontWeight.w600,
-                          fontFeatures: [const FontFeature.tabularFigures()],
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          HollowSpacing.xxl,
+                          0,
+                          HollowSpacing.xxl,
+                          HollowSpacing.xxl * 2,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _AnswerButton(
+                              icon: LucideIcons.phoneOff,
+                              label: 'Decline',
+                              fill: hollow.error,
+                              ink: hollow.textOnError,
+                              onTap: _decline,
+                            ),
+                            _AnswerButton(
+                              icon: _video
+                                  ? LucideIcons.video
+                                  : LucideIcons.phone,
+                              label: 'Accept',
+                              fill: hollow.accent,
+                              ink: hollow.textOnAccent,
+                              onTap: _accept,
+                            ),
+                          ],
                         ),
                       ),
                     ],
                   ),
                 ),
-                const Spacer(flex: 3),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.xl * 2),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _CallActionButton(
-                        icon: LucideIcons.phoneOff,
-                        color: hollow.error,
-                        label: 'Decline',
-                        onTap: () =>
-                            ref.read(callProvider.notifier).rejectCall(),
-                      ),
-                      _CallActionButton(
-                        icon: _cachedIsVideoCall
-                            ? LucideIcons.video
-                            : LucideIcons.phone,
-                        color: hollow.success,
-                        label: 'Accept',
-                        onTap: () {
-                          ref.read(callProvider.notifier).acceptCall();
-                          final peerId = _cachedPeerId;
-                          if (peerId.isNotEmpty) {
-                            Navigator.of(context, rootNavigator: true).push(
-                              hollowMobileRoute(
-                                settings:
-                                    const RouteSettings(name: 'call-screen'),
-                                transition: HollowRouteTransition.slideUp,
-                                builder: (_) =>
-                                    MobileCallScreen(peerId: peerId),
-                              ),
-                            );
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: HollowSpacing.xl * 2),
-              ],
+              ),
             ),
           ),
         ),
@@ -269,59 +211,46 @@ class _MobileIncomingCallOverlayState
   }
 }
 
-class _CallActionButton extends StatelessWidget {
+/// One of the two answers: a 72 round button, its word under it.
+class _AnswerButton extends StatelessWidget {
   final IconData icon;
-  final Color color;
   final String label;
+  final Color fill;
+  final Color ink;
   final VoidCallback onTap;
 
-  const _CallActionButton({
+  const _AnswerButton({
     required this.icon,
-    required this.color,
     required this.label,
+    required this.fill,
+    required this.ink,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Semantics(
-      button: true,
-      label: label,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                color: color,
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: color.withValues(alpha: 0.3),
-                    blurRadius: 16,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Icon(icon, size: 28, color: Colors.white),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            ExcludeSemantics(
-              child: Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        HollowPressable(
+          onTap: onTap,
+          semanticLabel: label,
+          borderRadius:
+              BorderRadius.circular(MobileCallMetrics.incomingButton / 2),
+          backgroundColor: fill,
+          child: SizedBox.square(
+            dimension: MobileCallMetrics.incomingButton,
+            child: Icon(icon, size: 24, color: ink),
+          ),
         ),
-      ),
+        const SizedBox(height: HollowSpacing.sm),
+        ExcludeSemantics(
+          child: Text(label,
+              style:
+                  HollowTypography.label.copyWith(color: hollow.textSecondary)),
+        ),
+      ],
     );
   }
 }

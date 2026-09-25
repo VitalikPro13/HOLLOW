@@ -226,6 +226,20 @@ pub(crate) struct MessageStore {
     conn: Connection,
 }
 
+/// One ended DM call as stored in `call_records`. Times are milliseconds;
+/// `outcome` is the Dart side's word for how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallRecordRow {
+    pub call_id: String,
+    pub peer_id: String,
+    pub outgoing: bool,
+    pub video: bool,
+    pub outcome: String,
+    pub started_at: i64,
+    pub connected_at: Option<i64>,
+    pub ended_at: i64,
+}
+
 /// Run one idempotent DDL statement (CREATE TABLE/INDEX …), mapping failure
 /// to a labeled error. Shared with the vault ContentStore schema setup.
 pub(crate) fn ddl(conn: &Connection, what: &str, sql: &str) -> Result<(), String> {
@@ -880,6 +894,25 @@ impl MessageStore {
         // Asset rail: emote_blobs generalizes to every content-addressed kind. The kind
         // is LOCAL bookkeeping for caps and eviction and never rides the wire.
         migrate(conn, "ALTER TABLE emote_blobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'emote';");
+
+        // One row per DM call this device took part in, written by each side when the
+        // call ends. LOCAL ONLY: its own table, so no sync, backfill, digest, unread
+        // count, search, preview or archive export (all `messages` readers) sees it,
+        // and there is nothing to sign.
+        ddl(conn, "call_records table",
+            "CREATE TABLE IF NOT EXISTS call_records (
+                call_id      TEXT PRIMARY KEY,
+                peer_id      TEXT NOT NULL,
+                outgoing     INTEGER NOT NULL,
+                video        INTEGER NOT NULL DEFAULT 0,
+                outcome      TEXT NOT NULL,
+                started_at   INTEGER NOT NULL,
+                connected_at INTEGER,
+                ended_at     INTEGER NOT NULL
+            )")?;
+        ddl(conn, "idx_call_records_peer",
+            "CREATE INDEX IF NOT EXISTS idx_call_records_peer
+             ON call_records (peer_id, started_at)")?;
 
         // -- Verified peers (RAT Files — peer identity verification) --
         ddl(conn, "verified_peers table",
@@ -4729,6 +4762,64 @@ impl MessageStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    // ── Call records ──────────────────────────────────────────────
+
+    /// Stores one ended DM call. A call id already recorded is left as it was, so a
+    /// teardown that runs twice cannot rewrite the outcome.
+    pub fn record_dm_call(&self, r: &CallRecordRow) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO call_records
+                 (call_id, peer_id, outgoing, video, outcome, started_at, connected_at, ended_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    r.call_id,
+                    r.peer_id,
+                    r.outgoing,
+                    r.video,
+                    r.outcome,
+                    r.started_at,
+                    r.connected_at,
+                    r.ended_at
+                ],
+            )
+            .map_err(|e| format!("Failed to record call: {e}"))?;
+        Ok(())
+    }
+
+    /// The newest `limit` calls with `peer_id`, oldest first.
+    pub fn load_dm_call_records(
+        &self,
+        peer_id: &str,
+        limit: u32,
+    ) -> Result<Vec<CallRecordRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT call_id, peer_id, outgoing, video, outcome, started_at, connected_at, ended_at
+                 FROM call_records WHERE peer_id = ?1
+                 ORDER BY started_at DESC LIMIT ?2",
+            )
+            .map_err(|e| format!("Failed to prepare call records query: {e}"))?;
+        let rows = stmt
+            .query_map(params![peer_id, limit], |row| {
+                Ok(CallRecordRow {
+                    call_id: row.get(0)?,
+                    peer_id: row.get(1)?,
+                    outgoing: row.get(2)?,
+                    video: row.get(3)?,
+                    outcome: row.get(4)?,
+                    started_at: row.get(5)?,
+                    connected_at: row.get(6)?,
+                    ended_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query call records: {e}"))?;
+        let mut out = collect_rows(rows, "call record")?;
+        out.reverse();
+        Ok(out)
+    }
+
     // ── Read markers (issue #80) ──────────────────────────────────
     //
     // A read pointer is the `seen:<key>` setting holding a message id. Siblings
@@ -6036,6 +6127,68 @@ mod tests {
     /// In-memory SQLCipher store for tests; the passphrase must be valid hex.
     fn mem_store() -> MessageStore {
         MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store")
+    }
+
+    fn call(id: &str, peer: &str, started: i64, outcome: &str) -> CallRecordRow {
+        CallRecordRow {
+            call_id: id.into(),
+            peer_id: peer.into(),
+            outgoing: true,
+            video: false,
+            outcome: outcome.into(),
+            started_at: started,
+            connected_at: Some(started + 2_000),
+            ended_at: started + 242_000,
+        }
+    }
+
+    /// Call records come back per conversation, oldest first, and a second write
+    /// for the same call never rewrites the first.
+    #[test]
+    fn call_records_round_trip_per_peer_and_keep_the_first_write() {
+        let store = mem_store();
+        store.record_dm_call(&call("c2", "mira", 2_000, "answered")).unwrap();
+        store.record_dm_call(&call("c1", "mira", 1_000, "missed")).unwrap();
+        store.record_dm_call(&call("c3", "juno", 3_000, "answered")).unwrap();
+        store.record_dm_call(&call("c1", "mira", 1_000, "answered")).unwrap();
+
+        let mira = store.load_dm_call_records("mira", 50).unwrap();
+        assert_eq!(mira.iter().map(|r| r.call_id.as_str()).collect::<Vec<_>>(), ["c1", "c2"]);
+        assert_eq!(mira[0].outcome, "missed", "a repeat teardown must not rewrite");
+        assert_eq!(mira[1], call("c2", "mira", 2_000, "answered"));
+
+        let newest = store.load_dm_call_records("mira", 1).unwrap();
+        assert_eq!(newest.len(), 1);
+        assert_eq!(newest[0].call_id, "c2", "the limit keeps the NEWEST calls");
+    }
+
+    /// A call record lives outside `messages`, so nothing that reads the DM rows
+    /// (unread counts, sync and sibling serves, gap digests, archive export,
+    /// search) can count it, send it or export it.
+    #[test]
+    fn call_records_never_reach_the_dm_message_readers() {
+        let store = mem_store();
+        let convo = "mira";
+        store.insert(convo, "hello", false, 1_000, None, None, Some("m1"), None, None, None, None).unwrap();
+        let digest_before = store.dm_gap_digest(convo, 0, 10_000_000).unwrap();
+
+        let mut incoming = call("c1", convo, 5_000, "missed");
+        incoming.outgoing = false;
+        incoming.connected_at = None;
+        store.record_dm_call(&incoming).unwrap();
+        store.record_dm_call(&call("c2", convo, 6_000, "answered")).unwrap();
+
+        assert_eq!(store.count_all_unread_dm(convo), 1, "only the real message is unread");
+        assert_eq!(store.count_unread_dm(convo, "m1"), 0);
+        assert_eq!(store.count_all_dm_messages(), 1);
+        assert_eq!(store.get_dm_messages_for_sibling(convo, 0, 200).unwrap().len(), 1);
+        assert_eq!(store.get_dm_messages_since(convo, 0, 200).unwrap().len(), 0);
+        assert_eq!(store.load_all_dm_messages(convo).unwrap().len(), 1);
+        assert_eq!(store.load_for_peer(convo, 200).unwrap().len(), 1);
+        assert_eq!(store.get_latest_dm_timestamp_any(convo).unwrap(), Some(1_000));
+        assert_eq!(store.dm_gap_digest(convo, 0, 10_000_000).unwrap(), digest_before);
+        assert!(store.search_dm_messages(convo, "call", 50).unwrap().is_empty());
+        assert_eq!(store.load_dm_call_records(convo, 50).unwrap().len(), 2);
     }
 
     /// Locks the multi-device peer-fallback responder branch: a friend serving a SINGLE

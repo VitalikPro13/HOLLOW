@@ -15,10 +15,11 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
@@ -211,7 +212,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
     final hollow = HollowTheme.of(context);
     final layout = ref.watch(serverStripLayoutProvider);
     final servers = ref.watch(serverListProvider);
-    final avatars = ref.watch(serverAvatarProvider);
     final notifSettings = ref.watch(notificationSettingsProvider);
 
     final currentFolder = layout
@@ -285,7 +285,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
               child: FadeTransition(
                 opacity: _fadeAnim,
                 child: Material(
-                  color: Colors.transparent,
+                  type: MaterialType.transparency,
                   child: Container(
                     width: cardWidth,
                     decoration: BoxDecoration(
@@ -301,8 +301,8 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                         Padding(
                           padding: const EdgeInsets.fromLTRB(
                             cardPadding,
-                            HollowSpacing.sm + 2,
-                            HollowSpacing.sm,
+                            HollowSpacing.xs,
+                            HollowSpacing.xs,
                             HollowSpacing.xs,
                           ),
                           child: Row(
@@ -310,34 +310,23 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                               Expanded(
                                 child: Text(
                                   currentFolder.name,
-                                  style: HollowTypography.body.copyWith(
+                                  style: HollowTypography.label.copyWith(
                                     color: hollow.textPrimary,
                                     fontWeight: FontWeight.w600,
-                                    fontSize: 13,
                                   ),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              HollowPressable(
-                                onTap: () {
-                                  widget.onRenameRequested();
-                                },
-                                subtle: true,
-                                
-                                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                                padding: const EdgeInsets.all(6),
-                                semanticLabel: 'Rename folder',
-                                child: Icon(
-                                  LucideIcons.pencil,
-                                  size: 12,
-                                  color: hollow.textSecondary,
-                                ),
+                              HollowIconButton(
+                                icon: LucideIcons.pencil,
+                                label: 'Rename folder',
+                                onPressed: widget.onRenameRequested,
                               ),
                             ],
                           ),
                         ),
-                        Container(height: 1, color: hollow.border),
+                        const HollowDivider(),
 
                         Padding(
                           padding: const EdgeInsets.all(cardPadding),
@@ -349,8 +338,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                                   in currentFolder.serverIds) ...[
                                 _FolderServerItem(
                                   serverId: sid,
-                                  server: servers[sid],
-                                  avatar: avatars[sid],
+                                  name: servers[sid]?.name ?? '',
                                   iconSize: iconSize,
                                   unreadCount:
                                       notifSettings.isServerMuted(sid)
@@ -389,10 +377,11 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
   }
 }
 
-class _FolderServerItem extends StatelessWidget {
+/// One server in the folder: its icon, name and unread count. Taking it out
+/// of the folder is on hover only, so no X rests on every server.
+class _FolderServerItem extends StatefulWidget {
   final String serverId;
-  final dynamic server;
-  final Uint8List? avatar;
+  final String name;
   final double iconSize;
   final int unreadCount;
   final VoidCallback onTap;
@@ -401,8 +390,7 @@ class _FolderServerItem extends StatelessWidget {
 
   const _FolderServerItem({
     required this.serverId,
-    required this.server,
-    this.avatar,
+    required this.name,
     required this.iconSize,
     required this.unreadCount,
     required this.onTap,
@@ -411,171 +399,118 @@ class _FolderServerItem extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final name = server?.name ?? '';
-    final bgColor = colorFromId(serverId);
+  State<_FolderServerItem> createState() => _FolderServerItemState();
+}
 
-    return HollowPressable(
-      onTap: onTap,
-      subtle: true,
-      
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      child: SizedBox(
-        width: iconSize + 8,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Container(
-                  width: iconSize,
-                  height: iconSize,
-                  decoration: BoxDecoration(
-                    color: bgColor,
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusMd),
+class _FolderServerItemState extends State<_FolderServerItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = widget.hollow;
+    final name = widget.name;
+    final iconSize = widget.iconSize;
+    final showRemove = widget.onRemove != null && _hovered;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: HollowPressable(
+        onTap: widget.onTap,
+        subtle: true,
+        semanticLabel: name.isNotEmpty ? name : 'Server',
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: SizedBox(
+          width: iconSize + HollowSpacing.sm,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  ServerAvatar(
+                    serverId: widget.serverId,
+                    name: name.isNotEmpty ? name : widget.serverId,
+                    size: iconSize,
                   ),
-                  clipBehavior: Clip.antiAlias,
-                  child: avatar != null
-                      ? Image.memory(avatar!,
-                          width: iconSize,
-                          height: iconSize,
-                          fit: BoxFit.cover)
-                      : Center(
-                          child: Text(
-                            initialsFromName(
-                                name.isNotEmpty ? name : serverId),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
+                  if (widget.unreadCount > 0)
+                    Positioned(
+                      top: -HollowSpacing.xs,
+                      right: -HollowSpacing.xs,
+                      child: HollowCountBadge(
+                        count: widget.unreadCount,
+                        ring: hollow.overlay,
+                      ),
+                    ),
+                  if (widget.onRemove != null)
+                    Positioned(
+                      top: -HollowSpacing.sm,
+                      left: -HollowSpacing.sm,
+                      child: IgnorePointer(
+                        ignoring: !showRemove,
+                        child: AnimatedOpacity(
+                          opacity: showRemove ? 1 : 0,
+                          duration: HollowDurations.fast,
+                          child: HollowPressable(
+                            onTap: widget.onRemove,
+                            subtle: true,
+                            padding: EdgeInsets.zero,
+                            semanticLabel: 'Take ${name.isNotEmpty ? name : 'this server'} out of the folder',
+                            child: Container(
+                              width: HollowSpacing.lg + HollowSpacing.xs,
+                              height: HollowSpacing.lg + HollowSpacing.xs,
+                              decoration: BoxDecoration(
+                                color: hollow.overlay,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: hollow.border),
+                              ),
+                              child: Icon(
+                                LucideIcons.x,
+                                size: 14,
+                                color: hollow.textSecondary,
+                              ),
                             ),
                           ),
                         ),
-                ),
-                if (unreadCount > 0)
-                  Positioned(
-                    top: -4,
-                    right: -4,
-                    child: HollowCountBadge(
-                      count: unreadCount,
-                      ring: hollow.overlay,
-                    ),
-                  ),
-                if (onRemove != null)
-                  Positioned(
-                    top: -5,
-                    left: -5,
-                    child: HollowPressable(
-                      onTap: onRemove,
-                      subtle: true,
-                      padding: EdgeInsets.zero,
-                      semanticLabel: 'Remove from folder',
-                      child: Container(
-                        width: 16,
-                        height: 16,
-                        decoration: BoxDecoration(
-                          color: hollow.overlay,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: hollow.border, width: 1),
-                        ),
-                        child: Icon(
-                          LucideIcons.x,
-                          size: 9,
-                          color: hollow.textSecondary,
-                        ),
                       ),
                     ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 3),
-            Text(
-              name.isNotEmpty ? name : 'Server',
-              style: HollowTypography.micro.copyWith(
-                color: hollow.textSecondary,
+                ],
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-            ),
-          ],
+              const SizedBox(height: HollowSpacing.xxs),
+              Text(
+                name.isNotEmpty ? name : 'Server',
+                style: HollowTypography.micro.copyWith(
+                  color: hollow.textSecondary,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// Show a dialog to rename a folder.
+/// Renames [folder]: the shared name prompt, 32 characters at most.
 void showFolderRenameDialog({
   required BuildContext context,
   required WidgetRef ref,
   required FolderStripItem folder,
 }) {
-  showHollowDialog(
+  // The container, not [ref]: a menu's ref dies with the menu.
+  final layout = ProviderScope.containerOf(context, listen: false)
+      .read(serverStripLayoutProvider.notifier);
+  promptForName(
     context: context,
-    builder: (ctx) => _FolderRenameDialog(folder: folder),
+    title: 'Rename folder',
+    hintText: 'Folder name',
+    initial: folder.name,
+    maxLength: 32,
+    confirmLabel: 'Rename',
+    onSubmit: (name) => layout.renameFolder(folder.id, name),
   );
-}
-
-class _FolderRenameDialog extends ConsumerStatefulWidget {
-  final FolderStripItem folder;
-  const _FolderRenameDialog({required this.folder});
-
-  @override
-  ConsumerState<_FolderRenameDialog> createState() =>
-      _FolderRenameDialogState();
-}
-
-class _FolderRenameDialogState extends ConsumerState<_FolderRenameDialog> {
-  late final TextEditingController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController(text: widget.folder.name);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _save() {
-    final name = _controller.text.trim();
-    if (name.isNotEmpty) {
-      ref
-          .read(serverStripLayoutProvider.notifier)
-          .renameFolder(widget.folder.id, name);
-    }
-    Navigator.of(context).pop();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowDialog(
-      title: 'Rename folder',
-      width: 420,
-      content: HollowTextField(
-        controller: _controller,
-        hintText: 'Folder name',
-        maxLength: 32,
-        autofocus: true,
-        onSubmitted: (_) => _save(),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _save,
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
 }

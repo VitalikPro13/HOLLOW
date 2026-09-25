@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -45,6 +45,15 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
     _startFlow();
   }
 
+  void _retry() {
+    setState(() {
+      _error = null;
+      _userCode = null;
+      _verificationUri = null;
+    });
+    _startFlow();
+  }
+
   Future<void> _startFlow() async {
     try {
       final result = await twitch_api.twitchStartDeviceFlow();
@@ -55,7 +64,7 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
       });
       _pollForToken(result.deviceCode, result.intervalSecs.toInt());
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = twitchFlowErrorSentence(e));
     }
   }
 
@@ -77,7 +86,7 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = twitchFlowErrorSentence(e);
           _polling = false;
         });
       }
@@ -90,89 +99,58 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
 
     return HollowDialog(
       title: 'Connect Twitch',
-      // An error leaves nothing to confirm; success closes on its own.
-      showClose: _error != null,
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_error != null) ...[
-            Icon(LucideIcons.alertCircle, size: 24, color: hollow.error),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              _error!,
-              style: HollowTypography.body.copyWith(color: hollow.error),
-              textAlign: TextAlign.center,
-            ),
-          ] else if (_done) ...[
-            Center(
-              child: Column(
-                children: [
-                  Icon(LucideIcons.checkCircle,
-                      size: 24, color: hollow.success),
-                  const SizedBox(height: HollowSpacing.md),
-                  Text(
-                    'Twitch connected!',
-                    style:
-                        HollowTypography.body.copyWith(color: hollow.textPrimary),
-                  ),
-                ],
-              ),
-            ),
-          ] else if (_userCode != null) ...[
-            const HollowDialogText('Enter this code on Twitch:'),
-            const SizedBox(height: HollowSpacing.lg),
-            GestureDetector(
-              onTap: () {
-                Clipboard.setData(ClipboardData(text: _userCode!));
-                HollowToast.show(context, 'Code copied!');
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.xl,
-                  vertical: HollowSpacing.md,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.elevated,
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _userCode!,
-                      style: HollowTypography.heading.copyWith(
-                        color: hollow.textPrimary,
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.md),
-                    Icon(LucideIcons.copy,
-                        size: 16, color: hollow.textSecondary),
-                  ],
-                ),
-              ),
+          if (_error != null)
+            HollowDialogText(_error!)
+          else if (_done)
+            Row(
+              children: [
+                Icon(LucideIcons.checkCircle, size: 20, color: hollow.success),
+                const SizedBox(width: HollowSpacing.sm),
+                const Expanded(child: HollowDialogText('Twitch is connected.')),
+              ],
+            )
+          else if (_userCode != null) ...[
+            const HollowDialogText(
+              'Open Twitch, sign in, and enter this code.',
             ),
             const SizedBox(height: HollowSpacing.lg),
-            if (_polling)
+            HollowCopyField(value: _userCode!, name: 'code'),
+            if (_polling) ...[
+              const SizedBox(height: HollowSpacing.md),
               Row(
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const HollowSpinner(),
                   const SizedBox(width: HollowSpacing.sm),
-                  Text(
-                    'Waiting for authorization...',
-                    style: HollowTypography.caption
-                        .copyWith(color: hollow.textSecondary),
+                  Expanded(
+                    child: Text(
+                      'Waiting for Twitch',
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.textSecondary),
+                    ),
                   ),
                 ],
               ),
-          ] else ...[
-            const HollowSpinner.medium(),
-          ],
+            ],
+          ] else
+            const Center(child: HollowSpinner.medium()),
         ],
       ),
       actions: [
-        if (_error == null && !_done) ...[
+        if (_error != null) ...[
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: _retry,
+            child: const Text('Try again'),
+          ),
+        ] else if (!_done) ...[
           HollowButton.ghost(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Cancel'),
@@ -182,15 +160,31 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
               onPressed: () {
                 final uri = Uri.tryParse(_verificationUri!);
                 if (uri != null) {
-                  launchUrl(uri, mode: LaunchMode.externalApplication);
+                  launchUrl(uri, mode: LaunchMode.externalApplication)
+                      .catchError((_) => false);
                 }
               },
-              icon: Icon(BrandIcons.twitch,
-                  size: 14, color: hollow.textPrimary),
+              icon: const Icon(BrandIcons.twitch, size: 14),
               child: const Text('Open Twitch'),
             ),
         ],
       ],
     );
   }
+}
+
+/// The sentence for a failed Twitch sign-in: what happened on Twitch's side,
+/// and that trying again starts over with a new code.
+String twitchFlowErrorSentence(Object error) {
+  final lower = error.toString().toLowerCase();
+  if (lower.contains('denied')) {
+    return 'The connection was turned down on Twitch. Try again if that was '
+        'a mistake.';
+  }
+  if (lower.contains('expired') || lower.contains('device code')) {
+    return 'That code ran out before Twitch saw it. Try again for a new one.';
+  }
+  // Logs the raw text; a network failure has no better words than these.
+  friendlyError(error);
+  return "Twitch didn't answer. Check your connection and try again.";
 }

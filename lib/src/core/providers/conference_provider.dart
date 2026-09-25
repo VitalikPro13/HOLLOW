@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -211,67 +212,60 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     }
   }
 
-  /// Create a room. Empty [accessCode] means "no code".
-  Future<ConferenceRoom?> createRoom({
+  /// Create a room. Empty [accessCode] means "no code". Throws when it fails,
+  /// for the form to show while it is still open.
+  Future<ConferenceRoom> createRoom({
     required String name,
     required bool waitingRoom,
     String? accessCode,
     bool broadcastMode = false,
   }) async {
-    try {
-      final info = await conference_api.conferenceUpsert(
-        name: name,
-        waitingRoom: waitingRoom,
-        accessCode: (accessCode == null || accessCode.isEmpty)
-            ? null
-            : accessCode,
-        broadcastMode: broadcastMode,
-      );
-      final room = ConferenceRoom.fromInfo(info);
-      state = state.copyWith(rooms: [
-        room,
-        ...state.rooms.where((r) => r.confId != room.confId),
-      ]);
-      return room;
-    } catch (e) {
-      _toast('Failed to create room: $e', HollowToastType.error);
-      return null;
-    }
+    final info = await conference_api.conferenceUpsert(
+      name: name,
+      waitingRoom: waitingRoom,
+      accessCode: (accessCode == null || accessCode.isEmpty)
+          ? null
+          : accessCode,
+      broadcastMode: broadcastMode,
+    );
+    final room = ConferenceRoom.fromInfo(info);
+    state = state.copyWith(rooms: [
+      room,
+      ...state.rooms.where((r) => r.confId != room.confId),
+    ]);
+    return room;
   }
 
   /// Update a room. [accessCode] follows the FFI COALESCE convention:
   /// null = keep the existing code, '' = clear it, value = set a new one.
-  Future<ConferenceRoom?> updateRoom({
+  /// Throws when it fails, for the form to show while it is still open.
+  Future<ConferenceRoom> updateRoom({
     required String confId,
     required String name,
     required bool waitingRoom,
     String? accessCode,
     required bool broadcastMode,
   }) async {
-    try {
-      final info = await conference_api.conferenceUpsert(
-        confId: confId,
-        name: name,
-        waitingRoom: waitingRoom,
-        accessCode: accessCode,
-        broadcastMode: broadcastMode,
-      );
-      final room = ConferenceRoom.fromInfo(info);
-      state = state.copyWith(
-        rooms: [
-          for (final r in state.rooms)
-            if (r.confId == confId) room else r,
-        ],
-      );
-      return room;
-    } catch (e) {
-      _toast('Failed to update room: $e', HollowToastType.error);
-      return null;
-    }
+    final info = await conference_api.conferenceUpsert(
+      confId: confId,
+      name: name,
+      waitingRoom: waitingRoom,
+      accessCode: accessCode,
+      broadcastMode: broadcastMode,
+    );
+    final room = ConferenceRoom.fromInfo(info);
+    state = state.copyWith(
+      rooms: [
+        for (final r in state.rooms)
+          if (r.confId == confId) room else r,
+      ],
+    );
+    return room;
   }
 
   /// Delete a room — retires its link forever. Ends the meeting first when
-  /// it's the one currently active.
+  /// it's the one currently active. Throws when the delete fails, for the
+  /// confirm to show.
   Future<void> deleteRoom(String confId) async {
     if (state.activeConfId == confId) {
       if (state.isHost) {
@@ -280,12 +274,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
         await leaveMeeting();
       }
     }
-    try {
-      await conference_api.conferenceDelete(confId: confId);
-    } catch (e) {
-      _toast('Failed to delete room: $e', HollowToastType.error);
-      return;
-    }
+    await conference_api.conferenceDelete(confId: confId);
     state = state.copyWith(
       rooms: state.rooms.where((r) => r.confId != confId).toList(),
     );
@@ -319,7 +308,9 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
         hostAvatarHash: avatarHash,
       );
     } catch (e) {
-      _toast('Failed to start meeting: $e', HollowToastType.error);
+      _toast(
+          friendlyError(e, fallback: "Couldn't start the meeting. Try again."),
+          HollowToastType.error);
       return;
     }
     _clearConfChat(room.confId);
@@ -417,7 +408,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     try {
       await conference_api.conferenceAdmit(confId: confId, peerId: peerId);
     } catch (e) {
-      _toast('Failed to admit: $e', HollowToastType.error);
+      _toast(friendlyError(e, fallback: "Couldn't let them in. Try again."),
+          HollowToastType.error);
       return;
     }
     state = state.copyWith(
@@ -543,7 +535,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     try {
       await conference_api.conferenceKick(confId: confId, peerId: peerId);
     } catch (e) {
-      _toast('Failed to remove: $e', HollowToastType.error);
+      _toast(friendlyError(e, fallback: "Couldn't remove them. Try again."),
+          HollowToastType.error);
     }
   }
 

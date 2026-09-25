@@ -9,7 +9,6 @@ import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
-import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -24,10 +23,10 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
+import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
@@ -274,7 +273,8 @@ List<HollowMenuEntry> userMenuEntries({
         icon: LucideIcons.userMinus,
         label: 'Remove friend',
         isDanger: true,
-        onTap: () => _confirmRemoveFriend(context, ref, master, name),
+        onTap: () =>
+            confirmRemoveFriend(context, ref, peerId: master, name: name),
       ));
     }
   }
@@ -413,31 +413,6 @@ Future<void> _copyUserId(BuildContext context, String master) async {
   await Clipboard.setData(ClipboardData(text: master));
   if (context.mounted) {
     HollowToast.show(context, 'User ID copied', type: HollowToastType.success);
-  }
-}
-
-Future<void> _confirmRemoveFriend(
-    BuildContext context, WidgetRef ref, String master, String name) async {
-  final confirmed = await showHollowConfirm(
-    context: context,
-    title: 'Remove $name?',
-    message: "You will both drop off each other's friend list. Your "
-        'conversation stays on this device.',
-    confirmLabel: 'Remove',
-    destructive: true,
-  );
-  if (!confirmed || !context.mounted) return;
-  try {
-    await ref.read(friendsProvider.notifier).removeFriend(master);
-    if (context.mounted) {
-      HollowToast.show(context, 'Friend removed',
-          type: HollowToastType.success);
-    }
-  } catch (_) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not remove friend',
-          type: HollowToastType.error);
-    }
   }
 }
 

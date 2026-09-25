@@ -75,7 +75,7 @@ void main() {
     // Friend 1's row is the only one reading Online.
     await tester.longPress(find.text('Online'));
     await tester.pumpAndSettle();
-    expect(find.text('Voice call'), findsOneWidget);
+    expect(find.text('Start a call'), findsOneWidget);
   });
 
   testWidgets('no call is offered to an offline friend', (tester) async {
@@ -85,7 +85,7 @@ void main() {
     await tester.longPress(find.text('Offline'));
     await tester.pumpAndSettle();
     expect(find.text('Message'), findsOneWidget);
-    expect(find.text('Voice call'), findsNothing);
+    expect(find.text('Start a call'), findsNothing);
   });
 }
 

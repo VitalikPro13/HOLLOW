@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
+import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -33,6 +34,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/changelog_dialog.dart';
 import 'package:hollow/src/ui/dialogs/news_post_dialog.dart';
 import 'package:hollow/src/ui/settings/relay_health_card.dart';
+import 'package:hollow/src/ui/shell/voice_room_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Home's side panel: news and what changed, the relay we are on, and who is
@@ -359,6 +361,8 @@ class _ActiveNow extends ConsumerWidget {
     final rooms = homeVoiceRooms(ref);
     final online = ref.watch(onlineIdentitiesProvider);
     final profiles = ref.watch(profileProvider);
+    // displayNameFor reads the nickname cache, so a rename must rebuild.
+    ref.watch(localNicknameProvider);
     final onlineFriends = [
       for (final f in ref.watch(sortedFriendsProvider))
         if (online.contains(f.peerId)) f.peerId,
@@ -466,6 +470,13 @@ class _HomeVoiceRoomTileState extends ConsumerState<HomeVoiceRoomTile> {
         return;
       }
       if (!room.mine) {
+        if (!await confirmVoiceRoomSwitch(context, ref,
+                serverId: room.serverId,
+                channelId: room.channelId,
+                channelName: room.channelName) ||
+            !mounted) {
+          return;
+        }
         await ref
             .read(voiceChannelProvider.notifier)
             .joinChannel(room.serverId, room.channelId);
@@ -485,6 +496,7 @@ class _HomeVoiceRoomTileState extends ConsumerState<HomeVoiceRoomTile> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
+    ref.watch(localNicknameProvider);
     final room = widget.room;
     final names = room.people.map((p) => displayNameFor(profiles, p)).toList();
     final who = switch (names.length) {

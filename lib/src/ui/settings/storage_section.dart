@@ -255,23 +255,23 @@ Offset _below(BuildContext context) => overlayAnchorOf(
           (context.size?.height ?? 0) + HollowSpacing.xs),
     );
 
-/// Asks, clears, then says how much it freed.
+/// Asks, clears inside the confirm, then says how much it freed.
 Future<void> _confirmAndClear(
   BuildContext context, {
   required String title,
   required String message,
   required Future<int> Function() run,
 }) async {
+  var freed = 0;
   final ok = await showHollowConfirm(
     context: context,
     title: title,
     message: message,
     confirmLabel: 'Clear',
     destructive: true,
+    onConfirm: () async => freed = await run(),
   );
-  if (!ok) return;
-  final freed = await run();
-  if (!context.mounted) return;
+  if (!ok || !context.mounted) return;
   if (freed > 0) {
     HollowToast.show(context, 'Freed ${formatBytes(freed)}',
         type: HollowToastType.success);
@@ -314,20 +314,21 @@ class _CleanupButton extends ConsumerWidget {
                         title: 'Clear all downloaded files?',
                         message: 'Deletes every downloaded file from disk. '
                             'Messages stay, and files can be downloaded again '
-                            'from peers later.',
+                            'from anyone who still has them.',
                         run: actions.clearAllFileBytes,
                       ),
                     ),
                     HollowMenuItem(
                       icon: LucideIcons.hardDrive,
-                      label: 'Clear vault cache',
+                      label: 'Clear cached server files',
                       trailing: formatBytes(cache),
                       enabled: cache > 0,
                       onTap: () => _confirmAndClear(
                         context,
-                        title: 'Clear vault cache?',
-                        message: 'Deletes cached vault files and videos. It is '
-                            'only a cache and downloads again when played.',
+                        title: 'Clear cached server files?',
+                        message: 'Deletes the copies of server files and '
+                            'videos saved when you opened them. They download '
+                            'again the next time you play them.',
                         run: actions.clearVaultCache,
                       ),
                     ),
@@ -341,8 +342,8 @@ class _CleanupButton extends ConsumerWidget {
                         title: 'Clear unused emotes and GIFs?',
                         message: 'Deletes cached emote, sticker and GIF images '
                             'that are not in your personal set or any of your '
-                            'servers. They download again from peers when '
-                            'needed.',
+                            'servers. They download again from anyone who '
+                            'has them when needed.',
                         run: actions.clearUnreferencedAssets,
                       ),
                     ),
@@ -420,7 +421,8 @@ class _ContextRow extends ConsumerWidget {
                       title: 'Clear "$label"?',
                       message: 'Deletes the downloaded files for this '
                           'conversation from disk. The messages stay, and '
-                          'files can be downloaded again later.',
+                          'files can be downloaded again from anyone who '
+                          'still has them.',
                       run: () => ref
                           .read(storageActionsProvider)
                           .clearContext(usage.contextType, usage.contextId),

@@ -1,10 +1,22 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
+import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart'
+    show openMobileSettingsPage;
+
+/// Forces the phone path in tests, where `Platform` is the host's.
+@visibleForTesting
+bool? debugNoTurnPhoneOverride;
+
+/// The refusal's title; the fleet relay-switch run waits on it.
+const kNoTurnDialogTitle = "This relay can't carry your call";
 
 /// True when a call may be dialled. Always-relay routes every call through
 /// TURN, so on a relay that has none the connection can only fail; say so
@@ -32,20 +44,42 @@ Future<bool> _ensureTurn(
 }) async {
   if (!alwaysRelay || turn != false) return true;
 
+  final read = ProviderScope.containerOf(context, listen: false).read;
+  final onPhone =
+      debugNoTurnPhoneOverride ?? (Platform.isAndroid || Platform.isIOS);
   await showHollowDialog<void>(
     context: context,
     builder: (dialogContext) {
       return HollowDialog(
-        title: 'Always relay calls needs a TURN server',
+        title: kNoTurnDialogTitle,
+        width: 420,
         content: const HollowDialogText(
-          'This relay has no TURN server, so a relayed call cannot be set up. '
-          'Turn off Always relay calls in Settings > Security to call on this '
-          'relay.',
+          'Always relay calls is on, so every call has to pass through the '
+          "relay, and this relay doesn't offer that. Turn off Always relay "
+          'calls in Security settings to call from here.',
         ),
         actions: [
-          HollowButton.filled(
+          HollowButton.ghost(
             onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('OK'),
+            child: const Text('Close'),
+          ),
+          HollowButton.filled(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              if (!onPhone) {
+                openSettings(read, category: SettingsCategory.security);
+                return;
+              }
+              // The phone's Settings is a tab of its own; the page is pushed
+              // over wherever the call was dialled from.
+              final host = context.mounted
+                  ? context
+                  : hollowNavigatorKey.currentContext;
+              if (host != null) {
+                openMobileSettingsPage(host, SettingsCategory.security);
+              }
+            },
+            child: const Text('Open Security settings'),
           ),
         ],
       );

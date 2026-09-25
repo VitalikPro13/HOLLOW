@@ -25,7 +25,7 @@
     { "peer": "a", "op": "wait", "ms": 1000 },
     { "peer": "a", "op": "tap", "target": "text:New label", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 800 },
-    { "peer": "a", "op": "enter_text", "target": "hint:Label name", "value": "Tester" },
+    { "peer": "a", "op": "enter_text", "target": "hint:VIP, Artist, Night owl", "value": "Tester" },
     { "peer": "a", "op": "tap", "target": "dialog > text:Create", "index": 0 },
     { "peer": "a", "op": "wait_for", "target": "text:Tester", "timeout_ms": 15000 },
     { "peer": "a", "op": "wait", "ms": 800 },
@@ -43,5 +43,12 @@
     { "peer": "a", "op": "wait", "ms": 1500 },
     { "peer": "a", "op": "shot", "name": "f8-04-label-deleted" },
     { "peer": "a", "op": "expect_no_text", "value": "Tester" }
+  ],
+  "cleanup": [
+    { "peer": "a", "op": "tap", "target": "semantics:Close server settings", "index": 0 },
+    { "peer": "a", "op": "right_click", "target": "server:sweep8" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Delete server", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0 },
+    { "peer": "a", "op": "wait_for", "gone": "server:sweep8", "timeout_ms": 30000 }
   ]
 }

@@ -642,6 +642,8 @@ All three are seeded into `VoiceService`/`VoiceChannelService` at service creati
 - Key: `'ringtone_end'`
 - Default: `30.0`. Clip end offset in seconds (or song duration if shorter).
 
+The trim dialog (`dialogs/ringtone_clip_editor_dialog.dart`, `showRingtoneClipEditor`, "Trim ringtone") draws the file's REAL waveform since 2026-09-25: `loadRingtoneWaveform` calls Rust `audio_waveform(path, buckets)` (`api/waveform.rs` → `audio_peaks.rs::decode_peaks`, symphonia with mp3/aac/isomp4/ogg/vorbis/wav/pcm/adpcm/flac, no native lib, decode capped at an hour, at most 8192 buckets) for the decoded duration and per-bucket min/max + RMS normalised to the loudest sample; `RingtoneWaveformPainter` draws them. A format symphonia lacks (Opus in Ogg) falls back to the player's duration with no waveform. The symphonia crates get `opt-level = 3` in the dev profile (the dialog waits on the decode).
+
 ### UI Sound Effects (issue #55)
 Two synchronous `Notifier`s (the bootstrap-`load()` exception above), both mirrored into `SoundService`'s statics.
 
@@ -1196,6 +1198,8 @@ Providers managing the Public Channel Browser panel — a first-class shell pane
 ### Persistence
 
 **`savedGuestServersProvider`** -- `AsyncNotifierProvider<SavedGuestServersNotifier, List<SavedGuestServer>>`. DB-backed via `app_settings` JSON key `guest_saved_servers`. Model: `SavedGuestServer { serverId, serverName, fetchMode, savedAt }`. Fetch modes: `GuestFetchMode.realtime` (max 7), `onLaunch`, `manual`, `periodic5m/15m/30m/1h`. Methods: `addServer`, `removeServer`, `updateFetchMode`, `updateServerName`.
+
+The guest sidebar's add field (`guest/guest_server_sidebar.dart` `_submitAdd`) accepts an invite link (`inviteFromInput`), a raw id or the legacy `?server=` / last-path-segment forms, then REFUSES anything that is not `isServerIdShape` (32 hex, `hollow_link_utils.dart`) with the toast "That isn't an invite link or server ID. Check what you pasted." and lower-cases the id. The Add a server dialog's Join half uses the same check (2026-09-25): a typo used to park a join no member could ever answer. A well-formed id of a server that never existed still parks, since the relay keeps no list of servers.
 
 ### Startup
 

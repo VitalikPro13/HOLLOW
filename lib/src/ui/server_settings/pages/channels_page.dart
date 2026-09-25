@@ -22,13 +22,12 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
+import 'package:hollow/src/ui/server_settings/delete_channel_confirm.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
 import 'package:hollow/src/ui/settings/channel_access_pickers.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:hollow/src/ui/shell/server_context_menus.dart'
-    show promptForName;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Who a tier or a label gate lets in, as the channel row says it.
@@ -656,7 +655,8 @@ class _ChannelPanel extends ConsumerWidget {
     final picked = await showAccessLabelPicker(
       context: context,
       serverId: serverId,
-      title: see ? 'Who can see it' : 'Who can post',
+      gate: see ? AccessLabelGate.see : AccessLabelGate.post,
+      target: '#${channel.name}',
       initial: initial.toSet(),
     );
     if (picked == null || !context.mounted) return;
@@ -681,6 +681,7 @@ class _ChannelPanel extends ConsumerWidget {
   }
 
   void _rename(BuildContext context, WidgetRef ref) {
+    final channels = ref.read(channelListProvider.notifier);
     promptForName(
       context: context,
       title: 'Rename channel',
@@ -689,45 +690,19 @@ class _ChannelPanel extends ConsumerWidget {
       confirmLabel: 'Rename',
       onSubmit: (name) async {
         if (name == channel.name) return;
-        try {
-          await crdt_api.renameChannel(
-              serverId: serverId, channelId: _id, newName: name);
-          ref
-              .read(channelListProvider.notifier)
-              .onChannelRenamed(serverId, _id, name);
-        } catch (_) {
-          if (context.mounted) {
-            HollowToast.show(context, 'Could not rename the channel',
-                type: HollowToastType.error);
-          }
-        }
+        await crdt_api.renameChannel(
+            serverId: serverId, channelId: _id, newName: name);
+        channels.onChannelRenamed(serverId, _id, name);
       },
     );
   }
 
-  Future<void> _delete(BuildContext context, WidgetRef ref) async {
-    final ok = await showHollowConfirm(
-      context: context,
-      title: 'Delete #${channel.name}?',
-      message: "Its messages go for everyone. This can't be undone.",
-      confirmLabel: 'Delete channel',
-      destructive: true,
-    );
-    if (!ok || !context.mounted) return;
-    try {
-      await crdt_api.removeChannel(serverId: serverId, channelId: _id);
-      ref.read(channelListProvider.notifier).onChannelRemoved(serverId, _id);
-      if (context.mounted) {
-        HollowToast.show(context, '#${channel.name} deleted',
-            type: HollowToastType.info);
-      }
-    } catch (_) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Could not delete the channel',
-            type: HollowToastType.error);
-      }
-    }
-  }
+  Future<void> _delete(BuildContext context) => confirmDeleteChannel(
+        context,
+        serverId: serverId,
+        channelId: _id,
+        channelName: channel.name,
+      );
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -846,7 +821,7 @@ class _ChannelPanel extends ConsumerWidget {
                 danger: true,
                 compact: true,
                 semanticLabel: 'Delete #${channel.name}',
-                onPressed: () => _delete(context, ref),
+                onPressed: () => _delete(context),
                 child: const Text('Delete channel'),
               ),
             ],

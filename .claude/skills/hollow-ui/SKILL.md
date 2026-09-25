@@ -159,6 +159,12 @@ words, not components.
 If it is clickable it is a chip. If it is not, it is a badge. There is no third
 option and no local variant.
 
+- **Every tab row is `HollowChipTabs<T>`** (dialogs, pages, `PlaceHeader`):
+  `hint` for a quiet total, `count` for something waiting, arrows move it,
+  `expand` on a phone. Never an underline tab or a local `_Tab`.
+- Labels: `LabelChip` toggles, `LabelBadge` is worn. "For how long" is
+  `HollowDurationPicker` (null = "Until I remove it", never red).
+
 ## Buttons
 
 `HollowButton`. Which variant is **not** a per-site choice:
@@ -183,6 +189,7 @@ option and no local variant.
   and ghost. Two actions with no primary (Export / Import) are both ghost.
   Two filled in one `children:`/`actions:` list fail CI.
 - Buttons in a row are `sm` 8 apart. Always.
+- Disabled is neutral at full opacity (`textTertiary`), never a faded accent.
 - While a request runs: **loading, not disabled**, via `HollowButton(loading: true)`
   (never a child swapped for a spinner). Success toast after the await,
   failure toast on a rethrow. A bare fire-and-forget call is a zone crash.
@@ -201,7 +208,14 @@ option and no local variant.
   (or `danger` for delete/leave/remove/wipe). Ghost extras go in
   `leadingActions`. Nothing to confirm = `showClose: true` and no Done button.
 - A yes-or-no question is `showHollowConfirm()`; a one-field name prompt is
-  `promptForName()`.
+  `promptForName()` (`description`, `maxLength`, `validator`).
+- **A confirm that acts passes `onConfirm`** (`onSubmit` for a prompt): the
+  dialog stays open loading, closes on success, shows the error inside on a
+  throw. Custom dialogs: `HollowDialogAction` + `HollowDialog(busy:, error:)`.
+  Never pop, then await.
+- Errors people read are `friendlyError(e)`; a raw `$e` in a toast is guarded.
+- A value to copy is `HollowCopyField` (the one well). Phone touch sizing and
+  `scrollable: false` belong to `HollowDialog`, never the call site.
 
 ## The rest of the components
 
@@ -212,7 +226,9 @@ for a sub-group; optional trailing action, optional count in mono, its own
 honest line about what is true now, one optional second line, at most one
 action; a pane takes the default, a list inside a card or section takes
 `dense: true`; never a local `*Empty*` helper, CI-guarded) · `HollowDivider` (the hairline, nothing else) · `HollowListRow`
-(leading / title / subtitle / trailing, hover on the whole row) ·
+(leading / title / subtitle / trailing, hover on the whole row; in a dialog
+its content sits on the text edge and the hover bleeds past it, and a list
+that clips wraps its scroll view in `HollowBleed`) ·
 `HollowSkeleton` (2 to 10 second loads, keeps the final geometry) · `HollowSpinner`
 (small 14 in a row or button, medium 20 in a card, large 32 for a pane; quiet
 `textSecondary`, never the accent) · `showHollowSheet()` (the only bottom sheet:
@@ -273,6 +289,11 @@ Already-settled surfaces: `showHollowMenu` via
 - Focus rings only through `HollowFocusRing`, on keyboard focus only.
 
 ## Chrome (Dock layout)
+
+- **Even proportions.** Something floats over your row (the window controls over a
+  full-window route)? Move the WHOLE row clear, down by `windowChromeTop()`, keeping
+  equal margins on every side and its pieces level. Never squeeze just the colliding
+  end sideways: a lopsided row reads as a bug. Facing margins match.
 
 - The header holds **people**; the dock holds **you** (identity, connection,
   the call), **where you are** (Home, servers, places) and **tools**. Places

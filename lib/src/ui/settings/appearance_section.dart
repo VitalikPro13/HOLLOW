@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
@@ -150,7 +151,8 @@ class _BackgroundImageRowState extends ConsumerState<_BackgroundImageRow> {
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Could not open that image: $e',
+        friendlyError(e,
+            fallback: "Couldn't open that image. Try another one."),
         type: HollowToastType.error,
       );
     } finally {

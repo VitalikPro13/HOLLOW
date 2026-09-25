@@ -11,6 +11,8 @@ const double kPlaceHeaderHeight = 52;
 /// tab chips beside it, and the actions 8 apart at the trailing edge.
 class PlaceHeader extends StatelessWidget {
   final String title;
+
+  /// One [HollowChipTabs], the same tab row every dialog and page uses.
   final List<Widget> tabs;
   final List<Widget> actions;
 

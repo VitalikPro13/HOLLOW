@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
@@ -13,7 +14,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -23,144 +24,229 @@ import 'package:hollow/src/ui/settings/backup_section.dart';
 import 'package:hollow/src/ui/settings/duress_section.dart';
 import 'package:hollow/src/ui/settings/pages/security_page.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Passphrase prompt for the app password flows. Returns the
-/// passphrase, or null if cancelled; [confirm] adds a second field that must
-/// match; [destructive] makes the confirm a danger button.
-Future<String?> askPassphraseDialog(BuildContext context, String title,
-    {bool confirm = false,
-    String buttonLabel = 'Encrypt',
-    bool destructive = false}) async {
-  final controller = TextEditingController();
-  final confirmController = TextEditingController();
+/// Which secrets a prompt asks for.
+enum SecretAsk {
+  /// The secret already set: to confirm it, or to turn it off.
+  current,
+
+  /// A new secret, typed twice.
+  create,
+
+  /// The current secret, then a new one typed twice.
+  change,
+}
+
+/// The app password (or a phone's PIN) prompt. [onSubmit] runs INSIDE the
+/// dialog with the current and the new secret (empty when not asked): the
+/// confirm loads, a wrong current secret lands on its field, and nothing typed
+/// is lost. Resolves to the secret that is now set (the new one for
+/// [SecretAsk.create] and [SecretAsk.change]), or null on Cancel.
+Future<String?> askSecretDialog(
+  BuildContext context, {
+  required String title,
+  required SecretAsk ask,
+  required String confirmLabel,
+  required Future<void> Function(String current, String next) onSubmit,
+  String? message,
+  bool isPin = false,
+}) {
   return showHollowDialog<String>(
     context: context,
-    builder: (ctx) {
-      void submit() {
-        final pass = controller.text.trim();
-        if (pass.isEmpty) return;
-        if (confirm && pass != confirmController.text.trim()) {
-          HollowToast.show(ctx, "Passphrases don't match", type: HollowToastType.error);
-          return;
-        }
-        Navigator.of(ctx).pop(pass);
-      }
-
-      return HollowDialog(
-        title: title,
-        width: 420,
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            HollowTextField(
-              controller: controller,
-              obscureText: true,
-              autofocus: true,
-              hintText: 'Enter passphrase',
-              onSubmitted: confirm ? null : (val) {
-                if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-              },
-            ),
-            if (confirm) ...[
-              const SizedBox(height: HollowSpacing.md),
-              HollowTextField(
-                controller: confirmController,
-                obscureText: true,
-                hintText: 'Confirm passphrase',
-              ),
-            ],
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(null),
-            child: const Text('Cancel'),
-          ),
-          destructive
-              ? HollowButton.danger(onPressed: submit, child: Text(buttonLabel))
-              : HollowButton.filled(onPressed: submit, child: Text(buttonLabel)),
-        ],
-      );
-    },
+    builder: (_) => _SecretDialog(
+      title: title,
+      ask: ask,
+      confirmLabel: confirmLabel,
+      onSubmit: onSubmit,
+      message: message,
+      isPin: isPin,
+    ),
   );
+}
+
+class _SecretDialog extends StatefulWidget {
+  final String title;
+  final SecretAsk ask;
+  final String confirmLabel;
+  final Future<void> Function(String current, String next) onSubmit;
+  final String? message;
+  final bool isPin;
+
+  const _SecretDialog({
+    required this.title,
+    required this.ask,
+    required this.confirmLabel,
+    required this.onSubmit,
+    required this.message,
+    required this.isPin,
+  });
+
+  @override
+  State<_SecretDialog> createState() => _SecretDialogState();
+}
+
+class _SecretDialogState extends State<_SecretDialog> with HollowDialogAction {
+  final _current = TextEditingController();
+  final _next = TextEditingController();
+  final _repeat = TextEditingController();
+  String? _currentError;
+  String? _nextError;
+  String? _repeatError;
+
+  bool get _asksCurrent => widget.ask != SecretAsk.create;
+  bool get _asksNext => widget.ask != SecretAsk.current;
+  String get _word => widget.isPin ? 'PIN' : 'password';
+  String get _capWord => widget.isPin ? 'PIN' : 'Password';
+
+  @override
+  void dispose() {
+    _current.dispose();
+    _next.dispose();
+    _repeat.dispose();
+    super.dispose();
+  }
+
+  // A PIN or password is used exactly as typed, so nothing is trimmed.
+  bool get _filled =>
+      (!_asksCurrent || _current.text.isNotEmpty) &&
+      (!_asksNext || (_next.text.isNotEmpty && _repeat.text.isNotEmpty));
+
+  Future<void> _submit() async {
+    if (actionRunning || !_filled) return;
+    final current = _asksCurrent ? _current.text : '';
+    final next = _asksNext ? _next.text : '';
+    if (_asksNext && widget.isPin && next.length < 4) {
+      setState(() => _nextError = 'A PIN needs at least 4 digits.');
+      return;
+    }
+    if (_asksNext && next != _repeat.text) {
+      setState(() => _repeatError = "The ${_word}s don't match.");
+      return;
+    }
+    Object? raw;
+    final ok = await runDialogAction(() async {
+      try {
+        await widget.onSubmit(current, next);
+      } catch (e) {
+        raw = e;
+        rethrow;
+      }
+    });
+    if (!mounted) return;
+    if (ok) {
+      Navigator.of(context).pop(_asksNext ? next : current);
+      return;
+    }
+    final error = raw;
+    if (error != null && _asksCurrent && isWrongPasswordError(error)) {
+      setState(() {
+        _currentError = "That $_word isn't right.";
+        actionError = null;
+      });
+    } else if (error != null &&
+        _asksNext &&
+        error.toString().contains('duress code')) {
+      setState(() {
+        _nextError = actionError;
+        actionError = null;
+      });
+    }
+  }
+
+  void _clearErrors() {
+    setState(() {
+      _currentError = null;
+      _nextError = null;
+      _repeatError = null;
+      actionError = null;
+    });
+  }
+
+  Widget _field(
+    TextEditingController controller,
+    String label, {
+    required String? errorText,
+    bool autofocus = false,
+    bool last = false,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingsFieldLabel(label: label),
+        const SizedBox(height: HollowSpacing.xs),
+        HollowTextField(
+          controller: controller,
+          obscureText: true,
+          autofocus: autofocus,
+          keyboardType: widget.isPin ? TextInputType.number : null,
+          inputFormatters:
+              widget.isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+          maxLength: widget.isPin ? 8 : null,
+          showCounter: false,
+          errorText: errorText,
+          onChanged: (_) => _clearErrors(),
+          onSubmitted: (_) =>
+              last ? _submit() : FocusScope.of(context).nextFocus(),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final change = widget.ask == SecretAsk.change;
+    final fields = <Widget>[
+      if (_asksCurrent)
+        _field(_current, change ? 'Current $_word' : _capWord,
+            errorText: _currentError,
+            autofocus: true,
+            last: !_asksNext),
+      if (_asksNext) ...[
+        _field(_next, change ? 'New $_word' : _capWord,
+            errorText: _nextError, autofocus: !_asksCurrent),
+        _field(_repeat, change ? 'Repeat the new $_word' : 'Repeat the $_word',
+            errorText: _repeatError, last: true),
+      ],
+    ];
+    return HollowDialog(
+      title: widget.title,
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.message != null) ...[
+            HollowDialogText(widget.message!),
+            const SizedBox(height: HollowSpacing.lg),
+          ],
+          for (var i = 0; i < fields.length; i++) ...[
+            if (i > 0) const SizedBox(height: HollowSpacing.md),
+            fields[i],
+          ],
+        ],
+      ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _filled ? _submit : null,
+          loading: actionRunning,
+          child: Text(widget.confirmLabel),
+        ),
+      ],
+    );
+  }
 }
 
 String get _biometricName =>
     Platform.isIOS ? 'Face ID or Touch ID' : 'Fingerprint or face unlock';
-
-/// The phone's lock secret prompt: a PIN takes digits only (4 to 8), and
-/// neither kind is trimmed, since what was typed at setup is what unlocks.
-Future<String?> _askLockSecret(BuildContext context, String title,
-    {bool confirm = false,
-    bool isPin = false,
-    String buttonLabel = 'OK',
-    bool destructive = false}) {
-  final controller = TextEditingController();
-  final confirmController = TextEditingController();
-  return showHollowDialog<String>(
-    context: context,
-    builder: (ctx) {
-      void submit() {
-        final secret = controller.text;
-        if (secret.isEmpty) return;
-        if (isPin && confirm && secret.length < 4) {
-          HollowToast.show(ctx, 'A PIN needs at least 4 digits',
-              type: HollowToastType.error);
-          return;
-        }
-        if (confirm && secret != confirmController.text) {
-          HollowToast.show(
-              ctx, isPin ? "PINs don't match" : "Passwords don't match",
-              type: HollowToastType.error);
-          return;
-        }
-        Navigator.of(ctx).pop(secret);
-      }
-
-      Widget field(TextEditingController c, String hint,
-              {bool autofocus = false}) =>
-          HollowTextField(
-            controller: c,
-            hintText: hint,
-            obscureText: true,
-            autofocus: autofocus,
-            keyboardType: isPin ? TextInputType.number : null,
-            inputFormatters:
-                isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
-            maxLength: isPin ? 8 : null,
-            showCounter: false,
-          );
-
-      return HollowDialog(
-        title: title,
-        width: 420,
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            field(controller, isPin ? 'PIN' : 'Password', autofocus: true),
-            if (confirm) ...[
-              const SizedBox(height: HollowSpacing.md),
-              field(confirmController,
-                  isPin ? 'Confirm PIN' : 'Confirm password'),
-            ],
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(null),
-            child: const Text('Cancel'),
-          ),
-          destructive
-              ? HollowButton.danger(onPressed: submit, child: Text(buttonLabel))
-              : HollowButton.filled(onPressed: submit, child: Text(buttonLabel)),
-        ],
-      );
-    },
-  );
-}
 
 /// The phone's first step: PIN or password. Null when dismissed.
 Future<String?> _chooseLockType(BuildContext context) {
@@ -179,95 +265,34 @@ Future<String?> _chooseLockType(BuildContext context) {
                 style: HollowTypography.subheading
                     .copyWith(color: hollow.textPrimary)),
           ),
-          _LockTypeOption(
-            icon: LucideIcons.hash,
+          HollowListRow(
+            touch: true,
             title: 'PIN',
             subtitle: '4 to 8 digits, quick to type',
+            trailing: Icon(LucideIcons.chevronRight,
+                size: 16, color: hollow.textSecondary),
             onTap: () => Navigator.pop(ctx, 'pin'),
           ),
-          _LockTypeOption(
-            icon: LucideIcons.keyRound,
+          HollowListRow(
+            touch: true,
             title: 'Password',
             subtitle: 'Anything you like, stronger',
+            trailing: Icon(LucideIcons.chevronRight,
+                size: 16, color: hollow.textSecondary),
             onTap: () => Navigator.pop(ctx, 'password'),
           ),
           // A biometric sits on top of a PIN or password rather than being a
           // lock of its own; it is listed so people know it exists.
-          _LockTypeOption(
-            icon: LucideIcons.fingerprint,
+          HollowListRow(
+            touch: true,
             title: _biometricName,
             subtitle: 'Available once a PIN or password is set',
-            onTap: null,
           ),
           const SizedBox(height: HollowSpacing.lg),
         ],
       ),
     ),
   );
-}
-
-class _LockTypeOption extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-
-  /// Null shows the row as unavailable.
-  final VoidCallback? onTap;
-
-  const _LockTypeOption({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final enabled = onTap != null;
-    final content = ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 56),
-      child: Row(
-        children: [
-          Icon(icon,
-              size: 20,
-              color: enabled ? hollow.textSecondary : hollow.textTertiary),
-          const SizedBox(width: HollowSpacing.lg),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(title,
-                    style: HollowTypography.bodyTouch.copyWith(
-                        color: enabled
-                            ? hollow.textPrimary
-                            : hollow.textTertiary)),
-                Text(subtitle,
-                    style: HollowTypography.bodySmall.copyWith(
-                        color: enabled
-                            ? hollow.textSecondary
-                            : hollow.textTertiary)),
-              ],
-            ),
-          ),
-          if (enabled)
-            Icon(LucideIcons.chevronRight,
-                size: 16, color: hollow.textSecondary),
-        ],
-      ),
-    );
-    const padding = EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg, vertical: HollowSpacing.xs);
-    if (!enabled) return Padding(padding: padding, child: content);
-    return HollowPressable(
-      onTap: onTap,
-      subtle: true,
-      semanticButton: false,
-      padding: padding,
-      child: content,
-    );
-  }
 }
 
 /// Kept for the legacy settings dialog, which still names it.
@@ -291,7 +316,7 @@ class AlwaysRelayCallsToggle extends ConsumerWidget {
           await ref.read(alwaysRelayCallsProvider.notifier).setEnabled(val);
         } catch (e) {
           if (context.mounted) {
-            HollowToast.show(context, 'Could not save the setting: $e',
+            HollowToast.show(context, friendlyError(e),
                 type: HollowToastType.error);
           }
         }
@@ -319,7 +344,7 @@ class PeerForwardingToggle extends ConsumerWidget {
           await ref.read(peerForwardingProvider.notifier).setEnabled(val);
         } catch (e) {
           if (context.mounted) {
-            HollowToast.show(context, 'Could not save the setting: $e',
+            HollowToast.show(context, friendlyError(e),
                 type: HollowToastType.error);
           }
         }
@@ -392,47 +417,30 @@ class _SecurityAppLockSectionState
     }
   }
 
-  /// Which protection action is running an Argon2id or keychain FFI, or null.
-  /// One field for every button, because they mutate the same identity file
-  /// and must not overlap.
-  String? _busyAction;
-
-  Future<void> _runProtectionAction(
-      String action, Future<void> Function() body) async {
-    if (_busyAction != null) return;
-    setState(() => _busyAction = action);
-    try {
-      await body();
-    } finally {
-      if (mounted) setState(() => _busyAction = null);
-    }
-  }
-
   Future<void> _enablePassword() async {
-    final passphrase = await askPassphraseDialog(context, 'Set app password',
-        confirm: true, buttonLabel: 'Set password');
-    if (passphrase == null || !mounted) return;
-
-    await _runProtectionAction('enablePassword', () async {
-      try {
+    final passphrase = await askSecretDialog(
+      context,
+      title: 'Set app password',
+      ask: SecretAsk.create,
+      confirmLabel: 'Set password',
+      message: 'Hollow asks for it whenever it locks. If you forget it, only '
+          'your recovery phrase brings your identity back.',
+      onSubmit: (_, next) async {
         // Silent start: the keystore holds the key where the platform has one,
         // and the secure-storage copy covers the rest, so the app lock is the
         // only prompt and a duress code typed there signs the wide scopes.
         await identity_api.enablePasswordProtection(
-            password: passphrase, requireOnLaunch: false);
+            password: next, requireOnLaunch: false);
         final appLock = AppLockService();
-        appLock.sessionSecret = passphrase;
-        await appLock.storeLaunchSecret(passphrase);
-        if (!mounted) return;
-        await _loadProtectionStatus();
-        if (!mounted) return;
-        HollowToast.show(context, 'App lock enabled',
-            type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-      }
-    });
+        appLock.sessionSecret = next;
+        await appLock.storeLaunchSecret(next);
+      },
+    );
+    if (passphrase == null || !mounted) return;
+    await _loadProtectionStatus();
+    if (!mounted) return;
+    HollowToast.show(context, 'App lock enabled',
+        type: HollowToastType.success);
   }
 
   Future<void> _toggleRequireOnLaunch(bool require) async {
@@ -446,14 +454,18 @@ class _SecurityAppLockSectionState
         // may not be in memory if this session was unlocked by the keystore.
         var secret = appLock.sessionSecret;
         if (secret == null) {
-          secret = _phone
-              ? await _askLockSecret(context, 'Confirm your $_secretWord',
-                  isPin: _isPin, buttonLabel: 'Continue')
-              : await askPassphraseDialog(context, 'Confirm your password',
-                  buttonLabel: 'Continue');
+          secret = await askSecretDialog(
+            context,
+            title: 'Confirm your $_secretWord',
+            ask: SecretAsk.current,
+            isPin: _phone && _isPin,
+            confirmLabel: 'Continue',
+            onSubmit: (current, _) async {
+              await identity_api.unlockIdentity(password: current);
+              appLock.sessionSecret = current;
+            },
+          );
           if (secret == null || !mounted) return;
-          await identity_api.unlockIdentity(password: secret);
-          appLock.sessionSecret = secret;
         }
         await identity_api.setRequirePasswordOnLaunch(require: false);
         await appLock.storeLaunchSecret(secret);
@@ -462,57 +474,51 @@ class _SecurityAppLockSectionState
       await _loadProtectionStatus();
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Couldn't change the setting. Try again."),
+          type: HollowToastType.error);
     }
   }
 
   Future<void> _changePassword() async {
-    final oldPass = await askPassphraseDialog(context, 'Current password',
-        buttonLabel: 'Next');
-    if (oldPass == null || !mounted) return;
-
-    final newPass = await askPassphraseDialog(context, 'New password',
-        confirm: true, buttonLabel: 'Change password');
-    if (newPass == null || !mounted) return;
-
-    await _runProtectionAction('changePassword', () async {
-      try {
+    final newPass = await askSecretDialog(
+      context,
+      title: 'Change password',
+      ask: SecretAsk.change,
+      confirmLabel: 'Change password',
+      onSubmit: (current, next) async {
         await identity_api.changePassword(
-            oldPassword: oldPass, newPassword: newPass);
+            oldPassword: current, newPassword: next);
         final appLock = AppLockService();
-        appLock.sessionSecret = newPass;
+        appLock.sessionSecret = next;
         if (await appLock.hasLaunchSecret()) {
-          await appLock.storeLaunchSecret(newPass);
+          await appLock.storeLaunchSecret(next);
         }
-        if (!mounted) return;
-        HollowToast.show(context, 'Password changed',
-            type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-      }
-    });
+      },
+    );
+    if (newPass == null || !mounted) return;
+    HollowToast.show(context, 'Password changed',
+        type: HollowToastType.success);
   }
 
   Future<void> _removePassword() async {
-    final pass = await askPassphraseDialog(context, 'Turn off the password',
-        buttonLabel: 'Turn off', destructive: true);
-    if (pass == null || !mounted) return;
-
-    await _runProtectionAction('removePassword', () async {
-      try {
-        await identity_api.removePasswordProtection(password: pass);
+    final pass = await askSecretDialog(
+      context,
+      title: 'Turn off the password',
+      ask: SecretAsk.current,
+      confirmLabel: 'Turn off',
+      message: 'Your identity file stays on this computer unencrypted, so '
+          'anyone using it can copy your identity.',
+      onSubmit: (current, _) async {
+        await identity_api.removePasswordProtection(password: current);
         await AppLockService().clearAll();
-        if (!mounted) return;
-        await _loadProtectionStatus();
-        if (!mounted) return;
-        HollowToast.show(context, 'Password turned off',
-            type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Wrong password', type: HollowToastType.error);
-      }
-    });
+      },
+    );
+    if (pass == null || !mounted) return;
+    await _loadProtectionStatus();
+    if (!mounted) return;
+    HollowToast.show(context, 'Password turned off',
+        type: HollowToastType.success);
   }
 
   /// Phone: a PIN or a password, chosen first. The calls are the desktop's;
@@ -522,89 +528,78 @@ class _SecurityAppLockSectionState
     final type = await _chooseLockType(context);
     if (type == null || !mounted) return;
     final isPin = type == 'pin';
-    final secret = await _askLockSecret(
-        context, isPin ? 'Set a PIN' : 'Set a password',
-        confirm: true, isPin: isPin, buttonLabel: 'Turn on');
-    if (secret == null || secret.isEmpty || !mounted) return;
-
-    await _runProtectionAction('enablePassword', () async {
-      try {
+    final secret = await askSecretDialog(
+      context,
+      title: isPin ? 'Set a PIN' : 'Set a password',
+      ask: SecretAsk.create,
+      isPin: isPin,
+      confirmLabel: 'Turn on',
+      message: 'Hollow asks for it whenever it locks. If you forget it, only '
+          'your recovery phrase brings your identity back.',
+      onSubmit: (_, next) async {
         await identity_api.enablePasswordProtection(
-            password: secret, requireOnLaunch: true);
+            password: next, requireOnLaunch: true);
         final appLock = AppLockService();
         await appLock.setLockType(type);
         // Any biometric secret stored before is stale now.
         await appLock.disableBiometric();
-        appLock.sessionSecret = secret;
+        appLock.sessionSecret = next;
         // Hollow starts on its own and the app lock is the prompt, so a duress
         // code typed there reaches the other devices even after a full close.
-        await appLock.storeLaunchSecret(secret);
-        if (!mounted) return;
-        await _loadProtectionStatus();
-        if (!mounted) return;
-        HollowToast.show(context, isPin ? 'PIN set' : 'Password set',
-            type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Could not turn on the app lock: $e',
-            type: HollowToastType.error);
-      }
-    });
+        await appLock.storeLaunchSecret(next);
+      },
+    );
+    if (secret == null || !mounted) return;
+    await _loadProtectionStatus();
+    if (!mounted) return;
+    HollowToast.show(context, isPin ? 'PIN set' : 'Password set',
+        type: HollowToastType.success);
   }
 
   Future<void> _changePhoneSecret() async {
     final isPin = _isPin;
-    final oldSecret = await _askLockSecret(context, 'Current $_secretWord',
-        isPin: isPin, buttonLabel: 'Next');
-    if (oldSecret == null || !mounted) return;
-    final newSecret = await _askLockSecret(context, 'New $_secretWord',
-        confirm: true, isPin: isPin, buttonLabel: 'Change');
-    if (newSecret == null || !mounted) return;
-
-    await _runProtectionAction('changePassword', () async {
-      try {
+    final newSecret = await askSecretDialog(
+      context,
+      title: 'Change $_secretWord',
+      ask: SecretAsk.change,
+      isPin: isPin,
+      confirmLabel: 'Change',
+      onSubmit: (current, next) async {
         await identity_api.changePassword(
-            oldPassword: oldSecret, newPassword: newSecret);
+            oldPassword: current, newPassword: next);
         final appLock = AppLockService();
-        appLock.sessionSecret = newSecret;
+        appLock.sessionSecret = next;
         if (await appLock.hasLaunchSecret()) {
-          await appLock.storeLaunchSecret(newSecret);
+          await appLock.storeLaunchSecret(next);
         }
         // The biometric releases the secret it holds, so it follows the change.
         if (await appLock.isBiometricEnabled()) {
-          await appLock.enableBiometric(newSecret);
+          await appLock.enableBiometric(next);
         }
-        if (!mounted) return;
-        HollowToast.show(context, isPin ? 'PIN changed' : 'Password changed',
-            type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-      }
-    });
+      },
+    );
+    if (newSecret == null || !mounted) return;
+    HollowToast.show(context, isPin ? 'PIN changed' : 'Password changed',
+        type: HollowToastType.success);
   }
 
   Future<void> _removePhoneLock() async {
-    final isPin = _isPin;
-    final secret = await _askLockSecret(context, 'Turn off the app lock',
-        isPin: isPin, buttonLabel: 'Turn off', destructive: true);
-    if (secret == null || secret.isEmpty || !mounted) return;
-
-    await _runProtectionAction('removePassword', () async {
-      try {
-        await identity_api.removePasswordProtection(password: secret);
+    final secret = await askSecretDialog(
+      context,
+      title: 'Turn off the app lock',
+      ask: SecretAsk.current,
+      isPin: _isPin,
+      confirmLabel: 'Turn off',
+      onSubmit: (current, _) async {
+        await identity_api.removePasswordProtection(password: current);
         await AppLockService().clearAll();
-        if (!mounted) return;
-        await _loadProtectionStatus();
-        if (!mounted) return;
-        HollowToast.show(context, 'App lock removed',
-            type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, isPin ? 'Wrong PIN' : 'Wrong password',
-            type: HollowToastType.error);
-      }
-    });
+      },
+    );
+    if (secret == null || !mounted) return;
+    await _loadProtectionStatus();
+    if (!mounted) return;
+    HollowToast.show(context, 'App lock removed',
+        type: HollowToastType.success);
   }
 
   Future<void> _toggleBiometric(bool enable) async {
@@ -615,12 +610,19 @@ class _SecurityAppLockSectionState
       return;
     }
     // The secret is stored behind the biometric gate, so it comes from this
-    // session's capture or from the user.
+    // session's capture or from the user, checked against the identity first.
     var secret = appLock.sessionSecret;
     if (secret == null) {
       if (!mounted) return;
-      secret = await _askLockSecret(context, 'Enter your $_secretWord',
-          isPin: _isPin, buttonLabel: 'Continue');
+      secret = await askSecretDialog(
+        context,
+        title: 'Enter your $_secretWord',
+        ask: SecretAsk.current,
+        isPin: _isPin,
+        confirmLabel: 'Continue',
+        onSubmit: (current, _) =>
+            identity_api.unlockIdentity(password: current),
+      );
     }
     if (secret == null || secret.isEmpty) return;
     // One live prompt, so a broken or cancelled sensor is never trusted.
@@ -651,8 +653,7 @@ class _SecurityAppLockSectionState
               'identity on this phone',
           trailing: HollowButton.filled(
             compact: true,
-            onPressed: _busyAction == null ? _enablePhoneLock : null,
-            loading: _busyAction == 'enablePassword',
+            onPressed: _enablePhoneLock,
             child: const Text('Turn on'),
           ),
         ),
@@ -672,15 +673,13 @@ class _SecurityAppLockSectionState
           children: [
             HollowButton.ghost(
               compact: true,
-              onPressed: _busyAction == null ? _changePhoneSecret : null,
-              loading: _busyAction == 'changePassword',
+              onPressed: _changePhoneSecret,
               child: const Text('Change'),
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.ghost(
               compact: true,
-              onPressed: _busyAction == null ? _removePhoneLock : null,
-              loading: _busyAction == 'removePassword',
+              onPressed: _removePhoneLock,
               child: const Text('Turn off'),
             ),
           ],
@@ -727,8 +726,7 @@ class _SecurityAppLockSectionState
                 'one, anyone using this computer can copy your identity.',
             trailing: HollowButton.filled(
               compact: true,
-              onPressed: _busyAction == null ? _enablePassword : null,
-              loading: _busyAction == 'enablePassword',
+              onPressed: _enablePassword,
               child: const Text('Set password'),
             ),
           )
@@ -770,15 +768,13 @@ class _SecurityAppLockSectionState
           children: [
             HollowButton.ghost(
               compact: true,
-              onPressed: _busyAction == null ? _changePassword : null,
-              loading: _busyAction == 'changePassword',
+              onPressed: _changePassword,
               child: const Text('Change'),
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.ghost(
               compact: true,
-              onPressed: _busyAction == null ? _removePassword : null,
-              loading: _busyAction == 'removePassword',
+              onPressed: _removePassword,
               child: const Text('Turn off'),
             ),
           ],
@@ -844,7 +840,7 @@ class _SecurityRecoverySectionState extends State<SecurityRecoverySection> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = friendlyError(e);
         _loading = false;
       });
     }
@@ -868,7 +864,7 @@ class _SecurityRecoverySectionState extends State<SecurityRecoverySection> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Failed to save: $e',
+        HollowToast.show(context, friendlyError(e),
             type: HollowToastType.error);
       }
     } finally {

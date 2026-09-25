@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart'
     show mutedMembersProvider;
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -18,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
@@ -245,7 +247,7 @@ class _MemberRow extends ConsumerWidget {
   });
 
   List<({IconData icon, String label, bool danger, VoidCallback onTap})>
-      _actions(BuildContext context, WidgetRef ref) {
+      _actions(BuildContext context, WidgetRef ref, {required bool muted}) {
     final peer = member.peerId;
     final roles =
         assignableRoles(myRole).where((r) => r != member.role).toList();
@@ -259,7 +261,8 @@ class _MemberRow extends ConsumerWidget {
               serverId: serverId,
               peerId: peer,
               displayName: name,
-              newRole: r),
+              newRole: r,
+              currentRole: member.role),
         ),
       (
         icon: LucideIcons.tag,
@@ -277,13 +280,22 @@ class _MemberRow extends ConsumerWidget {
           HollowToast.show(context, 'User ID copied');
         },
       ),
-      (
-        icon: LucideIcons.volumeX,
-        label: 'Mute',
-        danger: false,
-        onTap: () => showMuteMemberDialog(context, ref,
-            serverId: serverId, peerId: peer, displayName: name),
-      ),
+      if (muted)
+        (
+          icon: LucideIcons.volume2,
+          label: 'Unmute',
+          danger: false,
+          onTap: () => unmuteMember(context, ref,
+              serverId: serverId, peerId: peer, displayName: name),
+        )
+      else
+        (
+          icon: LucideIcons.volumeX,
+          label: 'Mute',
+          danger: false,
+          onTap: () => showMuteMemberDialog(context, ref,
+              serverId: serverId, peerId: peer, displayName: name),
+        ),
       (
         icon: LucideIcons.userMinus,
         label: 'Kick',
@@ -301,8 +313,8 @@ class _MemberRow extends ConsumerWidget {
     ];
   }
 
-  void _menu(BuildContext buttonContext, WidgetRef ref) {
-    final actions = _actions(buttonContext, ref);
+  void _menu(BuildContext buttonContext, WidgetRef ref, {required bool muted}) {
+    final actions = _actions(buttonContext, ref, muted: muted);
     final roleCount =
         assignableRoles(myRole).where((r) => r != member.role).length;
     showHollowMenu(
@@ -328,9 +340,9 @@ class _MemberRow extends ConsumerWidget {
     );
   }
 
-  void _sheet(BuildContext context, WidgetRef ref) {
+  void _sheet(BuildContext context, WidgetRef ref, {required bool muted}) {
     final hollow = HollowTheme.of(context);
-    final actions = _actions(context, ref);
+    final actions = _actions(context, ref, muted: muted);
     showHollowSheet(
       context: context,
       builder: (sheetContext) => SafeArea(
@@ -354,29 +366,16 @@ class _MemberRow extends ConsumerWidget {
               ),
             ),
             const HollowDivider(),
+            // Kick and Ban carry no red here: the confirm they open does.
             for (final a in actions)
-              HollowPressable(
+              HollowListRow(
+                touch: true,
+                leading: Icon(a.icon, size: 20, color: hollow.textSecondary),
+                title: a.label,
                 onTap: () {
                   Navigator.of(sheetContext).pop();
                   a.onTap();
                 },
-                subtle: true,
-                semanticButton: false,
-                padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 52),
-                  child: Row(
-                    children: [
-                      Icon(a.icon,
-                          size: 20,
-                          color: a.danger ? hollow.error : hollow.textSecondary),
-                      const SizedBox(width: HollowSpacing.lg),
-                      Text(a.label,
-                          style: HollowTypography.bodyTouch.copyWith(
-                              color: a.danger ? hollow.error : hollow.textPrimary)),
-                    ],
-                  ),
-                ),
               ),
           ],
         ),
@@ -409,8 +408,8 @@ class _MemberRow extends ConsumerWidget {
                 label: 'More for $name',
                 size: touch ? 44 : 32,
                 onPressed: () => touch
-                    ? _sheet(context, ref)
-                    : _menu(buttonContext, ref),
+                    ? _sheet(context, ref, muted: muted)
+                    : _menu(buttonContext, ref, muted: muted),
               ),
             )
           : null,
@@ -422,7 +421,7 @@ class _MemberRow extends ConsumerWidget {
           peerId: member.peerId,
           role: member.role,
           labels: member.labels.isNotEmpty ? member.labels : null),
-      onLongPress: canAct ? () => _sheet(context, ref) : null,
+      onLongPress: canAct ? () => _sheet(context, ref, muted: muted) : null,
       subtle: true,
       semanticButton: false,
       child: row,
@@ -435,22 +434,6 @@ class _ModerationSection extends ConsumerWidget {
   final String serverId;
   const _ModerationSection({required this.serverId});
 
-  Future<void> _unmute(BuildContext context, WidgetRef ref, String peer) async {
-    try {
-      await crdt_api.unmuteMember(serverId: serverId, peerId: peer);
-      ref.invalidate(mutedMembersProvider(serverId));
-      ref.invalidate(serverMembersProvider(serverId));
-      if (context.mounted) {
-        HollowToast.show(context, 'Unmuted', type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Could not unmute: $e',
-            type: HollowToastType.error);
-      }
-    }
-  }
-
   Future<void> _unban(BuildContext context, WidgetRef ref, String peer) async {
     try {
       await crdt_api.unbanMember(serverId: serverId, peerId: peer);
@@ -460,7 +443,8 @@ class _ModerationSection extends ConsumerWidget {
       }
     } catch (e) {
       if (context.mounted) {
-        HollowToast.show(context, 'Could not unban: $e',
+        HollowToast.show(
+            context, friendlyError(e, fallback: "Couldn't unban. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -502,7 +486,10 @@ class _ModerationSection extends ConsumerWidget {
                   trailing: HollowButton.outline(
                     compact: true,
                     semanticLabel: 'Unmute ${nameOf(m.peerId)}',
-                    onPressed: () => _unmute(context, ref, m.peerId),
+                    onPressed: () => unmuteMember(context, ref,
+                        serverId: serverId,
+                        peerId: m.peerId,
+                        displayName: nameOf(m.peerId)),
                     child: const Text('Unmute'),
                   ),
                 ),

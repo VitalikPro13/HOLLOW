@@ -4,12 +4,12 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/avatar_frame.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -78,13 +78,20 @@ class _AvatarFramePickerDialogState
   Uint8List? _uploadedBytes;
   bool _busy = false;
 
+  /// Why the last upload could not be a frame, under the Upload button until
+  /// the next pick.
+  String? _uploadError;
+
   Future<void> _upload() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.image);
     if (result == null || result.files.isEmpty) return;
     final path = result.files.single.path;
     if (path == null || !mounted) return;
 
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _uploadError = null;
+    });
     try {
       final raw = await File(path).readAsBytes();
       final processed = await network_api.processAndStoreAvatarFrame(
@@ -102,25 +109,12 @@ class _AvatarFramePickerDialogState
         _selected = processed.hash;
       });
     } catch (e) {
-      if (!mounted) return;
-      // The processing errors are the user's business: over the cap, or the
-      // gate that a frame's middle has to be see-through.
-      setState(() => _busy = false);
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      showHollowDialog<void>(
-        context: context,
-        builder: (_) => HollowDialog(
-          title: 'That image cannot be a frame',
-          content: HollowDialogText(message),
-          actions: [
-            HollowButton.filled(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
-      return;
+      // The processing errors are the person's business (over the cap, or a
+      // middle that is not see-through), and Rust words them as sentences.
+      if (mounted) {
+        setState(() => _uploadError = friendlyError(e,
+            fallback: "That image can't be a frame. Try another one."));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -128,8 +122,17 @@ class _AvatarFramePickerDialogState
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final accentHue = ref.watch(accentHueProvider).round() % 360;
+
+    final upload = HollowButton.ghost(
+      onPressed: _busy ? null : _upload,
+      loading: _busy,
+      icon: const Icon(LucideIcons.upload, size: 14),
+      child: const Text('Upload an image or GIF'),
+    );
+    // A phone's action row has no room beside Cancel and Use frame, so the
+    // upload sits under the choices it adds to.
+    final compact = HollowDialogSurface.isCompact(context);
 
     return HollowDialog(
       title: 'Avatar frame',
@@ -148,13 +151,10 @@ class _AvatarFramePickerDialogState
               ),
             ),
           ),
-          Text(
+          const HollowDialogText(
             'A frame is painted in front of your avatar, so its middle has to '
             'be see-through. Uploads are cropped square and shared with the '
             'people who can already see your profile.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
           ),
           const SizedBox(height: HollowSpacing.lg),
           Wrap(
@@ -205,16 +205,15 @@ class _AvatarFramePickerDialogState
                 ),
             ],
           ),
+          if (compact) ...[
+            const SizedBox(height: HollowSpacing.md),
+            HollowButtonTouchScope(touch: true, child: upload),
+          ],
         ],
       ),
-      leadingActions: [
-        HollowButton.ghost(
-          onPressed: _busy ? null : _upload,
-          loading: _busy,
-          icon: const Icon(LucideIcons.upload, size: 14),
-          child: const Text('Upload an image or GIF'),
-        ),
-      ],
+      // Beside the Upload button that caused it, kept until the next pick.
+      error: _uploadError,
+      leadingActions: [if (!compact) upload],
       actions: [
         HollowButton.ghost(
           onPressed: () => Navigator.of(context).pop(),
@@ -258,7 +257,7 @@ class _FrameChoice extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     // The frame's own box plus breathing room, so neighbouring choices never
     // overlap each other's art.
-    final box = 40 * kFrameScale + 8;
+    const box = 40 * kFrameScale + HollowSpacing.sm;
     return HollowFocusRing(
       onActivate: onTap,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
@@ -276,13 +275,9 @@ class _FrameChoice extends StatelessWidget {
             backgroundColor: isSelected ? hollow.accentMuted : null,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: EdgeInsets.zero,
-            child: Container(
+            child: SizedBox(
               width: box,
               height: box,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-              ),
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -293,21 +288,12 @@ class _FrameChoice extends StatelessWidget {
                   ),
                   if (isSelected)
                     Positioned(
-                      right: 2,
-                      bottom: 2,
-                      child: Container(
-                        width: 16,
-                        height: 16,
-                        decoration: BoxDecoration(
-                          color: hollow.accent,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: hollow.overlay, width: 1.5),
-                        ),
-                        child: Icon(
-                          LucideIcons.check,
-                          size: 9,
-                          color: hollow.textOnAccent,
-                        ),
+                      right: HollowSpacing.xxs,
+                      bottom: HollowSpacing.xxs,
+                      child: Icon(
+                        LucideIcons.check,
+                        size: 14,
+                        color: hollow.accentText,
                       ),
                     ),
                 ],

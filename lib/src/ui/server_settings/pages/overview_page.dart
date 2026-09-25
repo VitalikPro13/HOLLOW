@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
@@ -111,7 +112,9 @@ class _OverviewPageState extends ConsumerState<OverviewPage> {
         _stagedIcon = null;
         _iconBusy = false;
       });
-      HollowToast.show(context, 'Could not update the icon: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't update the icon. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -131,7 +134,9 @@ class _OverviewPageState extends ConsumerState<OverviewPage> {
           type: HollowToastType.success);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not remove the icon: $e',
+        HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't remove the icon. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -164,7 +169,9 @@ class _OverviewPageState extends ConsumerState<OverviewPage> {
         _stagedBanner = null;
         _bannerBusy = false;
       });
-      HollowToast.show(context, 'Could not update the banner: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't update the banner. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -183,7 +190,9 @@ class _OverviewPageState extends ConsumerState<OverviewPage> {
           type: HollowToastType.success);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not remove the banner: $e',
+        HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't remove the banner. Try again."),
             type: HollowToastType.error);
       }
     }

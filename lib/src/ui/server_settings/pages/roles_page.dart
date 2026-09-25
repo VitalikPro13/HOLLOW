@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -100,7 +101,9 @@ class _RolesPageState extends ConsumerState<RolesPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _local[role] = before);
-      HollowToast.show(context, 'Could not change that: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e, fallback: "Couldn't change that. Try again."),
           type: HollowToastType.error);
     }
   }

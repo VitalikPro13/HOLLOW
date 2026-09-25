@@ -13,6 +13,7 @@ import 'package:video_player/video_player.dart';
 
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
+import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
@@ -132,6 +133,7 @@ void main() {
     MediaItem item, {
     MediaContext? mediaContext,
     MediaViewerActions actions = MediaViewerActions.none,
+    double? windowControlsWidth,
   }) async {
     fullscreen = _FakeFullscreen();
     await tester.pumpWidget(
@@ -139,6 +141,11 @@ void main() {
         overrides: [
           appShortcutsProvider.overrideWith(() => _FixedShortcuts()),
           fullscreenProvider.overrideWith(() => fullscreen),
+          if (windowControlsWidth != null) ...[
+            dockOwnsWindowChromeProvider.overrideWith((_) => true),
+            windowControlsWidthProvider
+                .overrideWith((_) => windowControlsWidth),
+          ],
         ],
         child: MaterialApp(
           debugShowCheckedModeBanner: false,
@@ -196,6 +203,26 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
     await tester.pumpAndSettle();
     expect(find.text('1 of 3'), findsOneWidget);
+    await drainChrome(tester);
+  });
+
+  testWidgets('under the floating window controls the top bar moves down, '
+      'margins even', (tester) async {
+    await open(tester, itemNamed('a', 1000), windowControlsWidth: 176);
+    final screen = tester.getSize(find.byType(MediaViewerView));
+    final bars = find
+        .byType(MediaControlBar)
+        .evaluate()
+        .map((e) => tester.getRect(find.byWidget(e.widget)))
+        .toList();
+    final top = bars.where((r) => r.top < screen.height / 2).toList();
+    final left = top.map((r) => r.left).reduce((a, b) => a < b ? a : b);
+    final right = top.map((r) => r.right).reduce((a, b) => a > b ? a : b);
+    // Below the 44 px band, and the same gap on both sides.
+    for (final r in top) {
+      expect(r.top, greaterThanOrEqualTo(kDockHeaderHeight));
+    }
+    expect(left, closeTo(screen.width - right, 0.5));
     await drainChrome(tester);
   });
 

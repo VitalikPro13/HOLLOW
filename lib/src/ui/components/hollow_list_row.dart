@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -37,8 +38,19 @@ class HollowListRow extends StatelessWidget {
   /// full bleed so the row meets the screen edges.
   final bool touch;
 
+  /// Content aligns to the text edge of whatever sits above the row, and the
+  /// hover fill bleeds past it by the row's own [insetOf]. Null follows the
+  /// nearest [HollowFlushRows], which a padded dialog provides. A flush row
+  /// inside a scroll view needs the view widened by [HollowBleed], or the
+  /// view's clip cuts the fill at the text edge.
+  final bool? flush;
+
   /// The smallest a [touch] row may be.
   static const double touchMinHeight = 48;
+
+  /// The horizontal padding between the row's fill and its content.
+  static double insetOf({bool touch = false}) =>
+      touch ? HollowSpacing.lg : HollowSpacing.md;
 
   const HollowListRow({
     super.key,
@@ -51,13 +63,15 @@ class HollowListRow extends StatelessWidget {
     this.selected = false,
     this.semanticLabel,
     this.touch = false,
+    this.flush,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final inset = insetOf(touch: touch);
 
-    return HollowPressable(
+    final row = HollowPressable(
       onTap: onTap,
       onLongPress: onLongPress,
       // A row is not a button: it stays actionable for assistive tech without
@@ -70,11 +84,8 @@ class HollowListRow extends StatelessWidget {
       borderRadius:
           touch ? BorderRadius.zero : BorderRadius.circular(hollow.radiusMd),
       backgroundColor: selected ? hollow.accentMuted : null,
-      padding: touch
-          ? const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm)
-          : const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
+      padding:
+          EdgeInsets.symmetric(horizontal: inset, vertical: HollowSpacing.sm),
       child: ConstrainedBox(
         constraints: BoxConstraints(
             minHeight: touch ? touchMinHeight - 2 * HollowSpacing.sm : 0),
@@ -120,5 +131,115 @@ class HollowListRow extends StatelessWidget {
         ),
       ),
     );
+    if (!(flush ?? HollowFlushRows.of(context))) return row;
+    return HollowBleed(horizontal: inset, child: row);
+  }
+}
+
+/// Makes the [HollowListRow]s below it flush by default: their content sits on
+/// the surrounding text edge. A padded [HollowDialogSurface] provides it.
+class HollowFlushRows extends InheritedWidget {
+  final bool flush;
+
+  const HollowFlushRows({super.key, this.flush = true, required super.child});
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<HollowFlushRows>()?.flush ??
+      false;
+
+  @override
+  bool updateShouldNotify(HollowFlushRows oldWidget) =>
+      oldWidget.flush != flush;
+}
+
+/// Lays its child out [horizontal] wider on each side than its own box, the
+/// negative margin Flutter lacks. The box keeps the content's edges, the child
+/// paints and takes hits past them. Hits only arrive where every ancestor's box
+/// also reaches, so the bleed zone is hoverable only as far as they allow.
+class HollowBleed extends SingleChildRenderObjectWidget {
+  final double horizontal;
+
+  const HollowBleed({super.key, required this.horizontal, super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      RenderHollowBleed(horizontal);
+
+  @override
+  void updateRenderObject(
+      BuildContext context, RenderHollowBleed renderObject) {
+    renderObject.horizontal = horizontal;
+  }
+}
+
+/// The layout behind [HollowBleed].
+class RenderHollowBleed extends RenderShiftedBox {
+  RenderHollowBleed(this._horizontal) : super(null);
+
+  double _horizontal;
+  set horizontal(double value) {
+    if (value == _horizontal) return;
+    _horizontal = value;
+    markNeedsLayout();
+  }
+
+  BoxConstraints _widen(BoxConstraints c) => BoxConstraints(
+        minWidth: c.minWidth + 2 * _horizontal,
+        maxWidth: c.maxWidth + 2 * _horizontal,
+        minHeight: c.minHeight,
+        maxHeight: c.maxHeight,
+      );
+
+  Size _narrow(Size childSize, BoxConstraints c) => c.constrain(Size(
+      (childSize.width - 2 * _horizontal).clamp(0.0, double.infinity),
+      childSize.height));
+
+  @override
+  double computeMinIntrinsicWidth(double height) =>
+      ((child?.getMinIntrinsicWidth(height) ?? 0) - 2 * _horizontal)
+          .clamp(0.0, double.infinity);
+
+  @override
+  double computeMaxIntrinsicWidth(double height) =>
+      ((child?.getMaxIntrinsicWidth(height) ?? 0) - 2 * _horizontal)
+          .clamp(0.0, double.infinity);
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      child?.getMinIntrinsicHeight(width + 2 * _horizontal) ?? 0;
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      child?.getMaxIntrinsicHeight(width + 2 * _horizontal) ?? 0;
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final c = child;
+    if (c == null) return constraints.smallest;
+    return _narrow(c.getDryLayout(_widen(constraints)), constraints);
+  }
+
+  @override
+  void performLayout() {
+    final c = child;
+    if (c == null) {
+      size = constraints.smallest;
+      return;
+    }
+    c.layout(_widen(constraints), parentUsesSize: true);
+    size = _narrow(c.size, constraints);
+    (c.parentData! as BoxParentData).offset = Offset(-_horizontal, 0);
+  }
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    final bled = Rect.fromLTWH(
+        -_horizontal, 0, size.width + 2 * _horizontal, size.height);
+    if (!bled.contains(position)) return false;
+    if (hitTestChildren(result, position: position)) {
+      result.add(BoxHitTestEntry(this, position));
+      return true;
+    }
+    return false;
   }
 }

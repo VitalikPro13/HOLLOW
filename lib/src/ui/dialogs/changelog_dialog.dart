@@ -6,7 +6,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The bundled changelog, opened on [start] with Older / Newer to walk it.
 void showChangelogDialog(
@@ -40,6 +39,7 @@ class _ChangelogDialogState extends State<_ChangelogDialog> {
       title: "What's new in ${release.version}",
       showClose: true,
       width: 560,
+      scrollable: false,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -91,7 +91,6 @@ class _ChangelogDialogState extends State<_ChangelogDialog> {
           onPressed: _index < widget.releases.length - 1
               ? () => setState(() => _index++)
               : null,
-          icon: const Icon(LucideIcons.chevronLeft, size: 16),
           child: const Text('Older'),
         ),
         HollowButton.ghost(

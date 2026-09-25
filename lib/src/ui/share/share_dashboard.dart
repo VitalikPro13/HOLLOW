@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
@@ -10,7 +11,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
@@ -72,17 +73,21 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
     return PlaceHeader(
       title: 'Share',
       tabs: [
-        HollowChip(
-          label: 'My shares',
-          hint: userCount > 0 ? '$userCount' : null,
-          selected: _subTab == _ShareSubTab.myShares,
-          onTap: () => setState(() => _subTab = _ShareSubTab.myShares),
-        ),
-        HollowChip(
-          label: 'Server files',
-          hint: serverCount > 0 ? '$serverCount' : null,
-          selected: _subTab == _ShareSubTab.serverFiles,
-          onTap: () => setState(() => _subTab = _ShareSubTab.serverFiles),
+        HollowChipTabs<_ShareSubTab>(
+          selected: _subTab,
+          onSelected: (tab) => setState(() => _subTab = tab),
+          tabs: [
+            HollowChipTab(
+              value: _ShareSubTab.myShares,
+              label: 'My shares',
+              hint: userCount > 0 ? '$userCount' : null,
+            ),
+            HollowChipTab(
+              value: _ShareSubTab.serverFiles,
+              label: 'Server files',
+              hint: serverCount > 0 ? '$serverCount' : null,
+            ),
+          ],
         ),
       ],
       actions: [
@@ -195,7 +200,10 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       await share_api.shareCreateFromFile(sourcePath: result.files.single.path!);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, "Couldn't share the file: $e",
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't share the file. Try again."),
             type: HollowToastType.error);
       }
     } finally {

@@ -58,11 +58,11 @@
   },
   {
     "op": "expect_text",
-    "value": "Imported"
+    "value": "is in your library"
   },
   {
     "op": "tap",
-    "target": "text:Done"
+    "target": "text:Not now"
   },
   {
     "op": "wait",

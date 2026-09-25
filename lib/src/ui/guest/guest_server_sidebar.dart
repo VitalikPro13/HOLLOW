@@ -56,6 +56,13 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
         serverId = input.split('/').last;
       }
     }
+    if (!isServerIdShape(serverId)) {
+      HollowToast.show(
+          context, "That isn't an invite link or server ID. Check what you pasted.",
+          type: HollowToastType.error);
+      return;
+    }
+    serverId = serverId.toLowerCase();
 
     if (!await ensureRelayForInviteId(context, ref,
         type: HollowLinkType.serverInvite, id: serverId, relay: invite.relay)) {

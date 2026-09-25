@@ -10,7 +10,7 @@ import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/avatar_frame.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/speaking_border.dart';
+import 'package:hollow/src/ui/call/speaking_ring.dart';
 
 /// Screenshot harness for avatar frames (issue #54).
 ///
@@ -157,8 +157,10 @@ void main() {
                       padding: const EdgeInsets.only(right: 20),
                       child: labelled(
                         entry.$1,
-                        SpeakingBorder(
-                          isSpeaking: entry.$2,
+                        SpeakingRing(
+                          speaking: entry.$2,
+                          color: const Color(0xFF00BFA6),
+                          radius: 8,
                           child: HollowAvatar(
                               peerId: peer, size: 36, frameId: entry.$3),
                         ),

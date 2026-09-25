@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a Hollow-styled dialog: a scale and fade in over the flat [HollowTheme.scrim].
@@ -58,6 +63,11 @@ Future<T?> showHollowDialog<T>({
 
 /// Asks one yes-or-no question: ghost Cancel beside one filled confirm, or a
 /// danger confirm when [destructive]. Resolves true only on the confirm.
+///
+/// With [onConfirm] the dialog runs the action itself: it stays open with the
+/// confirm loading, closes and resolves true on success, and on a throw shows
+/// [friendlyError] inside the dialog so the person can retry or cancel. Cancel
+/// is disabled while the action runs, since closing would hide its outcome.
 Future<bool> showHollowConfirm({
   required BuildContext context,
   required String title,
@@ -65,30 +75,262 @@ Future<bool> showHollowConfirm({
   required String confirmLabel,
   bool destructive = false,
   String cancelLabel = 'Cancel',
+  Future<void> Function()? onConfirm,
 }) async {
   final confirmed = await showHollowDialog<bool>(
     context: context,
-    builder: (ctx) => HollowDialog(
+    builder: (_) => _HollowConfirmDialog(
       title: title,
-      content: HollowDialogText(message),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: Text(cancelLabel),
-        ),
-        destructive
-            ? HollowButton.danger(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: Text(confirmLabel),
-              )
-            : HollowButton.filled(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: Text(confirmLabel),
-              ),
-      ],
+      message: message,
+      confirmLabel: confirmLabel,
+      cancelLabel: cancelLabel,
+      destructive: destructive,
+      onConfirm: onConfirm,
     ),
   );
   return confirmed ?? false;
+}
+
+class _HollowConfirmDialog extends StatefulWidget {
+  final String title;
+  final String message;
+  final String confirmLabel;
+  final String cancelLabel;
+  final bool destructive;
+  final Future<void> Function()? onConfirm;
+
+  const _HollowConfirmDialog({
+    required this.title,
+    required this.message,
+    required this.confirmLabel,
+    required this.cancelLabel,
+    required this.destructive,
+    required this.onConfirm,
+  });
+
+  @override
+  State<_HollowConfirmDialog> createState() => _HollowConfirmDialogState();
+}
+
+class _HollowConfirmDialogState extends State<_HollowConfirmDialog>
+    with HollowDialogAction {
+  Future<void> _confirm() async {
+    final action = widget.onConfirm;
+    if (action == null) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    if (await runDialogAction(action) && mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final confirm = widget.destructive
+        ? HollowButton.danger(
+            onPressed: _confirm,
+            loading: actionRunning,
+            child: Text(widget.confirmLabel),
+          )
+        : HollowButton.filled(
+            onPressed: _confirm,
+            loading: actionRunning,
+            child: Text(widget.confirmLabel),
+          );
+    return HollowDialog(
+      title: widget.title,
+      content: HollowDialogText(widget.message),
+      busy: actionRunning,
+      error: actionError,
+      actions: [
+        HollowButton.ghost(
+          onPressed:
+              actionRunning ? null : () => Navigator.of(context).pop(false),
+          child: Text(widget.cancelLabel),
+        ),
+        confirm,
+      ],
+    );
+  }
+}
+
+/// Runs a dialog's confirm action: [actionRunning] while it runs, and
+/// [actionError] (a [friendlyError] sentence) when it throws. For a dialog of
+/// its own that acts on its confirm: pass both to [HollowDialog.busy] and
+/// [HollowDialog.error], and the confirm takes `loading: actionRunning`.
+mixin HollowDialogAction<T extends StatefulWidget> on State<T> {
+  bool actionRunning = false;
+  String? actionError;
+
+  /// True when [action] finished, and the caller then pops. The running state
+  /// stays on after success so the confirm keeps its spinner through the exit.
+  Future<bool> runDialogAction(FutureOr<void> Function() action,
+      {String? fallback}) async {
+    if (actionRunning) return false;
+    setState(() {
+      actionRunning = true;
+      actionError = null;
+    });
+    try {
+      await action();
+      return true;
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          actionRunning = false;
+          actionError = friendlyError(e, fallback: fallback);
+        });
+      }
+      return false;
+    }
+  }
+}
+
+/// One small "type a name" dialog: the field autofocused, Enter submits, and
+/// the dialog owns its controller. Resolves to the trimmed name, or null on
+/// Cancel.
+///
+/// [onSubmit] runs INSIDE the dialog: the confirm loads while it runs, and a
+/// throw keeps the dialog open with [friendlyError] on the field and the typed
+/// text intact. [validator] returns the field's error for a name that cannot
+/// be used, checked on submit. The confirm stays disabled while the field is
+/// empty unless [allowEmpty].
+Future<String?> promptForName({
+  required BuildContext context,
+  required String title,
+  required String confirmLabel,
+  String hintText = '',
+  String initial = '',
+  String? description,
+  int? maxLength,
+  String? Function(String name)? validator,
+  bool allowEmpty = false,
+  FutureOr<void> Function(String name)? onSubmit,
+}) {
+  return showHollowDialog<String>(
+    context: context,
+    builder: (_) => _NamePromptDialog(
+      title: title,
+      confirmLabel: confirmLabel,
+      hintText: hintText,
+      initial: initial,
+      description: description,
+      maxLength: maxLength,
+      validator: validator,
+      allowEmpty: allowEmpty,
+      onSubmit: onSubmit,
+    ),
+  );
+}
+
+class _NamePromptDialog extends StatefulWidget {
+  final String title;
+  final String confirmLabel;
+  final String hintText;
+  final String initial;
+  final String? description;
+  final int? maxLength;
+  final String? Function(String name)? validator;
+  final bool allowEmpty;
+  final FutureOr<void> Function(String name)? onSubmit;
+
+  const _NamePromptDialog({
+    required this.title,
+    required this.confirmLabel,
+    required this.hintText,
+    required this.initial,
+    required this.description,
+    required this.maxLength,
+    required this.validator,
+    required this.allowEmpty,
+    required this.onSubmit,
+  });
+
+  @override
+  State<_NamePromptDialog> createState() => _NamePromptDialogState();
+}
+
+class _NamePromptDialogState extends State<_NamePromptDialog>
+    with HollowDialogAction {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial);
+  final FocusNode _focus = FocusNode();
+  String? _fieldError;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  bool get _canSubmit =>
+      widget.allowEmpty || _controller.text.trim().isNotEmpty;
+
+  Future<void> _submit() async {
+    if (actionRunning || !_canSubmit) return;
+    final name = _controller.text.trim();
+    final invalid = widget.validator?.call(name);
+    if (invalid != null) {
+      setState(() => _fieldError = invalid);
+      _focus.requestFocus();
+      return;
+    }
+    final onSubmit = widget.onSubmit;
+    if (onSubmit != null && !await runDialogAction(() => onSubmit(name))) {
+      // On the field, so the error sits where the text went wrong.
+      if (mounted) {
+        setState(() => _fieldError = actionError);
+        _focus.requestFocus();
+      }
+      return;
+    }
+    if (mounted) Navigator.of(context).pop(name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowDialog(
+      title: widget.title,
+      width: 420,
+      busy: actionRunning,
+      content: Padding(
+        padding: const EdgeInsets.only(top: HollowSpacing.xs),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (widget.description != null) ...[
+              HollowDialogText(widget.description!),
+              const SizedBox(height: HollowSpacing.md),
+            ],
+            HollowTextField(
+              controller: _controller,
+              focusNode: _focus,
+              hintText: widget.hintText,
+              autofocus: true,
+              maxLength: widget.maxLength,
+              errorText: _fieldError,
+              onChanged: (_) => setState(() => _fieldError = null),
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _canSubmit ? _submit : null,
+          loading: actionRunning,
+          child: Text(widget.confirmLabel),
+        ),
+      ],
+    );
+  }
 }
 
 /// The body prose of a dialog: `body` in `textSecondary`.
@@ -140,6 +382,10 @@ class HollowDialogSurface extends StatelessWidget {
 
   /// Below this width a dialog spans the screen and takes the sheet radius.
   static const compactBreakpoint = 600.0;
+
+  /// A phone-width dialog: full width, the sheet radius, touch-size controls.
+  static bool isCompact(BuildContext context) =>
+      MediaQuery.sizeOf(context).width < compactBreakpoint;
 
   @override
   Widget build(BuildContext context) {
@@ -197,7 +443,7 @@ class HollowDialogSurface extends StatelessWidget {
               child: padded
                   ? Padding(
                       padding: const EdgeInsets.all(HollowSpacing.xl),
-                      child: child,
+                      child: HollowFlushRows(child: child),
                     )
                   : ClipRRect(borderRadius: radius, child: child),
             ),
@@ -213,7 +459,8 @@ class HollowDialogSurface extends StatelessWidget {
 ///
 /// Actions: ghost Cancel, then ONE filled confirm (danger only when it
 /// destroys something), primary last. A dialog with nothing to confirm has no
-/// Cancel; it takes [showClose] instead.
+/// Cancel; it takes [showClose] instead. On a phone the actions and the close
+/// button grow to touch size on their own.
 class HollowDialog extends StatelessWidget {
   final String title;
   final Widget content;
@@ -229,6 +476,19 @@ class HollowDialog extends StatelessWidget {
   final double? width;
   final double maxWidth;
 
+  /// False for content that scrolls itself (a long changelog with its own
+  /// scroll view): it gets the height left under the title, unwrapped. A
+  /// scroll view nested in the default one never scrolls.
+  final bool scrollable;
+
+  /// An action is running: the scrim, Escape and the close button stop
+  /// dismissing, so the outcome cannot be hidden mid-flight.
+  final bool busy;
+
+  /// Why the last action failed, one line above the actions. A failure that
+  /// belongs to one field goes on that field's `errorText` instead.
+  final String? error;
+
   const HollowDialog({
     super.key,
     required this.title,
@@ -238,13 +498,20 @@ class HollowDialog extends StatelessWidget {
     this.showClose = false,
     this.width,
     this.maxWidth = 600,
+    this.scrollable = true,
+    this.busy = false,
+    this.error,
   });
+
+  /// The widest [HollowListRow] bleed, a touch row's.
+  static const _rowBleed = HollowSpacing.lg;
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final compact = HollowDialogSurface.isCompact(context);
 
-    return HollowDialogSurface(
+    Widget dialog = HollowDialogSurface(
       width: width,
       maxWidth: maxWidth,
       child: Column(
@@ -271,42 +538,67 @@ class HollowDialog extends StatelessWidget {
             const SizedBox(height: HollowSpacing.lg),
           ],
           Flexible(
-            child: SingleChildScrollView(
-              child: content,
-            ),
+            // Widened into the frame's padding so a flush row's hover is not
+            // clipped at the text edge.
+            child: scrollable
+                ? HollowBleed(
+                    horizontal: _rowBleed,
+                    child: SingleChildScrollView(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: _rowBleed),
+                      child: content,
+                    ),
+                  )
+                : content,
           ),
+          if (error != null) ...[
+            const SizedBox(height: HollowSpacing.lg),
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                error!,
+                style: HollowTypography.bodySmall.copyWith(color: hollow.error),
+              ),
+            ),
+          ],
           if (actions.isNotEmpty || leadingActions.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.xl),
-            Row(
-              children: [
-                for (var i = 0; i < leadingActions.length; i++) ...[
-                  if (i > 0) const SizedBox(width: HollowSpacing.sm),
-                  leadingActions[i],
-                ],
-                if (leadingActions.isNotEmpty)
-                  const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: Wrap(
-                      alignment: WrapAlignment.end,
-                      spacing: HollowSpacing.sm,
-                      runSpacing: HollowSpacing.sm,
-                      children: actions,
+            SizedBox(height: error != null ? HollowSpacing.md : HollowSpacing.xl),
+            HollowButtonTouchScope(
+              touch: compact,
+              child: Row(
+                children: [
+                  for (var i = 0; i < leadingActions.length; i++) ...[
+                    if (i > 0) const SizedBox(width: HollowSpacing.sm),
+                    leadingActions[i],
+                  ],
+                  if (leadingActions.isNotEmpty)
+                    const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: HollowSpacing.sm,
+                        runSpacing: HollowSpacing.sm,
+                        children: actions,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ],
         ],
       ),
     );
+    if (busy) dialog = PopScope(canPop: false, child: dialog);
+    return dialog;
   }
 }
 
-/// The dialog close button: a ghost X that pops the route. Only on a dialog
-/// with nothing to confirm; a dialog with a Cancel never also shows it.
+/// The dialog close button: a ghost X that pops the route, 44 on a phone. Only
+/// on a dialog with nothing to confirm; a dialog with a Cancel never also
+/// shows it.
 class HollowDialogCloseButton extends StatelessWidget {
   final VoidCallback? onPressed;
 
@@ -314,14 +606,11 @@ class HollowDialogCloseButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return HollowTooltip(
-      message: 'Close',
-      child: HollowButton.ghost(
-        compact: true,
-        semanticLabel: 'Close',
-        onPressed: onPressed ?? () => Navigator.of(context).maybePop(),
-        child: const Icon(LucideIcons.x, size: 16),
-      ),
+    return HollowIconButton(
+      icon: LucideIcons.x,
+      label: 'Close',
+      size: HollowDialogSurface.isCompact(context) ? 44 : 32,
+      onPressed: onPressed ?? () => Navigator.of(context).maybePop(),
     );
   }
 }

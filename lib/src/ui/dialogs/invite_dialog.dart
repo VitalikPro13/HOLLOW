@@ -1,81 +1,33 @@
-﻿import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Shows the invite link dialog after creating a room or server invite.
-void showInviteDialog(
-    BuildContext context, String link, String code) {
-  final isServer = link.contains('server=');
-  final subtitle = isServer
-      ? 'Share this link to invite someone to your server:'
-      : 'Share this link to invite someone to your room:';
-  final codeLabel = isServer ? 'Server ID' : 'Room code';
-
+/// Shows the invite link for the server [serverId]. The link already carries
+/// the id, so the id itself is not shown.
+void showInviteDialog(BuildContext context, String link, String serverId) {
   showHollowDialog(
     context: context,
-    builder: (dialogContext) {
-      final hollow = HollowTheme.of(dialogContext);
-
+    builder: (_) => Consumer(builder: (context, ref, _) {
+      final name = ref.watch(serverListProvider)[serverId]?.name ?? '';
       return HollowDialog(
         title: 'Invite link',
         showClose: true,
+        width: 420,
         content: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            HollowDialogText(subtitle),
+            HollowDialogText(name.isEmpty
+                ? 'Anyone with this link can join your server.'
+                : 'Anyone with this link can join $name.'),
             const SizedBox(height: HollowSpacing.lg),
-            Container(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: SelectableText(
-                      link,
-                      style: HollowTypography.mono.copyWith(
-                        color: hollow.accentText,
-                      ),
-                    ),
-                  ),
-                  HollowPressable(
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: link));
-                      HollowToast.show(
-                        dialogContext,
-                        'Invite link copied to clipboard',
-                        type: HollowToastType.success,
-                      );
-                    },
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    semanticLabel: 'Copy invite link',
-                    child: Icon(LucideIcons.copy,
-                        size: 16, color: hollow.accentText),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              '$codeLabel: $code',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
+            HollowCopyField(value: link, name: 'invite link', wrap: false),
           ],
         ),
       );
-    },
+    }),
   );
 }

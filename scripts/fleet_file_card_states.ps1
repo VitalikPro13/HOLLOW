@@ -516,16 +516,16 @@ try {
     # process.
     Say '1/5 a and b become friends and DM both ways'
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'text:Add Friend'; index = 0 }
-    Step b @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_A}' }
+    Step b @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+    Step b @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_A}' }
     Step b @{ op = 'wait_for'; target = 'text:${PEER_A}'; timeout_ms = 15000 }
-    Step b @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+    Step b @{ op = 'tap'; target = 'text:Send request'; index = 0 }
 
     # The Accept button only exists on the INCOMING tab. Waiting for it from the
     # Friends tab is a 30-second timeout that reads exactly like a delivery
     # failure and is not one.
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'text:Incoming'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
 

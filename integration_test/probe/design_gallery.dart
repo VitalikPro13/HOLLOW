@@ -15,8 +15,11 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_duration_picker.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
@@ -26,6 +29,9 @@ import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/label_visuals.dart';
+import 'package:hollow/src/rust/api/crdt.dart' show LabelFfi;
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 
 /// Every design-language primitive in every state, dark beside light, in one
@@ -97,6 +103,8 @@ class _GalleryPane extends StatelessWidget {
                 style:
                     HollowTypography.heading.copyWith(color: hollow.textPrimary),
               ),
+              const SizedBox(height: HollowSpacing.xl),
+              const _DialogsPassSample(),
               const SizedBox(height: HollowSpacing.xl),
 
               Row(
@@ -818,5 +826,142 @@ class _CallsSample extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+
+/// The dialogs-pass primitives: chip tabs, the copy well, labels as chips and
+/// badges, the duration picker, and a dialog whose action failed inside it.
+/// The pane's width stands in for the screen's, so a pane at phone width
+/// shows the compact dialog with its touch-size actions.
+class _DialogsPassSample extends StatefulWidget {
+  const _DialogsPassSample();
+
+  @override
+  State<_DialogsPassSample> createState() => _DialogsPassSampleState();
+}
+
+class _DialogsPassSampleState extends State<_DialogsPassSample> {
+  int _tab = 1;
+  Duration? _duration = const Duration(hours: 1);
+
+  static const _artists =
+      LabelFfi(labelId: 'a', name: 'Artists', color: '#EC4899', access: false);
+  static const _staff =
+      LabelFfi(labelId: 's', name: 'Staff', color: '#3B82F6', access: true);
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    // Each theme pane is half the window; no LayoutBuilder, since the gallery
+    // sits in an IntrinsicHeight.
+    final mq = MediaQuery.of(context);
+    return MediaQuery(
+        data: mq.copyWith(size: Size(mq.size.width / 2, mq.size.height)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const HollowSectionHeader('Tabs are chips'),
+            HollowChipTabs<int>(
+              selected: _tab,
+              onSelected: (v) => setState(() => _tab = v),
+              tabs: const [
+                HollowChipTab(value: 0, label: 'Friends', hint: '12'),
+                HollowChipTab(value: 1, label: 'Requests', count: 3),
+                HollowChipTab(value: 2, label: 'Add friend'),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            HollowChipTabs<int>(
+              selected: _tab,
+              expand: true,
+              onSelected: (v) => setState(() => _tab = v),
+              tabs: const [
+                HollowChipTab(value: 0, label: 'Messages'),
+                HollowChipTab(value: 1, label: 'Vault files'),
+                HollowChipTab(value: 2, label: 'Imported'),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.xl),
+            const HollowSectionHeader('Copy field'),
+            const HollowCopyField(
+              value: 'https://hollow.chat/join#server=7Hq2kX9mP4vL8wR3',
+              name: 'invite link',
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            const HollowCopyField(
+                value: 'K7Q-4MX', label: 'Link code', wrap: false),
+            const SizedBox(height: HollowSpacing.xl),
+            const HollowSectionHeader('Labels'),
+            Wrap(
+              spacing: HollowSpacing.sm,
+              runSpacing: HollowSpacing.sm,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                LabelChip(label: _artists, selected: true, onTap: () {}),
+                LabelChip(label: _staff, selected: false, onTap: () {}),
+                LabelChip(
+                    label: _staff, selected: false, locked: true, onTap: () {}),
+                LabelTypeChip(
+                    icon: LucideIcons.lock,
+                    text: 'Access',
+                    selected: true,
+                    onTap: () {}),
+                const LabelBadge(label: _artists),
+                const LabelBadge(label: _staff),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.xl),
+            const HollowSectionHeader('Duration picker'),
+            HollowDurationPicker(
+              value: _duration,
+              onChanged: (d) => setState(() => _duration = d),
+            ),
+            const SizedBox(height: HollowSpacing.xl),
+            const HollowSectionHeader('A confirm that acts'),
+            HollowDialog(
+              title: 'Leave server',
+              content: const HollowDialogText(
+                  'You will need a new invite to rejoin.'),
+              error: "Hollow can't reach the relay right now. Check your "
+                  'connection and try again.',
+              actions: [
+                HollowButton.ghost(
+                    onPressed: () {}, child: const Text('Cancel')),
+                HollowButton.danger(
+                    onPressed: () {}, child: const Text('Leave server')),
+              ],
+            ),
+            HollowDialog(
+              title: 'Rename channel',
+              width: 420,
+              content: const HollowTextField(
+                hintText: 'Channel name',
+                maxLength: 32,
+                errorText: 'That name is taken.',
+              ),
+              actions: [
+                const HollowButton.ghost(onPressed: null, child: Text('Cancel')),
+                HollowButton.filled(
+                    onPressed: () {},
+                    loading: true,
+                    child: const Text('Rename')),
+              ],
+            ),
+            Text(
+              'Close on a phone is 44, as are the actions:',
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.textTertiary),
+            ),
+            const HollowDialog(
+              title: 'Invite link',
+              showClose: true,
+              content: HollowCopyField(
+                  value: 'https://hollow.chat/join#server=7Hq2kX9m',
+                  name: 'invite link'),
+            ),
+          ],
+        ),
+      );
   }
 }

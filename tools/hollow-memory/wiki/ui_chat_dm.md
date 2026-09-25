@@ -306,7 +306,7 @@ The call UI no longer lives in this file: see wiki `ui_call_surfaces`. Under the
 
 - **Banner** at 2.5:1 of the panel width: their banner (animated via `watchAnimatedBanner`, else `bannerProvider`), else a FLAT tone of their avatar colour (no gradient).
 - **Avatar** in a 4 px `surface` ring overlapping the banner, left-aligned on the text edge, `StatusDot` corner. It scales with the banner: `_avatarSizeFor(width)` = `width * 0.26` clamped 48 to 88 (72 at the default 280), so a narrow panel never pushes it into the icon strip.
-- **Icon strip** (`_Actions`, three 32 px buttons) under the banner's right edge while it fits beside the avatar (`actionsBeside`: avatar + ring + gaps + `_kActionsWidth` within the width); otherwise it moves UNDER the name block, left-aligned so its first glyph lines up with the name. Buttons: Set/Edit nickname, Mute notifications (selected when muted), More (Copy user ID; Remove friend with a confirm, through `removeFriendAndTidy` shared with the friends bar; then Block/Unblock and Report in the error tint). Hidden for Saved messages.
+- **Icon strip** (`_Actions`, three 32 px buttons) under the banner's right edge while it fits beside the avatar (`actionsBeside`: avatar + ring + gaps + `_kActionsWidth` within the width); otherwise it moves UNDER the name block, left-aligned so its first glyph lines up with the name. Buttons: Set/Edit nickname, Mute notifications (selected when muted), More (Copy user ID; Remove friend through `confirmRemoveFriend` (`dialogs/confirm_remove_friend.dart`, the one remove-friend confirm; its `removeFriendAndTidy` drops the favourite, the open DM and the split pane); then Block/Unblock and Report in the error tint). Hidden for Saved messages.
 - **Names:** nickname or profile name in `heading`, the profile name as a caption when a nickname is set, the status line in `bodySmall`, the verified Twitch badge.
 - **Sections** (`HollowSectionHeader` dense, 24 apart): About Me, Now Playing (the showcase board's `nowPlaying` block via `ShowcaseGameRow`), Encryption ("Not verified yet" / "Verified" over "End-to-end encrypted", with compact outline Verify or ghost View; `_Verification` stacks the button under its text when the row's content width is below `_kVerificationStackWidth` = 220). The raw peer id is no longer shown.
 - **Footer:** ghost "View full profile" -> `showProfileDialog`.
@@ -323,35 +323,18 @@ Shared, in `chat_pane_shared.dart`; see wiki ui_chat_pane_shared.
 
 The `ScrollablePositionedList` uses a `ValueKey('dm-list-${peerId}')` so each pane gets its own independent scroll state even when both show the same DM.
 
-## Mobile Call UI
+## Mobile Call UI (rebuilt 2026-09-25, session 23)
 
-**Files:** `lib/src/ui/mobile/mobile_call_video_view.dart`, `lib/src/ui/mobile/mobile_active_call_pill.dart`, `lib/src/ui/mobile/mobile_incoming_call.dart`
+The phone call screens live in `lib/src/ui/mobile/` and are described in wiki `ui_call_surfaces` (section "Phone"). In the DM chat route: the header's phone and video buttons hide while any DM call is up and start through `startMobileDmCall` (= `startDmCallFlow`, then the call screen); `MobileMinimisedCall(floating: false)` sits docked under the header for whatever call you are in. `MobileCallStatusStrip` and the voice strip are gone.
 
-### MobileCallScreen
+## The call record line (5.7, 2026-09-25, session 23)
 
-Full-screen call overlay pushed as a route with slide-up transition from `MobileChatRoute`. Handles all call states (ringing → connecting → active → idle). Auto-pops via `ref.listen` when call ends.
+A DM call leaves a quiet line in the conversation at the time it rang: "Voice call, 4 minutes", "Missed call", "Declined call", "Cancelled call", "Voice call, no answer", "Voice call, didn't connect". LOCAL to each device, no wire change:
 
-- **Audio mode:** Clustered avatar layout (`_ClusteredAvatars`) — 2: side-by-side, 3: triangle, 4: 2x2, 5: 2-1-2. Each avatar has animated teal rounded-square glow (`_SpeakingAvatar`) driven by `CallState.isLocalSpeaking`/`isRemoteSpeaking` (300ms ease-out animation). Mute badge overlay on muted avatars.
-- **Video mode:** Remote camera full-screen, local PiP corner (90x120 portrait, draggable). If remote camera off, shows local camera full-screen. Uses `_hasRealVideo()` which checks `renderer.srcObject != null` in addition to `remoteVideoEnabled` to prevent black rectangles from stale transceivers.
-- **Top bar:** Chevron-down to dismiss, peer name + status text ("Calling...", "Connecting...", "MM:SS", "Ended").
-- **Controls bar:** Four circular buttons — volume (opens bottom sheet with 0-200% slider, icon changes with level), mute (red highlight), camera (accent highlight), hangup (red circle). Volume slider wired to `callProvider.notifier.setRemoteVolume()`. Disabled gracefully during ringing via `AnimatedOpacity`.
-- **Status text:** Uses accent color for non-active states, secondary for duration.
-
-### MobileCallStatusStrip
-
-Thin green bar in `MobileChatRoute` (below header): "In call with X — Tap to return". Tapping pushes `MobileCallScreen` with slide-up. Hidden for incoming ringing calls (incoming overlay handles those). Shows for outgoing ringing, connecting, and active.
-
-### MobileActiveCallPill
-
-Floating draggable pill in `MobileShell` Stack. Shows during active/connecting calls. Positioned at `bottom: 80` (above nav bar). Mute, camera, hangup buttons + duration timer. Wrapped in `Material(color: transparent)` to prevent yellow underlines.
-
-### IncomingCallOverlay (desktop widget reused; rewritten 2026-09-25 as the 340 px card, see wiki ui_call_surfaces)
-
-The desktop `IncomingCallOverlay` (`lib/src/ui/dialogs/incoming_call_dialog.dart`) is reused on mobile. Placed in `MaterialApp.builder` in `app.dart` (above Navigator, so it renders over all pushed routes). Uses `MediaQuery.padding.top` for safe area positioning. Wrapped in `Material(color: transparent)` for yellow underline fix.
-
-### DM Header Call Buttons
-
-`_DmCallButtons` in `mobile_chat_route.dart` — phone + video icons next to the mute button. Gated on `isOnline && !isInCall`. Tapping starts call AND pushes `MobileCallScreen`. If call is already active with this peer, tapping the green phone icon opens the call screen.
+- **Written** by `CallNotifier._recordEndedCall()` at the top of `_cleanup()` (the one teardown chokepoint), plus the busy branch of `_handleInvite` (a call that rang while we were in another = missed). The path that ends the call sets `_endCause` (`CallEndCause`), `classifyCallEnd()` turns cause + picked up + connected into a `CallOutcome`. Ring start is `_ringStartedAt`, set in `startCall` / `_handleInvite`. Sibling devices never see the invite, so only the device that took part records it.
+- **Stored** in its OWN SQLCipher table `call_records` (messages.db; `call_id` primary key, `INSERT OR IGNORE`, peer = MASTER), never in `messages`: every `messages` reader (friend and sibling sync serves, gap digests, unread SQL, search/FTS, archive export, Home preview, read markers) stays blind to it, and there is nothing to sign. FFI `record_dm_call` / `load_dm_call_records` (`api/storage.rs`). Rust tests pin that the table never reaches those readers. The `.hollow` backup and device-link snapshot copy the whole DB file, so a linked device of YOURS inherits the history once, at link time.
+- **Shown** via `dmCallRecordsProvider(master)` (loads the newest 200, `add()` shows a new one at once) and `callRecordsAround()`: a row carries the calls since the previous row above it, the newest row carries later ones below it, and calls older than a partial 200-row window are left out. `dateSeparatedChatRow(callsBefore:, callsAfter:)` renders them as `CallRecordRow` (in `message_row.dart`: phone-family icon in the avatar column, `bodySmall` `textTertiary`, mono time; compact display puts the time first), with day rules between; a call before a message breaks that message's group. A DM with calls but no messages shows `CallRecordsOnly`. Desktop `chat_pane.dart` and the phone's `mobile_chat_route.dart` both do this.
+- Never a `ChatMessage`: no message id, so no hover bar, reactions, unread divider, `markDmSeen` or read marker ever sees one.
 
 ### VAD (Voice Activity Detection)
 

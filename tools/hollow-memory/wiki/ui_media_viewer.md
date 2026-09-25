@@ -19,6 +19,7 @@ One route replaces the old `_FullscreenImageView` dialog (`file_attachment_widge
 - One shared `TransformationController` for zoom, read by the zoom view, the readout and the keyboard handler.
 - The keyboard handler: a `HardwareKeyboard.instance` handler, not a `Shortcuts` binding, because an opaque page route has no barrier and focus may already sit on a child control. Guarded by `ModalRoute.of(context)?.isCurrent` and `keybindCaptureActiveProvider`.
 - `OverlayHosts.register(this, _dismiss)` in `initState`, unregistered in `dispose`, so App Lock's cover clears the viewer before it covers the screen.
+- **The top bar sits UNDER the window controls** (2026-09-25): in the Dock layout the controls float over the top of every full-window route, so `_buildTopBar` offsets the whole row by `windowChromeTop(ref)` (`shell/window_chrome_insets.dart`: `kDockHeaderHeight` while `dockOwnsWindowChromeProvider` and not fullscreen or annotating, else 0) plus `HollowSpacing.sm`, instead of `lg` from the top; the desktop info panel is padded down by the same band. The row moves down whole, never squeezed sideways around the controls.
 - A `[SENTINEL] media viewer open <ms>` emit at first frame (tap to first paint) and `[SENTINEL] media viewer preload n=<count> <ms>` from `_precacheNeighbours()`.
 
 ---
@@ -62,7 +63,7 @@ A toolbar toggle (`mediaViewerCrispPixels`, `@visibleForTesting` top-level bool 
 
 ### Trackpad pinch re-anchoring
 
-`_MediaZoomViewState` tracks `PointerPanZoomStartEvent`/`Update`/`End` alongside `InteractiveViewer`. Root cause (found with a fixed-point widget test across six DPR/interface-zoom combinations, reproduces at DPR 1.0 too): Flutter's `ScaleGestureRecognizer` reports a pan-zoom gesture's focal point as `position + pan`, and on Windows the reported pan grows with the pinch, so `InteractiveViewer`'s own anchoring lands at roughly twice the cursor position, and its own boundary clamp then pins the result into a corner.
+`ZoomSurface` (`media_zoom_view.dart`, extracted 2026-09-25 so the phone's full-screen share uses the same viewer; it owns no zoom state, the host's `TransformationController` is passed in) tracks `PointerPanZoomStartEvent`/`Update`/`End` alongside `InteractiveViewer`. Root cause (found with a fixed-point widget test across six DPR/interface-zoom combinations, reproduces at DPR 1.0 too): Flutter's `ScaleGestureRecognizer` reports a pan-zoom gesture's focal point as `position + pan`, and on Windows the reported pan grows with the pinch, so `InteractiveViewer`'s own anchoring lands at roughly twice the cursor position, and its own boundary clamp then pins the result into a corner.
 
 Fix: once a pan-zoom gesture's scale leaves 1.0 (so a two-finger pan that turns into a pinch anchors where the fingers were **then**, not at gesture start), `_zoomAnchor`/`_zoomAnchorScene` capture the pointer and its scene-space point; `onInteractionUpdate` calls `_reanchorZoom`, which redoes **only the translation** after `InteractiveViewer` applies its own scale, so the scene point under the cursor stays put. A `_startSettle()`/`_armSettle()` timer (120 ms) keeps re-applying the anchor through InteractiveViewer's own post-release inertia, because the library keeps moving the matrix on its own after the fingers lift, toward the same wrong focal point.
 

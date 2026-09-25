@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// The one bottom sheet: the floating surface, the sheet radius on its top
@@ -106,3 +107,46 @@ class HollowSheetHandle extends StatelessWidget {
 
 const double _handleWidth = 32;
 const double _handleHeight = 4;
+
+/// The name at the top of a phone action sheet (the person, server, channel or
+/// message the rows act on): start-aligned `subheading`, one line.
+class HollowSheetTitle extends StatelessWidget {
+  final String title;
+
+  /// A quiet second line, such as what kind of thing the title names.
+  final String? subtitle;
+
+  const HollowSheetTitle(this.title, {super.key, this.subtitle});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    // Full width, so a sheet whose column centres its children still starts
+    // the title on the rows' leading edge.
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(
+          HollowSpacing.lg, 0, HollowSpacing.lg, HollowSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title,
+            style: HollowTypography.subheading.copyWith(color: hollow.textPrimary),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (subtitle != null)
+            Text(
+              subtitle!,
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textSecondary),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+        ],
+      ),
+    );
+  }
+}

@@ -1,5 +1,6 @@
 ﻿import 'dart:async';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
@@ -255,7 +256,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       await ref.read(fileTransferProvider.notifier).stopWaitingForFile(fileId);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Could not stop the request: $e',
+      HollowToast.show(context, friendlyError(e, fallback: "Couldn't stop the request. Try again."),
           type: HollowToastType.error);
     }
   }

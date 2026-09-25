@@ -42,13 +42,14 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/shell/voice_room_switch.dart';
+import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart'
+    show showFriendsManager;
 import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
@@ -58,7 +59,6 @@ import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 
 /// Full height of the server banner header (issue #25) when the sidebar has
@@ -792,12 +792,13 @@ class _HomeContent extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.all(HollowSpacing.sm + 2),
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          // The Friends Manager's Add friend tab, the one add-friend form.
           child: HollowButton.outline(
-            onPressed: () => _showAddFriendDialog(innerContext, ref),
+            onPressed: () => showFriendsManager(innerContext, addFriend: true),
             expand: true,
             icon: const Icon(LucideIcons.userPlus, size: 14),
-            child: const Text('Add Friend'),
+            child: const Text('Add friend'),
           ),
         ),
 
@@ -919,13 +920,6 @@ class _HomeContent extends ConsumerWidget {
       ],
     );
   }
-
-  void _showAddFriendDialog(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
-      context: context,
-      builder: (ctx) => _SidebarAddFriendDialog(parentContext: context),
-    );
-  }
 }
 
 /// Pinned "Saved messages" row: [PeerCard] styling with a bookmark avatar and
@@ -968,8 +962,7 @@ class _SavedMessagesCard extends StatelessWidget {
               children: [
                 Text(
                   'Saved messages',
-                  style: HollowTypography.body.copyWith(
-                    fontSize: 13,
+                  style: HollowTypography.label.copyWith(
                     fontWeight:
                         isSelected ? FontWeight.w600 : FontWeight.w400,
                     color: hollow.textPrimary,
@@ -1055,9 +1048,8 @@ class _PendingRequestTile extends ConsumerWidget {
                 children: [
                   Text(
                     name,
-                    style: HollowTypography.body.copyWith(
+                    style: HollowTypography.label.copyWith(
                       color: hollow.textPrimary,
-                      fontSize: 13,
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -1065,9 +1057,8 @@ class _PendingRequestTile extends ConsumerWidget {
                     direction == 'incoming'
                         ? 'Wants to be friends'
                         : 'Request sent',
-                    style: HollowTypography.caption.copyWith(
+                    style: HollowTypography.micro.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 10,
                     ),
                   ),
                 ],
@@ -1093,86 +1084,6 @@ class _PendingRequestTile extends ConsumerWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-/// Sidebar add-friend dialog, taking a peer id or a nickname.
-class _SidebarAddFriendDialog extends ConsumerStatefulWidget {
-  final BuildContext parentContext;
-  const _SidebarAddFriendDialog({required this.parentContext});
-
-  @override
-  ConsumerState<_SidebarAddFriendDialog> createState() =>
-      _SidebarAddFriendDialogState();
-}
-
-class _SidebarAddFriendDialogState
-    extends ConsumerState<_SidebarAddFriendDialog> {
-  final _controller = TextEditingController();
-
-  static bool _isPeerId(String input) => input.startsWith('12D3KooW');
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _send() async {
-    final input = _controller.text.trim();
-    if (input.isEmpty) return;
-    // Awaited so a failure surfaces here and the dialog stays open for a
-    // retry, instead of toasting a false success.
-    try {
-      if (_isPeerId(input)) {
-        await ref.read(friendsProvider.notifier).sendRequest(input);
-      } else {
-        await network_api.sendFriendRequestByNickname(nickname: input);
-      }
-    } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not send request',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-    if (!mounted) return;
-    Navigator.pop(context);
-    final parentContext = widget.parentContext;
-    if (!parentContext.mounted) return;
-    HollowToast.show(
-      parentContext,
-      _isPeerId(input) ? 'Friend request sent' : 'Looking up nickname...',
-      type: HollowToastType.success,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowDialog(
-      title: 'Add friend',
-      width: 420,
-      content: HollowTextField(
-        controller: _controller,
-        hintText: 'Peer ID or nickname...',
-        autofocus: true,
-        style: HollowTypography.mono.copyWith(
-          color: hollow.textPrimary,
-        ),
-        onSubmitted: (_) => _send(),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _send,
-          child: const Text('Send request'),
-        ),
-      ],
     );
   }
 }
@@ -1318,6 +1229,26 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
 
   Set<String> _prevParticipants = {};
 
+  Future<void> _join() async {
+    if (!await confirmVoiceRoomSwitch(context, ref,
+            serverId: widget.serverId,
+            channelId: widget.channel.channelId,
+            channelName: widget.channel.name) ||
+        !mounted) {
+      return;
+    }
+    try {
+      await ref
+          .read(voiceChannelProvider.notifier)
+          .joinChannel(widget.serverId, widget.channel.channelId);
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, "Couldn't join the voice room",
+            type: HollowToastType.error);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -1345,8 +1276,7 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
           widget.onChannelSelected(widget.channel.channelId);
           return;
         }
-        ref.read(voiceChannelProvider.notifier)
-            .joinChannel(widget.serverId, widget.channel.channelId);
+        _join();
       },
       subtle: true,
       borderRadius: radius,
@@ -1622,7 +1552,7 @@ class _VoiceParticipantRow extends ConsumerWidget {
               _mark(LucideIcons.headphoneOff, 'Deafened', hollow),
             if (isRecording)
               const Padding(
-                padding: EdgeInsets.only(left: 4),
+                padding: EdgeInsets.only(left: HollowSpacing.xs),
                 child: RecordingIndicator.compact(),
               ),
           ],

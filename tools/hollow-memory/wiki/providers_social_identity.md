@@ -90,12 +90,13 @@ Five new events handled:
 **File:** `lib/src/core/providers/favourite_friends_provider.dart`
 **Provider:** `favouriteFriendsProvider` — `NotifierProvider<FavouriteFriendsNotifier, List<String>>`
 
-State is an ordered `List<String>` of peer IDs. When non-empty, the FriendsBar displays only these friends in this exact order. When empty, the FriendsBar falls back to showing all accepted friends.
+State is an ordered `List<String>` of MASTER ids (since 2026-09-25). When non-empty, the FriendsBar displays only these friends in this exact order. When empty, the FriendsBar falls back to showing all accepted friends.
 
 - **Persistence:** JSON-encoded list stored in `app_settings` table under key `'favourite_friends'`. Loaded via `storage_api.loadSetting(key:)` during bootstrap (`_bootstrap` calls `favouriteFriendsProvider.notifier.load()` after friends load).
-- **Mutations:** `add(peerId)` appends to end, `remove(peerId)` filters out, `toggle(peerId)` flips membership. All call `_persist()` which writes the JSON array back to `app_settings`.
+- **Master-keyed:** every method takes a device OR a master id and resolves it through `deviceLinkProvider.identityOf`. A stored device id beside its master gave the reorderable Friends list two rows with one key and crashed the Friends Manager, so `load()` and every `deviceLinkProvider` change run `_heal()`: `collapseFavourites` collapses device ids to masters, first place kept, and persists if anything changed. Tests: `test/favourite_friends_provider_test.dart`, `test/widget/favourites_device_id_test.dart` (`readStored` / `writeStored` are `@protected` seams for them).
+- **Mutations:** `add(peerId)` appends the master to the end, `remove(peerId)` drops it under ANY id it was stored as, `toggle(peerId)` flips membership. All call `_persist()` which writes the JSON array back to `app_settings`.
 - **Reorder:** `reorder(oldIndex, newIndex)` does in-place list reorder with standard remove/insert logic (adjusts `newIndex` when moving downward). Persists immediately.
-- **Query:** `isFavourite(peerId)` returns `state.contains(peerId)`.
+- **Query:** `isFavourite(peerId)` compares masters, so a device id of a starred friend reads true.
 
 ### Derived Providers (Performance)
 

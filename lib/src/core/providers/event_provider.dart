@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -80,6 +81,8 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
+import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart'
+    show handleNicknameLookupFailed;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
 /// Listens to the Rust event stream and dispatches to the right providers.
@@ -998,16 +1001,18 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_NicknameResolveFailed(:final nickname, :final error):
         debugPrint('[HOLLOW] Nickname resolve failed: $nickname — $error');
-        // User-visible failure: the add-friend UIs show an optimistic "Looking up
-        // nickname..." toast, so without this a bad nickname fails in total silence.
+        // A send that is waiting on the lookup shows the failure at its field;
+        // otherwise a bad nickname would fail in total silence.
         final overlay = hollowNavigatorKey.currentState?.overlay;
         final overlayContext = overlay?.context;
-        if (overlay != null && overlayContext != null && overlayContext.mounted) {
+        if (!handleNicknameLookupFailed(nickname, error) &&
+            overlay != null && overlayContext != null && overlayContext.mounted) {
           HollowToast.show(
             overlayContext,
             error == 'not_found'
-                ? "Nickname '$nickname' not found. It may have expired"
-                : "Couldn't look up '$nickname': $error",
+                ? "Nickname '$nickname' not found. It may have expired."
+                : friendlyError(error,
+                    fallback: "Couldn't look up '$nickname'. Try again."),
             type: HollowToastType.error,
             overlayState: overlay,
           );
@@ -1738,9 +1743,8 @@ class EventStreamNotifier extends Notifier<bool> {
           showNsfwConfirmDialog(
             ctx,
             serverName: serverName.isEmpty ? 'This server' : serverName,
-            onProceed: () {
-              crdt_api.joinServer(serverId: serverId, nsfwConfirmed: true);
-            },
+            onProceed: () =>
+                crdt_api.joinServer(serverId: serverId, nsfwConfirmed: true),
           );
         } else {
           final handled = handleTwitchJoinResult(success: false, error: reason);

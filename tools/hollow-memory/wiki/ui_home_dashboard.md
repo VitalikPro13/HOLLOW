@@ -50,12 +50,13 @@ Shown while the person has no friend OR no server, `homeSetupProvider.loaded`, a
 - Filter chips All / Unread (DMs with unread + mention rows) / Mentions, and the title-row search.
 - Rows are `ConversationRow` (`components/conversation_row.dart`): `PresenceAvatar`, title + detail + time BESIDE the name (`conversationTimeLabel()`: 14:05 / Yesterday / weekday / Sep 17 / Sep 17, 2025, and '' for an epoch-or-earlier time, interface face at `textTertiary`), preview, `HollowCountBadge` (accent unread, error + `@` mention) at the far edge.
 - Empty states: no conversations at all, nothing unread, no mentions, no search match.
+- **Names follow local nicknames** (2026-09-25): `displayNameFor` reads the local nickname CACHE, not a provider, so the inbox builders and `HomeRail` `ref.watch(localNicknameProvider)` to rebuild on a rename. Without it Home and the phone Chats kept the old name until something else rebuilt them (`test/widget/home_local_nickname_test.dart`).
 
 ## Side panel (`HomeRail`)
 
 1. **News card:** header "News" + the running version as a mono `HollowBadge`; the latest `newsProvider` post (title, date, plain-text excerpt via `plainNewsExcerpt`); the WHOLE card opens the post (`showNewsPostDialog`; a text link was too small for a finger) and a teal "What's new in X" (`showChangelogDialog`, Older / Newer to walk versions). When `changelogSeen != currentVersion`, the card leads with "Updated to X", three changelog lines and "See everything that's new" until opened (`markChangelogSeen`). The changelog is `changelog.txt` BUNDLED as a pubspec asset and parsed by `core/changelog.dart` (`changelogProvider`); `describes()` matches `0.11` to `0.11.0`. No network, no third party. Links are `HollowTextLink`.
 2. **Relay card:** "Relay", the connection dot + `overallConnectionProvider.label` via `connectionVisual()`, the relay domain in mono, then `RelayLoadBars` (`settings/relay_health_card.dart`: RAM, bandwidth, the 7 s poll sweep, an "Online" count row). Watching it runs `relayStatsProvider`'s poll, so it polls while Home or Settings > Network is open.
-3. **Active Now:** voice rooms across every non-conference server from `voiceChannelProvider.participants` (devices resolved to masters, channel names via `serverChannelsProvider`), each with Join (joins, then opens the channel) or Open when we are in it; then online friends (`onlineIdentitiesProvider`) as `HollowListRow` with their status or "In voice, <server>", capped at 8. Screen shares across servers are not tracked, so they do not appear.
+3. **Active Now:** voice rooms across every non-conference server from `voiceChannelProvider.participants` (devices resolved to masters, channel names via `serverChannelsProvider`), each with Join (asks `confirmVoiceRoomSwitch` first, which speaks only while you are in another room with people, then joins and opens the channel) or Open when we are in it; then online friends (`onlineIdentitiesProvider`) as `HollowListRow` with their status or "In voice, <server>", capped at 8. Screen shares across servers are not tracked, so they do not appear.
 
 The pieces are public and shared with the phone (wiki `ui_mobile`): `HomeNewsCard`, `HomeRelayCard(loadBars:)` (false drops the bars and their poll for a mounted-but-hidden tab) close mobile Settings; `homeVoiceRooms(ref)` + `HomeVoiceRoomTile(onOpen:, touch:)` are the phone Chats' Active Now.
 
@@ -143,147 +144,9 @@ Your Stats is Settings > Devices `SyncCheckCard`; the status card and relay bars
 
 ---
 
-## _FriendsManager — Full Friends Dialog
+## Friends Manager (moved)
 
-`friends_bar.dart:_FriendsManager` is a `ConsumerStatefulWidget`. A modal dialog opened by the Add friend button in FriendsBar. Contains 5 tabs for managing all friend relationships.
-
-**Dialog opening:** `showFriendsManager(context, {addFriend, tab})` (public, via `showHollowDialog`). `tab` is the public enum `FriendsManagerTab {friends, favourites, incoming, outgoing, add}` and wins when given; `addFriend: true` still means the Add tab; neither = Friends. Home's checklist and the New message dialog open it on the Add tab, the header's Add friend button on Incoming while requests wait.
-
-**State:** `_activeTab` (`_FriendsTab`, a typedef of `FriendsManagerTab`), initialised from `initialTab`. `_addController` (`TextEditingController`) for the Add Friend input, disposed in `dispose()`.
-
-**Providers read:**
-- `friendsProvider`: pending requests split into `incoming`, `outgoing`
-- `sortedFriendsProvider`: the accepted list (master-collapsed)
-
-**Sorting for accepted friends:** `sortedFriendsProvider`, online first, then by display name case-insensitively (`compareFriendNames`).
-
-**Dialog container:** 520px wide, 480px tall, `hollow.background` color, `radiusLg` corners, `hollow.border` border, drop shadow (black 30% alpha, blur 24, offset (0,8)).
-
-**Layout (Column):**
-1. **Header (48px):** `LucideIcons.users` (18px) + "Friends" title (subheading, w600) + spacer + close button (`LucideIcons.x`, 18px, calls `Navigator.pop`).
-
-2. **Tab bar (40px):** `hollow.surface` background with bottom border. Row of 5 `_TabButton` widgets:
-   - "Friends" — shows `accepted.length` count
-   - "Favourites" — shows `favouriteFriendsProvider.length` count, icon `LucideIcons.star`
-   - "Incoming" — shows `incoming.length` count, `showBadge: incoming.isNotEmpty` (red badge)
-   - "Outgoing" — shows `outgoing.length` count
-   - "Add Friend" — no count, icon `LucideIcons.userPlus`
-
-3. **Tab content (Expanded):** switching tabs is instant. Switch expression maps `_activeTab` to:
-   - `_FriendsTab.friends` -> `_FriendsListTab(accepted: accepted)`
-   - `_FriendsTab.favourites` -> `_FavouritesReorderTab(accepted: accepted)`
-   - `_FriendsTab.incoming` -> `_RequestsTab(requests: incoming, direction: 'incoming')`
-   - `_FriendsTab.outgoing` -> `_RequestsTab(requests: outgoing, direction: 'outgoing')`
-   - `_FriendsTab.add` -> `_AddFriendTab(controller: _addController)`
-
----
-
-## _TabButton — Tab Bar Button
-
-`friends_bar.dart:_TabButton` is a `StatelessWidget`. A pressable tab in the `_FriendsManager` tab bar.
-
-**Props:** `label`, `count` (nullable int), `isActive`, `showBadge` (default false), `icon` (nullable IconData), `onTap`.
-
-**Rendering:** `HollowPressable` with `radiusMd` corners. Row containing:
-- Optional icon (13px, accent if active, textSecondary if not)
-- Label text (12px caption, accent + w600 if active, textSecondary + w400 if not)
-- Optional count badge: pill container with count text. Background: `hollow.error` if `showBadge` is true, otherwise 15% alpha of active color. Text color: white if `showBadge`, otherwise active color. 10px, w600.
-
----
-
-## _FriendsListTab — All Friends Tab
-
-`friends_bar.dart:_FriendsListTab` is a `ConsumerWidget`. Shows all accepted friends with favourite toggle and remove buttons.
-
-**Props:** `accepted` (List<FriendInfo>).
-
-**Providers read:** `profileProvider`, `peersProvider`, `invisiblePeersProvider`, `favouriteFriendsProvider` (via Builder).
-
-**Empty state:** Centered column with `LucideIcons.users` (40px, 30% alpha), "No friends yet", "Add a friend by their peer ID".
-
-**List:** `ListView.builder` with `HollowSpacing.md` padding. Each item is a container with `hollow.elevated` background, `radiusMd` corners.
-
-**Item layout (Row):**
-1. **Avatar stack:** `HollowAvatar(peerId, size: 32)` with `StatusDot` overlay at bottom-right (7px dot inside 10px circle, `hollow.elevated` background).
-2. **Name + status (Expanded Column):** Name (13px, w500), online status text (10px, green if online, textSecondary if offline).
-3. **Favourite toggle button:** `HollowTooltip` ("Add to favourites" / "Remove from favourites"). `LucideIcons.star` (16px), `hollow.warning` if favourited, `hollow.textSecondary` at 40% alpha if not. Calls `favouriteFriendsProvider.notifier.toggle(peerId)`.
-4. **Remove friend button:** `HollowTooltip` "Remove friend". `LucideIcons.userMinus` (16px, `hollow.error`). On tap:
-   - Calls `friendsProvider.notifier.removeFriend(peerId)`
-   - Calls `favouriteFriendsProvider.notifier.remove(peerId)`
-   - If `selectedPeerProvider == peerId`, clears selection to null
-   - If split view right pane shows this peer, calls `splitViewProvider.notifier.closeSplit()`
-
----
-
-## _FavouritesReorderTab — Drag-to-Reorder Favourites
-
-`friends_bar.dart:_FavouritesReorderTab` is a `ConsumerWidget`. Shows starred friends in a reorderable list.
-
-**Props:** `accepted` (List<FriendInfo>).
-
-**Providers read:** `favouriteFriendsProvider`, `profileProvider`, `peersProvider`, `invisiblePeersProvider`.
-
-**Filtering:** `validFavs` = favourites list filtered to IDs present in accepted friends set (removes stale entries).
-
-**Empty state:** Centered column with `LucideIcons.star` (40px, 30% alpha), "No favourites yet", "Star a friend in the Friends tab to add them here".
-
-**List:** `ReorderableListView.builder` with `HollowSpacing.md` padding, `buildDefaultDragHandles: false`.
-
-**Drag proxy:** `proxyDecorator` wraps child in `Material` with 4px elevation, `Colors.black26` shadow, `radiusMd` corners, transparent background.
-
-**Reorder callback:** `favouriteFriendsProvider.notifier.reorder(oldIndex, newIndex)`.
-
-**Item layout (Row):**
-1. **Drag handle:** `ReorderableDragStartListener(index: index)` wrapping `LucideIcons.gripVertical` (16px, textSecondary).
-2. **Avatar:** `HollowAvatar(peerId, size: 28)`.
-3. **Name + status (Expanded Column):** Name (13px, w500), online status (10px).
-4. **Remove button:** `HollowTooltip` "Remove from favourites". `LucideIcons.x` (14px, textSecondary). Calls `favouriteFriendsProvider.notifier.remove(peerId)`.
-
----
-
-## _RequestsTab — Incoming/Outgoing Requests
-
-`friends_bar.dart:_RequestsTab` is a `ConsumerStatefulWidget`. Shows pending friend requests with search filtering and accept/reject actions.
-
-**Props:** `requests` (List<FriendInfo>), `direction` ('incoming' or 'outgoing').
-
-**State:** `_searchController` (TextEditingController), `_query` (String, initialized empty).
-
-**Providers read:** `profileProvider`.
-
-**Empty state:** Centered column with direction-specific icon (`LucideIcons.inbox` for incoming, `LucideIcons.send` for outgoing, both 40px at 30% alpha), and direction-specific text ("No incoming requests" / "No outgoing requests").
-
-**Search:** `HollowTextField` with direction-specific placeholder ("Search incoming requests..." / "Search outgoing requests..."), `LucideIcons.search` prefix, isDense. Filters by display name or peer ID (case-insensitive contains).
-
-**No matches:** "No matches" body text centered.
-
-**List:** `ListView.builder`. Each item: container with `hollow.elevated` background, `radiusMd` corners.
-
-**Item layout (Row):**
-1. **Avatar:** `HollowAvatar(peerId, size: 32)`.
-2. **Name + subtitle (Expanded Column):** Name (13px, w500), subtitle ("Wants to be friends" for incoming, "Request sent" for outgoing, 10px caption).
-3. **Action buttons:**
-   - **Incoming:** Accept button (`LucideIcons.check`, 16px, `hollow.success`) calling `friendsProvider.notifier.acceptRequest(peerId)` + Reject button (`LucideIcons.x`, 16px, `hollow.error`) calling `friendsProvider.notifier.rejectRequest(peerId)`. Both wrapped in `HollowTooltip`.
-   - **Outgoing:** Cancel button (`LucideIcons.x`, 16px, `hollow.error`) calling `friendsProvider.notifier.rejectRequest(peerId)`. Tooltip: "Cancel request".
-
----
-
-## _AddFriendTab — Unified Add Friend Input
-
-`friends_bar.dart:_AddFriendTab` is a `ConsumerStatefulWidget`. Unified input form for sending a friend request by peer ID or temporary nickname, plus a nickname claim section.
-
-**Props:** `controller` (TextEditingController, managed by parent `_FriendsManagerState`).
-
-**Auto-detection:** `_isPeerId(input)` checks if input starts with `12D3KooW`. If yes, sends via `friendsProvider.notifier.sendRequest()`; otherwise resolves as nickname via `network_api.sendFriendRequestByNickname()`.
-
-**Layout:** Padded with `HollowSpacing.lg`. Column containing:
-1. Instruction text: "Enter a peer ID or temporary nickname" (body, textSecondary)
-2. Row: `HollowTextField` (hint "Peer ID or nickname...", mono 12px, autofocus) + "Send Request" filled button
-3. Divider
-4. "Your temporary nickname" section — watches `temporaryNicknameProvider`:
-   - **Claimed state:** Shows nickname in accent-colored chip + "Release" ghost button
-   - **Off/failed state:** `HollowTextField` (hint "Choose a nickname (3-20 chars)...") + "Claim" filled button (disabled while claiming)
-   - **Error display:** Shows human-readable error for "taken" / "invalid" / generic failure
+The Friends dialog is `dialogs/friends_manager_dialog.dart` (`showFriendsManager(context, {addFriend, tab})`, re-exported from `friends_bar.dart`; tabs Friends / Requests / Add friend as one `HollowChipTabs` row). Full description in wiki `ui_dialogs`, "Friends Manager". The old `friends_bar.dart` pieces this page described (`_TabButton`, `_FriendsListTab`, `_FavouritesReorderTab`, the 5-tab bar) are gone. Removing a friend anywhere goes through `confirmRemoveFriend` (`dialogs/confirm_remove_friend.dart`: "Remove <name>?", danger "Remove friend", run inside the confirm, then `removeFriendAndTidy` drops the favourite, the open DM and the split pane).
 
 ---
 
@@ -298,11 +161,7 @@ Your Stats is Settings > Devices `SyncCheckCard`; the status card and relay bars
 **FriendsBar subtree reads:**
 - `friendsBarProvider` (itself over `sortedFriendsProvider`, `profileProvider`, `deviceLinkProvider`, `favouriteFriendsProvider`, `unreadProvider`, `notificationSettingsProvider`), `pendingFriendCountProvider`, `dockOwnsWindowChromeProvider`, `windowControlsWidthProvider`: FriendsBar
 - `profileProvider`, `onlineIdentitiesProvider`, `selectedPeerProvider`, `notificationSettingsProvider`, `unreadProvider`: _FriendChip
-- `friendsProvider`, `sortedFriendsProvider`, `favouriteFriendsProvider`: _FriendsManager
-- `profileProvider`, `peersProvider`, `invisiblePeersProvider`, `favouriteFriendsProvider`, `splitViewProvider` — _FriendsListTab
-- `favouriteFriendsProvider`, `profileProvider`, `peersProvider`, `invisiblePeersProvider` — _FavouritesReorderTab
-- `profileProvider` — _RequestsTab
-- `friendsProvider` — _AddFriendTab (via ref.read for sendRequest)
+- the Friends Manager's own reads: wiki `ui_dialogs`
 
 **State mutations triggered:**
 - `selectedPeerProvider`, `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider` — conversation/friend selection

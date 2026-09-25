@@ -242,8 +242,10 @@ actually appear in `serverMembersProvider` — an owner right-clicking a non-mem
 still advertises an action the user cannot perform, and a shown-but-unusable one produces a confusing Rust
 rejection later. Rust re-checks `op_allowed` on every op regardless.
 
-The confirms themselves live in `lib/src/ui/settings/moderation_dialogs.dart`, shared with the Server Settings
-Members tab and the mobile members route (see `ui_server_settings.md`).
+The confirms themselves live in `lib/src/ui/settings/moderation_dialogs.dart`, shared with the Server settings
+Members page (desktop and phone) and Manage member (see `ui_profile_card.md`, "Moderation confirms"): each runs
+its op INSIDE the confirm and toasts itself. Set nickname opens `showLocalNicknameDialog`, Remove friend
+`confirmRemoveFriend` (`dialogs/confirm_remove_friend.dart`), both the same dialogs every other surface uses.
 
 ## VoiceChannelPanel Integration
 

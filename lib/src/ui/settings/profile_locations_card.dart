@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/single_instance_lock.dart';
@@ -123,39 +124,13 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);
-        HollowToast.show(context, 'Failed to switch profile: $e',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't switch the profile. Try again."),
             type: HollowToastType.error);
       }
     }
-  }
-
-  Future<String?> _promptName({required String initial}) async {
-    final controller = TextEditingController(text: initial);
-    final name = await showHollowDialog<String>(
-      context: context,
-      builder: (dialogContext) => HollowDialog(
-        title: 'Profile name',
-        content: HollowTextField(
-          controller: controller,
-          hintText: 'e.g. Artist, Personal',
-          autofocus: true,
-          maxLength: 32,
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () =>
-                Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    return (name == null || name.isEmpty) ? null : name;
   }
 
   Future<void> _addProfile() async {
@@ -168,7 +143,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       // The folder may have appeared after this card was last built.
       setState(() {});
       HollowToast.show(
-          context, 'That is the portable folder: use its row in the list',
+          context, "That's the portable folder. Use its row in the list.",
           type: HollowToastType.info);
       return;
     }
@@ -190,40 +165,37 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         .split(Platform.pathSeparator)
         .where((s) => s.isNotEmpty)
         .lastOrNull;
-    final name = await _promptName(initial: baseName ?? 'New profile');
-    if (name == null || !mounted) return;
-
-    try {
-      await _saveRegistry(_registry.copyWith(custom: [
+    await promptForName(
+      context: context,
+      title: 'Add a profile',
+      confirmLabel: 'Add',
+      hintText: 'Profile name, like Artist or Personal',
+      initial: baseName ?? 'New profile',
+      maxLength: 32,
+      onSubmit: (name) => _saveRegistry(_registry.copyWith(custom: [
         ..._registry.custom,
         HollowProfile(name: name, path: picked),
-      ]));
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to save profile list: $e',
-            type: HollowToastType.error);
-      }
-    }
+      ])),
+    );
   }
 
   Future<void> _renameProfile(ProfileRow row) async {
-    final name = await _promptName(initial: row.name);
-    if (name == null || !mounted) return;
-    try {
-      await _saveRegistry(_registry.copyWith(
+    await promptForName(
+      context: context,
+      title: 'Rename profile',
+      confirmLabel: 'Rename',
+      hintText: 'Profile name',
+      initial: row.name,
+      maxLength: 32,
+      onSubmit: (name) => _saveRegistry(_registry.copyWith(
         custom: [
           for (final c in _registry.custom)
             sameProfilePath(c.path, row.path)
                 ? HollowProfile(name: name, path: c.path)
                 : c,
         ],
-      ));
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to rename: $e',
-            type: HollowToastType.error);
-      }
-    }
+      )),
+    );
   }
 
   Future<void> _removeProfile(ProfileRow row) async {
@@ -240,7 +212,10 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Failed to remove: $e',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't remove it from the list. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -302,7 +277,10 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       } catch (e) {
         if (mounted) {
           setState(() => _busy = false);
-          HollowToast.show(context, 'Failed to erase: $e',
+          HollowToast.show(
+              context,
+              friendlyError(e,
+                  fallback: "Couldn't erase the profile. Try again."),
               type: HollowToastType.error);
         }
       }
@@ -319,7 +297,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
     if (!_isEmptyOrHollowData(row.path)) {
       HollowToast.show(
-          context, 'That folder does not look like Hollow data. Not erasing',
+          context, "That folder doesn't look like Hollow data, so it stays.",
           type: HollowToastType.error);
       return;
     }
@@ -343,7 +321,10 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);
-        HollowToast.show(context, 'Erase failed: $e',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't erase the profile. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -554,7 +535,7 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
       if (!ok) {
         setState(() {
           _checking = false;
-          _error = 'Wrong password.';
+          _error = "That password isn't right.";
         });
         return;
       }
@@ -563,7 +544,8 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
       if (!mounted) return;
       setState(() {
         _checking = false;
-        _error = 'Could not check the password: $e';
+        _error = friendlyError(e,
+            fallback: "Couldn't check the password. Try again.");
       });
     }
   }
@@ -604,7 +586,6 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
             HollowTextField(
               controller: _controller,
               autofocus: true,
-              isDense: true,
               obscureText: widget.challenge == _EraseChallenge.password,
               hintText: widget.challenge == _EraseChallenge.password
                   ? 'Profile password'
@@ -624,7 +605,7 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
         HollowButton.danger(
           onPressed: canConfirm ? _confirm : null,
           loading: _checking,
-          child: Text(widget.isRunning ? 'Erase & restart' : 'Erase profile'),
+          child: Text(widget.isRunning ? 'Erase and restart' : 'Erase profile'),
         ),
       ],
     );

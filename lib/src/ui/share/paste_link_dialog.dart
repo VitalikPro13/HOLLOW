@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -34,6 +35,9 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
   int _totalSize = 0;
   int _loadingStartMs = 0;
   Timer? _countdownTimer;
+  bool _decoding = false;
+  bool _downloading = false;
+  String? _downloadError;
 
   @override
   void initState() {
@@ -94,6 +98,8 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
     return HollowDialog(
       title: 'Open a share link',
       width: 420,
+      busy: _downloading,
+      error: _state == _DialogState.confirm ? _downloadError : null,
       content: _buildContent(hollow),
       actions: _buildActions(),
     );
@@ -111,6 +117,9 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
               hintText: 'hollow://share/...',
               autofocus: true,
               errorText: _errorText,
+              onChanged: (_) {
+                if (_errorText != null) setState(() => _errorText = null);
+              },
               onSubmitted: (_) => _onOpen(),
             ),
           ],
@@ -193,6 +202,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
           ),
           HollowButton.filled(
             onPressed: _onOpen,
+            loading: _decoding,
             child: const Text('Open'),
           ),
         ];
@@ -206,11 +216,12 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
       case _DialogState.confirm:
         return [
           HollowButton.ghost(
-            onPressed: _onCancel,
+            onPressed: _downloading ? null : _onCancel,
             child: const Text('Cancel'),
           ),
           HollowButton.filled(
             onPressed: _onDownload,
+            loading: _downloading,
             child: const Text('Download'),
           ),
         ];
@@ -218,41 +229,100 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
   }
 
   Future<void> _onOpen() async {
+    if (_decoding || _state != _DialogState.input) return;
     final link = _controller.text.trim();
     if (link.isEmpty) {
       setState(() => _errorText = 'Paste a share link first');
       return;
     }
 
+    setState(() => _decoding = true);
+    final share_api.ShareLinkInfo info;
     try {
-      final info = await share_api.shareDecodeLink(link: link);
-      final existing = ref.read(shareTabProvider);
-      if (existing.any((s) => s.rootHash == info.rootHash)) {
-        setState(() => _errorText = 'You already have this file');
-        return;
+      info = await share_api.shareDecodeLink(link: link);
+    } catch (_) {
+      // Decoding is local, so a failure here means the text is not a link.
+      if (mounted) {
+        setState(() {
+          _decoding = false;
+          _errorText = "That isn't a share link";
+        });
       }
-      _rootHash = info.rootHash;
-      _shareLink = link;
-      _loadingStartMs = DateTime.now().millisecondsSinceEpoch;
-      _countdownTimer?.cancel();
-      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted && _state == _DialogState.loading) setState(() {});
-      });
+      return;
+    }
+    if (!mounted) return;
+    final existing = ref.read(shareTabProvider);
+    if (existing.any((s) => s.rootHash == info.rootHash)) {
       setState(() {
-        _state = _DialogState.loading;
-        _errorText = null;
+        _decoding = false;
+        _errorText = 'You already have this file';
       });
+      return;
+    }
+    _rootHash = info.rootHash;
+    _shareLink = link;
+    _loadingStartMs = DateTime.now().millisecondsSinceEpoch;
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _state == _DialogState.loading) setState(() {});
+    });
+    setState(() {
+      _decoding = false;
+      _state = _DialogState.loading;
+      _errorText = null;
+    });
+    try {
       await share_api.shareOpenLink(link: link);
     } catch (e) {
-      setState(() => _errorText = "That isn't a share link");
+      // The link was fine; asking for the file failed. Say that, and never
+      // let the countdown run on to blame the people sharing it.
+      if (!mounted || _state != _DialogState.loading) return;
+      _countdownTimer?.cancel();
+      _cleanup();
+      setState(() {
+        _state = _DialogState.input;
+        _rootHash = null;
+        _errorText = friendlyError(e,
+            fallback: "Couldn't ask for this file. Check your connection "
+                'and try again.');
+      });
     }
   }
 
   Future<void> _onDownload() async {
-    if (_rootHash == null) return;
+    final rootHash = _rootHash;
+    if (rootHash == null || _downloading) return;
     final saveDir = ref.read(shareDownloadPathProvider).valueOrNull ?? '';
-    ref.read(shareTabProvider.notifier).startDownload(_rootHash!, _shareLink ?? '');
-    await share_api.shareStartDownload(rootHash: _rootHash!, saveDir: saveDir, link: _shareLink ?? '', sequential: false);
+    final notifier = ref.read(shareTabProvider.notifier);
+    final manifest = notifier.pendingManifests[rootHash];
+    setState(() {
+      _downloading = true;
+      _downloadError = null;
+    });
+    notifier.startDownload(rootHash, _shareLink ?? '');
+    try {
+      await share_api.shareStartDownload(
+          rootHash: rootHash,
+          saveDir: saveDir,
+          link: _shareLink ?? '',
+          sequential: false);
+    } catch (e) {
+      // Undo the optimistic row so the list never shows a download that
+      // never started, and keep the manifest for a retry.
+      notifier.removeShare(rootHash);
+      if (manifest != null) {
+        final (name, size, chunks) = manifest;
+        notifier.handleShareManifestReady(rootHash, name, size, chunks);
+      }
+      if (mounted) {
+        setState(() {
+          _downloading = false;
+          _downloadError = friendlyError(e,
+              fallback: "Couldn't start the download. Try again.");
+        });
+      }
+      return;
+    }
     if (mounted) Navigator.pop(context);
   }
 
@@ -271,7 +341,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
   void _cleanup() {
     if (_rootHash != null) {
       ref.read(shareTabProvider.notifier).clearPendingManifest(_rootHash!);
-      share_api.shareCancel(rootHash: _rootHash!);
+      share_api.shareCancel(rootHash: _rootHash!).catchError((_) {});
     }
   }
 }

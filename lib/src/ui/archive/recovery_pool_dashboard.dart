@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
@@ -180,30 +181,38 @@ class RecoveryPoolDashboard extends ConsumerWidget {
 
   Future<void> _stop(BuildContext context, WidgetRef ref, String serverId,
       {required bool initiator}) async {
+    final pool = ref.read(recoveryPoolProvider.notifier);
     if (initiator) {
-      final ok = await showHollowConfirm(
+      final stopped = await showHollowConfirm(
         context: context,
         title: 'Stop the recovery pool?',
         message: 'Everyone helping is disconnected from it. Files already '
             'recovered stay on your device.',
         confirmLabel: 'Stop the pool',
         destructive: true,
+        onConfirm: () => crdt_api.stopRecoveryPool(serverId: serverId),
       );
-      if (!ok) return;
+      if (!stopped) return;
+      pool.clear();
+      if (context.mounted) {
+        HollowToast.show(context, 'Recovery pool stopped',
+            type: HollowToastType.info);
+      }
+      return;
     }
     try {
       await crdt_api.stopRecoveryPool(serverId: serverId);
-      ref.read(recoveryPoolProvider.notifier).clear();
+      pool.clear();
       if (context.mounted) {
-        HollowToast.show(
-            context, initiator ? 'Recovery pool stopped' : 'You left the pool',
+        HollowToast.show(context, 'You left the pool',
             type: HollowToastType.info);
       }
     } catch (e) {
       if (context.mounted) {
         HollowToast.show(
           context,
-          initiator ? "Couldn't stop the pool: $e" : "Couldn't leave the pool: $e",
+          friendlyError(e,
+              fallback: "Couldn't leave the pool. Try again."),
           type: HollowToastType.error,
         );
       }

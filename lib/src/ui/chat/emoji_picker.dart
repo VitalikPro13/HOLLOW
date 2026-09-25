@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
@@ -690,11 +691,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
           child: Text(
             'Emotes from FrankerFaceZ · tap to add & use',
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textTertiary, fontSize: 10),
+            style: HollowTypography.micro.copyWith(color: hollow.textTertiary),
           ),
         ),
       ],
@@ -998,6 +998,7 @@ Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
     return p;
   }).catchError((Object e) {
     processError = e;
+    _logLine('[HOLLOW-EMOTE] processing failed: $e');
     return null;
   });
 
@@ -1019,18 +1020,10 @@ Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
             ),
     ),
     processing: processing,
+    processingError: () => friendlyError(processError ?? 'unknown',
+        fallback: "Hollow couldn't use that image. Try another one."),
   );
   if (name == null) return null; // cancelled
-  if (name.isEmpty) {
-    // The dialog's sentinel for Save pressed after processing failed.
-    _logLine('[HOLLOW-EMOTE] processing failed: $processError');
-    if (context.mounted) {
-      HollowToast.show(
-          context, '$processError'.replaceFirst('Exception: ', ''),
-          type: HollowToastType.error);
-    }
-    return null;
-  }
   final processed = await processing;
   if (processed == null) return null;
   return (processed: processed, name: name);
@@ -1048,14 +1041,15 @@ Future<String?> promptEmoteName(BuildContext context,
 
 final _emoteNameRegex = RegExp(r'^[a-z0-9_]{2,24}$');
 
-/// Shared name dialog. With [processing] set, Save awaits it under a spinner
-/// and pops '' when it resolved null, which the caller toasts; a null pop is a
-/// cancel.
+/// Shared name dialog. With [processing] set, Save awaits it under a spinner;
+/// when it resolves null the dialog stays open with [processingError] shown
+/// in it, and only Cancel is left. A null pop is a cancel.
 Future<String?> _promptEmoteNameImpl(
   BuildContext context, {
   required Widget preview,
   String initial = '',
   Future<Object?>? processing,
+  String Function()? processingError,
 }) {
   return showHollowDialog<String>(
     context: context,
@@ -1063,6 +1057,7 @@ Future<String?> _promptEmoteNameImpl(
       preview: preview,
       initial: initial,
       processing: processing,
+      processingError: processingError,
     ),
   );
 }
@@ -1073,11 +1068,13 @@ class _EmoteNameDialog extends StatefulWidget {
   final Widget preview;
   final String initial;
   final Future<Object?>? processing;
+  final String Function()? processingError;
 
   const _EmoteNameDialog({
     required this.preview,
     required this.initial,
     required this.processing,
+    required this.processingError,
   });
 
   @override
@@ -1090,6 +1087,9 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Why the image could not be used; the name no longer matters then.
+  String? _failed;
+
   @override
   void dispose() {
     _controller.dispose();
@@ -1097,10 +1097,10 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
   }
 
   Future<void> _submit() async {
-    if (_saving) return;
+    if (_saving || _failed != null) return;
     final name = _controller.text.trim().toLowerCase();
     if (!_emoteNameRegex.hasMatch(name)) {
-      setState(() => _error = '2-24 characters, only a-z, 0-9 and _');
+      setState(() => _error = 'Use 2 to 24 lowercase letters, digits or _.');
       return;
     }
     final processing = widget.processing;
@@ -1109,7 +1109,10 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
       final ok = await processing;
       if (!mounted) return;
       if (ok == null) {
-        Navigator.pop(context, '');
+        setState(() {
+          _saving = false;
+          _failed = widget.processingError?.call() ?? kGenericErrorSentence;
+        });
         return;
       }
     }
@@ -1122,6 +1125,8 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
     return HollowDialog(
       title: 'Name this emote',
       width: 420,
+      busy: _saving,
+      error: _failed,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1137,7 +1142,7 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
           ),
           const SizedBox(height: HollowSpacing.xs),
           Text(
-            'Used as :name: (2-24 characters: a-z, 0-9, _)',
+            'Type it as :name: in a message.',
             style:
                 HollowTypography.caption.copyWith(color: hollow.textTertiary),
           ),
@@ -1149,7 +1154,7 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _saving ? null : _submit,
+          onPressed: _saving || _failed != null ? null : _submit,
           loading: _saving,
           child: const Text('Save'),
         ),

@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -20,25 +23,23 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
-import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_count_badge.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hover_scope.dart';
-import 'package:hollow/src/ui/components/nav_selection_mark.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
-import 'package:hollow/src/ui/shell/friends_bar.dart' show removeFriendAndTidy;
+import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The Friends Manager's tabs.
@@ -62,7 +63,6 @@ void showFriendsManager(
 
 const double _kDialogWidth = 520;
 const double _kDialogHeight = 552;
-const double _kTabHeight = 40;
 
 /// Row actions stay on screen on a touch device, which has no hover to find
 /// them with.
@@ -107,7 +107,6 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
 
     // The accepted list is master-collapsed and deduped by the shared provider.
@@ -123,60 +122,67 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
         .toList()
       ..sort((a, b) => b.requestedAt.compareTo(a.requestedAt));
 
-    return HollowDialogSurface(
-      width: _kDialogWidth,
-      maxHeight: _kDialogHeight,
-      padded: false,
-      child: SizedBox(
-        height: _kDialogHeight,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                HollowSpacing.xl,
-                HollowSpacing.lg,
-                HollowSpacing.lg,
-                HollowSpacing.xs,
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Friends',
-                      style: HollowTypography.heading
-                          .copyWith(color: hollow.textPrimary),
+    // The tab row is the header: a "Friends" title above a "Friends" tab said
+    // the same word twice. The route still announces its name.
+    return Semantics(
+      scopesRoute: true,
+      namesRoute: true,
+      explicitChildNodes: true,
+      label: 'Friends',
+      child: HollowDialogSurface(
+        width: _kDialogWidth,
+        maxHeight: _kDialogHeight,
+        padded: false,
+        child: SizedBox(
+          height: _kDialogHeight,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  HollowSpacing.xl,
+                  HollowSpacing.lg,
+                  HollowSpacing.lg,
+                  HollowSpacing.md,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _TabBar(
+                        selected: _tab,
+                        friendCount: accepted.length,
+                        waiting: incoming.length,
+                        onPick: _pick,
+                      ),
                     ),
-                  ),
-                  const HollowDialogCloseButton(),
-                ],
+                    const SizedBox(width: HollowSpacing.sm),
+                    const HollowDialogCloseButton(),
+                  ],
+                ),
               ),
-            ),
-            _TabBar(
-              selected: _tab,
-              friendCount: accepted.length,
-              waiting: incoming.length,
-              onPick: _pick,
-            ),
-            const HollowDivider(),
-            // Switching tabs is instant.
-            Expanded(
-              child: switch (_tab) {
-                FriendsManagerTab.friends => _FriendsTab(
-                    key: const ValueKey('friends'),
-                    accepted: accepted,
-                  ),
-                FriendsManagerTab.requests => _RequestsTab(
-                    key: const ValueKey('requests'),
-                    incoming: incoming,
-                    outgoing: outgoing,
-                  ),
-                FriendsManagerTab.add => _AddFriendTab(
-                    key: const ValueKey('add'),
-                    controller: _addController,
-                  ),
-              },
-            ),
-          ],
+              const HollowDivider(),
+              // Switching tabs is instant. Rows sit on the tab row's and the
+              // search field's text edge, as in every padded dialog.
+              Expanded(
+                child: HollowFlushRows(
+                  child: switch (_tab) {
+                    FriendsManagerTab.friends => _FriendsTab(
+                        key: const ValueKey('friends'),
+                        accepted: accepted,
+                      ),
+                    FriendsManagerTab.requests => _RequestsTab(
+                        key: const ValueKey('requests'),
+                        incoming: incoming,
+                        outgoing: outgoing,
+                      ),
+                    FriendsManagerTab.add => _AddFriendTab(
+                        key: const ValueKey('add'),
+                        controller: _addController,
+                      ),
+                  },
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -198,122 +204,27 @@ class _TabBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Padding(
-      // Each tab pads its own hit area, so the first label still lines up
-      // with the title.
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.xl - HollowSpacing.sm,
-      ),
-      child: Align(
-        alignment: AlignmentDirectional.centerStart,
-        // A bare Row overflows at a larger text setting and clips the last tab
-        // out of reach.
-        child: EdgeScrollRow(
-          semanticLabel: 'tabs',
-          fadeColor: hollow.overlay,
-          children: [
-            _Tab(
-              label: 'Friends',
-              selected: selected == FriendsManagerTab.friends,
-              onTap: () => onPick(FriendsManagerTab.friends),
-              trailing: Text(
-                '$friendCount',
-                style: HollowTypography.label.copyWith(
-                  color: hollow.textTertiary,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ),
-            _Tab(
-              label: 'Requests',
-              selected: selected == FriendsManagerTab.requests,
-              onTap: () => onPick(FriendsManagerTab.requests),
-              trailing: waiting > 0
-                  ? Semantics(
-                      label: '$waiting waiting',
-                      child: ExcludeSemantics(
-                        child: HollowCountBadge(count: waiting),
-                      ),
-                    )
-                  : null,
-            ),
-            _Tab(
-              label: 'Add friend',
-              selected: selected == FriendsManagerTab.add,
-              onTap: () => onPick(FriendsManagerTab.add),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// One tab: the label in textPrimary with the accent bar under it when open,
-/// textSecondary otherwise. Hover lifts the label, never a fill.
-class _Tab extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final Widget? trailing;
-  final VoidCallback onTap;
-
-  const _Tab({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-    this.trailing,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Semantics(
-      selected: selected,
-      child: HollowPressable(
-        onTap: onTap,
-        subtle: true,
-        // The overlay itself, so the hover shows in the label alone.
-        hoverColor: hollow.overlay,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-        child: SizedBox(
-          height: _kTabHeight,
-          child: Stack(
-            children: [
-              Center(
-                widthFactor: 1,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Builder(builder: (context) {
-                      final lit =
-                          selected || (HoverScope.maybeOf(context) ?? false);
-                      return Text(
-                        label,
-                        style: HollowTypography.label.copyWith(
-                          color:
-                              lit ? hollow.textPrimary : hollow.textSecondary,
-                        ),
-                      );
-                    }),
-                    if (trailing != null) ...[
-                      const SizedBox(width: HollowSpacing.sm),
-                      trailing!,
-                    ],
-                  ],
-                ),
-              ),
-              if (selected)
-                const Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: NavSelectionMark(width: double.infinity),
-                ),
-            ],
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: HollowChipTabs<FriendsManagerTab>(
+        selected: selected,
+        onSelected: onPick,
+        tabs: [
+          HollowChipTab(
+            value: FriendsManagerTab.friends,
+            label: 'Friends',
+            hint: '$friendCount',
           ),
-        ),
+          HollowChipTab(
+            value: FriendsManagerTab.requests,
+            label: 'Requests',
+            count: waiting,
+          ),
+          const HollowChipTab(
+            value: FriendsManagerTab.add,
+            label: 'Add friend',
+          ),
+        ],
       ),
     );
   }
@@ -366,7 +277,6 @@ class _FriendsTabState extends ConsumerState<_FriendsTab> {
     final hollow = HollowTheme.of(context);
     final accepted = widget.accepted;
     final stored = ref.watch(favouriteFriendsProvider);
-    final links = ref.watch(deviceLinkProvider);
     final profiles = ref.watch(profileProvider);
     ref.watch(localNicknameProvider);
 
@@ -378,17 +288,13 @@ class _FriendsTabState extends ConsumerState<_FriendsTab> {
       );
     }
 
-    // A favourite saved under a device id still matches its collapsed row.
+    // The store keeps masters; ids that are no longer friends stay stored but
+    // are not shown.
     final acceptedIds = {for (final f in accepted) f.peerId};
-    final favStored = [
+    final favMasters = [
       for (final id in stored)
-        if (acceptedIds.contains(links.identityOf(id))) id,
+        if (acceptedIds.contains(id)) id,
     ];
-    final favMasters = favStored.map(links.identityOf).toList();
-    String favKey(String master) {
-      final i = favMasters.indexOf(master);
-      return i < 0 ? master : favStored[i];
-    }
 
     final q = _query.trim().toLowerCase();
     final search = Padding(
@@ -408,18 +314,30 @@ class _FriendsTabState extends ConsumerState<_FriendsTab> {
       ),
     );
 
-    Widget row(String master, {int? reorderIndex}) {
+    Widget row(String master, {int? reorderIndex, bool handleSlot = false}) {
       final fav = favMasters.contains(master);
+      final last = favMasters.length - 1;
       return _FriendRow(
         key: ValueKey(master),
         peerId: master,
         favourite: fav,
-        favouriteKey: favKey(master),
         reorderIndex: reorderIndex,
+        handleSlot: handleSlot,
+        // The keyboard's path to the drag: Move up and Move down in More.
+        onMove: reorderIndex == null
+            ? null
+            : (delta) {
+                final to = reorderIndex + delta;
+                if (to < 0 || to > last) return;
+                // Post-removal coordinates, as a drag reports them.
+                _reorder(stored, favMasters, reorderIndex, to);
+              },
+        canMoveUp: reorderIndex != null && reorderIndex > 0,
+        canMoveDown: reorderIndex != null && reorderIndex < last,
       );
     }
 
-    const listPadding = EdgeInsets.symmetric(horizontal: HollowSpacing.lg);
+    final listPadding = evenListRowPadding(context, inset: HollowSpacing.xl);
 
     if (q.isNotEmpty) {
       final matches = accepted.where((f) {
@@ -454,9 +372,10 @@ class _FriendsTabState extends ConsumerState<_FriendsTab> {
           child: CustomScrollView(
             slivers: [
               if (favMasters.isNotEmpty) ...[
-                const SliverPadding(
+                SliverPadding(
                   padding: listPadding,
-                  sliver: SliverToBoxAdapter(child: _ListLabel('Favourites')),
+                  sliver:
+                      const SliverToBoxAdapter(child: _ListLabel('Favourites')),
                 ),
                 SliverPadding(
                   padding: listPadding,
@@ -464,13 +383,15 @@ class _FriendsTabState extends ConsumerState<_FriendsTab> {
                     child: ReorderableListView.builder(
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
+                      // It never scrolls, and a clip would cut the rows' hover.
+                      clipBehavior: Clip.none,
                       padding: EdgeInsets.zero,
                       buildDefaultDragHandles: false,
                       itemCount: favMasters.length,
                       proxyDecorator: (child, index, animation) =>
                           _DragLift(child: child),
                       onReorderItem: (oldIndex, newIndex) =>
-                          _reorder(stored, favStored, oldIndex, newIndex),
+                          _reorder(stored, favMasters, oldIndex, newIndex),
                       itemBuilder: (context, i) =>
                           row(favMasters[i], reorderIndex: i),
                     ),
@@ -478,15 +399,18 @@ class _FriendsTabState extends ConsumerState<_FriendsTab> {
                 ),
               ],
               if (others.isNotEmpty) ...[
-                const SliverPadding(
+                SliverPadding(
                   padding: listPadding,
-                  sliver: SliverToBoxAdapter(child: _ListLabel('All friends')),
+                  sliver:
+                      const SliverToBoxAdapter(child: _ListLabel('All friends')),
                 ),
                 SliverPadding(
                   padding: listPadding.copyWith(bottom: HollowSpacing.lg),
                   sliver: SliverList.builder(
                     itemCount: others.length,
-                    itemBuilder: (context, i) => row(others[i]),
+                    // Keeps the actions in the favourites' columns.
+                    itemBuilder: (context, i) => row(others[i],
+                        handleSlot: favMasters.isNotEmpty),
                   ),
                 ),
               ],
@@ -506,12 +430,7 @@ class _ListLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        HollowSpacing.sm,
-        HollowSpacing.md,
-        HollowSpacing.sm,
-        0,
-      ),
+      padding: const EdgeInsets.only(top: HollowSpacing.md),
       child: HollowSectionHeader(title, dense: true),
     );
   }
@@ -527,15 +446,23 @@ class _DragLift extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    // The lift covers the row's hover bleed, not only its content box.
+    final bleed = HollowListRow.insetOf(touch: _isTouch);
     return DefaultTextStyle(
       style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: hollow.hover,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          boxShadow: HollowShadows.float,
+      child: HollowBleed(
+        horizontal: bleed,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: hollow.hover,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            boxShadow: HollowShadows.float,
+          ),
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: bleed),
+            child: child,
+          ),
         ),
-        child: child,
       ),
     );
   }
@@ -549,19 +476,27 @@ class _FriendRow extends ConsumerStatefulWidget {
   final String peerId;
   final bool favourite;
 
-  /// The id the favourites list stores this friend under, which may be a
-  /// device id from before the friend's devices were linked.
-  final String favouriteKey;
-
   /// Set on a favourite, which can be dragged into a new place.
   final int? reorderIndex;
+
+  /// An empty drag-handle column on a row without one, so its actions line
+  /// up with the favourites' above it.
+  final bool handleSlot;
+
+  /// Moves a favourite one place up (-1) or down (1).
+  final void Function(int delta)? onMove;
+  final bool canMoveUp;
+  final bool canMoveDown;
 
   const _FriendRow({
     super.key,
     required this.peerId,
     required this.favourite,
-    required this.favouriteKey,
     this.reorderIndex,
+    this.handleSlot = false,
+    this.onMove,
+    this.canMoveUp = false,
+    this.canMoveDown = false,
   });
 
   @override
@@ -582,27 +517,13 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
   }
 
   void _toggleFavourite() {
-    ref.read(favouriteFriendsProvider.notifier).toggle(
-        widget.favourite ? widget.favouriteKey : widget.peerId);
+    ref.read(favouriteFriendsProvider.notifier).toggle(widget.peerId);
   }
 
   /// The same start as the DM header: TURN check, the leave-the-room
   /// confirm, then the call in its DM, and the manager closes behind it.
   Future<void> _call() => startDmCallFlow(context, ref, widget.peerId,
       beforeCall: () => _closeDialog(context));
-
-  Future<void> _confirmRemove(String name) async {
-    final confirmed = await showHollowConfirm(
-      context: context,
-      title: 'Remove $name?',
-      message: "You will both drop off each other's friend list. Your "
-          'conversation stays on this device.',
-      confirmLabel: 'Remove',
-      destructive: true,
-    );
-    if (!confirmed || !mounted) return;
-    await removeFriendAndTidy(context, ref, widget.peerId);
-  }
 
   void _openMenu(Offset anchor, {bool alignEnd = false}) {
     final master = widget.peerId;
@@ -649,12 +570,25 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
                   currentNickname: localNick ?? '');
             },
           ),
+          if (widget.onMove != null && widget.canMoveUp)
+            HollowMenuItem(
+              icon: LucideIcons.arrowUp,
+              label: 'Move up',
+              onTap: () => widget.onMove!(-1),
+            ),
+          if (widget.onMove != null && widget.canMoveDown)
+            HollowMenuItem(
+              icon: LucideIcons.arrowDown,
+              label: 'Move down',
+              onTap: () => widget.onMove!(1),
+            ),
           const HollowMenuDivider(),
           HollowMenuItem(
             icon: LucideIcons.userMinus,
             label: 'Remove friend',
             isDanger: true,
-            onTap: () => _confirmRemove(name),
+            onTap: () => confirmRemoveFriend(context, ref,
+                peerId: widget.peerId, name: name),
           ),
         ];
       },
@@ -680,7 +614,6 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
     final touch = _isTouch;
     final buttonSize = touch ? 44.0 : 32.0;
     final showActions = touch || _hovered || _focused || _menuOpen;
-    final restFill = hollow.hover.withValues(alpha: 0);
 
     final actions = Row(
       mainAxisSize: MainAxisSize.min,
@@ -722,75 +655,47 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
         ),
         if (widget.reorderIndex != null) ...[
           const SizedBox(width: HollowSpacing.xs),
+          // Pointer only; the keyboard moves a favourite from More.
           ReorderableDragStartListener(
             index: widget.reorderIndex!,
-            child: MouseRegion(
-              cursor: SystemMouseCursors.grab,
-              child: SizedBox.square(
-                dimension: buttonSize,
-                child: Icon(LucideIcons.gripVertical,
-                    size: 16, color: hollow.textTertiary),
+            child: Semantics(
+              label: 'Drag to reorder $name',
+              child: MouseRegion(
+                cursor: SystemMouseCursors.grab,
+                child: SizedBox.square(
+                  dimension: buttonSize,
+                  child: Icon(LucideIcons.gripVertical,
+                      size: 16, color: hollow.textTertiary),
+                ),
               ),
             ),
           ),
+        ] else if (widget.handleSlot) ...[
+          const SizedBox(width: HollowSpacing.xs),
+          SizedBox.square(dimension: buttonSize),
         ],
       ],
     );
 
-    final row = AnimatedContainer(
-      duration: HollowDurations.fast,
-      curve: HollowCurves.subtle,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.sm,
+    final row = HollowListRow(
+      onTap: _message,
+      leading: PresenceAvatar(
+        peerId: peerId,
+        size: 32,
+        online: online,
+        // The ring is cut from the surface under the dot: the row's hover
+        // fill while hovered.
+        ring: _hovered ? hollow.elevated : hollow.overlay,
       ),
-      decoration: BoxDecoration(
-        // Same-RGB endpoints, so the hover fades rather than lerping via black.
-        color: _hovered ? hollow.hover : restFill,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        children: [
-          PresenceAvatar(
-            peerId: peerId,
-            size: 32,
-            online: online,
-            ring: _hovered ? hollow.hover : hollow.overlay,
-          ),
-          const SizedBox(width: HollowSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  name,
-                  style: HollowTypography.label.copyWith(
-                    color: online ? hollow.textPrimary : hollow.textSecondary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  line,
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textTertiary),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          // Hidden, never removed: the buttons stay in the focus order, and a
-          // Tab onto one is what shows them.
-          AnimatedOpacity(
-            opacity: showActions ? 1 : 0,
-            duration: HollowDurations.fast,
-            alwaysIncludeSemantics: true,
-            child: actions,
-          ),
-        ],
+      title: name,
+      subtitle: line,
+      // Hidden, never removed: the buttons stay in the focus order, and a Tab
+      // onto one is what shows them.
+      trailing: AnimatedOpacity(
+        opacity: showActions ? 1 : 0,
+        duration: HollowDurations.fast,
+        alwaysIncludeSemantics: true,
+        child: actions,
       ),
     );
 
@@ -802,14 +707,9 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
         skipTraversal: true,
         onFocusChange: (focused) => setState(() => _focused = focused),
         child: MouseRegion(
-          cursor: SystemMouseCursors.click,
           onEnter: (_) => setState(() => _hovered = true),
           onExit: (_) => setState(() => _hovered = false),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _message,
-            child: row,
-          ),
+          child: row,
         ),
       ),
     );
@@ -858,7 +758,6 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
     final links = ref.watch(deviceLinkProvider);
     ref.watch(localNicknameProvider);
@@ -873,54 +772,18 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
       final at = DateTime.fromMillisecondsSinceEpoch(req.requestedAt);
       final busy = _busy[req.peerId];
 
-      final Widget title = chosen != null
-          ? Text(
-              chosen,
-              style:
-                  HollowTypography.label.copyWith(color: hollow.textPrimary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            )
-          : Text(
-              displayId,
-              style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            );
-      final subtitle =
-          incoming ? receivedRequestLabel(at) : sentRequestLabel(at);
-
-      return Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.sm,
-        ),
-        child: Row(
+      return HollowListRow(
+        leading: HollowAvatar(peerId: displayId, size: 32),
+        title: chosen ?? displayId,
+        subtitle: incoming ? receivedRequestLabel(at) : sentRequestLabel(at),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            HollowAvatar(peerId: displayId, size: 32),
-            const SizedBox(width: HollowSpacing.md),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  title,
-                  Text(
-                    subtitle,
-                    style: HollowTypography.bodySmall
-                        .copyWith(color: hollow.textTertiary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
             if (incoming) ...[
               HollowButton.ghost(
                 compact: true,
                 touch: _isTouch,
-                semanticLabel: 'Reject friend request',
+                semanticLabel: 'Decline friend request',
                 loading: busy == 'reject',
                 onPressed: () => _answer(
                     req.peerId,
@@ -961,20 +824,13 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
     }
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        HollowSpacing.lg,
-        0,
-        HollowSpacing.lg,
-        HollowSpacing.lg,
-      ),
+      padding: evenListRowPadding(context, inset: HollowSpacing.xl)
+          .copyWith(bottom: HollowSpacing.lg),
       children: [
         const _ListLabel('Received'),
         if (widget.incoming.isEmpty)
           const Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: HollowSpacing.sm,
-              vertical: HollowSpacing.xs,
-            ),
+            padding: EdgeInsets.symmetric(vertical: HollowSpacing.xs),
             child: HollowEmptyState(title: 'No requests waiting', dense: true),
           )
         else
@@ -1020,13 +876,58 @@ String sentRequestLabel(DateTime at) {
 /// Whether [input] is a peer id rather than a temporary nickname.
 bool isPeerIdInput(String input) => input.startsWith('12D3KooW');
 
+/// Nickname lookups a send is waiting on, by lowercased nickname.
+final Map<String, Completer<void>> _nicknameLookups = {};
+
+/// Called by event_provider when the relay could not resolve [nickname].
+/// True when a send was waiting on it, so the caller shows no second message.
+bool handleNicknameLookupFailed(String nickname, String error) {
+  var waiter = _nicknameLookups[nickname.toLowerCase()];
+  if (waiter == null && _nicknameLookups.length == 1) {
+    waiter = _nicknameLookups.values.single;
+  }
+  if (waiter == null || waiter.isCompleted) return false;
+  waiter.completeError(FriendlyException(error == 'not_found'
+      ? 'No one has the nickname $nickname right now. Nicknames reset when '
+          'their owner goes offline.'
+      : "Hollow couldn't look up that nickname. Try again."));
+  return true;
+}
+
+Map<String, int> _outgoing(Map<String, FriendInfo> friends) => {
+      for (final f in friends.values)
+        if (f.status == 'pending' && f.direction == 'outgoing')
+          f.peerId: f.requestedAt,
+    };
+
 /// Sends a friend request to a peer id or a temporary nickname; rethrows so
-/// the caller keeps the input for a retry.
+/// the caller keeps the input for a retry. A nickname completes only once the
+/// relay has answered and the request exists, so a caller's busy state and
+/// its success message are both true.
 Future<void> sendFriendRequestTo(WidgetRef ref, String input) async {
   if (isPeerIdInput(input)) {
     await ref.read(friendsProvider.notifier).sendRequest(input);
-  } else {
+    return;
+  }
+  final key = input.toLowerCase();
+  final before = _outgoing(ref.read(friendsProvider));
+  final sent = Completer<void>();
+  _nicknameLookups[key] = sent;
+  final sub = ref.listenManual(friendsProvider, (_, next) {
+    final now = _outgoing(next);
+    final changed = now.entries.any((e) => before[e.key] != e.value);
+    if (changed && !sent.isCompleted) sent.complete();
+  });
+  try {
     await network_api.sendFriendRequestByNickname(nickname: input);
+    await sent.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () => throw const FriendlyException(
+          "Hollow didn't hear back about that nickname. Try again."),
+    );
+  } finally {
+    sub.close();
+    if (identical(_nicknameLookups[key], sent)) _nicknameLookups.remove(key);
   }
 }
 
@@ -1044,31 +945,34 @@ class _AddFriendTab extends ConsumerStatefulWidget {
 
 class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
   bool _sending = false;
+  String? _error;
 
   Future<void> _send() async {
     final input = widget.controller.text.trim();
     if (input.isEmpty || _sending) return;
-    setState(() => _sending = true);
-    // Awaited so a failure surfaces here and the input is kept for a retry,
-    // instead of toasting a false success.
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
+    // Awaited, a nickname until the relay answers, so the button stays busy
+    // through the lookup and the input is kept for a retry.
     try {
       await sendFriendRequestTo(ref, input);
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        setState(() => _sending = false);
-        HollowToast.show(context, 'Could not send request',
-            type: HollowToastType.error);
+        setState(() {
+          _sending = false;
+          _error = friendlyError(e,
+              fallback: "Couldn't send the request. Try again.");
+        });
       }
       return;
     }
     if (!mounted) return;
     setState(() => _sending = false);
     widget.controller.clear();
-    HollowToast.show(
-      context,
-      isPeerIdInput(input) ? 'Friend request sent' : 'Looking up nickname...',
-      type: HollowToastType.success,
-    );
+    HollowToast.show(context, 'Friend request sent',
+        type: HollowToastType.success);
   }
 
   @override
@@ -1079,9 +983,13 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SettingsFieldLabel(label: 'Peer ID or nickname'),
+          const SettingsFieldLabel(label: 'User ID or nickname'),
           const SizedBox(height: HollowSpacing.sm),
+          // Baseline, not centre: an error line under the field would pull a
+          // centred button down out of line with the field.
           Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
             children: [
               Expanded(
                 child: HollowTextField(
@@ -1090,6 +998,10 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
                   autofocus: true,
                   style: HollowTypography.mono
                       .copyWith(color: hollow.textPrimary),
+                  errorText: _error,
+                  onChanged: (_) {
+                    if (_error != null) setState(() => _error = null);
+                  },
                   onSubmitted: (_) => _send(),
                 ),
               ),
@@ -1124,6 +1036,7 @@ class HowOthersAddYou extends ConsumerStatefulWidget {
 
 class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
   final _claimController = TextEditingController();
+  bool _releasing = false;
 
   @override
   void dispose() {
@@ -1131,28 +1044,34 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
     super.dispose();
   }
 
+  // The typed name stays until the relay answers: a taken or invalid name is
+  // corrected, not retyped. It clears once the claim lands.
   Future<void> _claim() async {
     final nickname = _claimController.text.trim().toLowerCase();
     if (nickname.isEmpty) return;
-    _claimController.clear();
+    final notifier = ref.read(temporaryNicknameProvider.notifier);
     try {
-      await ref.read(temporaryNicknameProvider.notifier).claim(nickname);
+      await notifier.claim(nickname);
     } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not claim that nickname',
-            type: HollowToastType.error);
-      }
+      // The relay never heard it, so no answer will end the claiming state.
+      if (mounted) notifier.onClaimFailed('send');
     }
   }
 
   Future<void> _release() async {
+    setState(() => _releasing = true);
     try {
       await ref.read(temporaryNicknameProvider.notifier).release();
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not release the nickname',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't release the nickname. Try again."),
             type: HollowToastType.error);
       }
+    } finally {
+      if (mounted) setState(() => _releasing = false);
     }
   }
 
@@ -1167,7 +1086,11 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final nicknameState = ref.watch(temporaryNicknameProvider);
+    ref.listen(temporaryNicknameProvider, (_, next) {
+      if (next.status == NicknameStatus.claimed) _claimController.clear();
+    });
     final myId = ref.watch(identityProvider).peerId ?? '';
+    final touch = _isTouch;
     final title = HollowTypography.label.copyWith(color: hollow.textPrimary);
     final mono = HollowTypography.mono.copyWith(color: hollow.textPrimary);
     final secondary =
@@ -1185,7 +1108,7 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Your ID', style: title),
+                  Text('Your user ID', style: title),
                   const SizedBox(height: HollowSpacing.xxs),
                   Text(
                     myId,
@@ -1199,8 +1122,9 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
             ),
             const SizedBox(width: HollowSpacing.md),
             HollowButton.ghost(
-              compact: true,
-              semanticLabel: 'Copy your ID',
+              compact: !touch,
+              touch: touch,
+              semanticLabel: 'Copy your user ID',
               onPressed: myId.isEmpty ? null : () => _copyId(myId),
               child: const Text('Copy'),
             ),
@@ -1225,7 +1149,9 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
               ),
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.ghost(
-                compact: true,
+                compact: !touch,
+                touch: touch,
+                loading: _releasing,
                 onPressed: _release,
                 child: const Text('Release'),
               ),
@@ -1244,6 +1170,7 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
               ),
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.outline(
+                touch: touch,
                 onPressed: _claim,
                 loading: nicknameState.status == NicknameStatus.claiming,
                 child: const Text('Claim'),

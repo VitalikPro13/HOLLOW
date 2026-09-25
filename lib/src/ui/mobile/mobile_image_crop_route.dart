@@ -1,16 +1,22 @@
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a full-screen mobile crop route, returning cropped PNG bytes or null.
 ///
@@ -249,7 +255,11 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
         Navigator.of(context).pop(byteData.buffer.asUint8List());
       }
     } catch (_) {
-      if (mounted) Navigator.of(context).pop(null);
+      // The picture stays, so the person can try again or cancel.
+      if (!mounted) return;
+      setState(() => _cropping = false);
+      HollowToast.show(context, "Couldn't crop that image. Try again.",
+          type: HollowToastType.error);
     }
   }
 
@@ -266,10 +276,21 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
 
   @override
   Widget build(BuildContext context) {
+    // The crop canvas is a picture, black in both themes, so its controls
+    // take the dark theme whatever the app's (the accent kept).
+    final hue = ProviderScope.containerOf(context, listen: false)
+        .read(accentHueProvider);
+    return Theme(
+      data: HollowThemeData.dark(accentHue: hue),
+      child: Builder(builder: _buildCanvas),
+    );
+  }
+
+  Widget _buildCanvas(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: HollowColors.mediaBlack,
       body: SafeArea(
         child: Column(
           children: [
@@ -280,24 +301,27 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
               ),
               child: Row(
                 children: [
-                  IconButton(
+                  HollowIconButton(
+                    icon: LucideIcons.arrowLeft,
+                    label: 'Back',
+                    size: 44,
+                    color: HollowColors.onMedia,
                     onPressed: () => Navigator.of(context).pop(null),
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
                   ),
-                  Text(
-                    widget.title,
-                    style: HollowTypography.subheading.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
+                  const SizedBox(width: HollowSpacing.xs),
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      style: HollowTypography.subheading
+                          .copyWith(color: HollowColors.onMedia),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  const Spacer(),
                   Text(
                     'Pinch to zoom',
-                    style: HollowTypography.caption.copyWith(
-                      color: Colors.white54,
-                      fontSize: 11,
-                    ),
+                    style: HollowTypography.caption
+                        .copyWith(color: hollow.textSecondary),
                   ),
                 ],
               ),
@@ -336,7 +360,7 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                                   child: CustomPaint(
                                     painter: _CropOverlayPainter(
                                       cropRect: _cropFrame,
-                                      overlayColor: Colors.black.withValues(alpha: 0.6),
+                                      overlayColor: HollowColors.mediaScrim,
                                       borderColor: hollow.accent,
                                     ),
                                   ),
@@ -347,30 +371,30 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                         );
                       },
                     )
-                  : const Center(
-                      child: HollowSpinner.medium(
-                        color: Colors.white54, // design-ignore: over the black crop canvas
-                      ),
-                    ),
+                  : const Center(child: HollowSpinner.medium()),
             ),
 
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.lg),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  HollowButton.ghost(
-                    onPressed: () => Navigator.of(context).pop(null),
-                    child: const Text('Cancel',
-                        style: TextStyle(color: Colors.white70)),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowButton.filled(
-                    onPressed: _onConfirm,
-                    loading: _cropping,
-                    child: const Text('Apply'),
-                  ),
-                ],
+              child: HollowButtonTouchScope(
+                touch: true,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    HollowButton.ghost(
+                      onPressed: _cropping
+                          ? null
+                          : () => Navigator.of(context).pop(null),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowButton.filled(
+                      onPressed: _onConfirm,
+                      loading: _cropping,
+                      child: const Text('Apply'),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],

@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Canonical preset palette for label colours, shared by desktop and mobile.
 const kLabelPresetColors = <Color>[
@@ -26,8 +26,8 @@ Color parseLabelColor(String hex) {
 String shortPeerIdSuffix(String peerId) =>
     peerId.length > 10 ? '…${peerId.substring(peerId.length - 6)}' : peerId;
 
-/// Cosmetic-vs-Access selector for the label create and edit dialog. Selection
-/// state is a chip, never a filled button.
+/// Cosmetic-vs-Access selector for the label create and edit dialog, and the
+/// role picker: a [HollowChip] with its icon.
 class LabelTypeChip extends StatelessWidget {
   final IconData icon;
   final String text;
@@ -44,44 +44,20 @@ class LabelTypeChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: GestureDetector(
+    return Semantics(
+      selected: selected,
+      child: HollowChip(
+        label: text,
+        icon: icon,
+        selected: selected,
         onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: selected
-                ? hollow.accent.withValues(alpha: 0.15)
-                : hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: selected ? hollow.accent : hollow.border),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 13,
-                  color: selected ? hollow.accentText : hollow.textSecondary),
-              const SizedBox(width: 6),
-              Text(
-                text,
-                style: HollowTypography.bodySmall.copyWith(
-                  color: selected ? hollow.accentText : hollow.textPrimary,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
 }
 
-/// A selectable label chip. `locked` dims it but keeps it focusable and still
+/// A selectable label: a [HollowChip] led by the label's colour. `locked`
+/// dims it and swaps the swatch for a lock, but keeps it focusable and still
 /// fires [onTap], so the caller can ANNOUNCE why rather than silently no-op.
 class LabelChip extends StatelessWidget {
   final crdt_api.LabelFfi label;
@@ -101,65 +77,90 @@ class LabelChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final c = parseLabelColor(label.color);
-    final leadingIcon = locked
-        ? LucideIcons.lock
-        : (selected ? LucideIcons.check : LucideIcons.circle);
-
-    final chip = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: selected ? c.withValues(alpha: 0.25) : hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: selected ? c : hollow.border),
+    final chip = Semantics(
+      selected: selected,
+      child: HollowChip(
+        label: label.name,
+        selected: selected,
+        onTap: onTap,
+        leading: LabelSwatch(label: label, locked: locked),
+        semanticLabel: semanticLabel ??
+            (locked
+                ? 'Access label ${label.name}, assigned by staff'
+                : 'Label ${label.name}'),
       ),
+    );
+    if (!locked) return chip;
+    // Dim via AnimatedOpacity (GPU-composited), never the Opacity widget.
+    return AnimatedOpacity(
+      opacity: 0.55,
+      duration: HollowDurations.fast,
+      child: chip,
+    );
+  }
+}
+
+/// A label someone wears, shown as a fact: a [HollowBadge] led by the
+/// label's colour. Never clickable; a label that can be toggled is a
+/// [LabelChip].
+class LabelBadge extends StatelessWidget {
+  final crdt_api.LabelFfi label;
+
+  const LabelBadge({super.key, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowBadge(
+      label.name,
+      leading: LabelSwatch(label: label),
+    );
+  }
+}
+
+/// A label's colour as a dot, plus a shield for an access label; a lock in
+/// place of the dot when the label is staff-assigned. [size] is the glyph box
+/// on the icon ramp.
+class LabelSwatch extends StatelessWidget {
+  final crdt_api.LabelFfi label;
+  final bool locked;
+  final double size;
+
+  const LabelSwatch({
+    super.key,
+    required this.label,
+    this.locked = false,
+    this.size = 14,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = parseLabelColor(label.color);
+    return ExcludeSemantics(
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(leadingIcon, size: 12, color: c),
-          const SizedBox(width: 6),
-          if (label.access) ...[
-            Icon(LucideIcons.shieldCheck, size: 12, color: c),
-            const SizedBox(width: 4),
-          ],
-          // Label names are free-form user content, so a long one must not
-          // overflow the chip at high text scale.
-          Flexible(
-            child: Text(
-              label.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HollowTypography.body.copyWith(
-                color: selected ? c : hollow.textPrimary,
+          if (locked)
+            Icon(LucideIcons.lock, size: size, color: color)
+          else
+            SizedBox.square(
+              dimension: size,
+              child: Center(
+                child: Container(
+                  width: size * _dotRatio,
+                  height: size * _dotRatio,
+                  decoration:
+                      BoxDecoration(color: color, shape: BoxShape.circle),
+                ),
               ),
             ),
-          ),
+          if (label.access) ...[
+            const SizedBox(width: HollowSpacing.xxs),
+            Icon(LucideIcons.shieldCheck, size: size, color: color),
+          ],
         ],
-      ),
-    );
-
-    return Semantics(
-      label: semanticLabel ??
-          (locked
-              ? 'Access label ${label.name}, assigned by staff'
-              : 'Label ${label.name}'),
-      child: HollowFocusRing(
-        enabled: true,
-        onActivate: onTap ?? () {},
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        child: GestureDetector(
-          onTap: onTap,
-          // Dim via AnimatedOpacity (GPU-composited), never the Opacity widget.
-          child: locked
-              ? AnimatedOpacity(
-                  opacity: 0.55,
-                  duration: HollowDurations.fast,
-                  child: chip,
-                )
-              : chip,
-        ),
       ),
     );
   }
 }
+
+const double _dotRatio = 0.6;

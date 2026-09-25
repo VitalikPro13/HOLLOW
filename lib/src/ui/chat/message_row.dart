@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -50,6 +51,10 @@ const double _kCompactNameWidth = 160;
 /// [showHeader] is false for a grouped continuation, which drops the avatar,
 /// name and time (the time comes back on hover, in the avatar column).
 class MessageRow extends ConsumerWidget {
+  /// The row's own inset on each side; a preview outside a chat list bleeds
+  /// it back (`HollowBleed`) to sit on the surrounding text edge.
+  static const double horizontalInset = HollowSpacing.lg;
+
   final String? messageId;
   final String senderId;
   final bool isMe;
@@ -212,7 +217,7 @@ class MessageRow extends ConsumerWidget {
         curve: HollowCurves.subtle,
         decoration: wash,
         padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg,
+          horizontal: horizontalInset,
           vertical: HollowSpacing.xxs,
         ),
         child: Row(
@@ -257,8 +262,8 @@ class MessageRow extends ConsumerWidget {
         padding: EdgeInsets.only(
           top: tileWithPrev ? 0 : HollowSpacing.xxs,
           bottom: tileWithNext ? 0 : HollowSpacing.xxs,
-          left: HollowSpacing.lg,
-          right: HollowSpacing.lg,
+          left: horizontalInset,
+          right: horizontalInset,
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -285,8 +290,8 @@ class MessageRow extends ConsumerWidget {
         top: HollowSpacing.xs,
         // A group header starts the run, so it never tiles upward.
         bottom: tileWithNext ? 0 : HollowSpacing.xxs,
-        left: HollowSpacing.lg,
-        right: HollowSpacing.lg,
+        left: horizontalInset,
+        right: horizontalInset,
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -421,6 +426,86 @@ class _HoverTime extends StatelessWidget {
         time,
         textAlign: TextAlign.right,
         style: _timeStyle(HollowTheme.of(context)),
+      ),
+    );
+  }
+}
+
+/// A DM call in the conversation, "Voice call, 4 minutes" at the time it rang:
+/// a quiet line in the message column, never a message. It carries no hover
+/// bar, no menu and no unread weight.
+class CallRecordRow extends ConsumerWidget {
+  final DmCallRecord record;
+
+  const CallRecordRow({super.key, required this.record});
+
+  IconData get _icon {
+    if (record.video && record.outcome == CallOutcome.answered) {
+      return LucideIcons.video;
+    }
+    return switch (record.outcome) {
+      CallOutcome.answered =>
+        record.outgoing ? LucideIcons.phoneOutgoing : LucideIcons.phoneIncoming,
+      CallOutcome.missed => LucideIcons.phoneMissed,
+      CallOutcome.declined ||
+      CallOutcome.cancelled ||
+      CallOutcome.unanswered ||
+      CallOutcome.failed =>
+        LucideIcons.phoneOff,
+      CallOutcome.unknown => LucideIcons.phone,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final time = _clock(record.startedAt);
+    final text = Text(
+      record.label,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: HollowTypography.bodySmall.copyWith(color: hollow.textTertiary),
+    );
+    final icon = Icon(_icon, size: 14, color: hollow.textTertiary);
+    final compact =
+        ref.watch(messageDisplayProvider) == MessageDisplay.compact;
+    return Semantics(
+      container: true,
+      label: '${record.label}, $time',
+      child: ExcludeSemantics(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.lg,
+            vertical: HollowSpacing.xs,
+          ),
+          child: compact
+              ? Row(
+                  children: [
+                    SizedBox(
+                      width: _kCompactTimeWidth,
+                      child: Text(time,
+                          textAlign: TextAlign.right,
+                          style: _timeStyle(hollow)),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    icon,
+                    const SizedBox(width: HollowSpacing.xs),
+                    Flexible(child: text),
+                  ],
+                )
+              : Row(
+                  children: [
+                    SizedBox(
+                      width: kMessageAvatarSize,
+                      child: Align(alignment: Alignment.center, child: icon),
+                    ),
+                    const SizedBox(width: HollowSpacing.md),
+                    Flexible(child: text),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Text(time, style: _timeStyle(hollow)),
+                  ],
+                ),
+        ),
       ),
     );
   }

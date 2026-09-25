@@ -2,37 +2,32 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
-import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/link_health_provider.dart';
-import 'package:hollow/src/core/providers/speaking_provider.dart';
-import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_person_tile.dart';
+import 'package:hollow/src/ui/call/call_stage_data.dart';
+import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
-import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/link_health_chip.dart';
-import 'package:hollow/src/ui/components/share_volume_control.dart';
-import 'package:hollow/src/ui/components/speaking_border.dart';
-import 'package:hollow/src/ui/mobile/mobile_audio_route_sheet.dart';
-import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
+import 'package:hollow/src/ui/mobile/mobile_share_fullscreen.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
-import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
-import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 
-/// Full-screen call overlay that slides up from the bottom inside a DM chat,
-/// through every call state from ringing to active.
+/// The phone's DM call screen, from ringing to hang-up: the other person large
+/// with their ring, you in the corner, one row of controls. A camera shows the
+/// video with you in a corner; a watched share takes the top of the screen.
 class MobileCallScreen extends ConsumerStatefulWidget {
+  /// The person called, a MASTER or one of their devices.
   final String peerId;
   const MobileCallScreen({super.key, required this.peerId});
 
@@ -41,7 +36,7 @@ class MobileCallScreen extends ConsumerStatefulWidget {
 }
 
 class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
-  Offset _pipOffset = const Offset(12, 12);
+  Offset _pip = const Offset(HollowSpacing.lg, HollowSpacing.lg);
   bool _wakelockOn = false;
 
   /// Last logged video-gate tuple, so the log only fires on a change.
@@ -55,73 +50,63 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     super.dispose();
   }
 
-  /// Keep the screen awake while video is displayed.
+  /// Keeps the screen awake while video is on it.
   void _syncWakelock(bool videoShown) {
     if (videoShown == _wakelockOn) return;
     _wakelockOn = videoShown;
     unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
   }
 
-  // Earpiece proximity is global, in CallProximityController, so it works from
-  // any screen.
-
-  // Call duration is a self-ticking leaf: a per-second setState here would
-  // rebuild the whole Scaffold, re-probing renderers once a second.
-
-  String _statusText(CallState call) {
-    switch (call.status) {
-      case CallStatus.ringing:
-        return call.direction == CallDirection.outgoing
-            ? 'Calling...'
-            : 'Incoming...';
-      case CallStatus.connecting:
-        return 'Connecting...';
-      case CallStatus.active:
-        return ''; // active shows CallDurationText instead
-      case CallStatus.idle:
-        return 'Ended';
+  /// Leaves the stack wherever this route sits in it, so a fullscreen share
+  /// above is not the one that goes.
+  void _close() {
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive) return;
+    if (route.isCurrent) {
+      Navigator.of(context).pop();
+    } else {
+      Navigator.of(context).removeRoute(route);
     }
-  }
-
-  /// Whether to show the video area. It needs a real renderer with a source as
-  /// well as the enabled flag, or the `onRemoteVideoTrack` safety net puts a
-  /// black rectangle over the avatars with no camera sending.
-  bool _hasRealVideo(CallState call) {
-    if (call.status != CallStatus.active) return false;
-    final notifier = ref.read(callProvider.notifier);
-    final vs = notifier.voiceService;
-
-    final screen = notifier.screenShareRenderer;
-    final remoteHasScreen = call.remoteScreenSharing &&
-        screen != null &&
-        screen.srcObject != null;
-    final remoteHasVideo = call.remoteVideoEnabled &&
-        vs?.remoteRenderer != null &&
-        vs!.remoteRenderer!.srcObject != null;
-    final localHasVideo = call.isVideoEnabled &&
-        vs?.localRenderer != null &&
-        vs!.localRenderer!.srcObject != null;
-
-    return remoteHasScreen || remoteHasVideo || localHasVideo;
   }
 
   @override
   Widget build(BuildContext context) {
-    final call = ref.watch(callProvider);
     final hollow = HollowTheme.of(context);
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
+    final call = ref.watch(callProvider);
 
-    ref.listen<CallState>(callProvider, (prev, next) {
-      if (next.status == CallStatus.idle &&
-          prev?.status != CallStatus.idle) {
-        if (mounted && Navigator.of(context).canPop()) {
-          Navigator.of(context).pop();
-        }
+    ref.listen<CallStatus>(callProvider.select((c) => c.status), (prev, next) {
+      if (next == CallStatus.idle && prev != CallStatus.idle && mounted) {
+        _close();
       }
     });
 
-    final showVideo = _hasRealVideo(call);
-    _syncWakelock(showVideo);
+    final source = DmCallStageSource(master);
+    final data = source.watchData(context, ref);
+    if (data == null) {
+      return Scaffold(backgroundColor: hollow.background);
+    }
+    final me = data.people.first;
+    final peer = data.people[1];
+    final watched = watchedShareOf(data);
+    final video = watched == null && (me.cameraOn || peer.cameraOn);
+    _syncWakelock(watched != null || video);
+    _logVideoGate(call);
+
+    final Widget body;
+    if (watched != null) {
+      body = MobileWatchingView(
+        data: data,
+        share: watched,
+        peopleTitle: 'In the call',
+        onFullscreen: () =>
+            openMobileShareFullscreen(context, source, watched.owner),
+      );
+    } else if (video) {
+      body = _videoView(data, me, peer);
+    } else {
+      body = _audioView(data, me, peer);
+    }
 
     return MobileSheetDragToMinimize(
       child: Scaffold(
@@ -129,49 +114,16 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         body: SafeArea(
           child: Column(
             children: [
-              _buildTopBar(hollow, call),
+              MobileCallTopBar(
+                title: peer.name,
+                subtitle: _subtitle(call),
+                onMinimise: () => Navigator.of(context).maybePop(),
+                onOpenChat: () => openMobileCallChat(context, peer: master),
+              ),
               // A call is when a relay maintenance notice matters most.
               const SystemStatusBanner(),
-              // Opt-in watching (issue #38): the share never streams until this
-              // is tapped.
-              if (call.remoteScreenSharing && !call.watchingRemoteShare)
-                Padding(
-                  padding: const EdgeInsets.only(top: HollowSpacing.xs),
-                  child: HollowPressable(
-                    onTap: () => ref
-                        .read(callProvider.notifier)
-                        .watchRemoteScreenShare(),
-                    semanticLabel: 'Watch screen share',
-                    borderRadius: BorderRadius.circular(HollowRadius.pill),
-                    backgroundColor: hollow.elevated,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.md,
-                      vertical: HollowSpacing.xs,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(LucideIcons.monitor,
-                            size: 14, color: hollow.accentText),
-                        const SizedBox(width: HollowSpacing.xs),
-                        Text(
-                          'Sharing their screen. Watch',
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textPrimary,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              Expanded(
-                child: showVideo
-                    ? _buildVideoView(hollow, call)
-                    : _buildAudioView(hollow, call, localPeerId),
-              ),
-              _buildControls(hollow, call),
-              const SizedBox(height: HollowSpacing.lg),
+              Expanded(child: body),
+              MobileCallControlRow(controls: _controls(call)),
             ],
           ),
         ),
@@ -179,600 +131,233 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     );
   }
 
-  Widget _buildTopBar(HollowTheme hollow, CallState call) {
-    final profiles = ref.watch(profileProvider);
-    final displayName = displayNameFor(profiles, widget.peerId);
+  Widget _subtitle(CallState call) {
+    final startedAt = call.startedAt;
+    if (call.status == CallStatus.active && startedAt != null) {
+      return CallDurationText(startedAt: startedAt);
+    }
+    return Text(switch (call.status) {
+      CallStatus.ringing => call.direction == CallDirection.outgoing
+          ? 'Ringing'
+          : 'Incoming call',
+      CallStatus.connecting => 'Connecting',
+      _ => '',
+    });
+  }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      child: Row(
-        children: [
-          HollowPressable(
-            onTap: () => Navigator.of(context).pop(),
-            semanticLabel: 'Minimize',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(LucideIcons.chevronDown,
-                size: 24, color: hollow.textPrimary),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
+  /// Audio only: them large, you in the corner, a share offer under the name.
+  Widget _audioView(CallStageData data, CallPerson me, CallPerson peer) {
+    final hollow = HollowTheme.of(context);
+    final offer = _offerOf(data);
+    final mine = _mineOf(data);
+    return Stack(
+      children: [
+        Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  displayName,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  overflow: TextOverflow.ellipsis,
+                MobileCallFace(
+                  person: peer,
+                  size: MobileCallMetrics.peerAvatar,
+                  largeRing: true,
+                  nameStyle: HollowTypography.heading,
                 ),
-                if (call.status == CallStatus.active && call.startedAt != null)
-                  CallDurationText(
-                    startedAt: call.startedAt!,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontFeatures: [const FontFeature.tabularFigures()],
-                    ),
-                  )
-                else
-                  Text(
-                    _statusText(call),
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.accent,
-                      fontFeatures: [const FontFeature.tabularFigures()],
-                    ),
+                _WeakLinkLine(person: peer),
+                if (offer != null) ...[
+                  const SizedBox(height: HollowSpacing.lg),
+                  MobileShareOffer(
+                    share: offer,
+                    compact: true,
+                    onWatch: () => data.onWatch(offer.owner),
                   ),
+                ],
+                if (mine != null) ...[
+                  const SizedBox(height: HollowSpacing.lg),
+                  MobileOwnShare(share: mine, onStop: data.onStopSharing),
+                ],
               ],
             ),
           ),
-          // Opt-in watching, issue #38.
-          if (call.watchingRemoteShare)
-            HollowPressable(
-              semanticLabel: 'Stop watching screen share',
-              onTap: () => ref
-                  .read(callProvider.notifier)
-                  .stopWatchingRemoteScreenShare(),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              child: Icon(LucideIcons.eyeOff,
-                  size: 22, color: hollow.textPrimary),
-            ),
-          // In the top bar, because the controls row already overflows at six.
-          // Watch-gated: audio only flows for a share we opted into.
-          if (call.watchingRemoteShare)
-            const ShareVolumeButton(
-              iconSize: 22,
-              padding: EdgeInsets.all(HollowSpacing.sm),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAudioView(
-      HollowTheme hollow, CallState call, String localPeerId) {
-    // Scoped so a VAD flip rebuilds only the avatar cluster, not the Scaffold.
-    return Center(
-      child: Consumer(builder: (context, ref, _) {
-        final speaking = ref.watch(callSpeakingProvider);
-        return MobileClusteredAvatars(
-          participants: [localPeerId, widget.peerId],
-          speakingSet: {
-            if (speaking.local) localPeerId,
-            if (speaking.remote) widget.peerId,
-          },
-          mutedSet: {
-            if (call.isMuted) localPeerId,
-            if (call.remoteMuted) widget.peerId,
-          },
-          deafenedSet: {
-            if (call.isDeafened) localPeerId,
-            if (call.remoteDeafened) widget.peerId,
-          },
-        );
-      }),
-    );
-  }
-
-  Widget _buildVideoView(HollowTheme hollow, CallState call) {
-    final notifier = ref.read(callProvider.notifier);
-    final voiceService = notifier.voiceService;
-    final remoteRenderer = voiceService?.remoteRenderer;
-    final localRenderer = voiceService?.localRenderer;
-    final screenRenderer = notifier.screenShareRenderer;
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final focused = ref.watch(focusedDmSourceProvider);
-
-    final screenAvailable = call.remoteScreenSharing &&
-        screenRenderer != null &&
-        screenRenderer.srcObject != null;
-    final remoteCamAvailable = call.remoteVideoEnabled &&
-        remoteRenderer != null &&
-        remoteRenderer.srcObject != null;
-    final localCamAvailable = call.isVideoEnabled &&
-        localRenderer != null &&
-        localRenderer.srcObject != null;
-
-    // Explicit pill focus wins, then the fixed priority: remote screen, remote
-    // camera, local camera.
-    var big = 'none'; // 'screen' | 'remoteCam' | 'localCam' | 'none'
-    if (focused.peerId != null && focused.type != null) {
-      final focusLocal = focused.peerId == localPeerId;
-      if (focused.type == 'screen' && !focusLocal && screenAvailable) {
-        big = 'screen';
-      } else if (focused.type == 'camera' &&
-          !focusLocal &&
-          remoteCamAvailable) {
-        big = 'remoteCam';
-      } else if (focused.type == 'camera' && focusLocal && localCamAvailable) {
-        big = 'localCam';
-      }
-    }
-    if (big == 'none') {
-      if (screenAvailable) {
-        big = 'screen';
-      } else if (remoteCamAvailable) {
-        big = 'remoteCam';
-      } else if (localCamAvailable) {
-        big = 'localCam';
-      }
-    }
-
-    final showScreen = big == 'screen';
-    final showRemoteFull = big == 'remoteCam';
-    final showLocalFull = big == 'localCam';
-    final showLocalPip =
-        (showScreen || showRemoteFull) && localCamAvailable;
-
-    // A local SCREEN share is excluded: the phone cannot preview its own share
-    // without an infinite mirror.
-    final sources = <({String peerId, String type})>[
-      if (call.remoteScreenSharing)
-        (peerId: widget.peerId, type: 'screen'),
-      if (call.isVideoEnabled) (peerId: localPeerId, type: 'camera'),
-      if (call.remoteVideoEnabled) (peerId: widget.peerId, type: 'camera'),
-    ];
-    // What is ACTUALLY big, since focus may have fallen back.
-    final String? effectiveFocusPeer = showScreen || showRemoteFull
-        ? widget.peerId
-        : (showLocalFull ? localPeerId : null);
-    final String? effectiveFocusType =
-        showScreen ? 'screen' : (big == 'none' ? null : 'camera');
-
-    // Device logs are the only way to see why a remote camera is invisible.
-    final gate = 'screen=$showScreen remoteFull=$showRemoteFull '
-        'localFull=$showLocalFull pip=$showLocalPip '
-        'remoteVideoEnabled=${call.remoteVideoEnabled} '
-        'remoteRenderer=${remoteRenderer != null} '
-        'srcObject=${remoteRenderer?.srcObject != null} '
-        'rendererValue=${remoteRenderer?.value} '
-        'status=${call.status} seq=${call.remoteVideoTrackSeq}';
-    if (gate != _lastVideoGateLog) {
-      _lastVideoGateLog = gate;
-      network_api.logFromDart(message: '[HOLLOW-CALL-UI] video gate: $gate');
-    }
-
-    return Stack(
-      children: [
-        if (showScreen)
-          Positioned.fill(
-            // Pinch-zoom and pan, for reading a desktop screen on a phone.
-            child: InteractiveViewer(
-              maxScale: 6,
-              child: RepaintBoundary(
-                child: RTCVideoView(
-                  // Non-null: 'screen' requires screenAvailable.
-                  screenRenderer!,
-                  objectFit:
-                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                ),
-              ),
-            ),
-          )
-        else if (showRemoteFull)
-          Positioned.fill(
-            child: RepaintBoundary(
-              child: RTCVideoView(
-                remoteRenderer!,
-                objectFit:
-                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-              ),
-            ),
-          )
-        else if (showLocalFull)
-          Positioned.fill(
-            child: RepaintBoundary(
-              child: RTCVideoView(
-                localRenderer!,
-                mirror: call.isFrontCamera,
-                objectFit:
-                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-              ),
-            ),
-          )
-        else
-          Positioned.fill(
-            child: Container(
-              color: hollow.elevated,
-              child: Center(
-                child: HollowAvatar(peerId: widget.peerId, size: 80, frameId: ''),
-              ),
-            ),
-          ),
-        // The ring's owner follows the big source: ours when our camera is
-        // full-screen, otherwise the remote peer.
-        Positioned.fill(
-          child: Consumer(builder: (context, ref, _) {
-            final speaking = ref.watch(callSpeakingProvider);
-            return SpeakingOverlayRing(
-              isSpeaking: showLocalFull ? speaking.local : speaking.remote,
-              borderRadius: BorderRadius.zero,
-            );
-          }),
         ),
-        // So a soft picture or a silent couple of seconds reads as the network
-        // rather than as the app breaking.
         Positioned(
-          top: MediaQuery.viewPaddingOf(context).top + HollowSpacing.sm,
-          left: HollowSpacing.md,
-          right: HollowSpacing.md,
-          child: Consumer(builder: (context, ref, _) {
-            final health = ref.watch(callLinkHealthProvider);
-            if (!health.hasFlair) return const SizedBox.shrink();
-            return Center(child: LinkHealthBanner(snapshot: health));
-          }),
+          top: HollowSpacing.md,
+          right: HollowSpacing.lg,
+          child: MobileCallFace(
+            person: me,
+            size: MobileCallMetrics.selfAvatar,
+            nameStyle: HollowTypography.caption.copyWith(color: hollow.accentText),
+          ),
         ),
-        if (showLocalPip)
-          Positioned(
-            right: _pipOffset.dx,
-            bottom: _pipOffset.dy,
-            child: GestureDetector(
-              onPanUpdate: (details) {
-                setState(() {
-                  final maxDy = MediaQuery.sizeOf(context).height - 260.0;
-                  _pipOffset = Offset(
-                    (_pipOffset.dx - details.delta.dx)
-                        .clamp(0.0, screenWidth - 110.0),
-                    (_pipOffset.dy - details.delta.dy).clamp(0.0, maxDy),
-                  );
-                });
-              },
-              child: Container(
-                width: 90,
-                height: 120,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: hollow.border, width: 1),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.3),
-                      blurRadius: 8,
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(11),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      RepaintBoundary(
-                        child: RTCVideoView(
-                          localRenderer,
-                          mirror: call.isFrontCamera,
-                          objectFit: RTCVideoViewObjectFit
-                              .RTCVideoViewObjectFitCover,
-                        ),
-                      ),
-                      Consumer(builder: (context, ref, _) {
-                        return SpeakingOverlayRing(
-                          isSpeaking: ref.watch(
-                              callSpeakingProvider.select((s) => s.local)),
-                          borderRadius: BorderRadius.circular(11),
-                          borderWidth: 2,
-                        );
-                      }),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        if (sources.length >= 2)
-          Positioned(
-            top: HollowSpacing.sm,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.md),
-                child: MobileSourceSwitchPill(
-                  sources: sources,
-                  focusedPeerId: effectiveFocusPeer,
-                  focusedType: effectiveFocusType,
-                  localPeerId: localPeerId,
-                  unwatchedPeerIds: {
-                    if (call.remoteScreenSharing &&
-                        !call.watchingRemoteShare)
-                      widget.peerId,
-                  },
-                  onSelect: (peerId, type) {
-                    // Tapping an unwatched tab opts in (issue #38).
-                    if (type == 'screen' &&
-                        call.remoteScreenSharing &&
-                        !call.watchingRemoteShare) {
-                      ref
-                          .read(callProvider.notifier)
-                          .watchRemoteScreenShare();
-                    }
-                    ref.read(focusedDmSourceProvider.notifier).state =
-                        DmFocusedSource(peerId: peerId, type: type);
-                  },
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
 
-  Future<void> _handleScreenShareToggle(CallState call) async {
-    final notifier = ref.read(callProvider.notifier);
-    if (call.isScreenSharing) {
-      await notifier.stopScreenShare();
-      return;
-    }
-    final choice = await showMobileScreenShareSheet(context);
-    if (choice == null || !mounted) return;
-    // Android ignores these constraints and captures at native display size;
-    // the encoder cap in ScreenShareService does the actual downscaling.
-    await notifier.startScreenShare(
-      sourceId: 'screen',
-      width: 1080,
-      height: 1920,
-      fps: 30,
-      shareAudio: choice.shareAudio,
-    );
-  }
-
-  /// Speaker button that doubles as the audio-device picker once a headset is
-  /// attached. The icon shows where audio ACTUALLY is, so a headset user can
-  /// see the call is not stuck on the phone.
-  Widget _buildAudioRouteButton(
-    HollowTheme hollow, {
-    required double iconSize,
-    required double buttonSize,
-    required bool handsFree,
-    required bool enabled,
-  }) {
-    final routeState = ref.watch(audioRouteProvider);
-    final activeRoute = routeState.activeRoute;
-    final canPick = routeState.hasExternalRoute;
-
-    Future<void> openSheet() => showMobileAudioRouteSheet(
-          context,
-          onSelect: (route) =>
-              ref.read(callProvider.notifier).selectAudioRoute(route),
-        );
-
-    return MobileControlButton(
-      icon: audioRouteIcon(routeState.activeKind),
-      iconSize: iconSize,
-      size: buttonSize,
-      color: handsFree ? hollow.accent : hollow.textPrimary,
-      backgroundColor: handsFree
-          ? hollow.accent.withValues(alpha: 0.15)
-          : hollow.elevated,
-      semanticLabel: activeRoute == null
-          ? 'Speaker'
-          : 'Audio device: ${activeRoute.label}',
-      onTap: !enabled
-          ? null
-          : canPick
-              ? openSheet
-              : () => ref.read(callProvider.notifier).toggleSpeaker(),
-      onLongPress: enabled ? openSheet : null,
-    );
-  }
-
-  Widget _buildControls(HollowTheme hollow, CallState call) {
-    // Six buttons overflow a narrow phone at 56px.
-    const iconSize = 21.0;
-    const buttonSize = 46.0;
-    final canControl = call.status == CallStatus.active ||
-        call.status == CallStatus.connecting;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+  /// A camera is on: the other person's picture (yours when theirs is off)
+  /// fills the screen, yours sits in a corner you can drag.
+  Widget _videoView(CallStageData data, CallPerson me, CallPerson peer) {
+    final big = peer.cameraOn ? peer : me;
+    final pip = peer.cameraOn && me.cameraOn ? me : null;
+    final offer = _offerOf(data);
+    final mine = _mineOf(data);
+    return LayoutBuilder(builder: (context, box) {
+      return Stack(
         children: [
-          MobileControlButton(
-            icon: call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-            iconSize: iconSize,
-            size: buttonSize,
-            color: call.isMuted ? hollow.error : hollow.textPrimary,
-            backgroundColor: call.isMuted
-                ? hollow.error.withValues(alpha: 0.15)
-                : hollow.elevated,
-            onTap: canControl
-                ? () => ref.read(callProvider.notifier).toggleMute()
-                : null,
-          ),
-          MobileControlButton(
-            icon: LucideIcons.headphones,
-            iconSize: iconSize,
-            size: buttonSize,
-            color: call.isDeafened ? hollow.error : hollow.textPrimary,
-            backgroundColor: call.isDeafened
-                ? hollow.error.withValues(alpha: 0.15)
-                : hollow.elevated,
-            onTap: call.status == CallStatus.active
-                ? () => ref.read(callProvider.notifier).toggleDeafen()
-                : null,
-          ),
-          _buildAudioRouteButton(
-            hollow,
-            iconSize: iconSize,
-            buttonSize: buttonSize,
-            handsFree: call.isSpeakerOn,
-            enabled: canControl,
-          ),
-          MobileControlButton(
-            icon: call.isVideoEnabled
-                ? LucideIcons.video
-                : LucideIcons.videoOff,
-            iconSize: iconSize,
-            size: buttonSize,
-            color:
-                call.isVideoEnabled ? hollow.accent : hollow.textPrimary,
-            backgroundColor: call.isVideoEnabled
-                ? hollow.accent.withValues(alpha: 0.15)
-                : hollow.elevated,
-            onTap: call.status == CallStatus.active
-                ? () => ref.read(callProvider.notifier).toggleVideo()
-                : null,
-          ),
-          MobileControlButton(
-            icon: call.isScreenSharing
-                ? LucideIcons.monitorOff
-                : LucideIcons.monitor,
-            iconSize: iconSize,
-            size: buttonSize,
-            color: call.isScreenSharing ? hollow.accent : hollow.textPrimary,
-            backgroundColor: call.isScreenSharing
-                ? hollow.accent.withValues(alpha: 0.15)
-                : hollow.elevated,
-            semanticLabel:
-                call.isScreenSharing ? 'Stop sharing screen' : 'Share screen',
-            onTap: call.status == CallStatus.active
-                ? () => _handleScreenShareToggle(call)
-                : null,
-          ),
-          if (call.isVideoEnabled)
-            MobileControlButton(
-              icon: LucideIcons.switchCamera,
-              iconSize: iconSize,
-              size: buttonSize,
-              color: hollow.textPrimary,
-              backgroundColor: hollow.elevated,
-              semanticLabel: 'Flip camera',
-              onTap: call.status == CallStatus.active
-                  ? () => ref.read(callProvider.notifier).switchCamera()
-                  : null,
+          Positioned.fill(
+            child: Padding(
+              padding: const EdgeInsets.all(HollowSpacing.md),
+              child: CallPersonTile(person: big, size: CallTileSize.large),
             ),
-          MobileControlButton(
-            icon: LucideIcons.phoneOff,
-            iconSize: iconSize,
-            size: buttonSize,
-            color: Colors.white,
-            backgroundColor: hollow.error,
-            onTap: () => ref.read(callProvider.notifier).endCall(),
           ),
+          if (pip != null)
+            Positioned(
+              right: _pip.dx,
+              bottom: _pip.dy,
+              child: GestureDetector(
+                onPanUpdate: (d) => setState(() {
+                  _pip = Offset(
+                    (_pip.dx - d.delta.dx).clamp(
+                        HollowSpacing.md,
+                        box.maxWidth -
+                            MobileCallMetrics.pipWidth -
+                            HollowSpacing.md),
+                    (_pip.dy - d.delta.dy).clamp(
+                        HollowSpacing.md,
+                        box.maxHeight -
+                            MobileCallMetrics.pipHeight -
+                            HollowSpacing.md),
+                  );
+                }),
+                child: SizedBox(
+                  width: MobileCallMetrics.pipWidth,
+                  height: MobileCallMetrics.pipHeight,
+                  child: CallPersonTile(person: pip, size: CallTileSize.strip),
+                ),
+              ),
+            ),
+          // Reachable with a camera on too: the offer used to exist only on
+          // the audio screen.
+          if (offer != null)
+            Positioned(
+              top: HollowSpacing.lg,
+              left: HollowSpacing.lg,
+              right: HollowSpacing.lg,
+              child: Center(
+                child: MobileShareOffer(
+                  share: offer,
+                  compact: true,
+                  onWatch: () => data.onWatch(offer.owner),
+                ),
+              ),
+            ),
+          if (mine != null)
+            Positioned(
+              left: HollowSpacing.lg,
+              right: HollowSpacing.lg,
+              bottom: HollowSpacing.lg,
+              child: MobileOwnShare(share: mine, onStop: data.onStopSharing),
+            ),
         ],
-      ),
-    );
+      );
+    });
   }
 
+  CallShare? _offerOf(CallStageData data) {
+    for (final s in data.shares) {
+      if (s.isOffer) return s;
+    }
+    return null;
+  }
+
+  CallShare? _mineOf(CallStageData data) {
+    for (final s in data.shares) {
+      if (s.isMine) return s;
+    }
+    return null;
+  }
+
+  List<MobileCallControl> _controls(CallState call) {
+    final calls = ref.read(callProvider.notifier);
+    final active = call.status == CallStatus.active;
+    final live = active || call.status == CallStatus.connecting;
+    final ringingOut = call.status == CallStatus.ringing &&
+        call.direction == CallDirection.outgoing;
+    return [
+      muteControl(muted: call.isMuted, onTap: live ? calls.toggleMute : null),
+      deafenControl(
+          deafened: call.isDeafened, onTap: active ? calls.toggleDeafen : null),
+      if (isPhoneCallPlatform)
+        speakerControl(
+          context,
+          ref,
+          on: call.isSpeakerOn,
+          toggle: calls.toggleSpeaker,
+          select: calls.selectAudioRoute,
+          enabled: live,
+        ),
+      cameraControl(
+        on: call.isVideoEnabled,
+        onTap: active
+            ? () => calls.toggleVideo().catchError((Object _) {})
+            : null,
+      ),
+      if (isPhoneCallPlatform || callCanShareScreen)
+        shareControl(
+          sharing: call.isScreenSharing,
+          onTap: active ? () => toggleMobileShare(context, ref, dm: true) : null,
+        ),
+      if (isPhoneCallPlatform && call.isVideoEnabled)
+        flipControl(onTap: active ? calls.switchCamera : null),
+      ringingOut
+          ? leaveControl(
+              word: 'Cancel',
+              purpose: 'Cancel',
+              onTap: () => leaveDmCall(context, ref))
+          : leaveControl(
+              word: 'End',
+              purpose: 'Leave the call',
+              onTap: () => leaveDmCall(context, ref)),
+    ];
+  }
+
+  /// Device logs are the only way to see why a remote camera is invisible.
+  void _logVideoGate(CallState call) {
+    final remote = ref.read(callProvider.notifier).voiceService?.remoteRenderer;
+    final gate = 'remoteVideoEnabled=${call.remoteVideoEnabled} '
+        'remoteRenderer=${remote != null} '
+        'srcObject=${remote?.srcObject != null} '
+        'local=${call.isVideoEnabled} status=${call.status} '
+        'seq=${call.remoteVideoTrackSeq}';
+    if (gate == _lastVideoGateLog) return;
+    _lastVideoGateLog = gate;
+    try {
+      network_api
+          .logFromDart(message: '[HOLLOW-CALL-UI] video gate: $gate')
+          .catchError((Object _) {});
+    } catch (_) {
+      // No bridge (tests): the gate only matters in a device log.
+    }
+  }
 }
 
-class MobileCallStatusStrip extends ConsumerWidget {
-  final String peerId;
-  const MobileCallStatusStrip({super.key, required this.peerId});
+/// "Weak connection" under the other person's name while their link is poor,
+/// nothing while it is fine.
+class _WeakLinkLine extends ConsumerWidget {
+  final CallPerson person;
+  const _WeakLinkLine({required this.person});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final call = ref.watch(callProvider);
-    final isCallWithThisPeer =
-        call.peerId == peerId && call.status != CallStatus.idle;
-
-    // Incoming ringing belongs to the IncomingCallOverlay.
-    if (!isCallWithThisPeer) return const SizedBox.shrink();
-    if (call.status == CallStatus.ringing &&
-        call.direction == CallDirection.incoming) {
+    final source = person.link;
+    final link = source == null ? null : ref.watch(source);
+    if (link == null || link.health == LinkHealth.healthy) {
       return const SizedBox.shrink();
     }
-
-    final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
-    final displayName = displayNameFor(profiles, peerId);
-
-    String label;
-    switch (call.status) {
-      case CallStatus.ringing:
-        label = call.direction == CallDirection.outgoing
-            ? 'Calling $displayName...'
-            : 'Incoming call...';
-      case CallStatus.connecting:
-        label = 'Connecting...';
-      case CallStatus.active:
-        label = 'In call with $displayName';
-      case CallStatus.idle:
-        label = '';
-    }
-
-    return GestureDetector(
-      onTap: () {
-        Navigator.of(context).push(
-          hollowMobileRoute(
-            settings: const RouteSettings(name: 'call-screen'),
-            transition: HollowRouteTransition.slideUp,
-            builder: (_) => MobileCallScreen(peerId: peerId),
-          ),
-        );
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.sm,
-        ),
-        decoration: BoxDecoration(
-          color: hollow.success.withValues(alpha: 0.1),
-          border: Border(
-            bottom:
-                BorderSide(color: hollow.success.withValues(alpha: 0.3)),
-          ),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: hollow.success,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.success,
-                  fontWeight: FontWeight.w500,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Text(
-              'Tap to return',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.success.withValues(alpha: 0.7),
-                fontSize: 11,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Icon(LucideIcons.chevronUp,
-                size: 14, color: hollow.success.withValues(alpha: 0.7)),
-          ],
-        ),
-      ),
+    return const Padding(
+      padding: EdgeInsets.only(top: HollowSpacing.sm),
+      child: HollowBadge('Weak connection',
+          kind: HollowBadgeKind.warning, icon: LucideIcons.wifiLow),
     );
   }
 }

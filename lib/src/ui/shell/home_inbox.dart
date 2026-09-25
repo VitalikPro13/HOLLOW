@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/mention_preview_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -188,6 +189,8 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
   List<_AttentionItem> _securityItems() {
     final alerts = ref.watch(securityAlertsProvider);
     final profiles = ref.watch(profileProvider);
+    // displayNameFor reads the nickname cache, so a rename must rebuild.
+    ref.watch(localNicknameProvider);
     final byPeer = <String, List<String>>{};
     for (final a in alerts) {
       if (a.acknowledgedAt != null) continue;
@@ -238,6 +241,7 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
   List<_AttentionItem> _requestItems() {
     final friends = ref.watch(friendsProvider);
     final profiles = ref.watch(profileProvider);
+    ref.watch(localNicknameProvider);
     final incoming = friends.values
         .where((f) => f.status == 'pending' && f.direction == 'incoming')
         .toList()
@@ -767,6 +771,7 @@ List<HomeConversation> homeDmConversations(WidgetRef ref) {
   final dmUnreads = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts));
   final notif = ref.watch(notificationSettingsProvider);
   final profiles = ref.watch(profileProvider);
+  ref.watch(localNicknameProvider);
   return [
     for (final friend in ref.watch(sortedFriendsProvider))
       () {
@@ -795,6 +800,7 @@ List<HomeConversation> homeMentionConversations(WidgetRef ref) {
   final previews = ref.watch(mentionPreviewProvider);
   final servers = ref.watch(serverListProvider);
   final profiles = ref.watch(profileProvider);
+  ref.watch(localNicknameProvider);
   final rows = <HomeConversation>[];
   for (final MapEntry(key: key, value: count) in mentions.entries) {
     if (count <= 0) continue;

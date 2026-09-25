@@ -224,7 +224,7 @@ function Open-Friends($peer) {
     Step $peer @{ op = 'wait_for'; target = 'type:_FriendsManager'; timeout_ms = 15000 }
 }
 
-# Never a bare Escape: after Send Request and the waits that follow, focus has
+# Never a bare Escape: after Send request and the waits that follow, focus has
 # left the dialog and the key reaches nothing, and the barrier then covers the
 # controls the next phase taps. And never a bare semantics:Close, which matches
 # the window title bar first and ends the process.
@@ -239,7 +239,7 @@ function Close-Friends($peer) {
 # tap lands on something the dialog is covering and fails as "on screen but a
 # click at its centre does not reach it".
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:_TabButton>text:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:HollowChip>text:$tab"; index = 0 }
 }
 
 # --------------------------------------------------------------------------
@@ -372,11 +372,14 @@ function Write-Evidence($label) {
 # Opens the DM with a friend from wherever the shell happens to be. The chip in
 # the rail carries the friend's display name as a HollowTooltip, which is also
 # the assertion that the profile crossed.
+$script:DmComposer = @{}
 function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    # The composer's hint names the conversation ("Message probe-b").
+    $script:DmComposer[$peer] = "hint:Message $friendName"
+    Step $peer @{ op = 'wait_for'; target = $script:DmComposer[$peer]; timeout_ms = 30000 }
 }
 
 # The composer is tapped first: enter_text on an unfocused field reports success
@@ -391,8 +394,8 @@ function Open-Dm($peer, $friendName) {
 # about the DM room rather than about the composer.
 function Send-Dm($peer, $body) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-        Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $body }
+        Step $peer @{ op = 'tap'; target = $script:DmComposer[$peer] }
+        Step $peer @{ op = 'enter_text'; target = $script:DmComposer[$peer]; value = $body }
         Step $peer @{ op = 'key'; value = 'enter' }
         $landed = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "text:$body"; timeout_ms = 20000 }
         if ($landed.ok) { return }
@@ -445,20 +448,20 @@ try {
     # ---- G1: a requests, b accepts, both agree ------------------------------
     Say '1/6 a sends the request, b accepts it on the Incoming tab'
     Open-Friends a
-    Show-FriendsTab a 'Add Friend'
+    Show-FriendsTab a 'Add friend'
     # Assert the id really IS in the field before sending: enter_text has
     # reported success into this field while it held only a fragment, which the
     # app then resolved as a nickname and never sent, and that failure is
     # indistinguishable downstream from the request being lost.
-    Step a @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_B}' }
+    Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_B}' }
     Step a @{ op = 'wait_for'; target = 'text:${PEER_B}'; timeout_ms = 15000 }
-    Step a @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+    Step a @{ op = 'tap'; target = 'text:Send request'; index = 0 }
 
     # The Accept button only exists on the INCOMING tab. Waiting for it from the
     # Friends tab is a 60-second timeout that reads exactly like a delivery
     # failure and is not one.
     Open-Friends b
-    Show-FriendsTab b 'Incoming'
+    Show-FriendsTab b 'Requests'
     Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
     Step b @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
 
@@ -491,8 +494,12 @@ try {
     Close-Friends b
     Open-Friends a
     Show-FriendsTab a 'Friends'
-    Step a @{ op = 'wait_for'; target = 'semantics:Remove friend'; timeout_ms = 15000 }
-    Step a @{ op = 'tap'; target = 'semantics:Remove friend'; index = 0 }
+    # Remove friend lives in the row's More menu and asks first.
+    Step a @{ op = 'wait_for'; target = 'semantics:More for probe-b'; timeout_ms = 15000 }
+    Step a @{ op = 'tap'; target = 'semantics:More for probe-b'; index = 0 }
+    Step a @{ op = 'tap'; target = 'menu > text:Remove friend'; index = 0 }
+    Step a @{ op = 'wait_for'; target = 'dialog > text:Remove friend'; timeout_ms = 5000 }
+    Step a @{ op = 'tap'; target = 'dialog > text:Remove friend'; index = 0 }
     # The sidebar's friends bar prints this too, so it is the same signal
     # whether or not the manager happens to be the surface showing it.
     Step a @{ op = 'wait_for'; target = 'text:No friends yet'; timeout_ms = 30000 }
@@ -522,13 +529,13 @@ try {
 
     # ---- G3: the re-add needs consent ---------------------------------------
     Say '3/6 a re-adds b: b must see a NEW request, and nobody may be a friend yet'
-    Show-FriendsTab a 'Add Friend'
-    Step a @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_B}' }
+    Show-FriendsTab a 'Add friend'
+    Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_B}' }
     Step a @{ op = 'wait_for'; target = 'text:${PEER_B}'; timeout_ms = 15000 }
-    Step a @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+    Step a @{ op = 'tap'; target = 'text:Send request'; index = 0 }
 
     Open-Friends b
-    Show-FriendsTab b 'Incoming'
+    Show-FriendsTab b 'Requests'
     Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 120000 }
     Say 'b sees a new incoming request'
 
@@ -540,8 +547,8 @@ try {
 
     Show-FriendsTab a 'Friends'
     $aFriendsTabEmpty = Invoke-SoftStep a @{ op = 'wait_for'; target = 'text:No friends yet'; timeout_ms = 10000 }
-    Show-FriendsTab a 'Outgoing'
-    # `Cancel friend request` is the outgoing ROW's own action, so it is on
+    Show-FriendsTab a 'Requests'
+    # `Cancel friend request` is the sent ROW's own action, so it is on
     # screen only while a still believes the request is pending.
     $aOutgoing = Invoke-SoftStep a @{ op = 'wait_for'; target = 'semantics:Cancel friend request'; timeout_ms = 20000 }
     Show-FriendsTab b 'Friends'
@@ -584,7 +591,7 @@ try {
 
     # ---- G4: b accepts for real ---------------------------------------------
     Say '4/6 b accepts the new request'
-    Show-FriendsTab b 'Incoming'
+    Show-FriendsTab b 'Requests'
     Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 20000 }
     Step b @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:probe-b'; timeout_ms = 90000 }

@@ -1,14 +1,15 @@
 ﻿import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -50,8 +51,9 @@ void showTwitchJoinDialog(
   );
 }
 
-/// The "you cannot join this server" dialog, with the specific reason: a vague
-/// failure here reads as a network problem.
+//// The "you cannot join this server" dialog, with the specific reason: a vague
+/// failure here reads as a network problem. Information only, so it closes
+/// from its title bar.
 void showJoinRejectedDialog(
   BuildContext context, {
   required String title,
@@ -59,92 +61,71 @@ void showJoinRejectedDialog(
 }) {
   showHollowDialog(
     context: context,
-    builder: (ctx) {
-      return HollowDialog(
-        title: title,
-        content: HollowDialogText(message),
-        actions: [
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('OK'),
-          ),
-        ],
-      );
-    },
+    builder: (_) => HollowDialog(
+      title: title,
+      showClose: true,
+      content: HollowDialogText(message),
+    ),
   );
 }
 
 /// NSFW join-consent gate, shown when a server rejects a join with the
 /// `nsfw_confirm:` reason. It covers every join entry point because the gate is
-/// server-side reject-then-retry.
-void showNsfwConfirmDialog(
+/// server-side reject-then-retry. [onProceed] sends the retry; the dialog stays
+/// open while it runs and shows why if it fails.
+Future<bool> showNsfwConfirmDialog(
   BuildContext context, {
   required String serverName,
-  required VoidCallback onProceed,
+  required Future<void> Function() onProceed,
 }) {
-  showHollowDialog(
+  // Filled, not danger: joining destroys nothing.
+  return showHollowConfirm(
     context: context,
-    builder: (ctx) {
-      final hollow = HollowTheme.of(ctx);
-      return HollowDialog(
-        title: 'Sensitive content warning',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text: serverName,
-                    style: TextStyle(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const TextSpan(
-                    text: ' is marked NSFW. It may contain adult or '
-                        'disturbing content.',
-                  ),
-                ],
-              ),
-              style:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'This server is moderated only by its own moderators. Hollow does '
-              'not host, review, or take responsibility for its content. '
-              'By continuing you confirm that you are 18 or older.',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                height: 1.4,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          // Filled, not danger: joining destroys nothing.
-          HollowButton.filled(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              onProceed();
-            },
-            child: const Text('I am 18 or older, join'),
-          ),
-        ],
-      );
-    },
+    title: 'Sensitive content warning',
+    message: '$serverName is marked NSFW. It may contain adult or disturbing '
+        'content.\n\n'
+        'This server is moderated only by its own moderators. Hollow does not '
+        'host, review, or take responsibility for its content. By continuing '
+        'you confirm that you are 18 or older.',
+    confirmLabel: 'I am 18 or older, join',
+    onConfirm: onProceed,
   );
 }
 
-enum _JoinStep { requirements, connect, verifying, success, failed }
+/// The calls the Twitch join flow makes, behind one object a test can replace.
+class TwitchJoinCalls {
+  const TwitchJoinCalls();
 
-class _TwitchJoinDialog extends StatefulWidget {
+  Future<bool> isConnected() => twitch_api.twitchIsConnected();
+
+  Future<twitch_api.TwitchDeviceFlowResult> startDeviceFlow() =>
+      twitch_api.twitchStartDeviceFlow();
+
+  Future<void> pollForToken(String deviceCode, int intervalSecs) =>
+      twitch_api.twitchPollForToken(
+        deviceCode: deviceCode,
+        intervalSecs: BigInt.from(intervalSecs),
+      );
+
+  Future<void> ensureToken() => twitch_api.twitchEnsureToken();
+
+  Future<String> verifyFollow(String broadcasterId) =>
+      twitch_api.twitchVerifyFollow(broadcasterId: broadcasterId);
+
+  Future<void> joinServer(String serverId, String proof) =>
+      crdt_api.joinServer(
+        serverId: serverId,
+        twitchProofJson: proof,
+        nsfwConfirmed: false,
+      );
+}
+
+final twitchJoinCallsProvider =
+    Provider<TwitchJoinCalls>((ref) => const TwitchJoinCalls());
+
+enum _JoinStep { checking, requirements, connect, verifying, success, failed }
+
+class _TwitchJoinDialog extends ConsumerStatefulWidget {
   final String serverId;
   final String channelId;
   final String channelName;
@@ -164,15 +145,20 @@ class _TwitchJoinDialog extends StatefulWidget {
   });
 
   @override
-  State<_TwitchJoinDialog> createState() => _TwitchJoinDialogState();
+  ConsumerState<_TwitchJoinDialog> createState() => _TwitchJoinDialogState();
 }
 
-class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
-  _JoinStep _step = _JoinStep.requirements;
+class _TwitchJoinDialogState extends ConsumerState<_TwitchJoinDialog>
+    with HollowDialogAction {
+  // Checking first, so a connected account goes straight to Verifying instead
+  // of flashing the requirements.
+  _JoinStep _step = _JoinStep.checking;
   String? _error;
 
   String? _userCode;
   String? _verificationUri;
+
+  TwitchJoinCalls get _calls => ref.read(twitchJoinCallsProvider);
 
   @override
   void initState() {
@@ -202,134 +188,134 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
         if (mounted) Navigator.of(context).pop();
       });
     } else {
-      setState(() {
-        _step = _JoinStep.failed;
-        _error = error ?? 'Verification failed';
-      });
+      _fail(error ??
+          "Your Twitch account doesn't meet this server's requirements.");
     }
   }
 
+  void _fail(String sentence) {
+    if (!mounted) return;
+    setState(() {
+      _step = _JoinStep.failed;
+      _error = sentence;
+    });
+  }
+
   Future<void> _checkAndProceed() async {
+    if (_step != _JoinStep.checking) {
+      setState(() {
+        _step = _JoinStep.checking;
+        _error = null;
+      });
+    }
+    bool connected;
     try {
-      final connected = await twitch_api.twitchIsConnected();
-      if (!mounted) return;
-      if (connected) {
-        _verify();
-      } else {
-        setState(() => _step = _JoinStep.requirements);
-      }
+      connected = await _calls.isConnected();
     } catch (_) {
-      if (mounted) setState(() => _step = _JoinStep.requirements);
+      connected = false;
+    }
+    if (!mounted) return;
+    if (connected) {
+      await _verify();
+    } else {
+      setState(() => _step = _JoinStep.requirements);
     }
   }
 
   Future<void> _startConnect() async {
-    setState(() => _step = _JoinStep.connect);
-    try {
-      final result = await twitch_api.twitchStartDeviceFlow();
+    final started = await runDialogAction(() async {
+      final result = await _calls.startDeviceFlow();
       if (!mounted) return;
       setState(() {
+        _step = _JoinStep.connect;
         _userCode = result.userCode;
         _verificationUri = result.verificationUri;
       });
       _pollForToken(result.deviceCode, result.intervalSecs.toInt());
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _step = _JoinStep.failed;
-          _error = 'Failed to start Twitch auth: $e';
-        });
-      }
-    }
+    }, fallback: "Hollow couldn't reach Twitch. Try again in a moment.");
+    // The next step shows its own waiting state.
+    if (started && mounted) setState(() => actionRunning = false);
   }
 
   Future<void> _pollForToken(String deviceCode, int intervalSecs) async {
     try {
-      await twitch_api.twitchPollForToken(
-        deviceCode: deviceCode,
-        intervalSecs: BigInt.from(intervalSecs),
-      );
-      if (!mounted) return;
-      _verify();
+      await _calls.pollForToken(deviceCode, intervalSecs);
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _step = _JoinStep.failed;
-          _error = 'Twitch authorization failed: $e';
-        });
-      }
+      _fail(friendlyError(e,
+          fallback: "Twitch didn't confirm the sign in. Try again."));
+      return;
     }
+    if (mounted) await _verify();
   }
 
   Future<void> _verify() async {
     setState(() => _step = _JoinStep.verifying);
     try {
-      await twitch_api.twitchEnsureToken();
+      await _calls.ensureToken();
       // A blind-signed FOLLOW credential, never our own word for it: the shop
       // signs what Twitch said onto our master and the owner verifies it
       // offline against the pinned root. It names a channel, an age bucket and
       // a tier and nothing that identifies the Twitch account, which is why it
       // may also ride the join ring.
-      final proof = await twitch_api.twitchVerifyFollow(
-        broadcasterId: widget.channelId,
-      );
-      crdt_api.joinServer(
-        serverId: widget.serverId,
-        twitchProofJson: proof,
-        nsfwConfirmed: false,
-      );
-      // Stays on verifying until event_provider calls back with the join
-      // result.
+      final proof = await _calls.verifyFollow(widget.channelId);
+      await _calls.joinServer(widget.serverId, proof);
+      // Stays on verifying until event_provider calls back with the result.
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _step = _JoinStep.failed;
-          _error = e.toString();
-        });
-      }
+      _fail(friendlyError(e,
+          fallback: "Hollow couldn't check your Twitch account. Try again."));
     }
   }
+
+  String get _title => switch (_step) {
+        _JoinStep.success => 'Joined ${widget.serverName}',
+        _JoinStep.failed => "Couldn't join ${widget.serverName}",
+        _ => 'Twitch verification',
+      };
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final stepIndex = _step.index;
-    final totalSteps = widget.failureReason != null ? 1 : 4;
-
+    final canCancel =
+        _step == _JoinStep.requirements || _step == _JoinStep.connect;
     return HollowDialog(
-      title: _step == _JoinStep.success
-          ? 'Joined!'
-          : _step == _JoinStep.failed
-              ? 'Verification failed'
-              : 'Twitch verification',
+      title: _title,
+      width: 420,
       // A failure leaves nothing to confirm; success closes on its own.
       showClose: _step == _JoinStep.failed,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildStepContent(hollow),
-          if (totalSteps > 1) ...[
-            const SizedBox(height: HollowSpacing.xl),
-            _buildDots(hollow, stepIndex, totalSteps),
-          ],
-        ],
-      ),
-      actions: _buildActions(hollow),
+      busy: actionRunning,
+      error: _step == _JoinStep.requirements ? actionError : null,
+      content: _buildStepContent(hollow),
+      actions: [
+        if (canCancel)
+          HollowButton.ghost(
+            onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+        ..._primaryAction(),
+      ],
     );
   }
 
   Widget _buildStepContent(HollowTheme hollow) {
     switch (_step) {
+      case _JoinStep.checking:
+        return _waiting(hollow, 'Checking your Twitch connection…');
       case _JoinStep.requirements:
         return _buildRequirements(hollow);
       case _JoinStep.connect:
         return _buildConnect(hollow);
       case _JoinStep.verifying:
-        return _buildVerifying(hollow);
+        return _waiting(
+          hollow,
+          'Verifying your Twitch account…',
+          detail: widget.channelName.isEmpty
+              ? null
+              : 'Checking that you follow ${widget.channelName}',
+        );
       case _JoinStep.success:
         return _buildSuccess(hollow);
       case _JoinStep.failed:
-        return _buildFailed(hollow);
+        return HollowDialogText(_error ?? kGenericErrorSentence);
     }
   }
 
@@ -338,27 +324,15 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        RichText(
-          text: TextSpan(
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-            children: [
-              TextSpan(
-                text: widget.serverName,
-                style: TextStyle(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const TextSpan(text: ' requires Twitch verification to join.'),
-            ],
-          ),
-        ),
+        HollowDialogText(
+            '${widget.serverName} asks new members to verify with Twitch.'),
         const SizedBox(height: HollowSpacing.lg),
         _requirementRow(
           hollow,
           LucideIcons.userCheck,
           widget.minFollowDays > 0
-              ? 'Follow ${widget.channelName} for at least ${widget.minFollowDays} days'
+              ? 'Follow ${widget.channelName} for at least '
+                  '${widget.minFollowDays} days'
               : 'Follow ${widget.channelName}',
         ),
         if (widget.requireSub) ...[
@@ -366,16 +340,12 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
           _requirementRow(
             hollow,
             LucideIcons.crown,
-            'Active subscription to ${widget.channelName}',
+            'Subscribe to ${widget.channelName}',
           ),
         ],
         const SizedBox(height: HollowSpacing.lg),
-        Text(
-          'You\'ll need to connect your Twitch account to verify.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-          ),
-        ),
+        const HollowDialogText(
+            'Connect your Twitch account so Hollow can check.'),
       ],
     );
   }
@@ -396,64 +366,24 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
   }
 
   Widget _buildConnect(HollowTheme hollow) {
-    if (_userCode == null) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const HollowSpinner.medium(),
-          const SizedBox(height: HollowSpacing.md),
-          Text(
-            'Starting Twitch authorization...',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
-        ],
-      );
-    }
-
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const HollowDialogText('Enter this code on Twitch:'),
+        const HollowDialogText(
+            'Open Twitch and enter this code to connect your account.'),
         const SizedBox(height: HollowSpacing.lg),
-        GestureDetector(
-          onTap: () {
-            Clipboard.setData(ClipboardData(text: _userCode!));
-            HollowToast.show(context, 'Code copied!');
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.xl,
-              vertical: HollowSpacing.md,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _userCode!,
-                  style: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary,
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.md),
-                Icon(LucideIcons.copy, size: 16, color: hollow.textSecondary),
-              ],
-            ),
-          ),
-        ),
+        HollowCopyField(value: _userCode ?? '', name: 'Code', wrap: false),
         const SizedBox(height: HollowSpacing.lg),
         Row(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const HollowSpinner(),
             const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Waiting for authorization...',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
+            Expanded(
+              child: Text(
+                'Waiting for Twitch…',
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary),
               ),
             ),
           ],
@@ -462,127 +392,88 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
     );
   }
 
-  Widget _buildVerifying(HollowTheme hollow) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const HollowSpinner.medium(),
-        const SizedBox(height: HollowSpacing.md),
-        Text(
-          'Verifying your Twitch account...',
-          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        Text(
-          'Checking follow status for ${widget.channelName}',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
+  Widget _waiting(HollowTheme hollow, String text, {String? detail}) {
+    return Semantics(
+      liveRegion: true,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const HollowSpinner.medium(),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  text,
+                  style:
+                      HollowTypography.body.copyWith(color: hollow.textPrimary),
+                ),
+                if (detail != null)
+                  Text(
+                    detail,
+                    style: HollowTypography.bodySmall
+                        .copyWith(color: hollow.textSecondary),
+                  ),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
   Widget _buildSuccess(HollowTheme hollow) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(LucideIcons.checkCircle, size: 24, color: hollow.success),
-        const SizedBox(height: HollowSpacing.md),
-        Text(
-          'You\'re now in ${widget.serverName}!',
-          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildFailed(HollowTheme hollow) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(LucideIcons.alertCircle, size: 20, color: hollow.error),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                'Could not join ${widget.serverName}',
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        Text(
-          _error ?? 'Unknown error',
-          style: HollowTypography.body.copyWith(color: hollow.error),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDots(HollowTheme hollow, int current, int total) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(total, (i) {
-        final isActive = i <= current;
-        return Container(
-          width: 8,
-          height: 8,
-          margin: const EdgeInsets.symmetric(horizontal: 3),
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: isActive
-                ? hollow.accent
-                : hollow.textSecondary.withValues(alpha: 0.3),
-          ),
-        );
-      }),
+      children: [
+        Icon(LucideIcons.checkCircle, size: 20, color: hollow.success),
+        const SizedBox(width: HollowSpacing.sm),
+        const Expanded(
+          child: HollowDialogText(
+              "Your Twitch account meets this server's requirements."),
+        ),
+      ],
     );
   }
 
-  List<Widget> _buildActions(HollowTheme hollow) {
+  List<Widget> _primaryAction() {
     switch (_step) {
       case _JoinStep.requirements:
         return [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
           HollowButton.filled(
             onPressed: _startConnect,
-            icon: Icon(BrandIcons.twitch, size: 14, color: hollow.textPrimary),
+            loading: actionRunning,
+            icon: const Icon(BrandIcons.twitch),
             child: const Text('Connect Twitch'),
           ),
         ];
       case _JoinStep.connect:
         return [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
           if (_verificationUri != null)
             HollowButton.filled(
               onPressed: () {
                 final uri = Uri.tryParse(_verificationUri!);
-                if (uri != null) launchUrl(uri);
+                if (uri != null) launchUrl(uri).catchError((_) => false);
               },
-              icon: Icon(BrandIcons.twitch, size: 14,
-                  color: hollow.textPrimary),
+              icon: const Icon(BrandIcons.twitch),
               child: const Text('Open Twitch'),
             ),
         ];
-      case _JoinStep.verifying:
-        return [];
-      case _JoinStep.success:
-        return [];
       case _JoinStep.failed:
-        return [];
+        // A retry needs the channel to check against; a rejection relayed
+        // without one only closes.
+        return [
+          if (widget.channelId.isNotEmpty)
+            HollowButton.filled(
+              onPressed: _checkAndProceed,
+              child: const Text('Try again'),
+            ),
+        ];
+      case _JoinStep.checking:
+      case _JoinStep.verifying:
+      case _JoinStep.success:
+        return const [];
     }
   }
 }

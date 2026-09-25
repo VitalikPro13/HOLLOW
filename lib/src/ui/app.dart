@@ -17,7 +17,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
-import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_incoming_call.dart';
 import 'package:hollow/src/ui/mobile/call_proximity_controller.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
 import 'package:hollow/src/ui/shell/window_title_bar.dart';
@@ -95,7 +95,9 @@ class HollowApp extends ConsumerWidget {
             child: Stack(
               children: [
                 body,
-                const IncomingCallOverlay(),
+                // The phone answers full screen; the desktop card is for
+                // windows.
+                const MobileIncomingCallOverlay(),
                 // Blanks the screen on ear-hold for any active call, not only
                 // while the call sheet is visible; renders nothing.
                 const CallProximityController(),

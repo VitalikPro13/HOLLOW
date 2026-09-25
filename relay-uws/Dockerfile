@@ -33,7 +33,7 @@ RUN setcap cap_net_bind_service=+ep /usr/local/bin/hollow-relay \
 
 # Docker copies this directory's ownership onto an empty named volume
 # mounted here, which is the only way the unprivileged process can write
-# its report counts.
+# its report counts and their key.
 RUN mkdir -p /data && chown 999:999 /data
 
 EXPOSE 443

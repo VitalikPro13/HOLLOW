@@ -274,6 +274,13 @@ String inviteIdFromInput(String input, HollowLinkType type) =>
   return (id: trimmed, relay: null);
 }
 
+/// Whether [id] has the shape of a server id: 32 hex characters, the 16 random
+/// bytes `CreateServer` mints. A pasted typo fails here instead of parking a
+/// join that no member can ever answer.
+bool isServerIdShape(String id) => _serverIdShape.hasMatch(id);
+
+final _serverIdShape = RegExp(r'^[0-9a-fA-F]{32}$');
+
 List<HollowLink> extractHollowLinks(String text) {
   final results = <HollowLink>[];
   final seen = <String>{};

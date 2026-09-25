@@ -446,6 +446,13 @@ class ProbeRunner {
         return 'typed "${step['value']}"';
 
       case 'key':
+        // What Enter does in a single-line field: the engine sends the
+        // field's action, which a synthetic key event never produces.
+        if (step['value'] == 'submit') {
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await settle(frames: step['frames'] as int? ?? 15);
+          return 'submitted the focused field';
+        }
         final key = _key('${step['value']}');
         await tester.sendKeyEvent(key);
         await settle(frames: step['frames'] as int? ?? 15);

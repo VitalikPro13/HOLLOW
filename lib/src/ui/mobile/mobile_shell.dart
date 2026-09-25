@@ -13,14 +13,14 @@ import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
-import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
+import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart'
-    show MobileChatsTab, showNewConversationDialog;
+    show MobileChatsTab;
+import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
@@ -185,7 +185,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         ),
       ),
       bottomNavigationBar: MobileNavBar(
-        onAdd: () => showNewConversationDialog(context),
+        onAdd: () => showCreateServerDialog(context),
       ),
     );
 
@@ -228,8 +228,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         // No in-app banner here: the only mobile in-app notification is
         // MobileInChatBanner, shown while inside a chat. Outside one, mobile
         // relies on OS notifications.
-        const MobileActiveCallPill(),
-        const MobileVoiceChannelPill(),
+        const MobileMinimisedCall(),
       ],
     );
   }

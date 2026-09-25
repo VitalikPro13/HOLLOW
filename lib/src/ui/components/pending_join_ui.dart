@@ -11,6 +11,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/pending_join_info.dart';
 import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/services/pending_join_ffi.dart';
@@ -19,7 +20,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -168,87 +169,33 @@ class _PendingJoinSheet extends ConsumerWidget {
     final rejected = info?.isRejected ?? false;
     final reason = info?.reason ?? '';
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HollowSpacing.md),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  pendingJoinTitle(rejected: rejected),
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textPrimary),
-                ),
-                const SizedBox(height: HollowSpacing.xs),
-                Text(
-                  pendingJoinExplanation(rejected: rejected, reason: reason),
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          if (rejected)
-            _SheetRow(
-              icon: LucideIcons.rotateCcw,
-              label: 'Request again',
-              onTap: onRetry,
-            ),
-          _SheetRow(
-            icon: LucideIcons.link,
-            label: 'Copy invite link',
-            onTap: onCopy,
-          ),
-          _SheetRow(
-            icon: LucideIcons.trash2,
-            label: rejected ? 'Remove' : 'Discard request',
-            danger: true,
-            onTap: onDiscard,
-          ),
-        ],
-      ),
-    );
-  }
-}
+    Widget row(IconData icon, String label, VoidCallback onTap) =>
+        HollowListRow(
+          touch: true,
+          title: label,
+          leading: Icon(icon, size: 20, color: hollow.textSecondary),
+          onTap: onTap,
+        );
 
-class _SheetRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool danger;
-
-  const _SheetRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.danger = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final color = danger ? hollow.error : hollow.textPrimary;
-    return HollowPressable(
-      onTap: onTap,
-      subtle: true,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.md,
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 20, color: color),
-          const SizedBox(width: HollowSpacing.md),
-          Text(label, style: HollowTypography.body.copyWith(color: color)),
-        ],
-      ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        HollowSheetTitle(pendingJoinTitle(rejected: rejected)),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+              HollowSpacing.lg, 0, HollowSpacing.lg, HollowSpacing.sm),
+          child: Text(
+            pendingJoinExplanation(rejected: rejected, reason: reason),
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+        ),
+        if (rejected) row(LucideIcons.rotateCcw, 'Request again', onRetry),
+        row(LucideIcons.link, 'Copy invite link', onCopy),
+        row(LucideIcons.trash2, rejected ? 'Remove' : 'Discard request',
+            onDiscard),
+        const SizedBox(height: HollowSpacing.sm),
+      ],
     );
   }
 }
@@ -281,7 +228,8 @@ Future<void> discardPendingJoinAction(
         type: HollowToastType.info);
   } catch (e) {
     if (!context.mounted) return;
-    HollowToast.show(context, 'Could not discard the request: $e',
+    HollowToast.show(context,
+        friendlyError(e, fallback: "Couldn't discard the request. Try again."),
         type: HollowToastType.error);
   }
 }
@@ -300,7 +248,8 @@ Future<void> retryPendingJoinAction(
         type: HollowToastType.info);
   } catch (e) {
     if (!context.mounted) return;
-    HollowToast.show(context, 'Could not send the request: $e',
+    HollowToast.show(context,
+        friendlyError(e, fallback: "Couldn't send the request. Try again."),
         type: HollowToastType.error);
   }
 }

@@ -21,6 +21,7 @@ import 'api/storage.dart';
 import 'api/twitch.dart';
 import 'api/updater.dart';
 import 'api/verification.dart';
+import 'api/waveform.dart';
 import 'api/wipe.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -91,10 +92,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AtRestStatus dco_decode_at_rest_status(dynamic raw);
 
   @protected
+  AudioWaveform dco_decode_audio_waveform(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
   bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
+  CallRecord dco_decode_box_autoadd_call_record(dynamic raw);
 
   @protected
   DiscoveredPeer dco_decode_box_autoadd_discovered_peer(dynamic raw);
@@ -147,6 +154,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VideoThumbRef dco_decode_box_autoadd_video_thumb_ref(dynamic raw);
 
   @protected
+  CallRecord dco_decode_call_record(dynamic raw);
+
+  @protected
   ChannelFfi dco_decode_channel_ffi(dynamic raw);
 
   @protected
@@ -172,6 +182,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double dco_decode_f_32(dynamic raw);
+
+  @protected
+  double dco_decode_f_64(dynamic raw);
 
   @protected
   FetchedMessage dco_decode_fetched_message(dynamic raw);
@@ -265,6 +278,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<bool> dco_decode_list_bool(dynamic raw);
 
   @protected
+  List<CallRecord> dco_decode_list_call_record(dynamic raw);
+
+  @protected
   List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
 
   @protected
@@ -335,6 +351,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<PersonalSticker> dco_decode_list_personal_sticker(dynamic raw);
+
+  @protected
+  Float32List dco_decode_list_prim_f_32_strict(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_32_loose(dynamic raw);
@@ -737,10 +756,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AtRestStatus sse_decode_at_rest_status(SseDeserializer deserializer);
 
   @protected
+  AudioWaveform sse_decode_audio_waveform(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  CallRecord sse_decode_box_autoadd_call_record(SseDeserializer deserializer);
 
   @protected
   DiscoveredPeer sse_decode_box_autoadd_discovered_peer(
@@ -815,6 +840,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CallRecord sse_decode_call_record(SseDeserializer deserializer);
+
+  @protected
   ChannelFfi sse_decode_channel_ffi(SseDeserializer deserializer);
 
   @protected
@@ -840,6 +868,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double sse_decode_f_32(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
 
   @protected
   FetchedMessage sse_decode_fetched_message(SseDeserializer deserializer);
@@ -949,6 +980,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<bool> sse_decode_list_bool(SseDeserializer deserializer);
 
   @protected
+  List<CallRecord> sse_decode_list_call_record(SseDeserializer deserializer);
+
+  @protected
   List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
 
   @protected
@@ -1049,6 +1083,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<PersonalSticker> sse_decode_list_personal_sticker(
     SseDeserializer deserializer,
   );
+
+  @protected
+  Float32List sse_decode_list_prim_f_32_strict(SseDeserializer deserializer);
 
   @protected
   List<int> sse_decode_list_prim_u_32_loose(SseDeserializer deserializer);
@@ -1554,10 +1591,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_at_rest_status(AtRestStatus self, SseSerializer serializer);
 
   @protected
+  void sse_encode_audio_waveform(AudioWaveform self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_call_record(
+    CallRecord self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_discovered_peer(
@@ -1653,6 +1699,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_call_record(CallRecord self, SseSerializer serializer);
+
+  @protected
   void sse_encode_channel_ffi(ChannelFfi self, SseSerializer serializer);
 
   @protected
@@ -1690,6 +1739,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_f_32(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_fetched_message(
@@ -1836,6 +1888,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_bool(List<bool> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_call_record(
+    List<CallRecord> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_channel_ffi(
     List<ChannelFfi> self,
     SseSerializer serializer,
@@ -1964,6 +2022,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_personal_sticker(
     List<PersonalSticker> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_f_32_strict(
+    Float32List self,
     SseSerializer serializer,
   );
 

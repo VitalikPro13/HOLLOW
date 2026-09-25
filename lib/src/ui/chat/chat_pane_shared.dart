@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -12,7 +13,8 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/chat/message_row.dart' show kMessageIndent;
+import 'package:hollow/src/ui/chat/message_row.dart'
+    show CallRecordRow, kMessageIndent;
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
@@ -894,39 +896,87 @@ Widget dateSeparatedChatRow({
   // The first row that arrived while the reader was away, so the "new
   // messages" line goes above it (issue #54).
   bool unreadDivider = false,
+  // DM calls placed by time: those since the previous row sit above this one,
+  // those after the newest row below it (see [callRecordsAround]).
+  List<DmCallRecord> callsBefore = const [],
+  List<DmCallRecord> callsAfter = const [],
 }) {
-  final showDate = shouldShowDateSeparator(timestamp, prevTimestamp);
+  final endInset =
+      railGutter && !_isTouchForm ? kChatRuleEndInset : HollowSpacing.lg;
+  final lines = <Widget>[];
+  var last = prevTimestamp;
+  void addCalls(List<DmCallRecord> calls) {
+    for (final call in calls) {
+      if (shouldShowDateSeparator(call.startedAt, last)) {
+        lines.add(DateSeparator(date: call.startedAt, endInset: endInset));
+      }
+      lines.add(CallRecordRow(record: call));
+      last = call.startedAt;
+    }
+  }
+
+  addCalls(callsBefore);
+  final showDate = shouldShowDateSeparator(timestamp, last);
   final messageWidget = showHeader
       ? Padding(
           padding: const EdgeInsets.only(top: HollowSpacing.sm),
           child: child,
         )
       : child;
-  final endInset =
-      railGutter && !_isTouchForm ? kChatRuleEndInset : HollowSpacing.lg;
   // A row carrying BOTH becomes one rule, not two (see [UnreadDivider.date]).
+  if (showDate && !unreadDivider) {
+    lines.add(DateSeparator(date: timestamp, endInset: endInset));
+  }
+  if (unreadDivider) {
+    lines.add(UnreadDivider(
+      endInset: endInset,
+      date: showDate ? timestamp : null,
+    ));
+  }
+  lines.add(messageWidget);
+  last = timestamp;
+  addCalls(callsAfter);
   return KeyedSubtree(
     key: ValueKey<Object>(rowKey),
-    child: showDate || unreadDivider
+    child: lines.length > 1
         ? Column(
             mainAxisSize: MainAxisSize.min,
             // STRETCH, not the default centre: a grouped continuation
             // shrink-wraps, and this Column exists only because the row
             // carries a separator, so centring would push it mid-pane.
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (showDate && !unreadDivider)
-                DateSeparator(date: timestamp, endInset: endInset),
-              if (unreadDivider)
-                UnreadDivider(
-                  endInset: endInset,
-                  date: showDate ? timestamp : null,
-                ),
-              messageWidget,
-            ],
+            children: lines,
           )
         : messageWidget,
   );
+}
+
+/// A conversation with calls but no messages yet: the calls alone, pinned to
+/// the bottom the way a message list is.
+class CallRecordsOnly extends StatelessWidget {
+  final List<DmCallRecord> records;
+  const CallRecordsOnly({super.key, required this.records});
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = <Widget>[];
+    DateTime? last;
+    for (final call in records) {
+      if (shouldShowDateSeparator(call.startedAt, last)) {
+        lines.add(DateSeparator(date: call.startedAt));
+      }
+      lines.add(CallRecordRow(record: call));
+      last = call.startedAt;
+    }
+    return SingleChildScrollView(
+      reverse: true,
+      padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: lines,
+      ),
+    );
+  }
 }
 
 /// Height of every conversation header, DM, channel or meeting.

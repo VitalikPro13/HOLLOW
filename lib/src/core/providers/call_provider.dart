@@ -11,6 +11,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/call_invite_decision.dart';
 import 'package:hollow/src/core/call_setup_trace.dart';
+import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/providers/call_records_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
@@ -192,6 +194,13 @@ class CallState {
 class CallNotifier extends Notifier<CallState> {
   VoiceService? _voiceService;
   Timer? _ringTimer;
+
+  /// When the current call began ringing, for its record in the chat.
+  DateTime? _ringStartedAt;
+
+  /// What is tearing the current call down, set by the path that ends it and
+  /// read once by [_cleanup]. Unset means the link gave out.
+  CallEndCause? _endCause;
   Timer? _statsTimer;
 
   /// SECURITY (Phase 6.25): Guard against concurrent renegotiations.
@@ -787,6 +796,7 @@ class CallNotifier extends Notifier<CallState> {
       return;
     }
     _callLog('[HOLLOW-CALL] Ending call: $reason');
+    _endCause = CallEndCause.linkLost;
     // With the relay unreachable the `end` below is dropped before it leaves.
     final peerId = state.peerId;
     final callId = state.callId;
@@ -936,6 +946,8 @@ class CallNotifier extends Notifier<CallState> {
       isVideoEnabled: false,
       sframeKey: sframeKey,
     );
+    _ringStartedAt = DateTime.now();
+    _endCause = null;
 
     // Ringback (#55): every path out of "ringing" stops it, the accept below and
     // `_cleanup()` for reject / busy / timeout / hang-up.
@@ -955,6 +967,7 @@ class CallNotifier extends Notifier<CallState> {
         _callLog('[HOLLOW-CALL] Ring timeout — no response from $peerId '
             '(call=$callId)');
         _sendSignal(peerId, 'end', callId);
+        _endCause = CallEndCause.ringTimeout;
         await _cleanup();
       }
     });
@@ -999,12 +1012,14 @@ class CallNotifier extends Notifier<CallState> {
     }
 
     _sendSignal(state.peerId!, 'reject', state.callId!);
+    _endCause ??= CallEndCause.localDecline;
     await _cleanup();
   }
 
   /// End the current call (active or ringing).
   Future<void> endCall() async {
     if (state.status == CallStatus.idle) return;
+    _endCause ??= CallEndCause.localHangup;
 
     final peerId = state.peerId;
     final callId = state.callId;
@@ -1809,6 +1824,21 @@ class CallNotifier extends Notifier<CallState> {
         // _callLog, not debugPrint: a rejected invite belongs in the release log.
         _callLog('[HOLLOW-CALL] Busy, rejecting invite from $peerId');
         _sendSignal(peerId, 'busy', callId);
+        // Rang while we were in another call: still a missed call from them.
+        final now = DateTime.now();
+        saveDmCallRecord(
+          ref,
+          DmCallRecord(
+            callId: callId,
+            peer: links.identityOf(peerId),
+            outgoing: false,
+            video: withVideo,
+            outcome: CallOutcome.missed,
+            startedAt: now,
+            connectedAt: null,
+            endedAt: now,
+          ),
+        );
         return;
       case InviteAction.glarePolite:
         final abandoned = state.callId;
@@ -1833,6 +1863,8 @@ class CallNotifier extends Notifier<CallState> {
       isVideoCall: withVideo,
       sframeKey: sframeKey,
     );
+    _ringStartedAt = DateTime.now();
+    _endCause = null;
     // The ring starts the clock on this side.
     CallSetupTrace.begin(callId: callId, outgoing: false);
 
@@ -1842,6 +1874,7 @@ class CallNotifier extends Notifier<CallState> {
           state.direction == CallDirection.incoming &&
           state.callId == callId) {
         debugPrint('[HOLLOW-CALL] Incoming ring timeout, auto-rejecting');
+        _endCause = CallEndCause.ringTimeout;
         rejectCall();
       }
     });
@@ -1895,12 +1928,14 @@ class CallNotifier extends Notifier<CallState> {
   Future<void> _handleReject(String peerId, String callId) async {
     if (state.callId != callId) return;
     debugPrint('[HOLLOW-CALL] Call rejected by $peerId');
+    _endCause = CallEndCause.remoteReject;
     await _cleanup();
   }
 
   Future<void> _handleEnd(String peerId, String callId) async {
     if (state.callId != callId) return;
     debugPrint('[HOLLOW-CALL] Call ended by $peerId');
+    _endCause = CallEndCause.remoteEnd;
     await _outgoingScreenShare?.close();
     _outgoingScreenShare = null;
     await _incomingScreenShare?.close();
@@ -1915,6 +1950,7 @@ class CallNotifier extends Notifier<CallState> {
     // Tear the call down FIRST: a thrown toast used to abort _handleBusy before
     // cleanup, leaving the "Calling..." sheet stuck on screen.
     final busyPeer = peerId;
+    _endCause = CallEndCause.remoteBusy;
     await _cleanup();
     _showBusyToast(busyPeer);
   }
@@ -2263,7 +2299,41 @@ class CallNotifier extends Notifier<CallState> {
     );
   }
 
+  /// Writes the ending call's line into its DM, once per call.
+  void _recordEndedCall() {
+    final peerId = state.peerId;
+    final callId = state.callId;
+    final ringStartedAt = _ringStartedAt;
+    final direction = state.direction;
+    if (peerId == null || callId == null || ringStartedAt == null ||
+        direction == null) {
+      return;
+    }
+    final outgoing = direction == CallDirection.outgoing;
+    saveDmCallRecord(
+      ref,
+      DmCallRecord(
+        callId: callId,
+        peer: ref.read(deviceLinkProvider).identityOf(peerId),
+        outgoing: outgoing,
+        video: state.isVideoCall,
+        outcome: classifyCallEnd(
+          outgoing: outgoing,
+          pickedUp: state.status != CallStatus.ringing,
+          connected: state.startedAt != null,
+          cause: _endCause ?? CallEndCause.linkLost,
+        ),
+        startedAt: ringStartedAt,
+        connectedAt: state.startedAt,
+        endedAt: DateTime.now(),
+      ),
+    );
+  }
+
   Future<void> _cleanup() async {
+    _recordEndedCall();
+    _ringStartedAt = null;
+    _endCause = null;
     // A call that never reached `connected` still has a story worth reading.
     CallSetupTrace.finishCurrent(reason: 'torn-down');
     _ringTimer?.cancel();

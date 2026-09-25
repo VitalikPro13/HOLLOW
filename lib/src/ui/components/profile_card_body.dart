@@ -28,7 +28,6 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -964,98 +963,30 @@ Color profileRoleColor(String role, HollowTheme hollow) {
   };
 }
 
-/// Show a dialog to set/edit/clear a local nickname for a peer.
-void showLocalNicknameDialog(
+/// Sets, edits or clears (an empty name) the nickname only you see for
+/// [peerId]. The one nickname dialog: every surface, desktop and phone, calls
+/// it.
+Future<void> showLocalNicknameDialog(
   BuildContext context,
   WidgetRef ref,
   String peerId, {
   String currentNickname = '',
-}) {
-  showHollowDialog(
+}) async {
+  // Read now: the caller's ref may belong to a menu or sheet that closes
+  // before the save runs.
+  final nicknames = ref.read(localNicknameProvider.notifier);
+  final saved = await promptForName(
     context: context,
-    builder: (ctx) => _LocalNicknameDialog(
-      peerId: peerId,
-      currentNickname: currentNickname,
-    ),
+    title: 'Set nickname',
+    confirmLabel: 'Save',
+    description: 'Only you see it.',
+    hintText: 'Nickname (leave empty to clear)',
+    initial: currentNickname,
+    maxLength: 32,
+    allowEmpty: true,
+    onSubmit: (name) => nicknames.setNickname(peerId, name),
   );
-}
-
-class _LocalNicknameDialog extends ConsumerStatefulWidget {
-  final String peerId;
-  final String currentNickname;
-
-  const _LocalNicknameDialog({
-    required this.peerId,
-    required this.currentNickname,
-  });
-
-  @override
-  ConsumerState<_LocalNicknameDialog> createState() =>
-      _LocalNicknameDialogState();
-}
-
-class _LocalNicknameDialogState extends ConsumerState<_LocalNicknameDialog> {
-  late final TextEditingController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController(text: widget.currentNickname);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    final nickname = _controller.text.trim();
-    try {
-      await ref.read(localNicknameProvider.notifier).setNickname(
-            widget.peerId,
-            nickname,
-          );
-    } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not save nickname',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-    if (mounted) Navigator.of(context).pop();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowDialog(
-      title: 'Set nickname',
-      width: 420,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const HollowDialogText('Only visible to you'),
-          const SizedBox(height: HollowSpacing.md),
-          HollowTextField(
-            controller: _controller,
-            hintText: 'Nickname (leave empty to clear)',
-            maxLength: 32,
-            autofocus: true,
-            onSubmitted: (_) => _save(),
-          ),
-        ],
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _save,
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
+  if (saved == null || !context.mounted) return;
+  HollowToast.show(context, saved.isEmpty ? 'Nickname cleared' : 'Nickname set',
+      type: HollowToastType.success);
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -14,8 +15,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/follow_days_steps.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_widgets.dart';
@@ -98,7 +99,8 @@ class _AccessPageState extends ConsumerState<AccessPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _values.addAll(before));
-      HollowToast.show(context, 'Could not save that: $e',
+      HollowToast.show(
+          context, friendlyError(e, fallback: "Couldn't save that. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -121,7 +123,7 @@ class _AccessPageState extends ConsumerState<AccessPage> {
   Future<({String name, String id})?> _editTwitchChannel() {
     return showHollowDialog<({String name, String id})>(
       context: context,
-      builder: (_) => _TwitchChannelDialog(
+      builder: (_) => TwitchChannelDialog(
         name: _values['twitch_channel_name'] ?? '',
         id: _values['twitch_channel_id'] ?? '',
       ),
@@ -291,26 +293,33 @@ class _AccessPageState extends ConsumerState<AccessPage> {
   }
 }
 
-/// The Twitch channel a join request is checked against: its name for the
+//// The Twitch channel a join request is checked against: its name for the
 /// joiner's messages and its numeric id for the check itself. Typing a name
-/// looks the id up; the id field stays editable for when that cannot run.
-class _TwitchChannelDialog extends StatefulWidget {
+/// looks the id up; the id field only shows when that cannot run.
+@visibleForTesting
+class TwitchChannelDialog extends StatefulWidget {
   final String name;
   final String id;
-  const _TwitchChannelDialog({required this.name, required this.id});
+  const TwitchChannelDialog({super.key, required this.name, required this.id});
 
   @override
-  State<_TwitchChannelDialog> createState() => _TwitchChannelDialogState();
+  State<TwitchChannelDialog> createState() => _TwitchChannelDialogState();
 }
 
 enum _Lookup { idle, looking, found, missing, failed }
 
-class _TwitchChannelDialogState extends State<_TwitchChannelDialog> {
+class _TwitchChannelDialogState extends State<TwitchChannelDialog> {
   late final _name = TextEditingController(text: widget.name);
   late final _id = TextEditingController(text: widget.id);
   Timer? _debounce;
   _Lookup _lookup = _Lookup.idle;
-  String _message = '';
+  String _found = '';
+  String? _lookupError;
+  String? _error;
+  bool _filling = false;
+
+  /// The id typed by hand: an id with no name to look it up by, or chosen.
+  late bool _manual = widget.id.isNotEmpty && widget.name.isEmpty;
 
   /// Bumped per lookup, so a slow answer for an older name is ignored.
   int _gen = 0;
@@ -325,6 +334,7 @@ class _TwitchChannelDialogState extends State<_TwitchChannelDialog> {
 
   void _onName(String _) {
     _debounce?.cancel();
+    _error = null;
     final login = _name.text.trim();
     if (login.isEmpty) {
       _gen++;
@@ -345,7 +355,7 @@ class _TwitchChannelDialogState extends State<_TwitchChannelDialog> {
           _lookup = _Lookup.missing;
         } else {
           _lookup = _Lookup.found;
-          _message = found.displayName;
+          _found = found.displayName;
           _id.text = found.id;
         }
       });
@@ -353,19 +363,36 @@ class _TwitchChannelDialogState extends State<_TwitchChannelDialog> {
       if (!mounted || gen != _gen) return;
       setState(() {
         _lookup = _Lookup.failed;
-        _message = '$e';
+        _lookupError = friendlyError(e,
+            fallback: "Couldn't look that channel up. Enter its ID below.");
       });
     }
   }
 
+  /// Enter on the name: save once the id is known, else look it up now.
+  void _submitName() {
+    if (_id.text.trim().isNotEmpty && _lookup != _Lookup.looking) {
+      _save();
+      return;
+    }
+    final login = _name.text.trim();
+    if (login.isEmpty) return;
+    _debounce?.cancel();
+    _find(login);
+  }
+
   Future<void> _fill() async {
+    setState(() {
+      _filling = true;
+      _error = null;
+    });
     try {
       final userId = await twitch_api.twitchGetUserId();
       final username = await twitch_api.twitchGetUsername();
       if (!mounted) return;
       if (userId == null) {
-        HollowToast.show(context, 'Connect Twitch in Settings, Profile first',
-            type: HollowToastType.error);
+        setState(() =>
+            _error = 'Connect Twitch in Settings, Profile first.');
         return;
       }
       _gen++;
@@ -373,54 +400,54 @@ class _TwitchChannelDialogState extends State<_TwitchChannelDialog> {
       setState(() {
         _id.text = userId;
         if (username != null) _name.text = username;
-        _lookup = _Lookup.idle;
+        _lookup = username == null ? _Lookup.idle : _Lookup.found;
+        _found = username ?? '';
       });
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not read your Twitch account: $e',
-            type: HollowToastType.error);
+        setState(() => _error = friendlyError(e,
+            fallback: "Couldn't read your Twitch account. Try again."));
       }
+    } finally {
+      if (mounted) setState(() => _filling = false);
     }
   }
 
   void _save() {
     final id = _id.text.trim();
     if (id.isEmpty) return;
-    final name = _lookup == _Lookup.found ? _message : _name.text.trim();
+    final name = _lookup == _Lookup.found ? _found : _name.text.trim();
     Navigator.of(context).pop((name: name, id: id));
   }
 
-  Widget _status(HollowTheme hollow) {
-    final (text, color) = switch (_lookup) {
-      _Lookup.idle => (
-          'Type the channel name and its ID fills in',
-          hollow.textSecondary
-        ),
-      _Lookup.looking => ('Looking it up', hollow.textSecondary),
-      _Lookup.found => ('Found $_message', hollow.success),
-      _Lookup.missing => ('No Twitch channel has that name', hollow.error),
-      _Lookup.failed => (_message, hollow.error),
-    };
-    return Row(
-      children: [
-        if (_lookup == _Lookup.looking) ...[
-          const HollowSpinner(),
-          const SizedBox(width: HollowSpacing.xs),
-        ],
-        Expanded(
-          child: Text(text,
-              style: HollowTypography.bodySmall.copyWith(color: color)),
-        ),
-      ],
-    );
-  }
+  /// The quiet line under the name, while nothing is wrong.
+  String? get _nameHint => switch (_lookup) {
+        _Lookup.idle => _id.text.trim().isEmpty
+            ? 'Type the channel name and Hollow finds it'
+            : null,
+        _Lookup.looking => 'Looking it up…',
+        _Lookup.found => 'Found $_found',
+        _ => null,
+      };
+
+  String? get _nameError => switch (_lookup) {
+        _Lookup.missing => 'No Twitch channel has that name',
+        _Lookup.failed => _lookupError,
+        _ => null,
+      };
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final showIdField = _manual ||
+        _lookup == _Lookup.missing ||
+        _lookup == _Lookup.failed;
+    final id = _id.text.trim();
+    final hint = _nameHint;
     return HollowDialog(
       title: 'Twitch channel',
       width: 420,
+      error: _error,
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -433,30 +460,56 @@ class _TwitchChannelDialogState extends State<_TwitchChannelDialog> {
             maxLength: 25,
             showCounter: false,
             autofocus: true,
+            errorText: _nameError,
             onChanged: _onName,
+            onSubmitted: (_) => _submitName(),
           ),
-          const SizedBox(height: HollowSpacing.xs),
-          _status(hollow),
+          if (hint != null && _nameError == null) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Text(hint,
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary)),
+          ],
           const SizedBox(height: HollowSpacing.md),
-          const SettingsFieldLabel(label: 'Twitch user ID'),
-          const SizedBox(height: HollowSpacing.xs),
-          HollowTextField(
-            controller: _id,
-            hintText: 'The number, like 123456789',
-            maxLength: 32,
-            showCounter: false,
-            keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            onSubmitted: (_) => _save(),
+          if (showIdField) ...[
+            const SettingsFieldLabel(label: 'Twitch user ID'),
+            const SizedBox(height: HollowSpacing.xs),
+            HollowTextField(
+              controller: _id,
+              hintText: 'The number, like 123456789',
+              maxLength: 32,
+              showCounter: false,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) => _save(),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+          ],
+          Wrap(
+            spacing: HollowSpacing.md,
+            runSpacing: HollowSpacing.xs,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (!showIdField && id.isNotEmpty)
+                Text('ID $id',
+                    style: HollowTypography.monoSmall
+                        .copyWith(color: hollow.textSecondary)),
+              if (!showIdField)
+                HollowTextLink(
+                  'Enter the ID yourself',
+                  onTap: () => setState(() => _manual = true),
+                ),
+              if (_filling)
+                Text('Reading your account…',
+                    style: HollowTypography.bodySmall
+                        .copyWith(color: hollow.textSecondary))
+              else
+                HollowTextLink('Use my own channel', onTap: _fill),
+            ],
           ),
         ],
       ),
-      leadingActions: [
-        HollowButton.ghost(
-          onPressed: _fill,
-          child: const Text('Fill from my account'),
-        ),
-      ],
       actions: [
         HollowButton.ghost(
           onPressed: () => Navigator.of(context).pop(),

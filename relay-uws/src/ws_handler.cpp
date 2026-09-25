@@ -1274,9 +1274,10 @@ static void handle_set_offline_buffer(PerSocketData* data, const json& j, RelayS
     // No logging — opt-in status per peer_id is user metadata.
 }
 
-// User report: one per (reporter, target, category), deduped via hashed keys
-// so the persisted file never contains who reported whom — only per-target
-// category totals the operator can act on (e.g. restricting relay access).
+// User report: one per (reporter, target, category), deduped via fingerprints
+// keyed by a relay secret kept outside the reports file, so the file alone
+// cannot confirm who reported whom; only per-target category totals are
+// readable (e.g. for restricting relay access).
 // Ack is sent even on dedup: from the client's view the report "is filed".
 static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
                           RelayState& state) {

@@ -704,6 +704,23 @@ void main() {
       expect(fade.opacity.value, 1.0);
     });
 
+    testWidgets('disabled is neutral and unfaded, so it stays visible on light',
+        (tester) async {
+      final hollow = await _pump(
+        tester,
+        const HollowButton.outline(onPressed: null, child: Text('Join')),
+        light: true,
+      );
+      final label = tester.widget<Text>(find.text('Join'));
+      final style = DefaultTextStyle.of(tester.element(find.text('Join'))).style;
+      expect(label.style?.color ?? style.color, hollow.textTertiary);
+      final fade = tester.widget<FadeTransition>(find.descendant(
+        of: find.byType(HollowButton),
+        matching: find.byType(FadeTransition),
+      ).first);
+      expect(fade.opacity.value, 1.0);
+    });
+
     testWidgets('the spinner takes the variant foreground', (tester) async {
       final hollow = await _pump(
         tester,

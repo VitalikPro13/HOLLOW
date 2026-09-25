@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -93,63 +94,72 @@ Widget serverSettingsPageFor(ServerSettingsPage page, String serverId) =>
         ServerNotificationsPage(serverId: serverId),
     };
 
-/// After a delete or leave: settings close and the server is no longer
-/// selected. A phone also pops back to its shell.
-void _afterServerGone(BuildContext context, WidgetRef ref) {
-  final touch = SettingsDensity.touchOf(context);
-  closeServerSettings(ref.read);
-  ref.read(serverSettingsServerIdProvider.notifier).state = null;
-  ref.read(selectedServerProvider.notifier).state = null;
-  ref.read(selectedChannelProvider.notifier).state = null;
-  ref.read(channelListProvider.notifier).clear();
-  if (touch) Navigator.of(context).popUntil((r) => r.isFirst);
-}
-
-Future<void> confirmDeleteServer(
-    BuildContext context, WidgetRef ref, String serverId) async {
-  final name = ref.read(serverListProvider)[serverId]?.name ?? 'this server';
-  final ok = await showHollowConfirm(
-    context: context,
-    title: 'Delete $name?',
-    message: "Every channel and message is deleted for everyone in it. "
-        "This can't be undone.",
-    confirmLabel: 'Delete server',
-    destructive: true,
-  );
-  if (!ok || !context.mounted) return;
-  try {
-    await crdt_api.deleteServer(serverId: serverId);
-    if (!context.mounted) return;
-    HollowToast.show(context, '$name deleted', type: HollowToastType.info);
-    _afterServerGone(context, ref);
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not delete the server: $e',
-          type: HollowToastType.error);
-    }
+/// After a delete or leave: server settings close if they showed this server,
+/// and the server is deselected if it was selected. A phone pops back to its
+/// shell.
+void _afterServerGone(
+    ProviderRead read, String serverId, NavigatorState? phoneNavigator) {
+  if (read(serverSettingsTargetProvider) == serverId) {
+    closeServerSettings(read);
+    read(serverSettingsServerIdProvider.notifier).state = null;
+  }
+  if (read(selectedServerProvider) == serverId) {
+    read(selectedServerProvider.notifier).state = null;
+    read(selectedChannelProvider.notifier).state = null;
+    read(channelListProvider.notifier).clear();
+  }
+  if (phoneNavigator?.mounted ?? false) {
+    phoneNavigator!.popUntil((r) => r.isFirst);
   }
 }
 
+/// THE delete-server confirm for the whole app (settings, strip menu, phone
+/// sheet): the delete runs inside the dialog, so a failure stays on screen.
+Future<void> confirmDeleteServer(
+    BuildContext context, WidgetRef ref, String serverId) async {
+  // The container, not [ref]: a menu or sheet that opened this may be gone
+  // by the time the dialog answers.
+  final read = ProviderScope.containerOf(context, listen: false).read;
+  final name = read(serverListProvider)[serverId]?.name ?? 'this server';
+  final phoneNavigator =
+      SettingsDensity.touchOf(context) ? Navigator.of(context) : null;
+  final ok = await showHollowConfirm(
+    context: context,
+    title: 'Delete $name?',
+    message: 'Every channel and message is deleted for everyone in it. '
+        "This can't be undone.",
+    confirmLabel: 'Delete server',
+    destructive: true,
+    onConfirm: () => crdt_api.deleteServer(serverId: serverId),
+  );
+  if (!ok) return;
+  if (context.mounted) {
+    HollowToast.show(context, '$name deleted', type: HollowToastType.info);
+  }
+  _afterServerGone(read, serverId, phoneNavigator);
+}
+
+/// THE leave-server confirm for the whole app, with the same shape as
+/// [confirmDeleteServer].
 Future<void> confirmLeaveServer(
     BuildContext context, WidgetRef ref, String serverId) async {
-  final name = ref.read(serverListProvider)[serverId]?.name ?? 'this server';
+  // The container, not [ref]: a menu or sheet that opened this may be gone
+  // by the time the dialog answers.
+  final read = ProviderScope.containerOf(context, listen: false).read;
+  final name = read(serverListProvider)[serverId]?.name ?? 'this server';
+  final phoneNavigator =
+      SettingsDensity.touchOf(context) ? Navigator.of(context) : null;
   final ok = await showHollowConfirm(
     context: context,
     title: 'Leave $name?',
     message: "You'll need a new invite to come back.",
     confirmLabel: 'Leave server',
     destructive: true,
+    onConfirm: () => crdt_api.leaveServer(serverId: serverId),
   );
-  if (!ok || !context.mounted) return;
-  try {
-    await crdt_api.leaveServer(serverId: serverId);
-    if (!context.mounted) return;
+  if (!ok) return;
+  if (context.mounted) {
     HollowToast.show(context, 'You left $name', type: HollowToastType.info);
-    _afterServerGone(context, ref);
-  } catch (e) {
-    if (context.mounted) {
-      HollowToast.show(context, 'Could not leave the server: $e',
-          type: HollowToastType.error);
-    }
   }
+  _afterServerGone(read, serverId, phoneNavigator);
 }

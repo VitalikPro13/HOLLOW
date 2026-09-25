@@ -1075,7 +1075,7 @@ A further direct frame type carries an Olm-encrypted file header with inlined, e
 - **Hard backpressure:** 64 MB per connection (uWebSockets built-in). Catches dead connections without interfering with legitimate traffic.
 - **Text frame cap:** 1 MB. Oversized text frames are silently dropped.
 - **Binary frame cap:** 64 MB (uWebSockets `maxPayloadLength`). Connections exceeding this are closed.
-- **DoS protection:** Ed25519 authentication + license key revocation. Only authenticated peers can send messages. Per-IP connection caps (simultaneous + new-per-minute) use the same /64-aggregated IPv6 keying.
+- **DoS protection:** Ed25519 authentication (plus key revocation on a relay that enables access keys, §12.8). Only authenticated peers can send messages. Per-IP connection caps (simultaneous + new-per-minute) use the same /64-aggregated IPv6 keying.
 - **Room membership enforcement:** every routing handler verifies that the *sender* belongs to the room it addresses before forwarding, and rewrites the routing header to carry the authenticated peer ID, so a room code cannot be used as a capability to inject into or read from a room one has not joined. Non-members' frames are silently dropped. Peer discovery is likewise restricted to rooms the requester is in; otherwise a room code alone would yield a membership roster, which matters because DM room codes are a deterministic function of the two participants' identities.
 
 ### 12.6 TURN Credential Management
@@ -1104,14 +1104,14 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 | Voice/video media | **No** (P2P, not relayed) |
 | File transfer bytes | **No** (P2P, not relayed) |
 | IP addresses | **No** (relay does not log IPs; TURN logging disabled) |
-| User reports | Partially: per-target abuse-category **counts** are persisted (§12.14); the reporter's identity is never written to disk |
+| User reports | Partially: per-target abuse-category **counts** are persisted (§12.14); the reporter's identity is never written in readable form, only inside a keyed fingerprint |
 
-### 12.8 License Key System
+### 12.8 Access Keys (Optional, for Self-Hosted Relays)
 
-The relay supports an optional license key system for controlling access during alpha/beta phases:
+The relay supports optional access keys for an operator who wants to restrict who may connect to their own relay. The official public relay runs with them disabled and is open to everyone.
 
 - Keys are stored in a `keys.json` file loaded at startup. The system can be enabled or disabled via a toggle.
-- Keys are validated during WebSocket authentication. Invalid or already-in-use keys are rejected.
+- Keys are validated during WebSocket authentication. An unknown key is rejected; one key admits up to five sockets at once, so a person's linked devices can share it.
 - The key file is hot-reloaded every 30 seconds, allowing key revocation without relay restart.
 - Active connections using a revoked key are terminated on the next reload cycle.
 - License keys are cached client-side in the encrypted SQLCipher database.
@@ -1188,7 +1188,7 @@ Abuse handling follows Hollow's self-protection model: users defend themselves l
 
 **Blocking is a purely local, receiver-side decision.** A block is keyed on the offender's *master* identity (so switching devices does not evade it) and enforced at message ingest, before anything is stored, displayed, or notified: friend requests, direct messages (live, sync backfill, and offline-cache replay), file transfers, call invitations, and data-channel offers from a blocked identity are dropped. The blocked party receives no signal that they are blocked, and no other party, including the relay, learns that a block exists. Server channel messages from a blocked member remain in the local store but are hidden from display, so unblocking restores history losslessly.
 
-**Reporting is the single deliberate exception to the relay's persist-nothing rule.** A client may file a report against a peer under a fixed category set (spam, harassment, illegal content, impersonation) over its authenticated relay connection. The relay persists exactly two things: per-target **counts** per category, and a SHA-256 hash of (reporter, target, category) used solely to enforce one report per reporter per target per category. The reporter's identity never appears on disk or in logs, no message content is attached (the relay could not read it anyway), and the resulting file supports exactly one operator action: identifying identities with abnormal report volumes for possible relay-access restriction. Reports carry no in-protocol authority: they cannot delete content, remove members, or affect any server's CRDT state.
+**Reporting is the single deliberate exception to the relay's persist-nothing rule.** A client may file a report against a peer under a fixed category set (spam, harassment, illegal content, impersonation) over its authenticated relay connection. The relay persists exactly two things: per-target **counts** per category, and a keyed one-way fingerprint of (reporter, target, category) used solely to enforce one report per reporter per target per category. The fingerprint is BLAKE2b keyed with a 32-byte secret the relay generates on first start and keeps in its own owner-only file, so the reports file alone cannot confirm a guessed "A reported B" (an unkeyed hash of public peer IDs could); only the relay holding the key can test such a guess. The relay necessarily sees a report arrive on the reporter's authenticated connection, but the reporter's identity never appears on disk in readable form or in logs, no message content is attached (the relay could not read it anyway), and the resulting file supports exactly one operator action: identifying identities with abnormal report volumes for possible relay-access restriction. Reports carry no in-protocol authority: they cannot delete content, remove members, or affect any server's CRDT state.
 
 ---
 
@@ -1649,7 +1649,7 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Evidence destruction | Decentralized storage + cryptographic signatures. No central authority can delete data from other users' devices. |
 | CRDT state manipulation | Author verification + role-based permission checks. Unauthorized operations rejected. |
 | Clock manipulation attacks | HLC drift bound (5 minutes). Far-future timestamps rejected to prevent LWW conflict gaming. |
-| Resource exhaustion | Ed25519 authentication, license key revocation, message size limits (64 MB binary / 1 MB text), 64 MB hard backpressure, connection limits. |
+| Resource exhaustion | Ed25519 authentication, access-key revocation where a relay enables it, message size limits (64 MB binary / 1 MB text), 64 MB hard backpressure, connection limits. |
 | Privilege escalation | Permission checks on all state-changing operations. CRDT author ≠ self-reported field; it is verified against the actual sender. |
 | Identity file theft | HKEYV1 at-rest protection. Identity file encrypted via DPAPI/Keychain (machine-bound) or Argon2id + AES-256-GCM (password). Stolen files are useless without the original machine or password. |
 | Data folder browsed, copied or stolen | Content files are per-file AES-256-GCM ciphertext whose keys live in the SQLCipher database, so a copied folder yields nothing without the identity; uninstalling or wiping leaves only dead ciphertext. Not a defence for a running, unlocked session or for the "no protection" identity mode, where the identity file is plaintext. |

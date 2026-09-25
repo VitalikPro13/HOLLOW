@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -208,7 +209,8 @@ class _ExportDiagnosticsRowState extends State<_ExportDiagnosticsRow> {
       );
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Export failed: $e',
+      HollowToast.show(context, friendlyError(e,
+              fallback: "Couldn't export the logs. Try again."),
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -306,7 +308,7 @@ void _showLegalDocument(
     // A fixed reading size; the surface clamps it to the zoomed viewport and
     // the Column fills the capped height so the document scrolls inside it.
     builder: (ctx) => HollowDialogSurface(
-      width: 640,
+      width: 560,
       maxHeight: 520,
       padded: false,
       child: Column(

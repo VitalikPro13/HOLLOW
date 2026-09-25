@@ -201,9 +201,9 @@ Mobile layout is fully decoupled from the desktop shell. When `width < 600px`, `
 
 Active tab: `hollow.accent` + w600. Inactive: `hollow.textSecondary` + w400. Badge: red pill (top-right of icon), shows count or "99+".
 
-**MobileChatsTab** (`ConsumerStatefulWidget`): Telegram-style unified list mixing DMs and servers. DMs show avatar + status dot + name + last message preview + timestamp + unread dot. Servers show icon + name + member count + unread badge pill + expand chevron. Tap DM → push `MobileChatRoute`. Tap server → animated accordion with channels loaded on demand via `ChannelListNotifier.fetchChannels()`. FAB "+" button opens Create/Join Server + Add Friend dialog.
+**MobileChatsTab** (`ConsumerStatefulWidget`): Telegram-style unified list mixing DMs and servers. DMs show avatar + status dot + name + last message preview + timestamp + unread dot. Servers show icon + name + member count + unread badge pill + expand chevron. Tap DM → push `MobileChatRoute`. Tap server → animated accordion with channels loaded on demand via `ChannelListNotifier.fetchChannels()`. The nav bar's centre "+" ("Add a server") opens `showCreateServerDialog`, the desktop Add a server dialog; add friend lives on the Friends tab. See `ui_mobile.md`.
 
-**MobileFriendsTab** (`ConsumerWidget`): Add Friend button, REQUESTS section (incoming with accept/reject, outgoing with cancel), FRIENDS section (sorted online-first, tap → push chat route).
+**MobileFriendsTab**: search + Add friend button, then Received / Sent / Favourites / All friends sections (tap → push chat route, long press = the person sheet). See `ui_mobile.md`.
 
 **MobileSettingsTab** (`ConsumerWidget`): the identity row, then the desktop rail's groups as rows, each pushing the SHARED page from `settingsPageFor()` under `SettingsDensity(touch: true)`; see `ui_user_settings.md`.
 

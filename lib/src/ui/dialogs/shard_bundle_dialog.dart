@@ -1,16 +1,16 @@
-﻿import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/storage_provider.dart' show formatBytes;
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
-import 'package:path_provider/path_provider.dart' as path_provider;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/dialogs/export_to_file.dart';
 
 /// Show the export shards dialog for a server.
 void showExportShardsDialog(
@@ -44,122 +44,52 @@ class _ExportShardsDialog extends StatefulWidget {
   State<_ExportShardsDialog> createState() => _ExportShardsDialogState();
 }
 
-class _ExportShardsDialogState extends State<_ExportShardsDialog> {
-  bool _exporting = false;
-
+class _ExportShardsDialogState extends State<_ExportShardsDialog>
+    with HollowDialogAction {
   Future<void> _export() async {
-    final safeName = widget.serverName
-        .replaceAll(RegExp(r'[^\w\s\-]'), '')
-        .replaceAll(RegExp(r'\s+'), '_')
-        .toLowerCase();
-    final fileName = '$safeName.hollow-shards';
-    final isMobile = Platform.isAndroid || Platform.isIOS;
-
-    String outputPath;
-    if (isMobile) {
-      final tmpDir = await path_provider.getTemporaryDirectory();
-      outputPath = '${tmpDir.path}/$fileName';
-    } else {
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save shard bundle',
-        fileName: fileName,
-        type: FileType.custom,
-        allowedExtensions: ['hollow-shards'],
-      );
-      if (savePath == null || !mounted) return;
-      outputPath = savePath;
+    int? size;
+    final ok = await runDialogAction(
+      () async => size = await exportToFile(
+        fileName: '${exportFileStem(widget.serverName)}.hollow-shards',
+        extension: 'hollow-shards',
+        pickerTitle: 'Save file pieces',
+        write: (path) => archive_api.exportServerShards(
+            serverId: widget.serverId, outputPath: path),
+      ),
+      fallback: "Couldn't save the file pieces. Try again.",
+    );
+    if (!ok || !mounted) return;
+    if (size == null) {
+      // The picker was cancelled: nothing happened, so nothing to say.
+      setState(() => actionRunning = false);
+      return;
     }
-
-    setState(() => _exporting = true);
-
-    try {
-      final sizeBytes = await archive_api.exportServerShards(
-        serverId: widget.serverId,
-        outputPath: outputPath,
-      );
-
-      if (isMobile) {
-        final bytes = await File(outputPath).readAsBytes();
-        final savedPath = await FilePicker.platform.saveFile(
-          dialogTitle: 'Save shard bundle',
-          fileName: fileName,
-          bytes: bytes,
-        );
-        try { await File(outputPath).delete(); } catch (_) {}
-        if (savedPath == null) {
-          if (mounted) setState(() => _exporting = false);
-          return;
-        }
-      }
-
-      final sizeMb = (sizeBytes.toInt() / (1024 * 1024)).toStringAsFixed(1);
-      final sizeKb = (sizeBytes.toInt() / 1024).toStringAsFixed(0);
-      final sizeStr =
-          sizeBytes.toInt() > 1024 * 1024 ? '$sizeMb MB' : '$sizeKb KB';
-
-      if (mounted) {
-        Navigator.of(context).pop();
-        HollowToast.show(
-          context,
-          'Shards exported: $sizeStr',
-          type: HollowToastType.success,
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _exporting = false);
-        HollowToast.show(
-          context,
-          'Export failed: $e',
-          type: HollowToastType.error,
-        );
-      }
-    }
+    Navigator.of(context).pop();
+    HollowToast.show(context, 'Saved ${formatBytes(size!)} of file pieces',
+        type: HollowToastType.success);
   }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
+    final count = widget.shardCount;
     return HollowDialog(
-      title: 'Export shards',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(LucideIcons.server, size: 16, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  widget.serverName,
-                  style: HollowTypography.label.copyWith(
-                    color: hollow.textPrimary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          HollowDialogText(
-            'Export ${widget.shardCount} vault shards as a .hollow-shards bundle. '
-            'Share this file with other ex-members so they can import your '
-            'shards and reconstruct files.',
-          ),
-        ],
+      title: 'Export file pieces',
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
+      content: HollowDialogText(
+        'Save the $count file ${count == 1 ? 'piece' : 'pieces'} you hold for '
+        '${widget.serverName} to one file. Send it to the others who were '
+        'there, and they can rebuild files without you being online.',
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: _exporting ? null : () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _exporting ? null : _export,
-          loading: _exporting,
-          icon: const Icon(LucideIcons.download, size: 14),
+          onPressed: _export,
+          loading: actionRunning,
           child: const Text('Export'),
         ),
       ],
@@ -187,122 +117,91 @@ class _ImportShardsDialog extends StatefulWidget {
   State<_ImportShardsDialog> createState() => _ImportShardsDialogState();
 }
 
-class _ImportShardsDialogState extends State<_ImportShardsDialog> {
-  bool _importing = false;
+class _ImportShardsDialogState extends State<_ImportShardsDialog>
+    with HollowDialogAction {
   archive_api.ShardImportResultFfi? _result;
 
   Future<void> _pickAndImport() async {
     final picked = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Select shard bundle',
+      dialogTitle: 'Choose a file of pieces',
       type: FileType.custom,
       allowedExtensions: ['hollow-shards'],
     );
-    if (picked == null || picked.files.isEmpty || !mounted) return;
-    final path = picked.files.first.path;
-    if (path == null) return;
+    final path = picked?.files.firstOrNull?.path;
+    if (path == null || !mounted) return;
 
-    setState(() => _importing = true);
-
-    try {
-      final result = await archive_api.importServerShards(
-        archivePath: path,
-      );
-      if (mounted) {
-        setState(() {
-          _importing = false;
-          _result = result;
-        });
-        widget.onImported?.call();
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _importing = false);
-        HollowToast.show(
-          context,
-          'Import failed: $e',
-          type: HollowToastType.error,
-        );
-      }
-    }
+    late final archive_api.ShardImportResultFfi result;
+    final ok = await runDialogAction(
+      () async =>
+          result = await archive_api.importServerShards(archivePath: path),
+      fallback: "Couldn't read that file. Check it's a .hollow-shards file "
+          'and try again.',
+    );
+    if (!ok || !mounted) return;
+    setState(() {
+      actionRunning = false;
+      _result = result;
+    });
+    widget.onImported?.call();
   }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    if (_result != null) {
-      return _buildResult(hollow);
-    }
+    final result = _result;
+    if (result != null) return _ImportResult(result: result);
 
     return HollowDialog(
-      title: 'Import shards',
+      title: 'Import file pieces',
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: const HollowDialogText(
-        'Select a .hollow-shards bundle from another ex-member. '
-        'New manifests and shards will be imported into your local vault.',
+        'Choose a .hollow-shards file from someone who was in the server. '
+        'Pieces you are missing are added, so more files can be rebuilt.',
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: _importing ? null : () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _importing ? null : _pickAndImport,
-          loading: _importing,
-          icon: const Icon(LucideIcons.upload, size: 14),
-          child: const Text('Select file'),
+          onPressed: _pickAndImport,
+          loading: actionRunning,
+          child: const Text('Choose file'),
         ),
       ],
     );
   }
+}
 
-  Widget _buildResult(HollowTheme hollow) {
-    final r = _result!;
+class _ImportResult extends ConsumerWidget {
+  final archive_api.ShardImportResultFfi result;
+
+  const _ImportResult({required this.result});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final name = ref.watch(serverListProvider)[result.serverId]?.name;
+    final rebuilt = result.newReconstructable;
+    final headline = rebuilt == 0
+        ? 'No new files can be rebuilt yet.'
+        : '$rebuilt more ${rebuilt == 1 ? 'file' : 'files'} can be rebuilt '
+            'now.';
     return HollowDialog(
-      title: 'Import complete',
+      title: 'Pieces imported',
       showClose: true,
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _ResultRow(
-            label: 'Server',
-            value: r.serverId,
-            hollow: hollow,
-          ),
+          HollowDialogText(name == null || name.isEmpty
+              ? headline
+              : 'Added to $name. $headline'),
+          const SizedBox(height: HollowSpacing.lg),
+          _ResultRow(label: 'New pieces', value: result.shardsImported),
           const SizedBox(height: HollowSpacing.sm),
-          _ResultRow(
-            label: 'Manifests imported',
-            value: '${r.manifestsImported}',
-            hollow: hollow,
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          _ResultRow(
-            label: 'Shards imported',
-            value: '${r.shardsImported}',
-            hollow: hollow,
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          _ResultRow(
-            label: 'Shards skipped',
-            value: '${r.shardsSkipped} (already had)',
-            hollow: hollow,
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          const SizedBox(height: HollowSpacing.sm),
-          Row(
-            children: [
-              Icon(LucideIcons.checkCircle, size: 16, color: hollow.success),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  '${r.newReconstructable} files now reconstructable',
-                  style: HollowTypography.label.copyWith(
-                    color: hollow.textPrimary,
-                  ),
-                ),
-              ),
-            ],
-          ),
+          _ResultRow(label: 'Already had', value: result.shardsSkipped),
         ],
       ),
     );
@@ -311,30 +210,26 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
 
 class _ResultRow extends StatelessWidget {
   final String label;
-  final String value;
-  final HollowTheme hollow;
+  final int value;
 
-  const _ResultRow({
-    required this.label,
-    required this.value,
-    required this.hollow,
-  });
+  const _ResultRow({required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(
-          label,
-          style: HollowTypography.bodySmall.copyWith(
-            color: hollow.textSecondary,
+        Expanded(
+          child: Text(
+            label,
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
           ),
         ),
         Text(
-          value,
+          '$value',
           style: HollowTypography.label.copyWith(
             color: hollow.textPrimary,
+            fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
       ],

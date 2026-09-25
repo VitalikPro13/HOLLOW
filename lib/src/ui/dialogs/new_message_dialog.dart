@@ -58,6 +58,7 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final compact = HollowDialogSurface.isCompact(context);
     final friends = ref.watch(sortedFriendsProvider);
     final profiles = ref.watch(profileProvider);
     final online = ref.watch(onlineIdentitiesProvider);
@@ -73,6 +74,8 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
       title: 'New message',
       showClose: true,
       width: 420,
+      // The list scrolls itself, so the search field stays put above it.
+      scrollable: false,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -89,44 +92,53 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
             },
           ),
           const SizedBox(height: HollowSpacing.sm),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: _listHeight),
-            child: matches.isEmpty
-                ? HollowEmptyState(
-                    title: friends.isEmpty
-                        ? 'No friends yet'
-                        : 'No friend matches that name',
-                    description: friends.isEmpty
-                        ? 'Add a friend first, then message them here.'
-                        : null,
-                  )
-                : ListView.builder(
-                    // Shrinks to a short friend list instead of leaving a
-                    // fixed-height hole under two names.
-                    shrinkWrap: true,
-                    // Else it inherits the phone's safe-area insets as padding.
-                    padding: EdgeInsets.zero,
-                    itemCount: matches.length,
-                    itemBuilder: (context, i) {
-                      final id = matches[i].peerId;
-                      final status = profiles[id]?.status ?? '';
-                      final isOnline = online.contains(id);
-                      return HollowListRow(
-                        key: ValueKey(id),
-                        leading: PresenceAvatar(
-                          peerId: id,
-                          size: 32,
-                          online: isOnline,
-                          ring: hollow.overlay,
-                        ),
-                        title: displayNameFor(profiles, id),
-                        subtitle: status.isNotEmpty
-                            ? status
-                            : (isOnline ? 'Online' : 'Offline'),
-                        onTap: () => _open(id),
-                      );
-                    },
-                  ),
+          Flexible(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: _listHeight),
+              child: matches.isEmpty
+                  ? HollowEmptyState(
+                      title: friends.isEmpty
+                          ? 'No friends yet'
+                          : 'No friend matches that name',
+                      description: friends.isEmpty
+                          ? 'Add a friend first, then message them here.'
+                          : null,
+                    )
+                  : HollowBleed(
+                      // Room for the rows' hover past the search field's edge.
+                      horizontal: HollowListRow.insetOf(touch: compact),
+                      child: ListView.builder(
+                        // Shrinks to a short friend list instead of leaving a
+                        // fixed-height hole under two names.
+                        shrinkWrap: true,
+                        // Also replaces the phone's safe-area insets it would
+                        // otherwise inherit as padding.
+                        padding: EdgeInsets.symmetric(
+                            horizontal: HollowListRow.insetOf(touch: compact)),
+                        itemCount: matches.length,
+                        itemBuilder: (context, i) {
+                          final id = matches[i].peerId;
+                          final status = profiles[id]?.status ?? '';
+                          final isOnline = online.contains(id);
+                          // The dot already says online or offline; the line is
+                          // for what they wrote.
+                          return HollowListRow(
+                            key: ValueKey(id),
+                            touch: compact,
+                            leading: PresenceAvatar(
+                              peerId: id,
+                              size: 32,
+                              online: isOnline,
+                              ring: hollow.overlay,
+                            ),
+                            title: displayNameFor(profiles, id),
+                            subtitle: status.isNotEmpty ? status : null,
+                            onTap: () => _open(id),
+                          );
+                        },
+                      ),
+                    ),
+            ),
           ),
         ],
       ),

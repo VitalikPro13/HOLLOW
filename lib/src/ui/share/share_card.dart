@@ -320,23 +320,16 @@ class ShareRow extends ConsumerWidget {
   }
 
   Future<void> _confirmRemove(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showHollowConfirm(
+    final shares = ref.read(shareTabProvider.notifier);
+    final removed = await showHollowConfirm(
       context: context,
-      title: 'Remove share?',
-      message: 'Remove "${item.fileName}" from your shares? The file itself '
-          'stays on your device.',
+      title: 'Remove ${item.fileName}?',
+      message: 'The file stays on your device.',
       confirmLabel: 'Remove',
       destructive: true,
+      onConfirm: () =>
+          share_api.shareRemove(rootHash: item.rootHash, deleteFile: false),
     );
-    if (!confirmed) return;
-    try {
-      await share_api.shareRemove(rootHash: item.rootHash, deleteFile: false);
-      ref.read(shareTabProvider.notifier).removeShare(item.rootHash);
-    } catch (_) {
-      if (context.mounted) {
-        HollowToast.show(context, "Couldn't remove the share",
-            type: HollowToastType.error);
-      }
-    }
+    if (removed) shares.removeShare(item.rootHash);
   }
 }

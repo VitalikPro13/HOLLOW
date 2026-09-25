@@ -371,9 +371,11 @@ mesh, and (partly) screen share.
 | `providers/link_health_provider.dart` | `callLinkHealthProvider`, `vcLinkHealthProvider`. |
 | `ui/components/link_health_chip.dart` | `LinkHealthChip` / `LinkHealthBanner` / `LinkHealthHeader`. |
 
-Where the flair renders: DM = call bar, mobile pill, panel header, mobile video
-view. Mesh = **per participant row** (`_VoiceParticipantRow` in the channel
-sidebar, `MobileSpeakingAvatar` on mobile) plus the camera tile, never
+Where the flair renders (since the call surfaces rebuild, sessions 22 and 23):
+DM = `DmCallRow`, the stage's `CallPersonTile`, the phone call screen's "Weak
+connection" badge. Mesh = **per participant** (`_VoiceParticipantRow` in the
+channel sidebar, `CallPersonTile` on the stage and the phone room grid, fed by
+`call_stage_sources.dart`), never
 channel-wide — one member on bad Wi-Fi is that member's leg. `VoiceChannelPanel`'s
 header is the one channel-wide line, and it reports OUR OWN link only, through
 `overallConnectionProvider` + `connectionVisual()` like the user bars.

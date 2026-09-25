@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
@@ -409,7 +410,8 @@ class _AudioVideoSettingsViewState
     } catch (e) {
       await _stopMicCapture();
       if (!mounted) return;
-      HollowToast.show(context, 'Microphone error: $e',
+      HollowToast.show(context, friendlyError(e,
+              fallback: "Couldn't use the microphone. Check it and try again."),
           type: HollowToastType.error);
     }
   }

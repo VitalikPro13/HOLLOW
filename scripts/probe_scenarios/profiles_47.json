@@ -122,7 +122,7 @@
   },
   {
     "op": "expect_text",
-    "value": "Wrong password."
+    "value": "That password isn't right."
   },
   {
     "op": "expect_text",

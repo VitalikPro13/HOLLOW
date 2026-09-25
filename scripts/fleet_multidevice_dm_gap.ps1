@@ -504,12 +504,12 @@ try {
     # ---- L: friends, history, and the link ---------------------------------
     Say 'L: a and c become friends and DM both ways, then b is linked from a'
     Open-Friends a
-    Step a @{ op = 'tap'; target = 'type:_TabButton>text:Add Friend'; index = 0 }
-    Step a @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_C}' }
+    Step a @{ op = 'tap'; target = 'type:HollowChip>text:Add friend'; index = 0 }
+    Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_C}' }
     Step a @{ op = 'wait_for'; target = 'text:${PEER_C}'; timeout_ms = 15000 }
-    Step a @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+    Step a @{ op = 'tap'; target = 'text:Send request'; index = 0 }
     Open-Friends c
-    Step c @{ op = 'tap'; target = 'type:_TabButton>text:Incoming'; index = 0 }
+    Step c @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
     Step c @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
     Step c @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 90000 }

@@ -246,8 +246,8 @@ void main() {
         channelName: 'staff-lounge',
       );
     });
-    expect(find.text('Active Grants'), findsOneWidget);
-    expect(find.text('Grant access'), findsOneWidget);
+    expect(find.text('Has access now'), findsOneWidget);
+    expect(find.text('Give access'), findsOneWidget);
     await capture(tester, 'grants_overview');
   });
 
@@ -299,7 +299,7 @@ void main() {
       showAccessLabelPicker(
         context: context,
         serverId: serverId,
-        title: 'Custom visibility',
+        target: '#staff-lounge',
         initial: {'vip'},
       );
     });
@@ -309,7 +309,7 @@ void main() {
     // Deselect the only chosen label — the tier-fallback warning appears.
     await tester.tap(find.text('VIP'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('tier-based access'), findsOneWidget);
+    expect(find.textContaining('roles decide who can see it again'), findsOneWidget);
     await capture(tester, 'label_picker_warning');
   });
 
@@ -340,7 +340,7 @@ void main() {
                     onPressed: () => showAccessLabelPicker(
                       context: context,
                       serverId: serverId,
-                      title: 'Custom visibility',
+                      target: '#staff-lounge',
                       initial: const {},
                     ),
                     child: const Text('open'),

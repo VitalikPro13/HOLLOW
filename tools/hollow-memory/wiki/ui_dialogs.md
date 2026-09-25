@@ -1,12 +1,52 @@
 # Dialogs -- All Modal Dialogs
 
-Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. Every modal opens with `showHollowDialog()` from `lib/src/ui/components/hollow_dialog.dart`: a scale 0.96->1.0 + fade entrance over the flat `HollowTheme.scrim` (65% black dark, 32% light; NO backdrop blur since design sweep 8, 2026-09-19). The frame is always `HollowDialogSurface` (overlay, hairline, 12 px shadow, radiusLg desktop / radiusXl + full width on a phone); a standard dialog is `HollowDialog` (title in `heading`, sentence case; `showClose`, `leadingActions`, `width`); a yes-or-no question is `showHollowConfirm()`. Raw `showDialog`/`showGeneralDialog` and hand-drawn frames are CI-guarded (`design_language_guard_test.dart`). Rules: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 4.4.
+Every modal dialog in the project. Most live under `lib/src/ui/dialogs/`; the shared layer (confirm, name prompt, duration, copy field, one-wording helpers) is the next section. Every modal opens with `showHollowDialog()` from `lib/src/ui/components/hollow_dialog.dart`: a scale 0.96->1.0 + fade entrance over the flat `HollowTheme.scrim` (65% black dark, 32% light; NO backdrop blur since design sweep 8, 2026-09-19). The frame is always `HollowDialogSurface` (overlay, hairline, 12 px shadow, radiusLg desktop / radiusXl + full width on a phone); a standard dialog is `HollowDialog` (title in `heading`, sentence case; `showClose`, `leadingActions`, `width`, `busy`, `error`, `scrollable`); a yes-or-no question is `showHollowConfirm()`, a one-field name `promptForName()`, and an action runs INSIDE the dialog. Raw `showDialog`/`showGeneralDialog` and hand-drawn frames are CI-guarded (`design_language_guard_test.dart`). Rules: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 4.4.
+
+---
+
+## The shared dialog layer (2026-09-25)
+
+Built by design language session 24 (the dialogs pass); rules in `HOLLOW_DESIGN_LANGUAGE.md` 4.1, 4.2, 4.4. The one law: **a dialog that acts runs the action INSIDE itself** (confirm loading, Cancel disabled, scrim/Escape/X blocked, close on success, the reason shown in the dialog on a throw so the person can retry). Never pop first and await after.
+
+### Primitives (`lib/src/ui/components/`)
+- **`showHollowConfirm(..., onConfirm:)`** (`hollow_dialog.dart`): the one yes-or-no. Ghost Cancel + ONE filled confirm, `danger` only when `destructive`. With `onConfirm` it runs the action in the dialog (above) and resolves true only once it finished; the error line is `friendlyError(e)`.
+- **`promptForName(title:, confirmLabel:, hintText, initial, description, maxLength, validator, allowEmpty, onSubmit)`** (`hollow_dialog.dart`): the one "type a name" dialog, width 420, owns its controller, autofocus, Enter submits, confirm disabled while empty (unless `allowEmpty`). `validator` returns the field's error, checked on submit; `onSubmit` runs inside, and a throw lands on the FIELD with the typed text kept. Resolves to the trimmed name or null.
+- **`HollowDialogAction`** mixin (`hollow_dialog.dart`): `runDialogAction(action, fallback:)` → true on success; sets `actionRunning` / `actionError` (a `friendlyError` sentence). Running stays on after success so the confirm keeps its spinner through the exit; a dialog that moves to a second step resets it itself. Pair with **`HollowDialog(busy:, error:)`**: `busy` wraps the dialog in `PopScope(canPop: false)`; `error` is one live-region line above the actions (a failure that belongs to one field goes on that field's `errorText` instead). **`HollowDialog(scrollable: false)`** for content that scrolls itself (a nested scroll view in the default one never scrolls).
+- **`HollowButtonTouchScope`** (`hollow_button.dart`): an InheritedWidget that turns on `HollowButton.touch` below it. `HollowDialog` wraps its action row in it on a compact screen, and `HollowDialogCloseButton` goes 44, so phone dialogs get touch-size actions without a call site passing `touch:`. Custom-layout dialogs (screen share, image crop) wrap their own action row the same way.
+- **Disabled buttons are neutral at full opacity**: label `textTertiary`, a faint `textPrimary` 8% fill for filled/danger, a `textTertiary` 40% hairline for outline, never a faded accent (a 40% fade of a 40% outline vanished on light). Loading is not disabled: same colours, a spinner.
+- **`friendlyError(e, {fallback})` + `FriendlyException`** (`lib/src/core/friendly_error.dart`): the sentence a person sees. First-match rules map locked identity, node not running, disk full, rate limit, timeout, relay/network, access denied, permission, not found, already exists, too large, invalid to one plain line with a next step; a Rust (`String`/`AnyhowException`) message that already reads as a sentence passes through; else `fallback` or `kGenericErrorSentence` ("Something went wrong. Try again."). The raw text goes to `hollow_debug.log` via `logFromDart`. Throw `FriendlyException('...')` for a specific sentence (it is shown verbatim). **Guard:** `design_language_guard_test.dart` "toasts do not show a raw exception" counts `$e`-style interpolations in toasts, ratcheted by `_rawExceptionToastBaseline` (6).
+- **`HollowCopyField`** (`hollow_copy_field.dart`): a value to copy (link, code, id): the value in `textPrimary` on `elevated`, mono unless `mono: false`, a labelled copy button ("Copy <label/name>") that toasts "Copied"; `label` puts a `SettingsFieldLabel` above; `wrap: false` keeps one line with an ellipsis (links); `copyValue` when the clipboard differs from the display. The one legitimate well: never a card, never accent text.
+- **`HollowChipTabs<T>`** (`hollow_chip_tabs.dart`, `HollowChipTab(value, label, hint, count, icon)`): EVERY tab row (dialog, page, place header) is a `HollowChip` row, 8 apart, one selected; `hint` a quiet total, `count` a `HollowCountBadge` for something waiting on the person (`HollowChip` gained `count:` and `focusNode:`); Left/Right/Home/End move and select; `expand: true` equal widths on a phone, else it wraps. No underline tabs, no local `_Tab`. Users: Friends Manager, screen share, Share, Archive, `place_header.dart`.
+- **`HollowDurationPicker`** + **`showHollowDurationDialog(title, message, confirmLabel, onConfirm(Duration?))`** (`hollow_duration_picker.dart`): the ONE "for how long" choice, a chip row of `kHollowDurationPresets` (10 min, 15 min, 1 h, 24 h, 7 days, null). Null = "Until I remove it", a choice like any other, never a red "Permanent". `hollowDurationLabel` words it for toasts ("until I remove it"). The dialog runs `onConfirm` inside. Users: mute (`moderation_dialogs.dart`), `channel_grants_dialog.dart`, `manage_member_dialog.dart`.
+- **`LabelChip` / `LabelBadge` / `LabelSwatch`** (`label_visuals.dart`): a label that toggles is `LabelChip` (a `HollowChip` led by the label's colour; `locked` dims it and swaps the swatch for a lock but still fires `onTap` so the caller can say why); a label someone wears is `LabelBadge` (a `HollowBadge`, never clickable). `LabelTypeChip` = the Cosmetic/Access selector. No private label chips.
+- **`HollowListRow` flush + `HollowBleed`** (`hollow_list_row.dart`): `flush` (null follows the nearest `HollowFlushRows`, which a PADDED `HollowDialogSurface` provides) puts the row's content on the surrounding text edge and bleeds its hover fill out by `insetOf(touch:)` (12, 16 touch). `HollowBleed(horizontal:)` is the negative margin Flutter lacks: `HollowDialog` widens its scroll view with it so the hover is not clipped at the text edge; a custom list in a dialog (New message, message proof's `MessageRow`, the Friends Manager drag lift) does the same.
+- **`HollowSheetTitle(title, subtitle:)`** (`hollow_sheet.dart`): the name at the top of a phone action sheet (the person, server, channel or message the rows act on): start-aligned `subheading`, one line, full width so a centred sheet column still starts it on the rows' edge.
+
+### One-wording helpers (every surface, desktop and phone, calls the same one)
+- **`confirmDeleteChannel(context, serverId:, channelId:, channelName:)`** (`server_settings/delete_channel_confirm.dart`): "Delete #name?", `kDeleteChannelMessage`, danger "Delete channel", `removeChannel` inside; then `onChannelRemoved` + toast. Reads the ProviderContainer, not a ref (the menu that opened it may be gone).
+- **`confirmLeaveServer` / `confirmDeleteServer(context, ref, serverId)`** (`server_settings/server_settings_catalog.dart`): "Leave <name>?" ("You'll need a new invite to come back.", danger "Leave server") / "Delete <name>?" (danger "Delete server"); the FFI runs inside; then a toast and `_afterServerGone` (closes its Server settings, deselects it, pops the phone back to its shell).
+- **`confirmRemoveFriend(context, ref, peerId:, name:)`** (`dialogs/confirm_remove_friend.dart`): see Friends Manager below.
+- **`showLocalNicknameDialog(context, ref, peerId, currentNickname:)`** (`components/profile_card_body.dart`): `promptForName` "Set nickname", "Only you see it.", max 32, empty clears, `setNickname` inside; toast "Nickname set" / "Nickname cleared".
+- **`confirmVoiceRoomSwitch(context, ref, serverId:, channelId:, channelName:)`** + **`voiceSwitchLeavesPeople(vc, ...)`** (`shell/voice_room_switch.dart`): a voice-room join asks "Switch voice room?" ("You'll leave #a and join #b.", filled "Switch") ONLY when it would leave someone else behind (current room has a participant other than our master or device id; the sets are DEVICE-keyed). An empty room, or the same room, never asks. Called by the sidebar, Home rail, voice pane and phone Chats.
+- **`confirmClearLabelGate(context, channelName:, tier:, forVisibility:)`** (`shell/channel_context_menus.dart`): "Drop the access labels?" before a plain tier replaces a channel's access labels (it lets more people in); confirm "Open to everyone" / "Open to Moderator and above" (`accessTierLabel`). Desktop menu + phone sheet.
+- **`showAccessLabelPicker(context, serverId:, initial:, gate:, target:)`** (`settings/access_label_picker.dart`): `AccessLabelGate { see, post }`; the title comes from `accessLabelPickerTitle` ("Who can see #general" / "Who can post in the channels in General"), never the caller (`title:` is deprecated). Returns the label-id set (empty = back to tier mode) or null.
+- **`showChangeRoleDialog(context, ref, serverId:, peerId:, displayName:, newRole:, currentRole:)`** (`settings/moderation_dialogs.dart`): THE role confirm (Members page, member menu, Manage member): "Make Mira an admin?", "They go from Member to Admin, which changes what they can do here.", filled "Make admin", `changeMemberRole` inside, toast "<name> is now Admin". Kick/ban/mute in the same file share its `_confirmAndRun` shape.
+- **`renameChannelFlow(context, ref, serverId, channel, onRenamed:)`** (`shell/channel_context_menus.dart`): `promptForName` "Rename channel", max 32, `renameChannel` inside (the prompt keeps the typed name on failure); a no-op when unchanged; toast "Channel renamed". Desktop menu + phone sheet.
+- **`showPinnedMessages(context, serverId:, channelId:, pinnedIds:, messages:, preview:, onJump:, touch:)`** (`chat/pinned_messages.dart`): a dialog on desktop, a sheet (with `HollowSheetTitle`) on the phone; newest first, "N more pinned messages are further back in this channel." for unloaded pins; a row jumps; whoever may pin gets a grey **Unpin** per row (hover/focus on desktop, always on touch; optimistic, back if it fails); unpinning the LAST pin closes the list.
+- **`askSecretDialog(context, title:, ask:, confirmLabel:, onSubmit(current, next), message:, isPin:)`** (`settings/security_section.dart`): the app password / PIN prompt. `SecretAsk { current, create, change }`; `onSubmit` runs inside; a wrong current secret lands on its field; nothing typed is lost; secret fields in dialogs are one height.
+- **`shell/identity_unlock_dialogs.dart`**: `UnlockDialog` (launch + app lock) and `RecoveryPhraseDialog`, see "Keyboard-Aware & Phone-Adaptive Dialogs" below.
+
+### Removed
+- `dialogs/browse_public_dialog.dart` (`showBrowsePublicDialog`, dead: guest browsing is the Browse Public Channels tab, `ShellTab.guest`).
+- The phone Chats tab's "New" dialog (`NewConversationDialog` / `showNewConversationDialog` in `mobile_chats_tab.dart`); its add-server entry now opens `showCreateServerDialog`.
+- Per-site confirm/rename/nickname/pledge/retention dialogs that the helpers above replaced (e.g. the storage dashboard's and phone storage route's own pledge and retention dialogs).
 
 ---
 
 ## WelcomeDialog -- First-launch Onboarding
 
 **File:** `lib/src/ui/dialogs/welcome_dialog.dart`
+**Held back:** one of the big five redesigns (session 24 fixed bugs only; a mockup comes first).
 **Trigger:** Called by the bootstrap flow when no identity exists on disk. That is first launch AND the state you land on after erasing the running profile (see `project_profile_switcher_issue47`).
 **Entry point:** `showWelcomeDialog(BuildContext context)` -- returns `Future<WelcomeResult?>`, a record `({String action, String relayDomain})`.
 **Barrier:** Non-dismissible (`barrierDismissible: false`).
@@ -29,7 +69,7 @@ Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. E
 - `_restoring` -- true while `importBackup` decrypts + restores (seconds on a large backup; frozen silence here reads as a hang)
 - `_showProfiles` / `_switching` -- the profile switcher below
 
-**Layout:** shield icon, "Welcome to Hollow", "Choose how to set up your identity", the profile line (below), three `_OptionCard`s (Create New Identity / Link a device / Restore from Backup), the profile switcher, then Advanced. The whole menu sits in a `SingleChildScrollView` inside a 480px-max `ConstrainedBox` so a short screen scrolls rather than overflows.
+**Layout:** shield icon, "Welcome to Hollow", "Choose how to set up your identity", the profile line (below), three `_OptionCard`s (Create New Identity / Link a device "Sync from your other device with a 6-character code" (the link code is 6 characters, not digits) / Restore from Backup), the profile switcher, then Advanced. The whole menu sits in a `SingleChildScrollView` inside a 480px-max `ConstrainedBox` so a short screen scrolls rather than overflows.
 
 ### Profile switcher (issue #47 follow-up, 2026-08-21)
 
@@ -42,7 +82,7 @@ Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; 
 
 ### Method: `_onRestoreFromBackup()`
 - `FilePicker` filtered to `.hollow`, except on iOS/Android where the custom extension is not a known UTI/MIME and the filter would HIDE the file (`FileType.any` there).
-- Nested passphrase `AlertDialog` (obscured, autofocus).
+- Nested passphrase `HollowDialog` "Enter backup passphrase" (obscured, autofocus).
 - `storage_api.importBackup(backupPath:, passphrase:)` under `_restoring`; pops `'restored_backup'` on success, error toast on failure.
 
 ### Widget: `_OptionCard` (StatefulWidget)
@@ -56,107 +96,56 @@ Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; 
 
 ---
 
-## CreateServerDialog -- Server Creation / Join
+## CreateServerDialog -- Add a server (join or create)
 
-**File:** `lib/src/ui/dialogs/create_server_dialog.dart` (210 lines)
-**Trigger:** Plus button in the server strip or home dashboard.
-**Entry point:** `showCreateServerDialog(BuildContext context)` -- void, no return.
+**File:** `lib/src/ui/dialogs/create_server_dialog.dart`
+**Trigger:** plus in the server strip, the dock (`bottom_bar.dart`), Home, the phone nav's centre button ("Add a server") and Chats tab.
+**Entry point:** `showCreateServerDialog(BuildContext context)` -- void. The phone opens the same dialog, stacked.
 
-### Layout
-- Two-panel side-by-side layout separated by a `VerticalDivider` (180px height)
-- Close button (X) via `HollowPressable` in top-right
-- Constraints: maxWidth 600, minWidth 400
+### Layout (`_AddServerDialog`, ConsumerStatefulWidget)
+`HollowDialog(title: 'Add a server', showClose: true, width: 600, busy: _busy)`. Two halves, each a `HollowSectionHeader` with its own form and its own action. A person picks one, never both, so neither outranks the other: **both buttons are `outline`** (no filled).
+- **Join a server** ("Paste an invite link or server ID."): mono `HollowTextField` "Invite link or server ID" (autofocus off on compact) + outline "Join".
+- **Start your own** ("A new server of yours. Invite people once it is made."): field "My Awesome Server" + outline "Create".
+- Desktop: side by side with a `HollowVerticalDivider`; headers and forms are two separate `IntrinsicHeight` rows so a wrapping description never pushes one side's field below the other's. Compact: stacked, `HollowDivider` between.
+- Each button is disabled while its field is empty or the other half runs; `onSubmitted` on each field acts too.
 
-**Left panel: Join a Server**
-- `LucideIcons.logIn` + "Join a Server" heading
-- "Paste an invite link or server ID." caption
-- `HollowTextField` with autofocus, mono font, hint "Invite link or server ID"
-- `HollowButton.filled` "Join" (expand: true)
-- `onSubmitted` on the text field also triggers join
+### The work runs inside the dialog
+- `_join()`: `inviteFromInput(input, HollowLinkType.serverInvite)` (`hollow_link_utils.dart`; accepts `hollow://join?server=`, web `https://hollow.anonlisten.com/join#server=` fragment or query, or a raw id), then **`isServerIdShape(id)` (32 hex) or the field says "That isn't an invite link or server ID. Check what you pasted."** (a typo used to park a join nobody could answer; a well-formed id of a server that never existed still parks, the relay keeps no server list). Then `ensureRelayForInviteId` (below; false = the switch dialog restarted or was declined, the dialog stays) and `crdt_api.joinServer(serverId: id.toLowerCase(), nsfwConfirmed: false)`. Join loads on its button; a throw lands on the join field via `friendlyError` (fallback "Couldn't join that server. Check the link and try again."). Success pops, then toasts "Joining server..." on the navigator overlay (`_closeWith`; only queued, the server appears once a member admits us).
+- `_create()`: `crdt_api.createServer(name:)`, loading on Create, error on the name field (fallback "Couldn't create the server. Try again."), success pops + "Server created".
+- `busy` blocks scrim, Escape and the X while either runs.
 
-**Right panel: Create a Server**
-- `LucideIcons.plus` + "Create a Server" heading
-- "Start your own server. You can invite others later." caption
-- `HollowTextField` with hint "My Awesome Server"
-- `HollowButton.outline` "Create" (expand: true)
-- `onSubmitted` on the text field also triggers create
-
-### Top-level functions
-
-**`_handleJoin(context, controller)`**
-- Parses input via `inviteIdFromInput(input, HollowLinkType.serverInvite)` (`hollow_link_utils.dart`) — accepts `hollow://join?server=`, web `https://hollow.anonlisten.com/join#server=` (fragment or query), or raw ID. ALL join/browse input bars use this helper; hand-parsing `Uri.queryParameters` misses the fragment form (2026-07-14 fix). Since 2026-09-10 the bars use `inviteFromInput` (id + the link's `relay` hint) and pass through `ensureRelayForInviteId` before joining: every builder (`webServerInviteLink`, `webConferenceInviteLink`, `roomInviteLink`) takes `required relay:` and stamps the SENDER's current relay, and a hint that differs from `relayDomainProvider` opens the ONE dialog in `relay_switch_dialog.dart` (`This server lives on another relay`, ghost Cancel, filled `Switch and restart`), which NEVER auto-switches; on confirm the canonical link is parked under the setting `pending_invite_after_switch`, the relay is switched and the app exits, and `_bootstrap` replays it once through `DeepLinkService.handleUrl` after the node starts. The in-chat Join card shows `On <host>` for a differing relay (not on an already-joined server card). Memory `project_self_hosting_overhaul_2026_09`
-- Calls `crdt_api.joinServer(serverId:)`
-- Shows info toast "Joining server..."
-
-**`_handleCreate(context, controller)`**
-- Trims name, validates non-empty
-- Calls `crdt_api.createServer(name:)`
+**Relay hint:** every invite builder (`webServerInviteLink`, `webConferenceInviteLink`, `roomInviteLink`) takes `required relay:` and stamps the SENDER's relay; a hint that differs from `relayDomainProvider` opens the ONE dialog in `relay_switch_dialog.dart` ("This server lives on another relay", ghost Cancel, filled "Switch and restart"), NEVER an auto-switch. On confirm the canonical link is parked under the setting `pending_invite_after_switch`, the relay is switched, the app exits, and `_bootstrap` replays it once through `DeepLinkService.handleUrl` after the node starts. The in-chat Join card shows `On <host>` for a differing relay. The guest sidebar's join bar applies the same 32-hex check. Memory `project_self_hosting_overhaul_2026_09`.
 
 ### FFI calls
-- `crdt_api.joinServer(serverId:)`
+- `crdt_api.joinServer(serverId:, nsfwConfirmed:)`
 - `crdt_api.createServer(name:)`
 
 ---
 
 ## CreateChannelDialog -- Channel Creation
 
-**File:** `lib/src/ui/dialogs/create_channel_dialog.dart` (150 lines)
-**Trigger:** Plus button next to channel list in `ChannelSidebar`.
-**Entry point:** `showCreateChannelDialog(BuildContext context, String serverId)` -- void.
+**File:** `lib/src/ui/dialogs/create_channel_dialog.dart`
+**Trigger:** the channel sidebar and category menus (`channel_context_menus.dart`), the shell shortcut, the Channels page of Server settings, the phone Chats tab.
+**Entry point:** `showCreateChannelDialog(context, serverId, {onCreated})` -- void; `onCreated` receives the NEW channel id so a caller can place it in the layout instead of letting it land unsorted.
 
-### Layout
-Uses `StatefulBuilder` inside `showHollowDialog` to manage local state.
-Wraps content in `HollowDialog` (title: "Create Channel").
-
-**State fields (closure-scoped):**
-- `nameController` -- `TextEditingController`
-- `isVoice` -- bool, false = text channel (default)
-
-**Channel type selector:**
-- Row of two `_TypeOption` widgets: Text (`LucideIcons.hash`) and Voice (`LucideIcons.volume2`)
-- `AnimatedContainer` with `HollowDurations.fast` transition
-- Selected: accent background + accent border (1.5px), bold text
-- Unselected: surface background + normal border (1px)
-
-**Name field:**
-- `HollowTextField` with autofocus
-- `prefixIcon`: hash icon for text, volume2 icon for voice
-- Hint text: "General" for voice, "general" for text
-
-**Actions:**
-- Cancel (ghost) + Create (filled)
-- `onSubmitted` on text field triggers submit
-
-**Submit logic:**
-- Calls `crdt_api.createChannel(serverId:, name:, category: null, channelType:)` where channelType is `'voice'` or `'text'`
-
-### Widget: `_TypeOption` (StatelessWidget)
-Props: `icon`, `label`, `isSelected`, `onTap`
-
-### FFI calls
-- `crdt_api.createChannel(serverId:, name:, category:, channelType:)`
+`_CreateChannelDialog` (`HollowDialogAction`): `HollowDialog(title: 'Create channel', width: 420, busy:)`.
+- "Choose a type and name for your new channel."
+- Type = two equal `HollowChip(expand: true)` (Text `hash` / Voice `volume2`), a selection, never buttons.
+- `HollowTextField` (autofocus, prefix icon follows the type, hint "general" / "General"); the failure sits on the field's `errorText` with the name kept, cleared on edit.
+- Ghost Cancel (disabled while running) + filled "Create" (disabled while empty, `loading:`).
+- Submit runs `crdt_api.createChannel(serverId:, name:, category: null, channelType: 'voice'|'text')` inside `runDialogAction` (fallback "Couldn't create the channel. Try again."), pops on success, then `onCreated(channelId)`.
 
 ---
 
-## InviteDialog -- Invite Code Display
+## InviteDialog -- Invite Link
 
-**File:** `lib/src/ui/dialogs/invite_dialog.dart` (94 lines)
-**Trigger:** After generating an invite from server settings or channel sidebar.
-**Entry point:** `showInviteDialog(BuildContext context, String link, String code)` -- void.
+**File:** `lib/src/ui/dialogs/invite_dialog.dart`
+**Trigger:** Invite in the channel sidebar header / server strip menu (`server_context_menus.dart`) / the phone's Chats tab.
+**Entry point:** `showInviteDialog(BuildContext context, String link, String serverId)` -- void. Server invites only (rooms no longer come here).
 
-### Layout
-Uses `HollowDialog` with title "Invite Link".
-
-**Content:**
-- Determines `isServer` by checking if link contains `'server='`
-- Dynamic subtitle: "Share this link to invite someone to your server/room:"
-- Dynamic code label: "Server ID" or "Room code"
-- Link container: accent-bordered box with `SelectableText` in mono font (accent color)
-- Copy button: `HollowPressable` with `LucideIcons.copy`, copies link to clipboard, shows success toast
-- Code label text below: "Server ID: {code}" or "Room code: {code}"
-
-**Actions:**
-- "Done" filled button closes dialog
+`HollowDialog(title: 'Invite link', showClose: true, width: 420)`, no Done button (nothing to confirm):
+- "Anyone with this link can join <server name>." (`serverListProvider`; "your server" when unnamed).
+- `HollowCopyField(value: link, name: 'invite link', wrap: false)`: the link on ONE line with an ellipsis, a labelled copy button that toasts "Copied". The id is not shown separately (the link carries it).
 
 ### No FFI calls -- purely display.
 
@@ -164,21 +153,16 @@ Uses `HollowDialog` with title "Invite Link".
 
 ## MnemonicDialog -- Recovery Phrase Display
 
-**File:** `lib/src/ui/dialogs/mnemonic_dialog.dart` (74 lines)
-**Trigger:** After creating a new account (post-WelcomeDialog).
+**File:** `lib/src/ui/dialogs/mnemonic_dialog.dart`
+**Trigger:** After creating a new account (`hollow_shell.dart`), Home's setup card "save your phrase" (`home_inbox.dart`), the user bar.
 **Entry point:** `showMnemonicDialog(BuildContext context, String mnemonic)` -- void.
 **Barrier:** Non-dismissible.
 
-### Layout
-Uses `HollowDialog` with title "Your Recovery Phrase".
-
-**Content:**
-- Warning text explaining to write down and keep safe
-- Container with warning-tinted border containing `SelectableText` of the mnemonic in mono font
-- Copy button: `HollowButton.ghost` with `LucideIcons.copy`, copies mnemonic, shows success toast
-
-**Actions:**
-- "I've saved it" filled button closes dialog
+`HollowDialog(title: 'Your recovery phrase')`, an acknowledgement, so ONE filled button and no X:
+- "These 24 words bring back your identity if you lose this device. Write them down in order and keep them somewhere safe."
+- **`RecoveryPhraseGrid`** (public, reusable): the words numbered in `monoSmall` `textTertiary` (tabular figures) + the word in `mono` `textPrimary`, read left to right, 3 columns on desktop / 2 on a phone, inside a `SelectionArea`. No tinted warning box.
+- `leadingActions`: ghost "Copy" (copies the phrase, toasts "Copied").
+- Filled "I've saved it": pops, then `homeSetupProvider.markPhraseSaved()`; a failed write only toasts (`friendlyError`, "Hollow couldn't note that you saved it, so it may remind you again."), never keeps the dialog up.
 
 ### No FFI calls -- mnemonic is passed in as parameter.
 
@@ -186,9 +170,9 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 
 ## ScreenShareDialog -- Screen/Window Source Selection
 
-**File:** `lib/src/ui/dialogs/screen_share_dialog.dart` (609 lines)
-**Trigger:** Screen share button in voice channel controls.
-**Entry point:** `showScreenShareDialog(BuildContext context)` -- returns `Future<ScreenShareSelection?>`.
+**File:** `lib/src/ui/dialogs/screen_share_dialog.dart`
+**Trigger:** Share in the call controls (desktop). The phone has its own `mobile_screen_share_sheet.dart`.
+**Entry point:** `showScreenShareDialog(BuildContext context)` -- returns `Future<ScreenShareSelection?>` (null on Cancel).
 
 ### Data types
 
@@ -196,220 +180,100 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 **`ScreenShareFps` enum:** fps5, fps15, fps30, fps60 -- each with `value`, `label`.
 
 **`ScreenShareSelection` class:**
-- Fields: `sourceId`, `width`, `height`, `fps`, `shareAudio`, `pid`, `windowHwnd`
+- Fields: `sourceId`, `width`, `height`, `fps`, `shareAudio`, `pid`, `windowHwnd`, `profile` (`ScreenContentProfile`, drives the encoder tuning; default motion)
 - `windowHwnd`: for a WINDOW share on Windows, the window's HWND (the desktop source `id` IS the decimal HWND); 0 for screens. The screen-audio exe resolves HWND→owning pid→the app's audio-rendering pids itself (per-app INCLUDE+mix). This is the RELIABLE per-app target — `pid` arrives as 0 for windows, so it isn't trusted
 - `pid`: process ID from `DesktopCapturerSource.pid` (Windows only, often 0 for windows — see `windowHwnd`). Legacy per-process target
 - `qualityLabel` getter: e.g. "1080p60", "4K30"
 
-### Widget: `_ScreenShareDialog` (StatefulWidget)
+**`ScreenShareSources`**: the injectable source of `capturer` + `requestPermission()` (macOS Screen Recording), so a widget test stands in for the native capturer. `ScreenShareDialog` is public with `sources:`.
 
-**State fields:**
-- `_sources` -- `Map<String, DesktopCapturerSource>` keyed by source ID
-- `_selectedSourceId` -- nullable string
-- `_resolution` -- default `p1080`
-- `_fps` -- default `fps60`
-- `_shareAudio` -- default false
-- `_loading` -- true until sources loaded
-- `_showScreens` -- true = Screens tab, false = Windows tab
-- `_refreshTimer` -- periodic thumbnail refresh every 3s
+### Widget: `_ScreenShareDialogState`
 
-**initState:**
-- Wayland (`DesktopCaptureSupport.usePortalPicker`): skips enumeration entirely — no `_loadSources()`, no listeners, no refresh timer (each of those pops an xdg-desktop-portal dialog of its own)
-- Otherwise calls `_loadSources()` and subscribes to `desktopCapturer.onAdded`, `.onRemoved`, `.onThumbnailChanged` streams
+**State fields:** `_sources` (by id), `_selectedSourceId`, `_resolution` (p1080, clamped to `_availableResolutions`: only tiers a connected display can produce), `_fps` (fps60), `_profile` (motion), `_shareAudio` (**false**: "Share audio" starts OFF, desktop and phone), `_load` (`_SourceLoad { loading, ready, denied, failed }`), `_showScreens`, `_refreshTimer` (3 s `updateSources`), `_portalMode` / `_portalFresh`.
 
-**`_loadSources()`:**
-- Calls `desktopCapturer.getSources(types: DesktopCaptureSupport.sourceTypes)` (issue #30; see `services_voice_webrtc.md` "Linux session gating")
-- Starts 3-second periodic `desktopCapturer.updateSources()` timer, same type list
+**initState:** Wayland (`DesktopCaptureSupport.usePortalPicker`) skips enumeration entirely (no `_loadSources()`, no listeners, no timer; each pops an xdg-desktop-portal dialog). Otherwise `_loadSources()` + `onAdded` / `onRemoved` (clears a removed pick) / `onThumbnailChanged`.
 
-**`_filteredSources`:** Filters `_sources` by current tab type (Screen vs Window).
+**`_loadSources()`:** on macOS asks `requestPermission()` FIRST (nothing enumerates until Screen Recording is granted); `getSources(types: DesktopCaptureSupport.sourceTypes)` (issue #30); the first screen starts picked. macOS with no permission or no screens = `denied`; a throw = `failed`.
 
-**Layout (680x560 max):**
-- Title: "Share Your Screen"
-- Wayland portal-first mode replaces the tabs + grid with `_buildPortalSection()`: ONE "Screen or window" entry (desktop icon, caption "Press Share and your desktop opens its own dialog"), plus — once `DesktopCaptureSupport.portalGrantLikely` — "Same as last time" / "Pick something new" pills (`_portalFresh`; the fresh pick bumps the restore generation on Share). Share button is always enabled there; it pops `ScreenShareSelection(sourceId: DesktopCaptureSupport.portalSourceId, ...)` with pid/hwnd 0. A caption under the audio toggle warns that Wayland audio is captured system-wide (minus Hollow) even for a window pick.
-- Tabs row (non-portal): "Screens" / "Windows" -- `_buildTab()` pills
-- Source grid: `GridView.builder`, crossAxisCount 2 for screens / 3 for windows, 16:10 aspect ratio
-- Each tile (`_buildSourceTile`): thumbnail image (or desktop icon placeholder), name label, accent border when selected
-- Resolution pills row: all `ScreenShareResolution` values as `_buildPill()` chips
-- FPS pills row: all `ScreenShareFps` values as `_buildPill()` chips
-- Share audio toggle: `HollowToggle` + label
-- Actions: Cancel (ghost) + Share (filled, disabled when no source selected)
+**Visible-tab selection:** `_visibleSelectionId` is the pick only when it is on the tab in view, so a screen picked on Screens never shares from the Windows tab where nothing looks chosen. Share enables on it.
 
-**Share button:** Pops dialog with `ScreenShareSelection(sourceId:, width:, height:, fps:, shareAudio:, pid:, windowHwnd:)`. For a WINDOW source, `windowHwnd = int.tryParse(sourceId)` (the source id IS the decimal HWND); 0 for screens. `pid` is still read from the source but is unreliable for windows (0). Also logs a `[SCREEN-AUDIO] Share confirmed: type/pid/hwnd/audio/id` diagnostic line via `network_api.logFromDart`.
+**Layout (`HollowDialogSurface`, width 680, maxHeight 560):**
+- Title "Share your screen".
+- `HollowChipTabs<bool>` "Screens" / "Windows" (the tab row is chips), then the source area by `_load`: `loading` = a skeleton grid in the final geometry; `denied` = `HollowEmptyState` "Hollow isn't allowed to see your screen" + outline "Open System Settings" (the Screen Recording pane); `failed` = "Hollow couldn't list your screens and windows" + outline "Try again"; `ready` = the grid (2 columns screens / 3 windows, 16:10), or "No screens found" / "No open windows found". A tile is `elevated` with a border that thickens to 2 px accent when picked (no tint), `HollowFocusRing`, Semantics selected.
+- Wayland portal mode replaces tabs + grid with `_buildPortalSection()`: "Press Share and your desktop opens its own dialog. Pick a whole screen or a single window there.", plus (once `portalGrantLikely`) chips "Same as last time" / "Pick something new" with a line under them; the fresh pick bumps the restore generation on Share.
+- Options table (`SettingsFieldLabel` + wrapping chip rows): "Optimize for" (Smooth motion / Sharp text, which also snaps fps 60 / 15), "Resolution", "Frame rate".
+- `HollowToggle` "Share audio" (locked off with a note on macOS below 13; a Wayland note that audio is system-wide minus Hollow).
+- Action row under `HollowButtonTouchScope`: a leading hint while nothing can be shared ("Finding your screens…", "Pick a screen to share.", "Pick a window to share."), ghost Cancel, filled Share.
+
+**Share:** pops `ScreenShareSelection(...)` with `windowHwnd = int.tryParse(id)` for a window, 0 for a screen (portal mode pops `DesktopCaptureSupport.portalSourceId`). Logs `[SCREEN-AUDIO] Share confirmed: type/pid/hwnd/audio/id` via `network_api.logFromDart`.
 
 ### External dependencies
-- `flutter_webrtc` -- `desktopCapturer`, `DesktopCapturerSource`, `SourceType`
+- `flutter_webrtc` -- `desktopCapturer`, `DesktopCapturerSource`, `SourceType`, `Helper.requestCapturePermission`
 
 ---
 
-## LicenseKeyDialog -- Beta Access Key Input
+## LicenseKeyDialog -- Relay Access Key Input
 
-**File:** `lib/src/ui/dialogs/license_key_dialog.dart` (194 lines)
-**Trigger:** On app startup when relay reports key-required via `/relay-status`.
-**Entry point:** `showLicenseKeyDialog(BuildContext context, {String? error})` -- returns `Future<String?>`.
-**Barrier:** Non-dismissible.
+**File:** `lib/src/ui/dialogs/license_key_dialog.dart`
+**Trigger:** Only a SELF-HOSTED relay whose owner switched access keys on (`/relay-status` says key-required); the official relay's `keys.json` has `"enabled": false`, so it never asks. Also after the relay rejects a stored key (`hollow_shell.dart` `_handleLicenseError`, reasons mapped to "access key" sentences).
+**Entry point:** `showLicenseKeyDialog(BuildContext context, {String? error})` -- returns `Future<String?>` (the typed key; the default-relay switch ends the process instead of returning).
+**Barrier:** Non-dismissible. One term in the UI: "access key" (never "license key" or "beta").
 
-### Widget: `_LicenseKeyContent` (StatefulWidget)
+### Widget: `_LicenseKeyContent` (ConsumerStatefulWidget, `HollowDialogAction`)
 
-**State fields:**
-- `_controller` -- `TextEditingController`
-- `_error` -- nullable error string (initialized from `widget.initialError`)
+**Auto-formatting (`_onChanged`):** uppercases, strips non-alphanumerics, 16 chars max, dashes every 4 (`XXXX-XXXX-XXXX-XXXX`), clears the error.
 
-**Auto-formatting (`_onChanged`):**
-- Uppercases input, strips non-alphanumeric chars
-- Limits to 16 chars
-- Inserts dashes every 4 chars: `XXXX-XXXX-XXXX-XXXX`
-- Clears error on any change
+**Validation (`_onSubmit`):** empty -> "Enter the access key you were given."; wrong shape -> "An access key is 16 letters and numbers, like XXXX-XXXX-XXXX-XXXX." Both on the field's `errorText`. Valid pops with the key.
 
-**Validation (`_onSubmit`):**
-- Empty check -> "Please enter a license key"
-- Splits on `-`, validates exactly 4 parts of exactly 4 chars each
-- On valid: pops with the key string
+**Layout (HollowDialog, width 420):**
+- Title "This relay needs an access key"
+- Body names the relay (mono span from `relayDomainProvider`): "<relay> only lets people in with an access key, set by whoever runs it. Ask them for one and enter it here."
+- `HollowTextField` (mono, hint `XXXX-XXXX-XXXX-XXXX`, `errorText`)
+- Leading ghost "Use the default relay" (phone: "... and close"), shown only off `kDefaultRelayDomain`: `setDomain(default)` + `exitForRelaySwitch()` inside the dialog with loading and an inline error.
+- Filled "Connect".
 
-**Layout (440x340 max):**
-- KeyRound icon in 56px accent-tinted container
-- "License Key Required" heading
-- "Enter your beta access key to continue" subtitle
-- `HollowTextField` with autofocus, mono font, hint "HLLW-XXXX-XXXX-XXXX"
-- Error text (conditional)
-- "Activate" filled button (full width)
-
-### No FFI calls -- returns key string to caller which passes it to `set_license_key()`.
+### No key FFI here -- the caller passes the key to `set_license_key()`.
 
 ---
 
-## TwitchJoinDialog -- Twitch OAuth Device Code Verification
+## TwitchJoinDialog -- Twitch-gated server join
 
-**File:** `lib/src/ui/dialogs/twitch_join_dialog.dart` (545 lines)
-**Trigger:** When a user tries to join a Twitch-gated server (from event_provider or server join flow).
-**Entry point:** `showTwitchJoinDialog(BuildContext context, {...})` -- void.
+**File:** `lib/src/ui/dialogs/twitch_join_dialog.dart`
+**Trigger:** A join to a Twitch-gated server (event_provider, the join flows).
+**Entry points:** `showTwitchJoinDialog(context, {serverId, channelId, channelName, serverName, minFollowDays, requireSub, failureReason})` -- void. Same file: `showJoinRejectedDialog(context, {title, message})` (info only, `showClose`, the specific reason: a vague failure reads as a network problem) and `showNsfwConfirmDialog(context, {serverName, onProceed})` (a `showHollowConfirm` "Sensitive content warning", filled "I am 18 or older, join" because joining destroys nothing; `onProceed` sends the retry INSIDE the dialog).
 
 ### Global callback mechanism
-- `_activeTwitchJoinCallback` -- top-level `void Function(bool success, String? error)?`
-- `handleTwitchJoinResult({required bool success, String? error})` -- called by event_provider when TwitchJoinRejected arrives; returns true if active dialog handled it
+- `_activeTwitchJoinCallback` + `handleTwitchJoinResult({success, error})`: event_provider routes a `TwitchJoinRejected` / result to the open dialog (returns true when handled, so no second dialog opens).
 
-### Widget: `_TwitchJoinDialog` (StatefulWidget)
+### Calls behind a seam
+`TwitchJoinCalls` (`twitchJoinCallsProvider`, a test replaces it): `isConnected`, `startDeviceFlow`, `pollForToken`, `ensureToken`, `verifyFollow(broadcasterId)`, `joinServer(serverId, proof)` (`crdt_api.joinServer(twitchProofJson:, nsfwConfirmed: false)`).
 
-**Constructor fields:**
-- `serverId`, `channelId`, `channelName`, `serverName`
-- `minFollowDays`, `requireSub` -- Twitch gate requirements
-- `failureReason` -- optional, pre-populates failed state
-
-**State fields:**
-- `_step` -- `_JoinStep` enum: `requirements`, `connect`, `verifying`, `success`, `failed`
-- `_error` -- nullable error string
-- `_userCode` -- device code shown to user
-- `_verificationUri` -- Twitch verification URL
-
-**Step flow:**
-
-**`_JoinStep.requirements` (`_buildRequirements`):**
-- RichText: "{serverName} requires Twitch verification to join."
-- Requirement rows with icon boxes:
-  - Follow requirement: "Follow {channelName} for at least {minFollowDays} days"
-  - Sub requirement (conditional): "Active subscription to {channelName}"
-- "You'll need to connect your Twitch account to verify."
-- Actions: Cancel (ghost) + "Connect Twitch" (filled, with Twitch icon from `SimpleIcons.twitch`)
-
-**`_JoinStep.connect` (`_buildConnect`):**
-- Before code received: spinner + "Starting Twitch authorization..."
-- After code received:
-  - "Enter this code on Twitch:" text
-  - Large styled code display (24px) in accent-bordered container
-  - Tap to copy code (toast "Code copied!")
-  - Spinner + "Waiting for authorization..."
-- Actions: Cancel + "Open Twitch" button (launches `_verificationUri` via `url_launcher`)
-
-**`_JoinStep.verifying` (`_buildVerifying`):**
-- Spinner + "Verifying your Twitch account..."
-- "Checking follow status for {channelName}"
-- No action buttons
-
-**`_JoinStep.success` (`_buildSuccess`):**
-- CheckCircle icon + "You're now in {serverName}!"
-- Auto-closes after 1500ms
-- No action buttons
-
-**`_JoinStep.failed` (`_buildFailed`):**
-- AlertCircle icon + "Could not join {serverName}"
-- Error box with error message
-- Actions: "Close" ghost button
-
-**Progress dots:** `_buildDots()` -- row of filled/unfilled circles tracking step index.
-
-**Flow methods:**
-- `_checkAndProceed()` -- checks `twitchIsConnected()`, skips to verify if already connected
-- `_startConnect()` -- calls `twitchStartDeviceFlow()`, gets `userCode` + `verificationUri` + `deviceCode`
-- `_pollForToken(deviceCode, intervalSecs)` -- calls `twitchPollForToken()`, then `_verify()` on success
-- `_verify()` -- calls `twitchEnsureToken()`, `twitchGenerateProof(broadcasterId:)`, then `crdt_api.joinServer(serverId:, twitchProofJson:)`. Stays on verifying step until `_onJoinResult` callback fires.
-
-### FFI calls
-- `twitch_api.twitchIsConnected()`
-- `twitch_api.twitchStartDeviceFlow()`
-- `twitch_api.twitchPollForToken(deviceCode:, intervalSecs:)`
-- `twitch_api.twitchEnsureToken()`
-- `twitch_api.twitchGenerateProof(broadcasterId:)`
-- `crdt_api.joinServer(serverId:, twitchProofJson:)`
+### `_TwitchJoinDialogState` (`HollowDialogAction`)
+`_JoinStep { checking, requirements, connect, verifying, success, failed }`. Starts at **checking** ("Checking your Twitch connection…") so a connected account goes straight to verifying instead of flashing the requirements; `failureReason` opens on failed. One `HollowDialog(width: 420, busy:)`; title by step: "Twitch verification", "Joined <server>", "Couldn't join <server>". No progress dots.
+- **requirements:** "<server> asks new members to verify with Twitch.", rows (grey 16 px icon + text): "Follow <channel> for at least N days" (or "Follow <channel>" when 0) and, with `requireSub`, "Subscribe to <channel>"; "Connect your Twitch account so Hollow can check." Ghost Cancel + filled "Connect Twitch" (`BrandIcons.twitch`, loading while `startDeviceFlow` runs; a failure shows inside, "Hollow couldn't reach Twitch. Try again in a moment.").
+- **connect:** "Open Twitch and enter this code to connect your account.", `HollowCopyField(value: userCode, name: 'Code', wrap: false)`, spinner "Waiting for Twitch…". Ghost Cancel + filled "Open Twitch" (`launchUrl`). Polling runs `pollForToken`, then verify.
+- **verifying:** spinner "Verifying your Twitch account…" + "Checking that you follow <channel>"; no actions. `_verify()` = `ensureToken` then `verifyFollow(channelId)`: a blind-signed FOLLOW credential (the shop signs what Twitch said onto our master; the owner verifies offline against the pinned root; names channel, age bucket and tier, nothing identifying the account, so it may ride the join ring), then `joinServer`. Stays here until the event callback.
+- **success:** check icon + "Your Twitch account meets this server's requirements."; closes itself after 1500 ms.
+- **failed:** the reason (`friendlyError`, or "Your Twitch account doesn't meet this server's requirements."), `showClose`, filled "Try again" (only when a `channelId` is known) re-runs from checking.
 
 ---
 
 ## ImageCropDialog -- Avatar/Image Cropping
 
-**File:** `lib/src/ui/dialogs/image_crop_dialog.dart` (470 lines)
-**Trigger:** Avatar or banner selection in user settings, server settings.
-**Entry point:** `showImageCropDialog({context, imageBytes, aspectRatio, title})` -- returns `Future<Uint8List?>`.
+**File:** `lib/src/ui/dialogs/image_crop_dialog.dart` (desktop; the phone uses `mobile/mobile_image_crop_route.dart`)
+**Trigger:** Avatar, banner, server icon or chat background selection in Settings and Server settings.
+**Entry point:** `showImageCropDialog({context, imageBytes, aspectRatio, title})` -- returns `Future<Uint8List?>` (PNG bytes, null on Cancel). `aspectRatio` = width/height: 1.0 avatar or server icon, **2.5 USER banner** (the ratio every banner surface and Rust's storage share), 3.0 SERVER banner, 16/9 chat background.
 
-### Widget: `_ImageCropDialog` (StatefulWidget)
+### Widget: `_ImageCropDialogState` (`HollowDialogAction`)
 
-**Constructor fields:**
-- `imageBytes` -- raw source image bytes
-- `aspectRatio` -- width/height (1.0 for avatar, 3.0 for banner)
-- `title` -- dialog title string
+**State:** `_decodedImage` (`ui.Image?`, disposed with the state), `_imageLoaded`, `_displayW`/`_displayH` (fit within `_maxDisplayWidth` 420 x `_maxDisplayHeight` 380), `_cropRect` (display coords), `_dragMode` (`_DragMode { none, move, topLeft, topRight, bottomLeft, bottomRight }`), `_dragStart`, `_cropAtDragStart`. Constants: `_minCropSide` 40, `_handleHit` 28 (the desktop target minimum) around a 10 px painted `_handleMark`, `_placeholder` 300x200 while decoding, `_nudge` 4 / `_bigNudge` 16.
 
-**State fields:**
-- `_decodedImage` -- `ui.Image?` (decoded via codec)
-- `_imageLoaded` -- bool
-- `_displayW`, `_displayH` -- scaled display dimensions (max 420x380)
-- `_cropRect` -- `Rect` in display coordinates
-- `_dragMode` -- `_DragMode` enum: `none`, `move`, `topLeft`, `topRight`, `bottomLeft`, `bottomRight`
-- `_dragStart` -- `Offset`
-- `_cropAtDragStart` -- `Rect`
+- `_decodeImage()`: `ui.instantiateImageCodec`, scale to fit, initial crop = the largest rect of the target ratio, centred.
+- Pan: move translates with clamping; a corner resizes keeping the ratio, min size and bounds.
+- **Keyboard:** the surface autofocuses a `Focus`; arrow keys move the crop (Shift = the big step), Enter / numpad Enter applies.
+- `_onConfirm()`: inside `runDialogAction` (fallback "Couldn't crop that image. Try again."): display rect to image rect, `PictureRecorder` + `drawImageRect` (high filter quality), `toImage` → PNG `toByteData`; pops the bytes on success. The error shows in the dialog above the actions; Cancel is disabled and `PopScope` blocks dismissal while it runs.
 
-**Constants:**
-- `_maxDisplayWidth = 420.0`, `_maxDisplayHeight = 380.0`
-- `_minCropSide = 40` -- minimum crop dimension in display pixels
-
-**`_decodeImage():`**
-- Decodes bytes via `ui.instantiateImageCodec`
-- Scales image to fit within max display bounds
-- Computes initial crop rect as largest rect with target aspect ratio that fits the display image, centered
-
-**Crop interaction:**
-- `_onPanStart(details, mode)` -- records drag start position and current crop rect
-- `_onPanUpdate(details)` -- move mode: translates rect with clamping; corner modes: resizes maintaining aspect ratio with minimum size and bounds clamping
-- `_onPanEnd(details)` -- resets drag mode to none
-
-**`_onConfirm():`**
-- Converts crop rect from display coords to image coords using scale factors
-- Renders cropped region via `PictureRecorder` + `Canvas.drawImageRect`
-- Exports as PNG via `picture.toImage().toByteData(format: ImageByteFormat.png)`
-- Pops with `Uint8List` of cropped PNG bytes
-
-**Layout:**
-- Header: title + "Drag to move, corners to resize" hint
-- Image area: `Stack` with:
-  - Full source image (`Image.memory`)
-  - `_CropOverlayPainter` (CustomPaint) -- dark overlay outside crop, accent border, rule-of-thirds grid
-  - Move handle: `GestureDetector` over crop rect area with `SystemMouseCursors.move`
-  - Four corner handles (`_buildHandle`): 18px hit area, 10px visual accent square with white border
-- Actions: Cancel (ghost) + Apply (filled)
-
-### CustomPainter: `_CropOverlayPainter`
-- Draws dark overlay (60% black) outside crop rect using `clipRect` with `ClipOp.difference`
-- Draws accent border (2px stroke) around crop rect
-- Draws rule-of-thirds grid lines (0.5px, 30% accent alpha)
-
-### Enum: `_DragMode`
-Values: `none`, `move`, `topLeft`, `topRight`, `bottomLeft`, `bottomRight`
+**Layout:** `HollowDialogSurface` (not `HollowDialog`: its scrolling body would contend with the crop drags), width = display width + padding. Title in `heading`, caption "Drag to move, corners to resize. Arrow keys move it too.", the image `Stack` (image, `_CropOverlayPainter` in a `RepaintBoundary` with `HollowColors.mediaScrim` outside the crop, accent 2 px border and rule-of-thirds lines at 30% accent; a transparent move region with the move cursor; four corner handles with resize cursors, accent square with an `onMedia` edge), a large spinner in the placeholder while decoding. Actions under `HollowButtonTouchScope`: ghost Cancel + filled Apply.
 
 ---
 
@@ -427,13 +291,13 @@ Uses `SingleTickerProviderStateMixin` for animation.
 - `_controller` -- `AnimationController` (duration: `HollowDurations.normal`; the exit sets `reverseDuration = HollowDurations.fast`)
 - `_fadeAnim` -- one `CurvedAnimation` (`HollowCurves.enter`, reverse `HollowCurves.exit`) that drives the fade AND an 8 px drop from above (`Transform.translate` of `-HollowMotion.rise * (1 - t)`), not the card's full height
 - `_wasVisible` -- tracks previous visibility for enter/exit transitions
-- `_ringtonePlayer` -- `AudioPlayer?` for ringtone playback (custom file or bundled default)
+- `_ringtone` -- a `CallRingtone` (`ui/call/call_ringtone.dart`, session 23), shared with the phone's `MobileIncomingCallOverlay`
 - `_countdownTimer` -- 30-second countdown `Timer.periodic`
 - `_secondsLeft` -- int, starts at 30, decrements each second
 - Cached display info (survives exit animation): `_cachedPeerId`, `_cachedDisplayName`, `_cachedAvatarBytes`, `_cachedIsVideoCall`
 
-**Ringtone playback (`_startRingtone`):**
-- Reads `ringtonePathProvider`, `ringtoneVolumeProvider`, `ringtoneStartProvider`, `ringtoneEndProvider`; after the awaits, bails if the call already ended (`!mounted || !_wasVisible` — a quick decline during the SQLCipher loads must not leave a ringtone playing forever)
+**Ringtone playback (`CallRingtone.start`):**
+- Reads `ringtonePathProvider`, `ringtoneVolumeProvider`, `ringtoneStartProvider`, `ringtoneEndProvider`; after the awaits, bails if the call already ended (`stillRinging: () => mounted && _wasVisible`; a quick decline during the SQLCipher loads must not leave a ringtone playing forever)
 - Custom path set AND file on disk AND trim range valid → plays from start offset, loops within clip range via `onPositionChanged` listener
 - Otherwise (never set, cleared, file deleted, degenerate trim) → bundled default `AssetSource('sounds/default_ringtone.wav')` with `ReleaseMode.loop`, full clip (issue #39; an unset ringtone is never silent anymore)
 
@@ -462,115 +326,49 @@ Uses `SingleTickerProviderStateMixin` for animation.
 
 ## RecoveryPoolDialog -- Recovery Pool Join/Initiate
 
-**File:** `lib/src/ui/dialogs/recovery_pool_dialog.dart` (371 lines)
-**Trigger:** DangerZoneTab in server settings (initiate) or recovery pool invite link (join).
-**Contains TWO separate dialogs.**
+**File:** `lib/src/ui/dialogs/recovery_pool_dialog.dart`
+**Trigger:** "Start a recovery pool" in Archive's vault files view (`archive/vault_files_view.dart`); a recovery link (deep link, the in-chat link card) opens Join.
+**Contains TWO dialogs**, both `HollowDialog(width: 420)` with `HollowDialogAction`: the work runs inside, the confirm loads, a failure shows above the actions.
 
-### Initiate Dialog
+### Initiate: `showInitiateRecoveryPoolDialog(context, {serverId, serverName})`
+- **Consent** ("Start a recovery pool"): "Ask the others who were in <server> to help rebuild its large files, like videos and attachments. Each of you shares the file pieces you still hold, and only those pieces leave this device." Ghost Cancel + filled "Start pool". `_initiate()` = `crdt_api.initiateRecoveryPool(serverId:)` (fallback "Couldn't start the recovery pool. Try again."), then the same dialog turns into the link step.
+- **Link** ("Recovery pool started", `showClose`, no Done): "Send this link to the others who were in <server>. ..." + `HollowCopyField(value: link, name: 'recovery pool link', wrap: false)`.
 
-**Entry point:** `showInitiateRecoveryPoolDialog(context, {serverId, serverName})`
-
-**Widget: `_InitiateDialog` (ConsumerStatefulWidget)**
-
-**State fields:**
-- `_starting` -- bool
-- `_inviteLink` -- nullable string, set after pool created
-
-**Two views:**
-
-**Consent screen (when `_inviteLink == null`):**
-- Server icon + name row
-- Explanation text about cooperatively gathering vault shards
-- "Your local data stays encrypted. Only vault shards are shared."
-- Actions: Cancel (ghost) + "Start Pool" (filled, shield icon, shows spinner when starting)
-
-**Link screen (when `_inviteLink != null`):**
-- Title: "Recovery Pool Started"
-- Share instructions text
-- Link container with `SelectableText` in mono accent font + copy button
-- Actions: "Done" filled button
-
-**`_initiate()`:** Calls `crdt_api.initiateRecoveryPool(serverId:)`, returns invite link string.
-
-### Join Dialog
-
-**Entry point:** `showJoinRecoveryPoolDialog(context, {prefillLink})`
-
-**Widget: `_JoinDialog` (ConsumerStatefulWidget)**
-
-**State fields:**
-- `_controller` -- `TextEditingController` (prefilled if `prefillLink` provided)
-- `_joining` -- bool
-
-**Layout:**
-- Explanation text about contributing vault shards
-- `HollowTextField` with mono font, hint "hollow://recovery?server=...&token=..."
-- Actions: Cancel (ghost) + "Join Pool" (filled, login icon, shows spinner when joining)
-
-**`_join()`:**
-- Validates link contains `server=` and `token=`
-- Calls `crdt_api.joinRecoveryPool(inviteLink:)`
-- Polls `recoveryPoolProvider` every 500ms for up to 10 seconds waiting for welcome
-- On welcome: calls `recoveryPoolProvider.notifier.confirmJoin()`, pops, shows success toast
-- On timeout: calls `crdt_api.stopRecoveryPool()`, clears provider, shows error toast
+### Join: `showJoinRecoveryPoolDialog(context, {prefillLink})`
+- "Join a recovery pool": prose, mono `HollowTextField` hint `hollow://recovery?server=...&token=...` (autofocus). Ghost Cancel + filled "Join pool".
+- A link without `server=` and `token=` = field error "That isn't a recovery pool link. Paste the whole link, starting with hollow://recovery."
+- `crdt_api.joinRecoveryPool(inviteLink:)`, then `_waitForWelcome()` polls `recoveryPoolProvider` every 500 ms for 10 s for a member; none = `stopRecoveryPool` + clear (the notifier read BEFORE the await), and the dialog shows `kRecoveryPoolNoAnswer` ("Nobody in that pool answered. Ask whoever shared the link to keep Hollow open, then try again."). Success: `confirmJoin()`, pop, toast "Joined the recovery pool".
 
 ### FFI calls
-- `crdt_api.initiateRecoveryPool(serverId:)`
-- `crdt_api.joinRecoveryPool(inviteLink:)`
-- `crdt_api.stopRecoveryPool(serverId:)`
-
-### Providers read
-- `recoveryPoolProvider`
+- `crdt_api.initiateRecoveryPool(serverId:)`, `crdt_api.joinRecoveryPool(inviteLink:)`, `crdt_api.stopRecoveryPool(serverId:)`
 
 ---
 
 ## ExportArchiveDialog -- Archive Export Options
 
-**File:** `lib/src/ui/dialogs/export_archive_dialog.dart` (366 lines)
-**Trigger:** Export button in chat pane context menu, server settings.
+**File:** `lib/src/ui/dialogs/export_archive_dialog.dart` (+ `export_to_file.dart`)
+**Trigger:** Export in Archive (`archive_conversation_list.dart`, `archive_message_viewer.dart`, the phone `mobile_archive_viewer_route.dart`).
 **Entry point:** `showExportArchiveDialog(context, {isDm, isServer, peerId, serverId, channelId, channelName, serverName, channels, name, messageCount})`
 
-### Widget: `_ExportArchiveDialogContent` (StatefulWidget)
+### `_ExportArchiveDialogContentState` (`HollowDialogAction`)
+`HollowDialog(title: 'Export <name>', width: 420, busy:, error:)`:
+- "Saves 1,204 messages to one file. The archive is signed, so anyone can check it came from you." (grouped count; "this conversation" when 0).
+- `SettingsFieldLabel` "Files", then three equal `HollowChip(expand: true)`: "Full" / "Images only" / "Messages only" (`_fileMode` `full` / `images_only` / `placeholder`), a selection; the chosen mode's one line under the row ("Includes every file. The largest archive.", "Includes images, and leaves out videos and large files.", "Keeps each file's name, not the file. The smallest archive."). Chips lock while exporting.
+- Ghost Cancel + filled "Export and sign" (loading).
 
-**State fields:**
-- `_fileMode` -- string: `'full'` (default), `'images_only'`, or `'placeholder'`
-- `_exporting` -- bool
+`_export()` runs `exportToFile(fileName: '<exportFileStem(name)>.hollow-archive', extension: 'hollow-archive', pickerTitle: 'Save archive', write: _write)` inside `runDialogAction` (fallback "Couldn't export the archive. Try again."). A cancelled picker (null) ends quietly with the dialog still open; success pops + toast "Archive exported (<size>)". `_write` picks `archive_api.exportServerArchive` / `exportDmArchive` / `exportChannelArchive(..., fileMode:)`.
 
-**Layout (HollowDialog, title "Export Archive"):**
-
-**Conversation info row:**
-- Type icon: `LucideIcons.server` / `.messageSquare` / `.hash`
-- Name (bold) + message count
-
-**File mode selector -- three `_FileModeOption` widgets:**
-1. `LucideIcons.hardDrive` "Full" -- Include all files (largest)
-2. `LucideIcons.image` "Images only" -- Include images, skip videos/large files
-3. `LucideIcons.fileText` "Placeholder" -- No files, just metadata (smallest)
-
-**Signed note:** ShieldCheck icon + "Archive will be signed with your Ed25519 key for cryptographic verification."
-
-**Actions:** Cancel (ghost) + "Export & Sign" (filled, fileOutput icon, shows spinner when exporting)
-
-**`_export()`:**
-- Opens `FilePicker.platform.saveFile()` with `.hollow-archive` extension
-- Calls appropriate FFI based on type:
-  - `archive_api.exportServerArchive(serverId:, serverName:, channelsJson:, outputPath:, fileMode:)` for server
-  - `archive_api.exportDmArchive(peerId:, outputPath:, fileMode:)` for DM
-  - `archive_api.exportChannelArchive(serverId:, channelId:, channelName:, outputPath:, fileMode:)` for channel
-- Shows success toast with file size
-
-### Widget: `_FileModeOption` (StatelessWidget)
-Uses `HollowPressable` wrapper. Shows check icon when selected.
-
-### FFI calls
-- `archive_api.exportServerArchive(...)`, `archive_api.exportDmArchive(...)`, `archive_api.exportChannelArchive(...)`
+### `export_to_file.dart` (shared with the shard export)
+- `exportFileStem(name)`: letters, digits, spaces and dashes, spaces to underscores, lower case; `hollow` when empty.
+- `exportToFile({fileName, extension, pickerTitle, write, onWriting})` → bytes written or null on cancel. Desktop asks where first (`FilePicker.saveFile`) and Rust writes there; a phone has no writable path to offer, so Rust writes a temp file whose bytes go to the system save sheet, then the temp is deleted. `onWriting` fires when the slow part starts, so loading shows only after the picker closes.
 
 ---
 
 ## StorageDashboardDialog -- Storage Usage Visualization
 
-**File:** `lib/src/ui/dialogs/storage_dashboard_dialog.dart` (749 lines)
-**Trigger:** Storage button in server settings or channel sidebar.
+**File:** `lib/src/ui/dialogs/storage_dashboard_dialog.dart`
+**Trigger:** Storage in the channel sidebar's server menu (`channel_sidebar.dart`). The phone's `MobileStorageRoute` (from mobile server settings) shares its editors and bar.
+**Held back:** one of the big five redesigns (session 24 fixed its bugs only; a mockup comes first).
 **Entry point:** `showStorageDashboardDialog(BuildContext context, String serverId)`
 
 ### Widget: `_StorageDashboardContent` (ConsumerStatefulWidget)
@@ -591,11 +389,9 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 - `crdt_api.getStorageStats(serverId:)`
 - `crdt_api.getServerSetting(serverId:, key: 'retention_files')`
 - `crdt_api.getServerSetting(serverId:, key: 'retention_messages')`
-- `_getDiskFreeBytes()` -- runs PowerShell `(Get-PSDrive C).Free` on Windows
+- `_getDiskFreeBytes()` -- `freeBytesAt(hollowDataDir)` (`core/services/disk_space.dart`): the volume that holds the DATA ROOT (a profile or portable mode can put it anywhere), never a fixed `C:` or `/`. Windows = `GetDiskFreeSpaceExW` via FFI (the per-user free, quotas included); Linux/macOS/Android = `df -Pk <dir>` parsed by `parseDfAvailableBytes` (read leftwards from the capacity column, since names can hold spaces); null on iOS. The phone draws its full-replication bar from the same reading (none when null).
 
-**Layout (HollowDialog, 540px width):**
-
-**Header:** HardDrive icon + "Storage Dashboard" + close button
+**Layout:** `HollowDialog(title: 'Storage dashboard', showClose: true, width: 600)`.
 
 Every section box ("Server Storage", "Your Storage", "Retention Policy", "Vault Health", "Member Pledges") is titled with `HollowSectionHeader(title, dense: true)`, no section icon.
 
@@ -615,7 +411,7 @@ Every section box ("Server Storage", "Your Storage", "Retention Policy", "Vault 
 
 **Bottom row (always):**
 - Side-by-side: "Retention Policy" | "Vault Health"
-- Retention Policy: two rows — Messages (top) and Files (bottom), both editable by owner/admin via `_editRetention()` -> `SimpleDialog` with options (permanent, 30d, 90d, 180d, 365d). Both are forward-only: changing the setting writes a `{key}_since` companion CRDT setting with the current timestamp. Label: "Changes affect new content only."
+- Retention Policy: two rows — Messages (top) and Files (bottom), both editable by owner/admin via `_editRetention()` -> `editRetentionPolicy` (below). Both are forward-only: changing the setting writes a `{key}_since` companion CRDT setting with the current timestamp. Label: "Changes affect new content only."
 - Vault Health:
   - < 6 members: green StatusDot + "Full replication" + explainer
   - 6+ members: colored StatusDot (green/yellow/red) + status text based on active transfers and failures + shard count
@@ -627,9 +423,12 @@ Every section box ("Server Storage", "Your Storage", "Retention Policy", "Vault 
 - `_vaultParams(memberCount)` -- returns `(k, m)` tuple for erasure coding tiers
 - `_formatBytes(BigInt)`, `_formatBytesInt(int)` -- human-readable byte formatting
 - `_formatRetention(policy)` -- "365 days", "Permanent", etc.
-- `_storageBar(fraction, color, hollow)` -- `TweenAnimationBuilder` animated bar, color shifts to warning at 70%, error at 90%
-- `_editPledge(hollow)` -- `AlertDialog` with MB input (min 512), calls `crdt_api.setStoragePledge()`
-- `_editRetention(hollow, key, currentValue)` -- `SimpleDialog` with retention options, calls `crdt_api.updateServerSetting()`
+- `_storageBar(...)` -- `StorageUsageBar(fraction:, color:)` (public, shared with the phone): animated, warning over 70%, error over 90%
+- `_editPledge` / `_editRetention` -- thin wrappers over the two public editors below, then a toast ("Pledge saved" / "Retention saved") and `_loadData()`
+
+**Shared editors (desktop and phone both ask through these, the work inside the dialog):**
+- `editStoragePledge(context, serverId, currentBytes)` → bool: `promptForName` "Set storage pledge" ("The space, in MB, this device keeps for this server's files.", hint "At least 512"); `validator` says "Enter a number of MB, like 1024." / "Pledge at least 512 MB." (`kMinPledgeMb`) on the field; `onSubmit` = `crdt_api.setStoragePledge`. Before, a bad number silently did nothing and a failure only reached debugPrint.
+- `editRetentionPolicy(context, serverId, key, currentValue)` → bool: `_RetentionPicker` (`HollowDialogAction`), title "File retention" / "Message retention" / "Voice retention", `showClose`, a `HollowChip` row (Permanent, 30/90/180/365 days); tapping one saves it (the tapped chip shows selected while saving), writes `{key}_since` = now (forward-only), closes on success, shows the reason in the dialog on failure. Tapping the current value just closes.
 
 ### Providers read
 - `serverMembersProvider(serverId)` -- member count
@@ -646,114 +445,50 @@ Every section box ("Server Storage", "Your Storage", "Retention Policy", "Vault 
 
 ## MessageProofDialog -- Cryptographic Message Proof Verification
 
-**File:** `lib/src/ui/dialogs/message_proof_dialog.dart` (582 lines)
-**Trigger:** the message context menu (right-click) -> "Message proof". Since issue #61 right-click opens the
-FULL message menu rather than jumping straight here, so proof is one row among many; the hover toolbar's
-shieldCheck button is unchanged.
+**File:** `lib/src/ui/dialogs/message_proof_dialog.dart`
+**Trigger:** the message More / right-click menu -> "Message proof" (DM, channel, guest view), and the Archive viewers' info action (live and imported archives).
 **Entry point:** `showMessageProofDialog(BuildContext context, MessageProofData proof)`
 
 ### Data class: `MessageProofData`
+- `senderPeerId`, `senderDisplayName`, `text`, `timestampMs`, `signature?`, `publicKey?`, `messageId?`, `context` (recipient peer_id for DM, "server_id:channel_id" for channel), `msgType` (`"dm"` / `"ch"`), `fileAttachment?`, `preverified?`.
+- (0.8.5) NO Dart payload reconstruction: live rows verify via `network_api.verifyMessageProofV2(msgType:, context:, senderPeerId:, messageId:)` (Rust loads the row and builds the v2 payload, or v3 when it has an `album_id`); imported-archive rows carry the Rust loader's verdict as `preverified`.
+- `publicKeyFingerprint`: base64 key → hex → first 32 hex chars in groups of 4, upper case.
 
-**Fields:**
-- `senderPeerId`, `senderDisplayName`, `senderAvatar` (nullable `Uint8List`)
-- `text`, `timestampMs`, `signature` (nullable), `publicKey` (nullable)
-- `messageId` (nullable), `context` (recipient peer_id for DM, "server_id:channel_id" for channel)
-- `msgType` -- `"dm"` or `"ch"`
-- `fileAttachment` -- nullable `FileAttachment`
+### Status: `ProofStatus { checking, verified, invalid, unsigned, notHere, failed }`
+One `HollowBadge` + one explaining line (`_statusWords()`):
+- **Checking** (neutral) while the FFI runs.
+- **Verified** (success): "Signed with the sender's key, and unchanged since it was sent."
+- **Invalid** (error): "The signature doesn't match this message. It was changed after it was signed, or signed by an older version of Hollow."
+- **Unsigned** (neutral): no signature or public key, or Rust found none.
+- **Not on this device** (neutral): no `messageId`, or the FFI said "not found". NOT a verdict on the message (the row this device would check against is missing), so it must never read as Invalid: "...Check it on a device that has the conversation, or ask the sender for an exported proof."
+- **Not checked** (neutral): any other throw, with the `friendlyError` line.
 
-**Computed properties:**
-- (0.8.5) `canonicalPayload` REMOVED — Dart builds no signing payload at all. Live rows verify via `verifyMessageProofV2` (Rust loads the row, builds the v2 payload, or v3 when the row has an `album_id`, reporting `sig_version` 3); the exported JSON adds `album` and `payload_version` 3 for album rows; imported-archive rows carry the Rust loader's verdict as `MessageProofData.preverified`; anything else displays unverified. Copy/Export gate on `_canExport` (a v2 payload exists).
-- `publicKeyFingerprint` -- base64-decoded key -> hex -> groups of 4 uppercase chars (first 32 hex chars = 16 bytes)
-- `toProofJson()` -- structured JSON with version, protocol, message, sender, context, signature, verification instructions
+### Layout: `HollowDialog(title: 'Message proof', showClose: true, maxWidth: 520)`
+- The badge, its line, then the message as the ONE `MessageRow` (read-only: no reactions, no reply), wrapped in `HollowBleed(horizontal: MessageRow.horizontalInset)` so the avatar sits on the dialog's text edge.
+- `HollowSectionHeader('Details', dense: true)`, then `HollowCopyField`s, each with its own copy button:
+  - **Sender** (not mono): the sender's OWN profile name (MASTER via `identityOf`), plus ", you call them <nickname>" when a local nickname differs; copies the name. A proof names who SIGNED, never the nickname alone.
+  - **Sender's user ID**, **Time (UTC)** (`toUtc().toIso8601String()`, copies it with the raw ms), **Message ID**, **Key fingerprint**, **Signature** (shown as first 24 + "..." + last 24, copies the whole).
+- `leadingActions`, only when `_canExport` (Rust produced the canonical payload): ghost "Copy proof" (JSON to clipboard, "Proof copied") and ghost "Export proof" (`FilePicker.saveFile` `hollow-proof-<id>.json`, "Proof exported"; a failure toasts `friendlyError`).
+- `_proofJsonString()`: always the v2 envelope (`protocol: hollow-proof-v2`; `payload_version` 3 and `album` for album rows; message fields incl. `edited_at`, `reply_to`, `file_id`, `order_us`, `link_preview_digest`; verification instructions for msg2 and msg3 grammars).
 
-### Widget: `_MessageProofDialogContent` (StatefulWidget)
-
-**State fields:**
-- `_verified` -- `bool?` (null = pending, true = valid, false = invalid)
-
-No entrance animation of its own: the content renders in place and the dialog route's scale-and-fade is the only motion (the old per-section stagger and its `PopScope` reverse are gone). The close X pops normally.
-
-**`_verifySignature()` (called in initState):**
-- Calls `network_api.verifyMessageProof(senderPeerId:, signatureB64:, publicKeyB64:, canonicalPayload:)`
-- Sets `_verified` accordingly
-
-**Layout:** `HollowDialog(title: 'Message proof', showClose: true, maxWidth: 520)`.
-
-- **Status:** `_buildStatus(hasSig)` in an `AnimatedSwitcher` (fade, `HollowDurations.normal`): nothing while verification is pending, then ONE `HollowBadge`: "Unsigned" (neutral), "Verified" (success) or "Invalid" (error).
-- **Message preview (`_MessagePreview`):** chat-bubble style, `HollowAvatar` + sender name + time + optional media thumbnail (48px from `file.diskPath`; paperclip + filename for other files) + text (200 chars / 3 lines).
-- **Info rows (`_InfoRow`):** Sender peer ID (mono, copyable), Timestamp (ISO 8601 + raw ms), Message ID (conditional, mono, copyable), Public key fingerprint (conditional, mono, copyable), Ed25519 signature (when signed, mono, copyable, truncated).
-
-**Actions** (`leadingActions`, only when `_canExport`, i.e. Rust produced the canonical v2 payload): ghost "Copy proof" (full proof JSON to the clipboard, success toast) and ghost "Export proof" (`_exportProofFile`, save dialog).
-
-### Widget: `_MessagePreview` (StatelessWidget)
-Renders chat-style message with avatar, name, time, optional media, text.
-
-### Widget: `_InfoRow` (StatelessWidget)
-Props: `label`, `value`, `mono`, `copyable`, `truncate`. Shows label above value with optional copy icon.
-
-### FFI calls
-- `network_api.verifyMessageProof(senderPeerId:, signatureB64:, publicKeyB64:, canonicalPayload:)`
+No entrance animation of its own; the dialog route's scale-and-fade is the only motion.
 
 ---
 
-## ShardBundleDialog -- Shard Import/Export
+## ShardBundleDialog -- File pieces export/import
 
-**File:** `lib/src/ui/dialogs/shard_bundle_dialog.dart` (372 lines)
-**Contains TWO separate dialogs.**
+**File:** `lib/src/ui/dialogs/shard_bundle_dialog.dart`
+**Trigger:** Archive's vault files view (`archive/vault_files_view.dart`). The UI says "file pieces"; "shards" stays in code and the `.hollow-shards` extension.
+**Contains TWO dialogs**, both `HollowDialog(width: 420)` with `HollowDialogAction` (work inside, loading confirm, error above the actions).
 
-### Export Shards Dialog
+### Export: `showExportShardsDialog(context, {serverId, serverName, shardCount})`
+- "Export file pieces": "Save the N file pieces you hold for <server> to one file. Send it to the others who were there, and they can rebuild files without you being online." Ghost Cancel + filled "Export".
+- `exportToFile(fileName: '<exportFileStem(serverName)>.hollow-shards', extension: 'hollow-shards', pickerTitle: 'Save file pieces', write: archive_api.exportServerShards)` (the shared helper in `export_to_file.dart`, so the phone gets the system save sheet); a cancelled picker ends quietly; success pops + "Saved <size> of file pieces".
 
-**Entry point:** `showExportShardsDialog(context, {serverId, serverName, shardCount})`
-
-**Widget: `_ExportShardsDialog` (StatefulWidget)**
-
-**State fields:**
-- `_exporting` -- bool
-
-**Layout (HollowDialog, title "Export Shards"):**
-- Server icon + name row
-- "Export {shardCount} vault shards as a .hollow-shards bundle." description
-- Actions: Cancel (ghost) + "Export" (filled, download icon, shows spinner)
-
-**`_export()`:**
-- Sanitizes server name for filename: `{safe_name}.hollow-shards`
-- Opens `FilePicker.platform.saveFile()` with `.hollow-shards` extension
-- Calls `archive_api.exportServerShards(serverId:, outputPath:)`
-- Shows success toast with file size
-
-### Import Shards Dialog
-
-**Entry point:** `showImportShardsDialog(context, {onImported})`
-
-**Widget: `_ImportShardsDialog` (StatefulWidget)**
-
-**State fields:**
-- `_importing` -- bool
-- `_result` -- nullable `archive_api.ShardImportResultFfi`
-
-**Two views:**
-
-**Initial view (when `_result == null`):**
-- "Select a .hollow-shards bundle from another ex-member." description
-- Actions: Cancel (ghost) + "Select File" (filled, upload icon, shows spinner)
-
-**Result view (`_buildResult`, when `_result != null`):**
-- Title: "Import Complete"
-- Result rows (`_ResultRow`): Server ID, Manifests imported, Shards imported, Shards skipped
-- Green success box: "{newReconstructable} files now reconstructable"
-- Actions: "Done" filled button
-
-**`_pickAndImport()`:**
-- Opens `FilePicker` for `.hollow-shards` files
-- Calls `archive_api.importServerShards(archivePath:)`
-- Calls `widget.onImported?.call()` on success
-
-### Widget: `_ResultRow` (StatelessWidget)
-Simple label-value row with spaceBetween alignment.
-
-### FFI calls
-- `archive_api.exportServerShards(serverId:, outputPath:)`
-- `archive_api.importServerShards(archivePath:)`
+### Import: `showImportShardsDialog(context, {onImported})`
+- "Import file pieces": "Choose a .hollow-shards file from someone who was in the server. Pieces you are missing are added, so more files can be rebuilt." Ghost Cancel + filled "Choose file" (picker "Choose a file of pieces").
+- `archive_api.importServerShards(archivePath:)` (fallback "Couldn't read that file. Check it's a .hollow-shards file and try again."), then `onImported()`, and the same dialog turns into `_ImportResult`.
+- `_ImportResult` ("Pieces imported", `showClose`): "Added to <server>. N more files can be rebuilt now." (or "No new files can be rebuilt yet."), then `_ResultRow`s "New pieces" / "Already had" (tabular figures). No success box, no Done.
 
 ---
 
@@ -762,49 +497,84 @@ Simple label-value row with spaceBetween alignment.
 `UserSettingsDialog` / `showUserSettingsDialog` are DELETED. Settings is a centre place opened
 with `openSettings()` / `toggleSettings()`; see `ui_user_settings.md`.
 
-## Friends Manager -- `dialogs/friends_manager_dialog.dart` (2026-09-24)
+## Friends Manager -- `dialogs/friends_manager_dialog.dart` (2026-09-24, dialogs pass 2026-09-25)
 
 `showFriendsManager(context, {addFriend, tab})`, re-exported from `shell/friends_bar.dart`;
 `FriendsManagerTab { friends, requests, add }`. The header's add-friend button opens Requests
 while requests wait, else Add friend. The class stays `_FriendsManager` (fleet scenarios target
-`type:_FriendsManager`). `HollowDialogSurface` 520 wide on `overlay`; three tabs on the dialog's
-own surface with a 2 px accent bar under the open one (Friends shows its count, Requests a
-`HollowCountBadge` while requests wait).
+`type:_FriendsManager`). `HollowDialogSurface` 520 x 552, `padded: false`, on `overlay`.
+**The chip tab row IS the header**: `HollowChipTabs` "Friends" (count as `hint`), "Requests"
+(`count:` badge while requests wait), "Add friend", then the close X, a hairline under it. No
+"Friends" title (it said the word twice); the route still announces "Friends" via `Semantics`.
+Tab content sits under `HollowFlushRows`, so rows are on the tab row's and search field's text edge.
 
-- **Friends:** search, then "Favourites" (reorderable in place; the drag handle shows on hover
-  and keyboard focus; visible positions are mapped to the stored list before `reorder`), then
-  "All friends". Rows: avatar with presence dot, name, status line or Online/Offline. Actions on
-  hover, focus, while the row's menu is open, and always on touch: Message, the favourite star,
-  More (Voice call, View profile, Set/Edit nickname, Remove friend behind a confirm, then
-  `removeFriendAndTidy`). Clicking a row opens the DM; right-click opens More.
-- **Requests:** "Received" (ghost Decline, outline Accept; semantic labels "Accept/Reject friend
-  request") and "Sent" (ghost "Cancel request").
-- **Add friend:** "Peer ID or nickname" field (hint "Paste an ID, or type a nickname") + filled
-  "Send request"; "How others add you" (`HowOthersAddYou`: your ID with Copy, the temporary
-  nickname claim). Shared helpers for the phone's Friends tab: `receivedRequestLabel`,
-  `sentRequestLabel`, `isPeerIdInput`, `sendFriendRequestTo`.
+- **Friends:** "Search friends", then "Favourites" (reorderable in place: a pointer-only drag
+  handle; visible positions are mapped to the stored list before `reorder`) and "All friends"
+  (an empty handle column when favourites exist, so the actions line up). Rows are
+  `HollowListRow`: `PresenceAvatar` (ring cut from the row's hover fill), name, status line or
+  Online/Offline. Actions (`HollowIconButton`s, 44 on touch) fade in on hover, keyboard focus,
+  while the row's menu is open, and always on touch, hidden never removed so Tab reaches them:
+  Message, the favourite star, More. More (also right-click via `ContextMenuTarget`): Voice call
+  (online, not in a call; `startDmCallFlow`, the DM header's TURN check and leave-the-room
+  confirm), View profile, Set a nickname / Edit nickname (`showLocalNicknameDialog`), **Move up /
+  Move down** on a favourite (the keyboard's path to the drag), then Remove friend
+  (`confirmRemoveFriend`). Clicking a row opens the DM. Empty: "No friends yet" / "No friends
+  match".
+- **Favourites are MASTER ids** (`favourite_friends_provider.dart`): the store keys masters and
+  ids that are no longer friends stay stored but hidden (a device id in the store crashed the
+  manager).
+- **Requests:** "Received" (ghost "Decline", outline "Accept"; semantic labels "Decline/Accept
+  friend request"; "No requests waiting" when empty) and "Sent" (ghost "Cancel request"). The
+  pressed button loads per row; a failure toasts. Display resolves device→master for name and
+  avatar only; answers still target `req.peerId`.
+- **Add friend:** `SettingsFieldLabel` "User ID or nickname", mono field (`kAddFriendHint` "Paste
+  an ID, or type a nickname") + filled "Send request", baseline-aligned so an error under the field
+  never pulls the button out of line; `kAddFriendNote` "They see your request the next time
+  they're online." The typed id survives a look at another tab (controller held by the dialog).
+  `sendFriendRequestTo(ref, input)` (shared with the phone) is AWAITED: a peer id sends; a
+  nickname registers a lookup in `_nicknameLookups`, calls `sendFriendRequestByNickname`, and
+  completes only when a new outgoing request appears (15 s timeout: "Hollow didn't hear back about
+  that nickname. Try again."). `handleNicknameLookupFailed` (from event_provider) fails the waiting
+  send with "No one has the nickname X right now. Nicknames reset when their owner goes offline."
+  So the button stays busy through the lookup, the error lands on the field via `friendlyError`
+  with the input kept, and "Friend request sent" is true when it shows.
+- **`HowOthersAddYou`** (shared with the phone's add sheet): `HollowSectionHeader` "How others add
+  you", "Your user ID" + ghost "Copy" ("ID copied"), "Temporary nickname" (field + outline "Claim",
+  loading while claiming; the typed name stays until the relay answers and clears once claimed; a
+  claim that never reached the relay calls `onClaimFailed('send')`), or the claimed name + ghost
+  "Release". Claim errors: taken / invalid (3 to 20 lowercase letters, numbers or underscores).
+- Shared helpers for the phone's Friends tab: `receivedRequestLabel`, `sentRequestLabel`,
+  `isPeerIdInput`, `sendFriendRequestTo`, `kAddFriendHint`, `kAddFriendNote`.
 
+### `confirmRemoveFriend` (`dialogs/confirm_remove_friend.dart`)
+THE remove-friend question, every surface: `showHollowConfirm` "Remove <name>?", "You'll both drop
+off each other's friend list. Your conversation stays on this device.", danger "Remove friend",
+`onConfirm` = `removeFriendAndTidy(ref, peerId)` (remove, drop the favourite, close the open DM
+and the split pane showing them; reads everything BEFORE the await). The toast "Friend removed"
+goes to the root overlay captured up front (the removal usually unmounts the asking row).
+
+---
 
 ## Keyboard-Aware & Phone-Adaptive Dialogs (2026-06)
 
 - **Global keyboard avoidance**: `showHollowDialog` (hollow_dialog.dart) wraps EVERY dialog's pageBuilder in `AnimatedPadding(padding: MediaQuery.viewInsetsOf(context), 100ms decelerate)` + `MediaQuery.removeViewInsets(removeBottom: true, ...)` — the same pattern as Flutter's `Dialog`. Every dialog (including custom Center-based builders) shifts above the keyboard for free. RULE: never add viewInsets padding inside a dialog builder — it double-pads.
-- **HollowDialog widget**: under 600px screen width, minWidth = screen − 2×24 (full-width feel); content wrapped in `Flexible > SingleChildScrollView`; actions in right-aligned `Wrap`.
-- **CreateServerDialog**: compact screens stack Join above Create with a horizontal divider (desktop keeps two columns); the old `minWidth: 400` (overflowed phones) is compact-aware; autofocus disabled on compact so the keyboard doesn't immediately cover the stacked layout.
-- **MessageProofDialog**: compact-aware width/padding; preview + info rows scroll in a `Flexible`; on phones the actions stack (Copy|Export row + full-width Close).
+- **HollowDialog widget**: under 600px (`HollowDialogSurface.isCompact`) the frame spans the screen minus 24 a side with `radiusXl`; content scrolls in a `Flexible` (`scrollable: false` for content that scrolls itself), actions in a right-aligned `Wrap` under `HollowButtonTouchScope`, so the actions and the close X grow to 44 on their own (a call site never passes `touch:`).
+- **CreateServerDialog**: compact stacks Join above Create with a `HollowDivider` (desktop keeps two columns); autofocus is off on compact so the keyboard doesn't immediately cover the stacked layout.
+- **MessageProofDialog**: a standard `HollowDialog`; its Copy/Export are `leadingActions` and touch-size on a phone like any other.
 - **WelcomeDialog**: compact-aware minWidth (was forced 360) + internal scroll.
-- **Unlock/recovery dialogs** (hollow_shell.dart): widths are `(screenWidth - padding).clamp(0, 380/420)` (were fixed 380/420 — overflowed phones); the password-unlock dialog is PIN-aware (numeric keyboard) and offers biometric retry. See ui_mobile.md "Security Tab (App Lock)".
+- **Unlock/recovery dialogs**: `shell/identity_unlock_dialogs.dart`, opened by hollow_shell. `UnlockDialog` ("Unlock Hollow", width 420, PIN-aware numeric keyboard, "Wrong PIN/password. Try again." on the field, never a toast because the lock cover silences toasts; leading ghost "Forgot PIN?" / "Forgot password?" pops `kUnlockRecover`, a biometric icon button pops `kUnlockBiometric`, filled "Unlock"). `RecoveryPhraseDialog` (`HollowDialogAction`: the 24 words checked for count on the field, `onRecover` runs inside the dialog, a failure lands on the field with the phrase kept; `cancellable: false` at launch). See ui_mobile.md "Security Tab (App Lock)".
 
 ---
 
 ## VerifyContactDialog -- Safety Number Comparison (Issue 1-D, 2026-07)
 
 **File:** `lib/src/ui/dialogs/verify_contact_dialog.dart`
-**Entry point:** `showVerifyContactDialog(context, peerId:)` -- desktop opens a `HollowDialog`, mobile pushes `MobileVerifyContactRoute` via `hollowMobileRoute()`. Both wrap the same `VerifyContactBody`, so the flow can never drift between platforms.
+**Entry point:** `showVerifyContactDialog(context, peerId:)` (device or master id; it resolves to the MASTER, verification is of a person) -- desktop opens `HollowDialog(title: 'Verify contact', showClose: true)`, mobile pushes `MobileVerifyContactRoute` (a `MobileSettingsSubPage`) via `hollowMobileRoute()`. Both wrap the same `VerifyContactBody`, so the flow can never drift between platforms.
 **Reached from:** `ProfileCardBody` (both densities -- hover popup and profile dialog), the DM left-hand profile panel (`_DmProfilePanel._buildDmActions` in chat_pane.dart), `MobileProfileSheet`, the "Verify" button on `SecurityAlertBanner`, and the "View" action in Settings > Security > Verified Contacts.
 
 **Every floating host dismisses itself first.** `ProfileCardBody._openVerifyDialog` and `MobileProfileSheet._openVerify` both capture the ROOT navigator context, then close the host, then push -- the same pattern as nickname/block/report. Capturing first is load-bearing: dismissing disposes the host's own context. The DM panel is persistent, not floating, so it opens the screen directly.
 
-The button label doubles as the state readout -- "Verify contact" vs "Verified — view number" -- so every surface shows verification status without needing a separate badge.
+The entry label doubles as the state readout ("Verify contact" vs "Verified: view safety number" on the profile card, "Verified, view safety number" on the phone sheet, "Safety number" in the user menu), so every surface shows verification status without a separate badge.
 
 ### What the user is doing
 
@@ -814,16 +584,15 @@ There is deliberately no "yours / theirs" split: a single shared number removes 
 
 ### Layout
 
-- Explainer naming the contact.
-- `_NumberBlock` -- 12 groups of 5, three rows of four, `HollowTypography.mono` at 17px inside a `SelectionArea`. Grouping comes from the Rust `formatSafetyNumber()` so desktop and mobile cannot render the same number two different ways.
-- Copy button (copies the grouped form).
-- **Paste-compare** -- a `HollowTextField` whose `onChanged` runs the sync FFI `safetyNumbersMatch()`. 60 digits is too many to check reliably by eye; the machine does it. Both sides are normalized to digits first, so display spacing or a pasted newline never produces a false mismatch (a false alarm on a security screen teaches users to ignore it). Result renders in a `Semantics(liveRegion: true)` row with an ICON as well as colour.
+- Explainer naming the contact ("Compare this number with <name> over a channel you already trust: ...").
+- `_numberField` -- a `HollowCopyField` labelled "Safety number": 12 groups of 5, four to a line (so a person reading aloud keeps their place), copying the one-line grouped form. Grouping comes from the Rust `formatSafetyNumber()` so desktop and mobile cannot render the same number two different ways. No hand-drawn number card.
+- **Paste-compare** -- `SettingsFieldLabel` "Their number" + a `HollowTextField` ("Paste the number they sent you") whose `onChanged` runs the sync FFI `safetyNumbersMatch()`. 60 digits is too many to check reliably by eye; the machine does it. Both sides are normalized to digits first, so display spacing or a pasted newline never produces a false mismatch (a false alarm on a security screen teaches users to ignore it). Result renders in a `Semantics(liveRegion: true)` row with an ICON as well as colour.
 - Outstanding `security_alerts` for this contact, surfaced here too -- this is the moment the user decides whether to trust the person.
-- `_VerifiedRow` -- current state plus "Mark verified" / "Remove", with a `_busy` spinner and a success/error toast (the mutating provider rethrows).
+- `_VerifiedRow` -- a plain row (no card): shield icon + "You verified <name>." / "Not verified yet." and ONE compact outline, "Mark verified" or "Remove verification" (`danger: true`, cautionary), with `loading` and a success/error toast (the mutating provider rethrows).
 
 ### Failure handling
 
-`safetyNumberWith()` returning `Err` renders `_ErrorBox` INSTEAD of a number. The screen never shows a plausible-looking value it did not actually compute -- per the spec's own warning, a badge or number that fails to reflect reality is worse than none, because it asserts a safety that is not there.
+`safetyNumberWith()` returning `Err` renders `_ErrorLine` (alert icon + a `friendlyError` sentence, fallback "Hollow couldn't work out a safety number for this contact. Try again later.", live region) INSTEAD of a number. The screen never shows a plausible-looking value it did not actually compute -- per the spec's own warning, a badge or number that fails to reflect reality is worse than none, because it asserts a safety that is not there.
 
 ### No camera scanning
 

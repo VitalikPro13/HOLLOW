@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -24,12 +25,10 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
@@ -37,6 +36,8 @@ import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/profile_card_body.dart'
+    show profileRoleColor, showLocalNicknameDialog;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -63,19 +64,6 @@ void showMobileProfileSheet(
       labels: labels,
     ),
   );
-}
-
-Color _roleColor(String role, HollowTheme hollow) {
-  switch (role) {
-    case 'owner':
-      return hollow.warning;
-    case 'admin':
-      return const Color(0xFFA78BFA);
-    case 'moderator':
-      return Color.lerp(hollow.warning, hollow.error, 0.5) ?? hollow.warning;
-    default:
-      return hollow.textSecondary;
-  }
 }
 
 class MobileProfileSheet extends ConsumerWidget {
@@ -230,13 +218,13 @@ class MobileProfileSheet extends ConsumerWidget {
                     vertical: HollowSpacing.xs,
                   ),
                   decoration: BoxDecoration(
-                    color: _roleColor(role!, hollow).withValues(alpha: 0.15),
+                    color: profileRoleColor(role!, hollow).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Text(
                     roleDisplayName(role!),
                     style: HollowTypography.bodySmall.copyWith(
-                      color: _roleColor(role!, hollow),
+                      color: profileRoleColor(role!, hollow),
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -287,12 +275,12 @@ class MobileProfileSheet extends ConsumerWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(BrandIcons.twitch, size: 14, color: Color(0xFF9146FF)),
+                      const Icon(BrandIcons.twitch, size: 14, color: Color(0xFF9146FF)), // design-ignore: Twitch brand colour
                       const SizedBox(width: HollowSpacing.xs),
                       Text(
                         verifiedTwitch,
                         style: HollowTypography.bodySmall.copyWith(
-                          color: const Color(0xFF9146FF),
+                          color: const Color(0xFF9146FF), // design-ignore: Twitch brand colour
                         ),
                       ),
                     ],
@@ -417,15 +405,8 @@ class MobileProfileSheet extends ConsumerWidget {
   }
 
   void _showNicknameDialog(BuildContext context, WidgetRef ref) {
-    final current = ref.read(localNicknameProvider)[peerId] ?? '';
-    final controller = TextEditingController(text: current);
-    showHollowDialog(
-      context: context,
-      builder: (_) => _NicknameDialog(
-        peerId: peerId,
-        controller: controller,
-      ),
-    );
+    showLocalNicknameDialog(context, ref, peerId,
+        currentNickname: ref.read(localNicknameProvider)[peerId] ?? '');
   }
 }
 
@@ -440,60 +421,68 @@ Color _parseLabelColor(String hex) {
   return const Color(0xFF78909C);
 }
 
-class _FriendActionRow extends ConsumerWidget {
+class _FriendActionRow extends ConsumerStatefulWidget {
   final String peerId;
 
   const _FriendActionRow({required this.peerId});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_FriendActionRow> createState() => _FriendActionRowState();
+}
+
+class _FriendActionRowState extends ConsumerState<_FriendActionRow> {
+  bool _busy = false;
+
+  Future<void> _run(Future<void> Function() action,
+      {required String done, required String failed}) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        HollowToast.show(context, friendlyError(e, fallback: failed),
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+    HollowToast.show(context, done, type: HollowToastType.success);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final peerId = widget.peerId;
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
+    final notifier = ref.read(friendsProvider.notifier);
 
     // A `declined` row is a sticky reject tombstone, neither pending nor
     // accepted, so it reads as no row at all and the person can be re-added.
     if (friendInfo == null ||
         (friendInfo.status != 'pending' && friendInfo.status != 'accepted')) {
       return HollowButton.ghost(
-        onPressed: () async {
-          try {
-            await ref.read(friendsProvider.notifier).sendRequest(peerId);
-            if (context.mounted) {
-              HollowToast.show(context, 'Friend request sent',
-                  type: HollowToastType.success);
-            }
-          } catch (e) {
-            if (context.mounted) {
-              HollowToast.show(context, 'Failed to send request',
-                  type: HollowToastType.error);
-            }
-          }
-        },
+        onPressed: () => _run(() => notifier.sendRequest(peerId),
+            done: 'Friend request sent',
+            failed: "Couldn't send the request. Try again."),
+        loading: _busy,
         icon: const Icon(LucideIcons.userPlus, size: 16),
         expand: true,
-        child: const Text('Add Friend'),
+        child: const Text('Add friend'),
       );
     }
 
     if (friendInfo.status == 'pending' && friendInfo.direction == 'incoming') {
       return HollowButton.filled(
-        onPressed: () async {
-          try {
-            await ref.read(friendsProvider.notifier).acceptRequest(peerId);
-            if (context.mounted) {
-              HollowToast.show(context, 'Friend request accepted',
-                  type: HollowToastType.success);
-            }
-          } catch (_) {
-            if (context.mounted) {
-              HollowToast.show(context, 'Could not accept request',
-                  type: HollowToastType.error);
-            }
-          }
-        },
+        onPressed: () => _run(() => notifier.acceptRequest(peerId),
+            done: 'Friend request accepted',
+            failed: "Couldn't accept the request. Try again."),
+        loading: _busy,
         icon: const Icon(LucideIcons.check, size: 16),
         expand: true,
-        child: const Text('Accept Request'),
+        child: const Text('Accept request'),
       );
     }
 
@@ -502,7 +491,7 @@ class _FriendActionRow extends ConsumerWidget {
         onPressed: null,
         icon: Icon(LucideIcons.clock, size: 16),
         expand: true,
-        child: Text('Request Sent'),
+        child: Text('Request sent'),
       );
     }
 
@@ -520,80 +509,6 @@ class _FriendActionRow extends ConsumerWidget {
         ],
       ),
     );
-  }
-}
-
-class _NicknameDialog extends ConsumerStatefulWidget {
-  final String peerId;
-  final TextEditingController controller;
-
-  const _NicknameDialog({required this.peerId, required this.controller});
-
-  @override
-  ConsumerState<_NicknameDialog> createState() => _NicknameDialogState();
-}
-
-class _NicknameDialogState extends ConsumerState<_NicknameDialog> {
-  bool _saving = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowDialog(
-      title: 'Set nickname',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const HollowDialogText('Only visible to you.'),
-          const SizedBox(height: HollowSpacing.lg),
-          HollowTextField(
-            controller: widget.controller,
-            hintText: 'Nickname',
-            maxLength: 32,
-            showCounter: true,
-            autofocus: true,
-            onSubmitted: (_) => _save(),
-          ),
-        ],
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _save,
-          loading: _saving,
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _save() async {
-    if (_saving) return;
-    final nickname = widget.controller.text.trim();
-    setState(() => _saving = true);
-    try {
-      await ref
-          .read(localNicknameProvider.notifier)
-          .setNickname(widget.peerId, nickname);
-    } catch (_) {
-      if (mounted) {
-        setState(() => _saving = false);
-        HollowToast.show(context, 'Could not save nickname',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-    if (mounted) {
-      Navigator.of(context).pop();
-      HollowToast.show(
-        context,
-        nickname.isEmpty ? 'Nickname cleared' : 'Nickname set',
-        type: HollowToastType.success,
-      );
-    }
   }
 }
 

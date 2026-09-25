@@ -11,9 +11,9 @@
   ],
   "peers": ["a"],
   "steps": [
-    { "peer": "a", "op": "tap", "target": "semantics:New conversation", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "semantics:Add a server", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 1000 },
-    { "peer": "a", "op": "enter_text", "target": "hint:Server name", "value": "sweep3" },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "sweep3" },
     { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
     { "peer": "a", "op": "wait_for", "target": "text:sweep3", "timeout_ms": 30000 },
     { "peer": "a", "op": "wait", "ms": 1500 },

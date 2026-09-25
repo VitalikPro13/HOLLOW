@@ -4,6 +4,7 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -56,7 +57,11 @@ Future<void> loadImportedArchive(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, "Couldn't load the archive: $e",
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't load the archive. Check the file and try "
+                  'again.'),
           type: HollowToastType.error);
     }
   } finally {

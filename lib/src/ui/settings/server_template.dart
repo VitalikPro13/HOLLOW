@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -235,7 +236,10 @@ Future<void> exportServerTemplate(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, 'Export failed: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't export the template. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -351,24 +355,33 @@ Future<void> importServerTemplate(
       return;
     }
 
-    final confirmed = await _showConfirmationDialog(context, template, diff);
+    final confirmed = await showTemplateConfirmDialog(context, template, diff);
     if (confirmed != true || !context.mounted) return;
 
     // Non-dismissible: the apply runs channel deletes, creates and a polling
     // loop, so without this the UI sits silent until the terminal toast.
+    // Held so the finally removes THIS route, never whatever is on top.
+    Route<void>? progress;
     unawaited(showHollowDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const _TemplateApplyProgressDialog(),
+      builder: (ctx) {
+        progress = ModalRoute.of(ctx);
+        return const _TemplateApplyProgressDialog();
+      },
     ));
     try {
       await _applyTemplate(context, ref, server.serverId, template, diff);
     } finally {
-      if (context.mounted) Navigator.of(context).pop();
+      final route = progress;
+      if (route != null && route.isActive) route.navigator?.removeRoute(route);
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, 'Import failed: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't import the template. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -572,13 +585,20 @@ Future<void> _applyTemplate(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, 'Failed to apply template: $e',
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't apply the whole template. Check the "
+                  'channels and try again.'),
           type: HollowToastType.error);
     }
   }
 }
 
-Future<bool?> _showConfirmationDialog(
+/// Asks before a template changes the server, listing what changes. When it
+/// removes channels the confirm says so and is the danger button.
+@visibleForTesting
+Future<bool?> showTemplateConfirmDialog(
   BuildContext context,
   ServerTemplate template,
   TemplateDiff diff,
@@ -587,76 +607,48 @@ Future<bool?> _showConfirmationDialog(
     context: context,
     builder: (ctx) {
       final hollow = HollowTheme.of(ctx);
+      final removing = diff.channelsToRemove.length;
       return HollowDialog(
         title: 'Apply template',
+        width: 480,
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Apply "${template.name}" to this server?',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textPrimary),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              'Removed channels will disappear from the sidebar, but their '
-              'messages are never deleted. They remain in everyone\u2019s '
-              'local database.',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary),
-            ),
+            HollowDialogText('Apply "${template.name}" to this server?'),
             const SizedBox(height: HollowSpacing.lg),
-
             if (diff.nameChange != null ||
                 diff.descriptionChange != null ||
                 diff.iconChanged) ...[
               const HollowSectionHeader('Settings', dense: true),
               if (diff.nameChange != null)
-                _changeRow(hollow, LucideIcons.type,
-                    'Name \u2192 ${diff.nameChange}'),
+                _changeRow(hollow, 'The name becomes ${diff.nameChange}'),
               if (diff.descriptionChange != null)
-                _changeRow(hollow, LucideIcons.alignLeft,
-                    'Description will be updated'),
-              if (diff.iconChanged)
-                _changeRow(
-                    hollow, LucideIcons.image, 'Server icon will change'),
-              const SizedBox(height: HollowSpacing.md),
+                _changeRow(hollow, 'A new description'),
+              if (diff.iconChanged) _changeRow(hollow, 'A new server icon'),
+              const SizedBox(height: HollowSpacing.lg),
             ],
-
             if (diff.channelsToAdd.isNotEmpty) ...[
               const HollowSectionHeader('Channels to add', dense: true),
               for (final ch in diff.channelsToAdd)
-                _changeRow(
-                  hollow,
-                  ch.channelType == 'voice'
-                      ? LucideIcons.volume2
-                      : LucideIcons.hash,
-                  ch.name,
-                  color: hollow.accentText,
-                ),
-              const SizedBox(height: HollowSpacing.md),
+                _changeRow(hollow, ch.name, voice: ch.channelType == 'voice'),
+              const SizedBox(height: HollowSpacing.lg),
             ],
-
-            if (diff.channelsToRemove.isNotEmpty) ...[
+            if (removing > 0) ...[
               const HollowSectionHeader('Channels to remove', dense: true),
               for (final ch in diff.channelsToRemove)
-                _changeRow(
-                  hollow,
-                  ch.channelType == ChannelType.voice
-                      ? LucideIcons.volume2
-                      : LucideIcons.hash,
-                  ch.name,
-                  color: hollow.error,
-                ),
-              const SizedBox(height: HollowSpacing.md),
+                _changeRow(hollow, ch.name,
+                    voice: ch.channelType == ChannelType.voice),
+              const SizedBox(height: HollowSpacing.sm),
+              const HollowDialogText(
+                  'Removed channels disappear for everyone. Their messages '
+                  'stay on the devices that already have them.'),
+              const SizedBox(height: HollowSpacing.lg),
             ],
-
             if (diff.layoutChanged &&
                 diff.channelsToAdd.isEmpty &&
-                diff.channelsToRemove.isEmpty)
-              _changeRow(hollow, LucideIcons.layoutList,
-                  'Channel ordering will be updated'),
+                removing == 0)
+              _changeRow(hollow, 'The channel order changes'),
           ],
         ),
         actions: [
@@ -664,31 +656,39 @@ Future<bool?> _showConfirmationDialog(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: const Text('Cancel'),
           ),
-          // Filled, not danger: applying a template is not destructive, and red
-          // misreads as "this will delete something".
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Apply template'),
-          ),
+          if (removing > 0)
+            HollowButton.danger(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(removing == 1
+                  ? 'Apply and remove 1 channel'
+                  : 'Apply and remove $removing channels'),
+            )
+          else
+            HollowButton.filled(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Apply template'),
+            ),
         ],
       );
     },
   );
 }
 
-Widget _changeRow(HollowTheme hollow, IconData icon, String text,
-    {Color? color}) {
-  final c = color ?? hollow.textPrimary;
+/// One line of the change list; a channel carries its kind's glyph.
+Widget _changeRow(HollowTheme hollow, String text, {bool? voice}) {
   return Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
+    padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs),
     child: Row(
       children: [
-        Icon(icon, size: 14, color: c),
-        const SizedBox(width: HollowSpacing.sm),
+        if (voice != null) ...[
+          Icon(voice ? LucideIcons.volume2 : LucideIcons.hash,
+              size: 14, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+        ],
         Expanded(
           child: Text(
             text,
-            style: HollowTypography.body.copyWith(color: c, fontSize: 13),
+            style: HollowTypography.label.copyWith(color: hollow.textPrimary),
           ),
         ),
       ],

@@ -1,8 +1,9 @@
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -46,7 +47,8 @@ class _ImageCropDialog extends StatefulWidget {
   State<_ImageCropDialog> createState() => _ImageCropDialogState();
 }
 
-class _ImageCropDialogState extends State<_ImageCropDialog> {
+class _ImageCropDialogState extends State<_ImageCropDialog>
+    with HollowDialogAction {
   ui.Image? _decodedImage;
   bool _imageLoaded = false;
 
@@ -63,6 +65,18 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
   late Rect _cropAtDragStart;
 
   static const double _minCropSide = 40;
+
+  /// The corner handle's hit area, the desktop target minimum, around a
+  /// small painted square.
+  static const double _handleHit = 28;
+  static const double _handleMark = 10;
+
+  /// The loading box before the image decodes.
+  static const Size _placeholder = Size(300, 200);
+
+  /// One arrow-key step of the crop, and a Shift step.
+  static const double _nudge = HollowSpacing.xs;
+  static const double _bigNudge = HollowSpacing.lg;
 
   @override
   void initState() {
@@ -173,40 +187,67 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
   }
 
   Future<void> _onConfirm() async {
-    if (_decodedImage == null) return;
+    final image = _decodedImage;
+    if (image == null) return;
+    Uint8List? bytes;
+    final ok = await runDialogAction(() async {
+      final scaleX = image.width / _displayW;
+      final scaleY = image.height / _displayH;
+      final srcRect = Rect.fromLTWH(
+        _cropRect.left * scaleX,
+        _cropRect.top * scaleY,
+        _cropRect.width * scaleX,
+        _cropRect.height * scaleY,
+      );
+      final outW = srcRect.width.round();
+      final outH = srcRect.height.round();
 
-    final imgW = _decodedImage!.width.toDouble();
-    final imgH = _decodedImage!.height.toDouble();
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawImageRect(
+        image,
+        srcRect,
+        Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
+        Paint()..filterQuality = FilterQuality.high,
+      );
+      final cropped = await recorder.endRecording().toImage(outW, outH);
+      final data = await cropped.toByteData(format: ui.ImageByteFormat.png);
+      cropped.dispose();
+      if (data == null) throw StateError('no PNG bytes');
+      bytes = data.buffer.asUint8List();
+    }, fallback: "Couldn't crop that image. Try again.");
+    if (ok && mounted) Navigator.of(context).pop(bytes);
+  }
 
-    final scaleX = imgW / _displayW;
-    final scaleY = imgH / _displayH;
-    final srcRect = Rect.fromLTWH(
-      _cropRect.left * scaleX,
-      _cropRect.top * scaleY,
-      _cropRect.width * scaleX,
-      _cropRect.height * scaleY,
-    );
-
-    final outW = srcRect.width.round();
-    final outH = srcRect.height.round();
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final paint = Paint()..filterQuality = FilterQuality.high;
-    canvas.drawImageRect(
-      _decodedImage!,
-      srcRect,
-      Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
-      paint,
-    );
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(outW, outH);
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-
-    if (byteData != null && mounted) {
-      Navigator.of(context).pop(byteData.buffer.asUint8List());
+  /// Arrow keys move the crop; Enter applies it.
+  KeyEventResult _onKey(FocusNode _, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
     }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      _onConfirm();
+      return KeyEventResult.handled;
+    }
+    if (!_imageLoaded) return KeyEventResult.ignored;
+    final step = HardwareKeyboard.instance.isShiftPressed ? _bigNudge : _nudge;
+    final delta = switch (key) {
+      LogicalKeyboardKey.arrowLeft => Offset(-step, 0),
+      LogicalKeyboardKey.arrowRight => Offset(step, 0),
+      LogicalKeyboardKey.arrowUp => Offset(0, -step),
+      LogicalKeyboardKey.arrowDown => Offset(0, step),
+      _ => null,
+    };
+    if (delta == null) return KeyEventResult.ignored;
+    setState(() {
+      _cropRect = Rect.fromLTWH(
+        (_cropRect.left + delta.dx).clamp(0.0, _displayW - _cropRect.width),
+        (_cropRect.top + delta.dy).clamp(0.0, _displayH - _cropRect.height),
+        _cropRect.width,
+        _cropRect.height,
+      );
+    });
+    return KeyEventResult.handled;
   }
 
   @override
@@ -220,9 +261,12 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
     final hollow = HollowTheme.of(context);
 
     // Not HollowDialog: its scrolling body would contend with the crop drags.
-    return HollowDialogSurface(
-      width: max(_displayW, 300) + HollowSpacing.xl * 2,
-      child: Column(
+    Widget dialog = HollowDialogSurface(
+      width: max(_displayW, _placeholder.width) + HollowSpacing.xl * 2,
+      child: Focus(
+        autofocus: true,
+        onKeyEvent: _onKey,
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -234,7 +278,7 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
           ),
           const SizedBox(height: HollowSpacing.xs),
           Text(
-            'Drag to move, corners to resize',
+            'Drag to move, corners to resize. Arrow keys move it too.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
             ),
@@ -262,7 +306,7 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                             child: CustomPaint(
                               painter: _CropOverlayPainter(
                                 cropRect: _cropRect,
-                                overlayColor: Colors.black.withValues(alpha: 0.6),
+                                overlayColor: HollowColors.mediaScrim,
                                 borderColor: hollow.accent,
                               ),
                             ),
@@ -289,43 +333,57 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                       ],
                     ),
                   )
-                : const SizedBox(
-                    width: 300,
-                    height: 200,
-                    child: Center(
+                : SizedBox.fromSize(
+                    size: _placeholder,
+                    child: const Center(
                       child: HollowSpinner.large(),
                     ),
                   ),
           ),
 
-          const SizedBox(height: HollowSpacing.xl),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              HollowButton.ghost(
-                onPressed: () => Navigator.of(context).pop(null),
-                child: const Text('Cancel'),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowButton.filled(
-                onPressed: _onConfirm,
-                child: const Text('Apply'),
-              ),
-            ],
+          if (actionError != null) ...[
+            const SizedBox(height: HollowSpacing.lg),
+            Text(
+              actionError!,
+              style: HollowTypography.bodySmall.copyWith(color: hollow.error),
+            ),
+          ],
+          SizedBox(
+              height: actionError != null ? HollowSpacing.md : HollowSpacing.xl),
+          HollowButtonTouchScope(
+            touch: HollowDialogSurface.isCompact(context),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                HollowButton.ghost(
+                  onPressed: actionRunning
+                      ? null
+                      : () => Navigator.of(context).pop(null),
+                  child: const Text('Cancel'),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowButton.filled(
+                  onPressed: _onConfirm,
+                  loading: actionRunning,
+                  child: const Text('Apply'),
+                ),
+              ],
+            ),
           ),
         ],
       ),
+      ),
     );
+    if (actionRunning) dialog = PopScope(canPop: false, child: dialog);
+    return dialog;
   }
 
   Widget _buildHandle(HollowTheme hollow, Offset center, _DragMode mode, MouseCursor cursor) {
-    const handleSize = 18.0;
-    const visualSize = 10.0;
     return Positioned(
-      left: center.dx - handleSize / 2,
-      top: center.dy - handleSize / 2,
-      width: handleSize,
-      height: handleSize,
+      left: center.dx - _handleHit / 2,
+      top: center.dy - _handleHit / 2,
+      width: _handleHit,
+      height: _handleHit,
       child: GestureDetector(
         onPanStart: (d) => _onPanStart(d, mode),
         onPanUpdate: _onPanUpdate,
@@ -334,12 +392,12 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
           cursor: cursor,
           child: Center(
             child: Container(
-              width: visualSize,
-              height: visualSize,
+              width: _handleMark,
+              height: _handleMark,
               decoration: BoxDecoration(
                 color: hollow.accent,
-                borderRadius: BorderRadius.circular(2),
-                border: Border.all(color: Colors.white, width: 1),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
+                border: Border.all(color: HollowColors.onMedia),
               ),
             ),
           ),

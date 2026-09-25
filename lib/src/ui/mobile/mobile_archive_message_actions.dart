@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
@@ -41,7 +42,7 @@ Future<void> saveArchivedAttachmentMobile(
     }
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, "Couldn't save the file: $e",
+      HollowToast.show(context, friendlyError(e, fallback: "Couldn't save the file. Try again."),
           type: HollowToastType.error);
     }
   } finally {

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
 /// Open the encrypted message database, once at app start after the identity loads.
 Future<void> openMessageStore() =>
@@ -86,6 +86,19 @@ Future<Uint8List?> getAvatar({required String peerId}) =>
 /// Get only the banner bytes for a peer (lazy load for profile card/DM header).
 Future<Uint8List?> getBanner({required String peerId}) =>
     RustLib.instance.api.crateApiStorageGetBanner(peerId: peerId);
+
+/// Stores an ended DM call. A call id already stored is left unchanged.
+Future<void> recordDmCall({required CallRecord record}) =>
+    RustLib.instance.api.crateApiStorageRecordDmCall(record: record);
+
+/// The newest `limit` calls with `peer_id` (a MASTER id), oldest first.
+Future<List<CallRecord>> loadDmCallRecords({
+  required String peerId,
+  required int limit,
+}) => RustLib.instance.api.crateApiStorageLoadDmCallRecords(
+  peerId: peerId,
+  limit: limit,
+);
 
 /// Save a key-value setting to the local database.
 Future<void> saveSetting({required String key, required String value}) =>
@@ -432,6 +445,63 @@ class AppliedReadMarker {
           runtimeType == other.runtimeType &&
           key == other.key &&
           messageId == other.messageId;
+}
+
+/// One ended DM call, as this device saw it. Local only: it never rides the wire,
+/// and it lives outside the message table so no sync, count or export reads it.
+class CallRecord {
+  final String callId;
+
+  /// The conversation's MASTER id.
+  final String peerId;
+  final bool outgoing;
+  final bool video;
+
+  /// How it ended: answered, missed, declined, cancelled, unanswered, failed.
+  final String outcome;
+
+  /// When it began ringing, in milliseconds.
+  final PlatformInt64 startedAt;
+
+  /// When it connected; `None` for a call that never did.
+  final PlatformInt64? connectedAt;
+  final PlatformInt64 endedAt;
+
+  const CallRecord({
+    required this.callId,
+    required this.peerId,
+    required this.outgoing,
+    required this.video,
+    required this.outcome,
+    required this.startedAt,
+    this.connectedAt,
+    required this.endedAt,
+  });
+
+  @override
+  int get hashCode =>
+      callId.hashCode ^
+      peerId.hashCode ^
+      outgoing.hashCode ^
+      video.hashCode ^
+      outcome.hashCode ^
+      startedAt.hashCode ^
+      connectedAt.hashCode ^
+      endedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CallRecord &&
+          runtimeType == other.runtimeType &&
+          callId == other.callId &&
+          peerId == other.peerId &&
+          outgoing == other.outgoing &&
+          video == other.video &&
+          outcome == other.outcome &&
+          startedAt == other.startedAt &&
+          connectedAt == other.connectedAt &&
+          endedAt == other.endedAt;
 }
 
 /// A friend entry returned to Dart.

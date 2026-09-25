@@ -373,7 +373,8 @@ Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent`
 **Hover effects:**
 - NO hover glow (the old 8px BoxShadow halo painted outside the button's outline — removed 2026-07-05).
 - Outline variant: border alpha increases from 0.4 to 0.6 on hover.
-- Disabled: opacity fixed at 0.4 via `AlwaysStoppedAnimation`.
+- Disabled (2026-09-25, design language 4.2): **neutral at FULL opacity**, never a faded accent: label `textTertiary`; filled and danger get a `textPrimary` 8% fill, outline a `textTertiary` 40% border, ghost stays bare (the old 0.4 opacity is gone).
+- `HollowButtonTouchScope(touch:)` (an `InheritedWidget`) makes every `HollowButton` below it touch-sized; phone dialogs use it for their action rows.
 
 **Content layout:** Row with an optional leading icon (in `IconTheme` with `fg` color) + `DefaultTextStyle` using `HollowTypography.label`.
 
@@ -444,7 +445,7 @@ Top-level function wrapping `showGeneralDialog`. Returns `Future<T?>`.
 
 `StatelessWidget`. Dark-themed dialog container.
 
-**Parameters:** `title` (String), `content` (Widget), `actions` (List<Widget>).
+**Parameters:** `title` (String), `content` (Widget), `actions` (List<Widget>), `leadingActions` (ghost actions at the leading edge), `showClose`, `width` / `maxWidth` (600), `scrollable` (false for content that scrolls itself), `busy` (an action is running: the scrim, Escape and the close button stop dismissing), `error` (why the last action failed, one line above the actions; a field's own failure goes on that field's `errorText`). The shared confirm and prompt built on it (`showHollowConfirm(onConfirm:)`, `promptForName(onSubmit:)`, the `HollowDialogAction` mixin, `HollowDialogSurface`): wiki `ui_dialogs`. The layout notes below predate the dialogs pass (2026-09-25); `ui_dialogs` is current.
 
 **Layout:** `Center` > `Padding(xl)` > `ConstrainedBox(maxWidth: 600, minWidth: 300 [or screenWidth-padding on phones], maxHeight: screenHeight - xl*2)` > `Material(transparent)` > `Container`.
 
@@ -802,7 +803,7 @@ Top-level function. Creates `OverlayEntry` with `_FolderPopupOverlay`. Callbacks
 
 ### showFolderRenameDialog()
 
-Opens `showHollowDialog` with `_FolderRenameDialog` — text field (maxLength 32, autofocus) + Cancel/Save buttons. Saves via `serverStripLayoutProvider.notifier.renameFolder(id, name)`.
+The shared `promptForName` ("Rename folder", maxLength 32, confirm "Rename"); `onSubmit` runs `serverStripLayoutProvider.notifier.renameFolder(id, name)` inside the dialog. See wiki `ui_server_strip`.
 
 
 ## ProfileCardPopup
@@ -849,4 +850,4 @@ Top-level function. Creates `OverlayEntry` with `_ProfileCardOverlay`. Accepts `
 
 ### showLocalNicknameDialog()
 
-Opens `showHollowDialog` with `_LocalNicknameDialog`. TextField (maxLength 32, hint "Nickname (leave empty to clear)"). Saves via `localNicknameProvider.notifier.setNickname(peerId, nickname)`.
+THE nickname dialog for every surface, desktop and phone (profile card, DM profile panel, user menu, Friends Manager, phone friends sheet, phone profile sheet). The shared `promptForName`: "Set nickname", "Only you see it.", hint "Nickname (leave empty to clear)", maxLength 32, `allowEmpty`, confirm "Save"; `onSubmit` runs `localNicknameProvider.notifier.setNickname(peerId, name)` inside the dialog, then toasts "Nickname set" / "Nickname cleared". Lives in `profile_card_body.dart`; `_LocalNicknameDialog` and the phone's own `_NicknameDialog` are gone.

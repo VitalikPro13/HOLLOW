@@ -531,12 +531,12 @@ try {
     # --- G1: friends, a server, both directions. ---------------------------
     Say '1/6 friends + server baseline'
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'text:Add Friend'; index = 0 }
-    Step b @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_A}' }
+    Step b @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+    Step b @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_A}' }
     Step b @{ op = 'wait_for'; target = 'text:${PEER_A}'; timeout_ms = 15000 }
-    Step b @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+    Step b @{ op = 'tap'; target = 'text:Send request'; index = 0 }
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'text:Incoming'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:probe-b'; timeout_ms = 60000 }

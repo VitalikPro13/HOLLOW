@@ -3,6 +3,9 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
+    show AnyhowException;
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -63,18 +66,15 @@ Future<void> importHollowpackAt(
     imported = await network_api.importHollowpack(path: path);
   } catch (e) {
     if (!context.mounted) return;
-    // The Rust errors are the user's business: a bad signature, an oversized
-    // file, a hash that does not match its bytes.
-    final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
     await showHollowDialog<void>(
       context: context,
       builder: (dialogContext) => HollowDialog(
-        title: 'That pack could not be imported',
-        content: HollowDialogText(message),
+        title: "Couldn't import that pack",
+        content: HollowDialogText(hollowpackFailureSentence(e)),
         actions: [
           HollowButton.filled(
             onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('OK'),
+            child: const Text('Got it'),
           ),
         ],
       ),
@@ -87,7 +87,45 @@ Future<void> importHollowpackAt(
   await showImportedPackDialog(context, ref, imported);
 }
 
-/// What the pack contained, and one button per wearable kind.
+/// Why a pack was refused, as a sentence with a next step. Rust names the
+/// exact check that failed; a person only needs to know what to do about it.
+String hollowpackFailureSentence(Object error) {
+  final raw = switch (error) {
+    AnyhowException(:final message) => message,
+    _ => error.toString(),
+  };
+  final lower = raw.toLowerCase();
+  bool has(List<String> needles) => needles.any(lower.contains);
+  if (has(['newer version'])) {
+    return 'This pack was made by a newer version of Hollow. Update Hollow, '
+        'then import it again.';
+  }
+  if (has(['to be real', 'claims', 'does not match', 'missing the file',
+      'malformed', 'twice', 'animates', 'does not animate', 'has to be',
+      'unreadable', 'zero dimensions', 'no frames', 'failed to decode',
+      'carries no files', 'lists a file role'])) {
+    return 'This pack is damaged or was changed after the shop made it. '
+        'Download it again from where you bought it.';
+  }
+  if (has(['too large', 'over the', 'more than', 'at most'])) {
+    return 'This pack is bigger than Hollow accepts. Ask the artist for a '
+        'smaller one.';
+  }
+  if (has(['not a hollow art pack', 'not a valid art pack', 'not a webp',
+      'manifest'])) {
+    return "This file isn't a Hollow art pack, or it's damaged. Download it "
+        'again from where you bought it.';
+  }
+  if (has(['failed to open the pack', 'failed to read the pack'])) {
+    return "Hollow couldn't read that file. Check that it's still there and "
+        'try again.';
+  }
+  return friendlyError(error,
+      fallback: "Hollow couldn't import this pack. Download it again from "
+          'where you bought it and try once more.');
+}
+
+/// What the pack contained, with the art ready to wear.
 Future<void> showImportedPackDialog(
   BuildContext context,
   WidgetRef ref,
@@ -109,48 +147,34 @@ class _ImportedPackDialog extends ConsumerStatefulWidget {
       _ImportedPackDialogState();
 }
 
-class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
-  /// Which button is mid-save, so only that one shows a spinner.
-  String? _busyKey;
-
-  Future<void> _wear(String key, Set<String> kinds) async {
-    final item = ref
-        .read(ownedArtProvider)
-        .where((i) => i.itemId == widget.result.itemId)
-        .firstOrNull;
-    if (item == null) {
-      HollowToast.show(context, 'That item is no longer in your library',
-          type: HollowToastType.error);
-      return;
-    }
-    setState(() => _busyKey = key);
-    try {
+class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog>
+    with HollowDialogAction {
+  Future<void> _wear(Set<String> kinds) async {
+    final worn = await runDialogAction(() async {
+      final item = ref
+          .read(ownedArtProvider)
+          .where((i) => i.itemId == widget.result.itemId)
+          .firstOrNull;
+      if (item == null) {
+        throw const FriendlyException(
+            'That item is no longer in your library.');
+      }
       await ref.read(ownedArtProvider.notifier).wear(item, kinds);
-      if (!mounted) return;
-      HollowToast.show(context, 'Wearing ${item.title}',
-          type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      HollowToast.show(context, message, type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _busyKey = null);
-    }
+    });
+    if (!worn || !mounted) return;
+    final title = widget.result.title;
+    final overlay = Overlay.of(context);
+    Navigator.of(context).pop();
+    HollowToast.show(context, 'Wearing $title',
+        type: HollowToastType.success, overlayState: overlay);
   }
 
-  Widget _wearButton({
-    required String key,
-    required String label,
-    required Set<String> kinds,
-    required bool filled,
-  }) {
-    final busy = _busyKey == key;
-    final onPressed = _busyKey == null ? () => _wear(key, kinds) : null;
-    final child = Text(label);
-    return filled
-        ? HollowButton.filled(onPressed: onPressed, loading: busy, child: child)
-        : HollowButton.outline(
-            onPressed: onPressed, loading: busy, child: child);
+  static String _fileLabel(network_api.HollowpackFile file) {
+    final role = ownedRoleLabel(file.role);
+    // The animated slots already read "Animated avatar".
+    return file.animated && !role.toLowerCase().contains('animated')
+        ? '$role, animated'
+        : role;
   }
 
   @override
@@ -165,27 +189,18 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
     final kinds = item?.kinds ?? const <String>[];
 
     return HollowDialog(
-      title: 'Imported',
+      title: '${result.title} is in your library',
+      width: 420,
       // With nothing to wear there is nothing to confirm.
       showClose: kinds.isEmpty,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            result.title,
-            style: HollowTypography.body.copyWith(
-              color: hollow.textPrimary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'by ${result.artistName}',
-            style:
-                HollowTypography.caption.copyWith(color: hollow.textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.md),
+          HollowDialogText('By ${result.artistName}.'),
+          const SizedBox(height: HollowSpacing.lg),
           for (final file in result.files)
             Padding(
               padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
@@ -195,9 +210,8 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
                   const SizedBox(width: HollowSpacing.md),
                   Expanded(
                     child: Text(
-                      '${ownedRoleLabel(file.role)}  ${file.w}x${file.h}'
-                      '${file.animated ? '  animated' : ''}',
-                      style: HollowTypography.caption
+                      _fileLabel(file),
+                      style: HollowTypography.label
                           .copyWith(color: hollow.textSecondary),
                     ),
                   ),
@@ -205,7 +219,7 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
               ),
             ),
           if (result.license.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.md),
+            const SizedBox(height: HollowSpacing.lg),
             Text(
               result.license,
               style: HollowTypography.caption
@@ -215,27 +229,21 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
         ],
       ),
       actions: [
-        if (kinds.isNotEmpty)
+        if (kinds.isNotEmpty) ...[
           HollowButton.ghost(
             onPressed:
-                _busyKey == null ? () => Navigator.of(context).pop() : null,
-            child: const Text('Done'),
+                actionRunning ? null : () => Navigator.of(context).pop(),
+            child: const Text('Not now'),
           ),
-        for (final kind in kinds)
-          _wearButton(
-            key: kind,
-            label: wearKindLabel(kind),
-            kinds: {kind},
-            // With more than one kind, "Wear all" becomes the primary action.
-            filled: kinds.length == 1,
+          // One kind wears by name; a bundle wears whole, and single pieces
+          // of it stay a tap away in Your art.
+          HollowButton.filled(
+            onPressed: () => _wear(kinds.toSet()),
+            loading: actionRunning,
+            child: Text(
+                kinds.length == 1 ? wearKindLabel(kinds.single) : 'Wear all'),
           ),
-        if (kinds.length >= 2)
-          _wearButton(
-            key: 'all',
-            label: 'Wear all',
-            kinds: kinds.toSet(),
-            filled: true,
-          ),
+        ],
       ],
     );
   }

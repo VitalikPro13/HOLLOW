@@ -33,9 +33,9 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart' show SettingsSwitchRow;
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart';
 import 'package:hollow/src/ui/shell/place_header.dart';
@@ -261,12 +261,12 @@ class _RoomFormDialog extends ConsumerStatefulWidget {
   ConsumerState<_RoomFormDialog> createState() => _RoomFormDialogState();
 }
 
-class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
+class _RoomFormDialogState extends ConsumerState<_RoomFormDialog>
+    with HollowDialogAction {
   late final TextEditingController _nameController;
   late final TextEditingController _codeController;
   late bool _waitingRoom;
   bool _removeCode = false;
-  bool _saving = false;
 
   bool get _isEdit => widget.room != null;
 
@@ -285,47 +285,50 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
     super.dispose();
   }
 
+  /// Stays open until the room is saved, so a failure keeps what was typed.
   Future<void> _submit() async {
     final name = _nameController.text.trim();
-    if (name.isEmpty || _saving) return;
-    setState(() => _saving = true);
+    if (name.isEmpty) return;
     final notifier = ref.read(conferenceProvider.notifier);
     final code = _codeController.text.trim();
-    if (_isEdit) {
-      // COALESCE convention: null keeps the existing code, '' clears it.
-      final String? accessCode =
-          _removeCode ? '' : (code.isEmpty ? null : code);
-      await notifier.updateRoom(
-        confId: widget.room!.confId,
-        name: name,
-        waitingRoom: _waitingRoom,
-        accessCode: accessCode,
-        broadcastMode: widget.room!.broadcastMode,
-      );
-    } else {
-      await notifier.createRoom(
-        name: name,
-        waitingRoom: _waitingRoom,
-        accessCode: code,
-      );
-    }
-    if (mounted) Navigator.of(context).pop();
+    final room = widget.room;
+    final saved = await runDialogAction(
+      () => room != null
+          ? notifier.updateRoom(
+              confId: room.confId,
+              name: name,
+              waitingRoom: _waitingRoom,
+              // COALESCE convention: null keeps the existing code, '' clears.
+              accessCode: _removeCode ? '' : (code.isEmpty ? null : code),
+              broadcastMode: room.broadcastMode,
+            )
+          : notifier.createRoom(
+              name: name,
+              waitingRoom: _waitingRoom,
+              accessCode: code,
+            ),
+      fallback: room != null
+          ? "Couldn't save the room. Try again."
+          : "Couldn't create the room. Try again.",
+    );
+    if (saved && mounted) Navigator.of(context).pop();
   }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final hasCode = widget.room?.hasAccessCode ?? false;
 
     return HollowDialog(
       title: _isEdit ? 'Edit room' : 'Create room',
       width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SettingsFieldLabel(label: 'Room name'),
-          const SizedBox(height: HollowSpacing.xs),
+          const SizedBox(height: HollowSpacing.sm),
           HollowTextField(
             controller: _nameController,
             hintText: 'e.g. Weekly sync',
@@ -336,70 +339,48 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
             onSubmitted: (_) => _submit(),
           ),
           const SizedBox(height: HollowSpacing.md),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Waiting room',
-                        style: HollowTypography.body
-                            .copyWith(color: hollow.textPrimary)),
-                    Text(
-                      'Approve each joiner before they enter',
-                      style: HollowTypography.caption
-                          .copyWith(color: hollow.textSecondary),
-                    ),
-                  ],
-                ),
-              ),
-              HollowToggle(
-                value: _waitingRoom,
-                semanticLabel: 'Waiting room',
-                onChanged: (v) => setState(() => _waitingRoom = v),
-              ),
-            ],
+          SettingsSwitchRow(
+            title: 'Waiting room',
+            subtitle: 'Approve each joiner before they enter',
+            value: _waitingRoom,
+            onChanged: (v) => setState(() => _waitingRoom = v),
           ),
           const SizedBox(height: HollowSpacing.md),
-          const SettingsFieldLabel(label: 'Access code (optional)'),
-          const SizedBox(height: HollowSpacing.xs),
-          HollowTextField(
-            controller: _codeController,
-            hintText: _isEdit && hasCode && !_removeCode
-                ? 'Unchanged. Type to replace'
-                : 'Leave empty for none',
-            maxLength: 64,
-            showCounter: false,
-          ),
-          if (_isEdit && hasCode) ...[
+          if (_isEdit && hasCode)
+            SettingsSwitchRow(
+              title: 'Remove access code',
+              subtitle: 'Anyone with the link can ask to join',
+              value: _removeCode,
+              onChanged: (v) => setState(() => _removeCode = v),
+            ),
+          // Removing the code and typing a new one would contradict each
+          // other, so the field steps aside while the code is being removed.
+          if (!_removeCode) ...[
+            if (_isEdit && hasCode) const SizedBox(height: HollowSpacing.md),
+            SettingsFieldLabel(
+                label: _isEdit && hasCode
+                    ? 'New access code (optional)'
+                    : 'Access code (optional)'),
             const SizedBox(height: HollowSpacing.sm),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Remove access code',
-                    style: HollowTypography.body
-                        .copyWith(color: hollow.textPrimary),
-                  ),
-                ),
-                HollowToggle(
-                  value: _removeCode,
-                  semanticLabel: 'Remove access code',
-                  onChanged: (v) => setState(() => _removeCode = v),
-                ),
-              ],
+            HollowTextField(
+              controller: _codeController,
+              hintText: _isEdit && hasCode
+                  ? 'Leave empty to keep the current code'
+                  : 'Leave empty for none',
+              maxLength: 64,
+              showCounter: false,
+              onSubmitted: (_) => _submit(),
             ),
           ],
         ],
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          loading: _saving,
+          loading: actionRunning,
           onPressed: _nameController.text.trim().isEmpty ? null : _submit,
           child: Text(_isEdit ? 'Save' : 'Create'),
         ),
@@ -425,7 +406,8 @@ class _JoinConferenceDialog extends ConsumerStatefulWidget {
       _JoinConferenceDialogState();
 }
 
-class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
+class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog>
+    with HollowDialogAction {
   static final _idRe = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
   final _controller = TextEditingController();
   String? _error;
@@ -438,7 +420,7 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
 
   Future<void> _join() async {
     final text = _controller.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || actionRunning) return;
     String? confId;
     final link = classifyHollowLink(text);
     if (link != null) {
@@ -462,26 +444,29 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
       setState(() => _error = 'Paste a meeting link or its id');
       return;
     }
+    final id = confId;
+    // The relay check may ask to switch relays, so it runs before the
+    // dialog shows its own busy state.
     if (!await ensureRelayForInviteId(context, ref,
-        type: HollowLinkType.conference,
-        id: confId,
-        relay: link?.relay)) {
+        type: HollowLinkType.conference, id: id, relay: link?.relay)) {
       return;
     }
     if (!mounted) return;
-    Navigator.of(context).pop();
-    unawaited(ref
-        .read(conferenceProvider.notifier)
-        .requestJoin(confId)
-        .catchError((_) {}));
+    final notifier = ref.read(conferenceProvider.notifier);
+    if (await runDialogAction(() => notifier.requestJoin(id),
+            fallback: "Couldn't reach the meeting. Try again.") &&
+        mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return HollowDialog(
       title: 'Join a meeting',
       width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -490,30 +475,24 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _controller,
-            hintText: 'hollow://conference/… or meeting id',
+            hintText: 'Paste the meeting link',
             autofocus: true,
+            errorText: _error,
             onSubmitted: (_) => _join(),
             onChanged: (_) {
               if (_error != null) setState(() => _error = null);
             },
           ),
-          if (_error != null) ...[
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              _error!,
-              style:
-                  HollowTypography.caption.copyWith(color: hollow.error),
-            ),
-          ],
         ],
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
           onPressed: _join,
+          loading: actionRunning,
           child: const Text('Join'),
         ),
       ],

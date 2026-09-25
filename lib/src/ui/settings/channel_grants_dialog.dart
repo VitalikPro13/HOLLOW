@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/moderation_format.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -8,27 +8,21 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_duration_picker.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/settings/manage_member_dialog.dart'
+    show grantRemainingLabel, optimisticGrant;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-/// Grant duration options as (label, seconds); 0 means until revoked. Public
-/// for the tests.
-const kGrantDurationOptions = <(String, int)>[
-  ('15 minutes', 900),
-  ('1 hour', 3600),
-  ('24 hours', 86400),
-  ('Until revoked', 0),
-];
 
 /// Temporary channel access manager: the active grants and a member picker to
 /// add one. A grant removes itself at expiry.
@@ -66,45 +60,85 @@ class _ChannelGrantsDialog extends ConsumerStatefulWidget {
       _ChannelGrantsDialogState();
 }
 
-class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
+class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog>
+    with HollowDialogAction {
   _View _view = _View.overview;
   String? _pendingPeerId;
   String _pendingName = '';
-  bool _busy = false;
+  Duration? _duration = const Duration(hours: 1);
+
+  /// This dialog's own writes by member, null for a removal: a refetch right
+  /// after a queued CrdtStore write still returns the previous grants.
+  final Map<String, crdt_api.ChannelGrantFfi?> _written = {};
+  final Set<String> _revoking = {};
+  late final ProviderContainer _container;
 
   ({String serverId, String channelId}) get _key =>
       (serverId: widget.serverId, channelId: widget.channelId);
 
   @override
+  void initState() {
+    super.initState();
+    _container = ProviderScope.containerOf(context, listen: false);
+  }
+
+  @override
+  void dispose() {
+    // By now the writes have landed: other surfaces reread the grants.
+    if (_written.isNotEmpty) _container.invalidate(channelGrantsProvider(_key));
+    super.dispose();
+  }
+
+  List<crdt_api.ChannelGrantFfi> _grants() {
+    final stored = ref.watch(channelGrantsProvider(_key)).valueOrNull ??
+        const <crdt_api.ChannelGrantFfi>[];
+    return [
+      for (final g in stored)
+        if (!_written.containsKey(g.peerId)) g,
+      for (final g in _written.values) ?g,
+    ];
+  }
+
+  @override
   Widget build(BuildContext context) {
     return HollowDialog(
-      title: 'Temporary access: #${widget.channelName}',
+      title: 'Temporary access to #${widget.channelName}',
+      width: 480,
       showClose: _view == _View.overview,
+      busy: actionRunning,
+      error: _view == _View.pickDuration ? actionError : null,
       content: switch (_view) {
         _View.overview => _buildOverview(context),
         _View.pickDuration => _buildDurationPicker(context),
       },
       actions: [
-        if (_view == _View.pickDuration)
+        if (_view == _View.pickDuration) ...[
           HollowButton.ghost(
-            onPressed: _busy
+            onPressed: actionRunning
                 ? null
-                : () => setState(() => _view = _View.overview),
+                : () => setState(() {
+                      _view = _View.overview;
+                      actionError = null;
+                    }),
             child: const Text('Back'),
           ),
+          HollowButton.filled(
+            onPressed: _grant,
+            loading: actionRunning,
+            child: const Text('Give access'),
+          ),
+        ],
       ],
     );
   }
 
   Widget _buildOverview(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final grants = ref.watch(channelGrantsProvider(_key)).valueOrNull ??
-        const <crdt_api.ChannelGrantFfi>[];
+    final grants = _grants();
     final membersAsync = ref.watch(serverMembersProvider(widget.serverId));
     final profiles = ref.watch(profileProvider);
     final myPeerId = ref.watch(identityProvider).peerId ?? '';
     final granted = grants.map((g) => g.peerId).toSet();
-    final now = DateTime.now().millisecondsSinceEpoch;
 
     String nameFor(String peerId) {
       final member = membersAsync.valueOrNull
@@ -114,110 +148,78 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
           nickname: member?.nickname ?? '');
     }
 
+    // The id suffix only where it tells two people apart.
+    final grantNames = [for (final g in grants) nameFor(g.peerId)];
+    String? subtitleFor(int i) {
+      final name = grantNames[i];
+      final shared = grantNames.where((n) => n == name).length > 1;
+      final left = grantRemainingLabel(grants[i]);
+      return shared ? '${shortPeerIdSuffix(grants[i].peerId)} · $left' : left;
+    }
+
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const HollowDialogText(
-          'Grant a member time-boxed access to this channel. Access is '
-          'removed automatically when the timer runs out.',
+          'Let one member into this channel for a while. Their access ends '
+          'on its own when the time is up.',
         ),
-        const SizedBox(height: HollowSpacing.lg),
         if (grants.isNotEmpty) ...[
-          SettingsCard(
-            title: 'Active Grants',
-            children: [
-              for (final (i, g) in grants.indexed)
-                Padding(
-                  padding: EdgeInsets.only(
-                    bottom:
-                        i == grants.length - 1 ? 0 : HollowSpacing.sm,
-                  ),
-                  child: Row(
-                    children: [
-                      HollowAvatar(peerId: g.peerId, size: 28),
-                      const SizedBox(width: HollowSpacing.md),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              nameFor(g.peerId),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: HollowTypography.body.copyWith(
-                                color: hollow.textPrimary,
-                              ),
-                            ),
-                            Text(
-                              '${shortPeerIdSuffix(g.peerId)} · '
-                              '${g.permanent ? 'Until revoked' : '${formatMuteRemaining(Duration(milliseconds: (g.expiresAtMs - now).clamp(0, 1 << 62)))} left'}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textTertiary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.md),
-                      HollowPressable(
-                        semanticLabel:
-                            'Revoke access for ${nameFor(g.peerId)}',
-                        onTap: _busy ? null : () => _revoke(g.peerId),
-                        borderRadius: BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child:
-                            Icon(LucideIcons.x, size: 14, color: hollow.error),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-        ],
-        SettingsCard(
-          title: 'Grant access',
-          children: [
-            membersAsync.when(
-              data: (members) {
-                // Members who can already see via tier or labels are NOT
-                // excluded: computing that per-member would re-implement the
-                // Rust predicate, and a redundant grant is harmless.
-                final candidates = members
-                    .where((m) =>
-                        !granted.contains(m.peerId) && m.peerId != myPeerId)
-                    .toList();
-                if (candidates.isEmpty) {
-                  return const HollowEmptyState(
-                      title: 'No members to grant access to');
-                }
-                return MemberSearchPicker(
-                  members: candidates,
-                  nameOf: (m) => serverDisplayNameFor(profiles, m.peerId,
-                      nickname: m.nickname),
-                  trailingOf: (_) => Icon(LucideIcons.chevronRight,
-                      size: 16, color: hollow.textSecondary),
-                  onTapMember: _busy
-                      ? null
-                      : (m) => setState(() {
-                            _pendingPeerId = m.peerId;
-                            _pendingName = serverDisplayNameFor(
-                                profiles, m.peerId,
-                                nickname: m.nickname);
-                            _view = _View.pickDuration;
-                          }),
-                );
-              },
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-                child: Center(child: HollowSpinner.large()),
+          const SizedBox(height: HollowSpacing.xl),
+          const HollowSectionHeader('Has access now', dense: true),
+          for (final (i, g) in grants.indexed)
+            HollowListRow(
+              key: ValueKey('grant-${g.peerId}'),
+              leading: HollowAvatar(peerId: g.peerId, size: 28),
+              title: grantNames[i],
+              subtitle: subtitleFor(i),
+              trailing: HollowIconButton(
+                icon: LucideIcons.x,
+                label: 'Remove access for ${grantNames[i]}',
+                onPressed:
+                    _revoking.contains(g.peerId) ? null : () => _revoke(g),
               ),
-              error: (e, _) => Text('Error: $e'),
             ),
-          ],
+        ],
+        const SizedBox(height: HollowSpacing.xl),
+        const HollowSectionHeader('Give access', dense: true),
+        membersAsync.when(
+          data: (members) {
+            // Members who can already see via tier or labels are NOT
+            // excluded: computing that per-member would re-implement the
+            // Rust predicate, and a redundant grant is harmless.
+            final candidates = members
+                .where((m) =>
+                    !granted.contains(m.peerId) && m.peerId != myPeerId)
+                .toList();
+            if (candidates.isEmpty) {
+              return const HollowEmptyState(
+                  dense: true, title: 'Everyone else already has access');
+            }
+            return MemberSearchPicker(
+              members: candidates,
+              nameOf: (m) => serverDisplayNameFor(profiles, m.peerId,
+                  nickname: m.nickname),
+              trailingOf: (_) => Icon(LucideIcons.chevronRight,
+                  size: 16, color: hollow.textSecondary),
+              onTapMember: (m) => setState(() {
+                _pendingPeerId = m.peerId;
+                _pendingName = serverDisplayNameFor(profiles, m.peerId,
+                    nickname: m.nickname);
+                _view = _View.pickDuration;
+              }),
+            );
+          },
+          loading: () => const Padding(
+            padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
+            child: Center(child: HollowSpinner.medium()),
+          ),
+          error: (_, _) => const HollowEmptyState(
+            dense: true,
+            title: "Couldn't load the members",
+            description: 'Close this and try again.',
+          ),
         ),
       ],
     );
@@ -226,78 +228,81 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
   Widget _buildDurationPicker(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         HollowDialogText('How long should $_pendingName have access?'),
-        const SizedBox(height: HollowSpacing.md),
-        // A list of answers, not a confirm: all ghost, like the mute picker.
-        for (final (label, secs) in kGrantDurationOptions)
-          Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-            child: HollowButton.ghost(
-              onPressed: _busy ? null : () => _grant(secs, label),
-              expand: true,
-              child: Text(label),
-            ),
-          ),
+        const SizedBox(height: HollowSpacing.lg),
+        HollowDurationPicker(
+          value: _duration,
+          onChanged: (d) {
+            if (actionRunning) return;
+            setState(() {
+              _duration = d;
+              actionError = null;
+            });
+          },
+        ),
       ],
     );
   }
 
-  Future<void> _grant(int durationSecs, String label) async {
+  Future<void> _grant() async {
     final peerId = _pendingPeerId;
     if (peerId == null) return;
-    setState(() => _busy = true);
-    try {
-      await crdt_api.grantChannelAccess(
-        serverId: widget.serverId,
-        channelId: widget.channelId,
-        peerId: peerId,
-        durationSecs: durationSecs,
-      );
-      // set_* only queues into the CrdtStore actor, so the write needs a beat
-      // before any re-read.
-      await Future.delayed(const Duration(milliseconds: 150));
-      ref.invalidate(channelGrantsProvider(_key));
-      if (mounted) {
-        HollowToast.show(
-            context, 'Access granted ($label)', type: HollowToastType.success);
-        setState(() {
-          _busy = false;
-          _pendingPeerId = null;
-          _view = _View.overview;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not grant access',
-            type: HollowToastType.error);
-        setState(() => _busy = false);
-      }
-    }
+    final duration = _duration;
+    final granted = await runDialogAction(() => crdt_api.grantChannelAccess(
+          serverId: widget.serverId,
+          channelId: widget.channelId,
+          peerId: peerId,
+          durationSecs: duration?.inSeconds ?? 0,
+        ));
+    if (!granted || !mounted) return;
+    HollowToast.show(
+      context,
+      duration == null
+          ? '$_pendingName has access until someone removes it'
+          : '$_pendingName has access for ${hollowDurationLabel(duration)}',
+      type: HollowToastType.success,
+    );
+    setState(() {
+      actionRunning = false;
+      _written[peerId] = optimisticGrant(peerId, duration);
+      _pendingPeerId = null;
+      _view = _View.overview;
+    });
   }
 
-  Future<void> _revoke(String peerId) async {
-    setState(() => _busy = true);
+  Future<void> _revoke(crdt_api.ChannelGrantFfi grant) async {
+    final peerId = grant.peerId;
+    final had = _written.containsKey(peerId);
+    final before = _written[peerId];
+    // The row goes now; a failure brings it back.
+    setState(() {
+      _revoking.add(peerId);
+      _written[peerId] = null;
+    });
     try {
       await crdt_api.revokeChannelAccess(
         serverId: widget.serverId,
         channelId: widget.channelId,
         peerId: peerId,
       );
-      await Future.delayed(const Duration(milliseconds: 150));
-      ref.invalidate(channelGrantsProvider(_key));
-      if (mounted) {
-        HollowToast.show(context, 'Access revoked',
-            type: HollowToastType.success);
-      }
     } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not revoke access',
-            type: HollowToastType.error);
-      }
+      if (!mounted) return;
+      setState(() {
+        if (had) {
+          _written[peerId] = before;
+        } else {
+          _written.remove(peerId);
+        }
+      });
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't remove their access. Try again."),
+          type: HollowToastType.error);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _revoking.remove(peerId));
     }
   }
 }

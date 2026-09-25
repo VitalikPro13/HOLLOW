@@ -1,17 +1,16 @@
-﻿import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 
 /// Show the dialog to initiate a recovery pool for a server.
 void showInitiateRecoveryPoolDialog(
@@ -28,7 +27,7 @@ void showInitiateRecoveryPoolDialog(
   );
 }
 
-class _InitiateDialog extends ConsumerStatefulWidget {
+class _InitiateDialog extends StatefulWidget {
   final String serverId;
   final String serverName;
 
@@ -38,140 +37,70 @@ class _InitiateDialog extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<_InitiateDialog> createState() => _InitiateDialogState();
+  State<_InitiateDialog> createState() => _InitiateDialogState();
 }
 
-class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
-  bool _starting = false;
+class _InitiateDialogState extends State<_InitiateDialog>
+    with HollowDialogAction {
   String? _inviteLink;
 
   Future<void> _initiate() async {
-    setState(() => _starting = true);
-    try {
-      final link = await crdt_api.initiateRecoveryPool(
-        serverId: widget.serverId,
-      );
-      if (mounted) {
-        setState(() {
-          _starting = false;
-          _inviteLink = link;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _starting = false);
-        HollowToast.show(
-          context,
-          'Failed to start pool: $e',
-          type: HollowToastType.error,
-        );
-      }
-    }
-  }
-
-  void _copyLink() {
-    if (_inviteLink == null) return;
-    Clipboard.setData(ClipboardData(text: _inviteLink!));
-    HollowToast.show(
-      context,
-      'Invite link copied',
-      type: HollowToastType.success,
+    late final String link;
+    final ok = await runDialogAction(
+      () async =>
+          link = await crdt_api.initiateRecoveryPool(serverId: widget.serverId),
+      fallback: "Couldn't start the recovery pool. Try again.",
     );
+    if (!ok || !mounted) return;
+    // A second step follows in this same dialog, so the busy state ends here.
+    setState(() {
+      actionRunning = false;
+      _inviteLink = link;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    if (_inviteLink != null) {
+    final link = _inviteLink;
+    if (link != null) {
       return HollowDialog(
         title: 'Recovery pool started',
         showClose: true,
+        width: 420,
         content: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             HollowDialogText(
-              'Share this invite link with other ex-members of '
-              '${widget.serverName}. They can join to contribute their '
-              'vault shards and help reconstruct files.',
+              'Send this link to the others who were in ${widget.serverName}. '
+              'As they join, each of you shares the file pieces you hold, and '
+              'the files are rebuilt from them.',
             ),
-            const SizedBox(height: HollowSpacing.md),
-            Container(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: SelectableText(
-                      _inviteLink!,
-                      style: HollowTypography.mono.copyWith(
-                        color: hollow.accentText,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowTooltip(
-                    message: 'Copy invite link',
-                    child: HollowButton.ghost(
-                      compact: true,
-                      semanticLabel: 'Copy invite link',
-                      onPressed: _copyLink,
-                      child: const Icon(LucideIcons.copy, size: 16),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            const SizedBox(height: HollowSpacing.lg),
+            HollowCopyField(value: link, name: 'recovery pool link', wrap: false),
           ],
         ),
       );
     }
 
     return HollowDialog(
-      title: 'Start recovery pool',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(LucideIcons.server, size: 16, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  widget.serverName,
-                  style: HollowTypography.label.copyWith(
-                    color: hollow.textPrimary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          const HollowDialogText(
-            'Start a Recovery Pool to cooperatively gather vault shards '
-            'from other ex-members. This exchanges erasure-coded file '
-            'shards to reconstruct large files (videos, attachments) that '
-            'were distributed across the server.\n\n'
-            'Your local data stays encrypted. Only vault shards are shared.',
-          ),
-        ],
+      title: 'Start a recovery pool',
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
+      content: HollowDialogText(
+        'Ask the others who were in ${widget.serverName} to help rebuild its '
+        'large files, like videos and attachments. Each of you shares the '
+        'file pieces you still hold, and only those pieces leave this device.',
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: _starting ? null : () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _starting ? null : _initiate,
-          loading: _starting,
-          icon: const Icon(LucideIcons.shield, size: 14),
+          onPressed: _initiate,
+          loading: actionRunning,
           child: const Text('Start pool'),
         ),
       ],
@@ -190,6 +119,11 @@ void showJoinRecoveryPoolDialog(
   );
 }
 
+/// The words for a join that nobody answered: the pool may be over, or its
+/// members offline, and only the person who shared it can change that.
+const kRecoveryPoolNoAnswer = 'Nobody in that pool answered. Ask whoever '
+    'shared the link to keep Hollow open, then try again.';
+
 class _JoinDialog extends ConsumerStatefulWidget {
   final String? prefillLink;
 
@@ -199,9 +133,10 @@ class _JoinDialog extends ConsumerStatefulWidget {
   ConsumerState<_JoinDialog> createState() => _JoinDialogState();
 }
 
-class _JoinDialogState extends ConsumerState<_JoinDialog> {
+class _JoinDialogState extends ConsumerState<_JoinDialog>
+    with HollowDialogAction {
   late final TextEditingController _controller;
-  bool _joining = false;
+  String? _linkError;
 
   @override
   void initState() {
@@ -217,73 +152,48 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
 
   Future<void> _join() async {
     final link = _controller.text.trim();
-    if (link.isEmpty) return;
+    if (link.isEmpty || actionRunning) return;
 
     if (!link.contains('server=') || !link.contains('token=')) {
-      HollowToast.show(
-        context,
-        'Invalid invite link format',
-        type: HollowToastType.error,
-      );
+      setState(() => _linkError = "That isn't a recovery pool link. Paste "
+          'the whole link, starting with hollow://recovery.');
       return;
     }
 
-    setState(() => _joining = true);
-    try {
+    final joined = await runDialogAction(() async {
       await crdt_api.joinRecoveryPool(inviteLink: link);
-
-      // A welcome from a member is what confirms the pool is active.
-      bool welcomed = false;
-      for (int i = 0; i < 20; i++) {
-        await Future.delayed(const Duration(milliseconds: 500));
-        if (!mounted) return;
-        final pool = ref.read(recoveryPoolProvider);
-        if (pool != null && pool.memberPeerIds.isNotEmpty) {
-          welcomed = true;
-          break;
-        }
+      if (!await _waitForWelcome()) {
+        throw const FriendlyException(kRecoveryPoolNoAnswer);
       }
+    }, fallback: "Couldn't join the recovery pool. Try again.");
+    if (!joined || !mounted) return;
+    // Clears the pending flag, which is what shows the dashboard.
+    ref.read(recoveryPoolProvider.notifier).confirmJoin();
+    Navigator.of(context).pop();
+    HollowToast.show(context, 'Joined the recovery pool',
+        type: HollowToastType.success);
+  }
 
-      if (!mounted) return;
-
-      if (welcomed) {
-        // Clears the pending flag, which is what shows the dashboard.
-        ref.read(recoveryPoolProvider.notifier).confirmJoin();
-        Navigator.of(context).pop();
-        HollowToast.show(
-          context,
-          'Joined recovery pool',
-          type: HollowToastType.success,
-        );
-      } else {
-        final pool = ref.read(recoveryPoolProvider);
-        if (pool != null) {
-          // Taken before the await: `ref` is unusable once the dialog is
-          // disposed mid-flight, and the cleanup must still run.
-          final poolNotifier = ref.read(recoveryPoolProvider.notifier);
-          try {
-            await crdt_api.stopRecoveryPool(serverId: pool.serverId);
-          } catch (_) {}
-          poolNotifier.clear();
-        }
-        if (!mounted) return;
-        setState(() => _joining = false);
-        HollowToast.show(
-          context,
-          'No active pool found. Nobody responded',
-          type: HollowToastType.error,
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _joining = false);
-        HollowToast.show(
-          context,
-          'Failed to join: $e',
-          type: HollowToastType.error,
-        );
-      }
+  /// A welcome from a member is what confirms the pool is active; with none
+  /// in ten seconds the half-joined pool is stopped again.
+  Future<bool> _waitForWelcome() async {
+    for (var i = 0; i < 20; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return false;
+      final pool = ref.read(recoveryPoolProvider);
+      if (pool != null && pool.memberPeerIds.isNotEmpty) return true;
     }
+    final pool = ref.read(recoveryPoolProvider);
+    if (pool != null) {
+      // Taken before the await: `ref` is unusable once the dialog is
+      // disposed mid-flight, and the cleanup must still run.
+      final poolNotifier = ref.read(recoveryPoolProvider.notifier);
+      try {
+        await crdt_api.stopRecoveryPool(serverId: pool.serverId);
+      } catch (_) {}
+      poolNotifier.clear();
+    }
+    return false;
   }
 
   @override
@@ -291,22 +201,26 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
     final hollow = HollowTheme.of(context);
 
     return HollowDialog(
-      title: 'Join recovery pool',
+      title: 'Join a recovery pool',
       width: 420,
+      busy: actionRunning,
+      error: actionError,
       content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const HollowDialogText(
-            'Paste the recovery pool invite link to join. You\'ll contribute '
-            'your vault shards and receive shards from other ex-members to '
-            'reconstruct files.',
+            'Paste the link someone sent you. You share the file pieces you '
+            "hold and get theirs, so the server's large files can be rebuilt.",
           ),
-          const SizedBox(height: HollowSpacing.md),
+          const SizedBox(height: HollowSpacing.lg),
           HollowTextField(
             controller: _controller,
             hintText: 'hollow://recovery?server=...&token=...',
             autofocus: true,
+            errorText: _linkError,
+            onChanged: (_) => setState(() => _linkError = null),
+            onSubmitted: (_) => _join(),
             style: HollowTypography.mono.copyWith(
               color: hollow.textPrimary,
             ),
@@ -315,13 +229,12 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
       ),
       actions: [
         HollowButton.ghost(
-          onPressed: _joining ? null : () => Navigator.of(context).pop(),
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _joining ? null : _join,
-          loading: _joining,
-          icon: const Icon(LucideIcons.logIn, size: 14),
+          onPressed: _join,
+          loading: actionRunning,
           child: const Text('Join pool'),
         ),
       ],

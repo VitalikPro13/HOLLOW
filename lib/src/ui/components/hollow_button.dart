@@ -109,6 +109,29 @@ class HollowButton extends StatefulWidget {
   State<HollowButton> createState() => _HollowButtonState();
 }
 
+/// Turns on [HollowButton.touch] for every button below it, for a container
+/// that knows it is on a phone (a compact dialog's action row) when the
+/// buttons it was handed do not.
+class HollowButtonTouchScope extends InheritedWidget {
+  final bool touch;
+
+  const HollowButtonTouchScope({
+    super.key,
+    required this.touch,
+    required super.child,
+  });
+
+  static bool of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<HollowButtonTouchScope>()
+          ?.touch ??
+      false;
+
+  @override
+  bool updateShouldNotify(HollowButtonTouchScope oldWidget) =>
+      touch != oldWidget.touch;
+}
+
 class _HollowButtonState extends State<HollowButton>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
@@ -144,6 +167,7 @@ class _HollowButtonState extends State<HollowButton>
     final hollow = HollowTheme.of(context);
     final isDisabled = widget.onPressed == null && !widget.loading;
     final isInteractive = widget.onPressed != null && !widget.loading;
+    final touch = widget.touch || HollowButtonTouchScope.of(context);
 
     Color bg;
     Color fg;
@@ -179,6 +203,21 @@ class _HollowButtonState extends State<HollowButton>
         bg = hollow.error;
         fg = hollow.textOnError;
         hoverBg = hollow.error.withValues(alpha: 0.85);
+    }
+
+    // Disabled goes NEUTRAL rather than a faded accent: a 40% fade of a 40%
+    // outline all but vanished on the light theme.
+    if (isDisabled) {
+      fg = hollow.textTertiary;
+      switch (widget.variant) {
+        case HollowButtonVariant.filled:
+        case HollowButtonVariant.danger:
+          bg = hollow.textPrimary.withValues(alpha: 0.08);
+        case HollowButtonVariant.outline:
+          border = Border.all(color: hollow.textTertiary.withValues(alpha: 0.4));
+        case HollowButtonVariant.ghost:
+          break;
+      }
     }
 
     final effectiveBg = _hovering && isInteractive ? hoverBg : bg;
@@ -300,7 +339,7 @@ class _HollowButtonState extends State<HollowButton>
                 builder: (context, child) {
                   return FadeTransition(
                     opacity: isDisabled
-                        ? const AlwaysStoppedAnimation(0.4)
+                        ? const AlwaysStoppedAnimation(1.0)
                         : _opacityAnimation,
                     child: ScaleTransition(
                       scale: _scaleAnimation,
@@ -312,7 +351,7 @@ class _HollowButtonState extends State<HollowButton>
                   duration: HollowDurations.fast,
                   curve: HollowCurves.subtle,
                   // The Row centres its label in the extra height.
-                  constraints: widget.touch
+                  constraints: touch
                       ? const BoxConstraints(minHeight: HollowButton.touchHeight)
                       : null,
                   // The outline's 1 px border comes out of the padding, so

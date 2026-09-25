@@ -26,6 +26,7 @@ void main() {
     WidgetTester tester, {
     List<crdt_api.LabelFfi> serverLabels = labels,
     Set<String> initial = const {},
+    bool loadFails = false,
   }) async {
     tester.view.physicalSize = const Size(800, 900);
     tester.view.devicePixelRatio = 1.0;
@@ -40,7 +41,8 @@ void main() {
       ProviderScope(
         overrides: [
           serverLabelsProvider(serverId)
-              .overrideWith((ref) async => serverLabels),
+              .overrideWith((ref) async =>
+                  loadFails ? throw StateError('boom') : serverLabels),
         ],
         child: MaterialApp(
           theme: HollowThemeData.dark(),
@@ -51,7 +53,7 @@ void main() {
                   result = await showAccessLabelPicker(
                     context: context,
                     serverId: serverId,
-                    title: 'Custom visibility',
+                    target: '#general',
                     initial: initial,
                   );
                   completed = true;
@@ -91,8 +93,8 @@ void main() {
     final result = await pumpPicker(tester, initial: {'vip'});
     await tester.tap(find.text('VIP'));
     await tester.pump();
-    // The picker warns that the channel falls back to tier access.
-    expect(find.textContaining('tier-based access'), findsOneWidget);
+    // The picker says the channel falls back to going by role.
+    expect(find.textContaining('roles decide who can see it again'), findsOneWidget);
     await tester.tap(find.text('Apply'));
     await tester.pumpAndSettle();
     expect(result(), isEmpty);
@@ -105,11 +107,24 @@ void main() {
     expect(result(), isNull);
   });
 
-  testWidgets('empty state points to the Labels tab', (tester) async {
+  testWidgets('the picker owns its title', (tester) async {
+    await pumpPicker(tester);
+    expect(find.text('Who can see #general'), findsOneWidget);
+  });
+
+  testWidgets('empty state points to the Labels page', (tester) async {
     await pumpPicker(tester, serverLabels: const [
       crdt_api.LabelFfi(
           labelId: 'fun', name: 'Fun', color: '#0000ff', access: false),
     ]);
     expect(find.textContaining('No access labels yet'), findsOneWidget);
+    expect(find.textContaining('under Labels'), findsOneWidget);
+  });
+
+  testWidgets('a failed load says so instead of claiming there are none',
+      (tester) async {
+    await pumpPicker(tester, loadFails: true);
+    expect(find.text("Couldn't load the labels"), findsOneWidget);
+    expect(find.textContaining('No access labels yet'), findsNothing);
   });
 }

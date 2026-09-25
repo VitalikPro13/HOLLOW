@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -10,16 +11,18 @@ import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_duration_picker.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
-import 'package:hollow/src/ui/settings/channel_grants_dialog.dart'
-    show kGrantDurationOptions;
-import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Member management from the profile card (issue #48): role, labels and
@@ -39,6 +42,27 @@ Future<void> showManageMemberDialog(
   );
 }
 
+/// How a grant's time left reads on a row. One with no end says "someone",
+/// since another admin may have given it; the picker's "Until I remove it"
+/// is your own choice.
+String grantRemainingLabel(crdt_api.ChannelGrantFfi grant) {
+  if (grant.permanent) return 'Until someone removes it';
+  final left = grant.expiresAtMs - DateTime.now().millisecondsSinceEpoch;
+  return '${formatMuteRemaining(Duration(milliseconds: left.clamp(0, 1 << 62)))} '
+      'left';
+}
+
+/// A grant as it stands right after a write, before the queued write can be
+/// read back.
+crdt_api.ChannelGrantFfi optimisticGrant(String peerId, Duration? duration) =>
+    crdt_api.ChannelGrantFfi(
+      peerId: peerId,
+      expiresAtMs: duration == null
+          ? 0
+          : DateTime.now().add(duration).millisecondsSinceEpoch,
+      permanent: duration == null,
+    );
+
 enum _View { overview, pickDuration }
 
 class _ManageMemberDialog extends ConsumerStatefulWidget {
@@ -52,15 +76,37 @@ class _ManageMemberDialog extends ConsumerStatefulWidget {
       _ManageMemberDialogState();
 }
 
-class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
+class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog>
+    with HollowDialogAction {
   _View _view = _View.overview;
   ChannelInfo? _pendingChannel;
-  bool _busy = false;
+  Duration? _duration = const Duration(hours: 1);
 
-  /// Optimistic label selection, seeded ONCE from the member row: a refetch
-  /// right after a queued CrdtStore write returns the PREVIOUS value, so the
-  /// chips must never re-seed from the provider.
+  /// Optimistic state, seeded ONCE or set by our own writes: a refetch right
+  /// after a queued CrdtStore write returns the PREVIOUS value, so what this
+  /// dialog wrote wins over the provider until it closes.
   Set<String>? _labelIds;
+  String? _role;
+  final Map<String, crdt_api.ChannelGrantFfi?> _grants = {};
+  final Set<String> _revoking = {};
+
+  late final ProviderContainer _container;
+
+  @override
+  void initState() {
+    super.initState();
+    _container = ProviderScope.containerOf(context, listen: false);
+  }
+
+  @override
+  void dispose() {
+    // By now the writes have landed: other surfaces reread the grants.
+    for (final channelId in _grants.keys) {
+      _container.invalidate(channelGrantsProvider(
+          (serverId: widget.serverId, channelId: channelId)));
+    }
+    super.dispose();
+  }
 
   String _memberName(crdt_api.MemberFfi? member) {
     final profiles = ref.read(profileProvider);
@@ -79,105 +125,138 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
     }
     final name = _memberName(member);
 
+    final Widget overview;
+    if (member != null) {
+      overview = _buildOverview(context, member, name);
+    } else if (membersAsync.isLoading) {
+      overview = const Padding(
+        padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
+        child: Center(child: HollowSpinner.medium()),
+      );
+    } else if (membersAsync.hasError) {
+      overview = const HollowEmptyState(
+        dense: true,
+        title: "Couldn't load the members of this server",
+        description: 'Close this and try again.',
+      );
+    } else {
+      overview = HollowEmptyState(
+        dense: true,
+        title: "$name isn't a member of this server anymore",
+      );
+    }
+
     return HollowDialog(
       title: 'Manage $name',
+      width: 480,
       showClose: _view == _View.overview,
+      busy: actionRunning,
+      error: _view == _View.pickDuration ? actionError : null,
       content: switch (_view) {
-        _View.overview => _buildOverview(context, member, name),
+        _View.overview => overview,
         _View.pickDuration => _buildDurationPicker(context, name),
       },
       actions: [
-        if (_view == _View.pickDuration)
+        if (_view == _View.pickDuration) ...[
           HollowButton.ghost(
-            onPressed:
-                _busy ? null : () => setState(() => _view = _View.overview),
+            onPressed: actionRunning
+                ? null
+                : () => setState(() {
+                      _view = _View.overview;
+                      actionError = null;
+                    }),
             child: const Text('Back'),
           ),
+          HollowButton.filled(
+            onPressed: _grant,
+            loading: actionRunning,
+            child: const Text('Give access'),
+          ),
+        ],
       ],
     );
   }
 
   Widget _buildOverview(
-      BuildContext context, crdt_api.MemberFfi? member, String name) {
+      BuildContext context, crdt_api.MemberFfi member, String name) {
     final hollow = HollowTheme.of(context);
-    if (member == null) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-        child: Center(
-          child: Text(
-            'This person is no longer a member of the server.',
-            style:
-                HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-          ),
-        ),
+    final roleAsync = ref.watch(myRoleProvider(widget.serverId));
+    final permsAsync = ref.watch(myPermissionsProvider(widget.serverId));
+    if (roleAsync.hasError || permsAsync.hasError) {
+      return const HollowEmptyState(
+        dense: true,
+        title: "Couldn't check what you can change here",
+        description: 'Close this and try again.',
       );
     }
-
-    final myRole =
-        ref.watch(myRoleProvider(widget.serverId)).valueOrNull ?? 'member';
-    final perms =
-        ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ?? 0;
+    // Until both land, "no permission" would be a guess.
+    if (!roleAsync.hasValue || !permsAsync.hasValue) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
+        child: Center(child: HollowSpinner.medium()),
+      );
+    }
+    final myRole = roleAsync.value!;
+    final perms = permsAsync.value!;
     final myPeerId = ref.watch(identityProvider).peerId;
     final isMe = widget.peerId == myPeerId;
+    final role = _role ?? member.role;
 
     final canRole = !isMe &&
-        canManageRole(myRole, member.role) &&
+        canManageRole(myRole, role) &&
         assignableRoles(myRole).isNotEmpty;
     final canLabels = (perms & Permission.manageRoles) != 0;
     final canGrants = (perms & Permission.manageChannels) != 0;
 
     final sections = <Widget>[
-      if (canRole) _buildRoleSection(hollow, member, name, myRole),
-      if (canLabels) _buildLabelsSection(hollow),
+      if (canRole) _buildRoleSection(role, name, myRole),
+      if (canLabels) _buildLabelsSection(),
       if (canGrants) _buildGrantsSection(hollow),
     ];
     if (sections.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-        child: Center(
-          child: Text(
-            "You don't have permission to manage this member.",
-            style:
-                HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-          ),
-        ),
+      return const HollowEmptyState(
+        dense: true,
+        title: "You don't have permission to manage this member",
       );
     }
 
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (final (i, section) in sections.indexed) ...[
-          if (i > 0) const SizedBox(height: HollowSpacing.md),
+          if (i > 0) const SizedBox(height: HollowSpacing.xl),
           section,
         ],
       ],
     );
   }
 
-  Widget _buildRoleSection(HollowTheme hollow, crdt_api.MemberFfi member,
-      String name, String myRole) {
-    // Current role first, so the selected chip is always present.
-    final roles = <String>[
-      member.role,
-      ...assignableRoles(myRole).where((r) => r != member.role),
-    ];
-    return SettingsCard(
-      title: 'Role',
+  Widget _buildRoleSection(String role, String name, String myRole) {
+    // Rank order, so the chips never reorder from one member to the next; the
+    // current role joins even when it is not one you can assign.
+    const rank = ['owner', 'admin', 'moderator', 'member'];
+    final roles = {role, ...assignableRoles(myRole)}.toList()
+      ..sort((a, b) => rank.indexOf(a).compareTo(rank.indexOf(b)));
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        const HollowSectionHeader('Role', dense: true),
         Wrap(
           spacing: HollowSpacing.sm,
           runSpacing: HollowSpacing.sm,
           children: [
-            for (final role in roles)
-              LabelTypeChip(
-                icon: _roleIcon(role),
-                text: roleDisplayName(role),
-                selected: role == member.role,
-                onTap: _busy || role == member.role
-                    ? () {}
-                    : () => _confirmRoleChange(role, name),
+            for (final r in roles)
+              Semantics(
+                selected: r == role,
+                inMutuallyExclusiveGroup: true,
+                child: HollowChip(
+                  icon: _roleIcon(r),
+                  label: roleDisplayName(r),
+                  selected: r == role,
+                  onTap: r == role ? null : () => _changeRole(role, r, name),
+                ),
               ),
           ],
         ),
@@ -192,47 +271,28 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
         _ => LucideIcons.user,
       };
 
-  Future<void> _confirmRoleChange(String newRole, String name) async {
-    final roleName = roleDisplayName(newRole);
-    final confirmed = await showHollowConfirm(
-      context: context,
-      title: 'Change role',
-      message: "Change $name's role to $roleName?",
-      confirmLabel: 'Change',
+  Future<void> _changeRole(String current, String next, String name) async {
+    final changed = await showChangeRoleDialog(
+      context,
+      ref,
+      serverId: widget.serverId,
+      peerId: widget.peerId,
+      displayName: name,
+      newRole: next,
+      currentRole: current,
     );
-    if (!confirmed || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      await crdt_api.changeMemberRole(
-        serverId: widget.serverId,
-        peerId: widget.peerId,
-        newRole: newRole,
-      );
-      // set_* only queues into the CrdtStore actor, so the write needs a beat
-      // before any re-read.
-      await Future.delayed(const Duration(milliseconds: 150));
-      ref.invalidate(serverMembersProvider(widget.serverId));
-      if (mounted) {
-        HollowToast.show(context, '$name is now $roleName',
-            type: HollowToastType.success);
-      }
-    } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not change role',
-            type: HollowToastType.error);
-      }
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (changed && mounted) setState(() => _role = next);
   }
 
-  Widget _buildLabelsSection(HollowTheme hollow) {
+  Widget _buildLabelsSection() {
     final labels =
         ref.watch(serverLabelsProvider(widget.serverId)).valueOrNull ??
             const <crdt_api.LabelFfi>[];
-    return SettingsCard(
-      title: 'Labels',
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        const HollowSectionHeader('Labels', dense: true),
         if (labels.isEmpty)
           const HollowEmptyState(
               dense: true, title: 'This server has no labels yet')
@@ -245,7 +305,7 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
                 LabelChip(
                   label: label,
                   selected: _labelIds?.contains(label.labelId) ?? false,
-                  onTap: _busy ? null : () => _toggleLabel(label),
+                  onTap: () => _toggleLabel(label),
                 ),
             ],
           ),
@@ -277,12 +337,16 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
         );
       }
       ref.invalidate(serverMembersProvider(widget.serverId));
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
         setState(() {
           assigned ? ids.add(label.labelId) : ids.remove(label.labelId);
         });
-        HollowToast.show(context, 'Could not update label',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't change the ${label.name} label. Try "
+                    'again.'),
             type: HollowToastType.error);
       }
     }
@@ -299,90 +363,61 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
         .where((c) => c.visibilityLabels.isNotEmpty)
         .toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return SettingsCard(
-      title: 'Temporary channel access',
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const HollowSectionHeader('Temporary channel access', dense: true),
         if (gated.isEmpty)
           const HollowEmptyState(
-              dense: true, title: 'No label-gated channels in this server')
+              dense: true, title: 'No channel here needs a label to see it')
         else
-          for (final (i, channel) in gated.indexed)
-            Padding(
-              padding: EdgeInsets.only(
-                bottom: i == gated.length - 1 ? 0 : HollowSpacing.sm,
-              ),
-              child: _grantRow(hollow, channel),
-            ),
+          for (final channel in gated) _grantRow(hollow, channel),
       ],
     );
   }
 
-  Widget _grantRow(HollowTheme hollow, ChannelInfo channel) {
+  crdt_api.ChannelGrantFfi? _grantFor(ChannelInfo channel) {
+    if (_grants.containsKey(channel.channelId)) {
+      return _grants[channel.channelId];
+    }
     final grants = ref
             .watch(channelGrantsProvider(
                 (serverId: widget.serverId, channelId: channel.channelId)))
             .valueOrNull ??
         const <crdt_api.ChannelGrantFfi>[];
-    final grant =
-        grants.where((g) => g.peerId == widget.peerId).firstOrNull;
-    final now = DateTime.now().millisecondsSinceEpoch;
+    return grants.where((g) => g.peerId == widget.peerId).firstOrNull;
+  }
 
-    return Row(
-      children: [
-        Icon(
-          channel.channelType == ChannelType.voice
-              ? LucideIcons.volume2
-              : LucideIcons.hash,
-          size: 14,
-          color: hollow.textSecondary,
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                channel.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style:
-                    HollowTypography.body.copyWith(color: hollow.textPrimary),
-              ),
-              if (grant != null)
-                Text(
-                  grant.permanent
-                      ? 'Until revoked'
-                      : '${formatMuteRemaining(Duration(milliseconds: (grant.expiresAtMs - now).clamp(0, 1 << 62)))} left',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textTertiary),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.md),
-        if (grant != null)
-          HollowPressable(
-            semanticLabel: 'Revoke access to ${channel.name}',
-            onTap: _busy ? null : () => _revoke(channel),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 14, color: hollow.error),
-          )
-        else
-          HollowButton.outline(
-            onPressed: _busy
-                ? null
-                : () => setState(() {
-                      _pendingChannel = channel;
-                      _view = _View.pickDuration;
-                    }),
-            compact: true,
-            icon: const Icon(LucideIcons.userPlus),
-            child: const Text('Grant'),
-          ),
-      ],
+  Widget _grantRow(HollowTheme hollow, ChannelInfo channel) {
+    final grant = _grantFor(channel);
+    return HollowListRow(
+      leading: Icon(
+        channel.channelType == ChannelType.voice
+            ? LucideIcons.volume2
+            : LucideIcons.hash,
+        size: 16,
+        color: hollow.textSecondary,
+      ),
+      title: channel.name,
+      subtitle: grant == null ? null : grantRemainingLabel(grant),
+      trailing: grant != null
+          ? HollowIconButton(
+              icon: LucideIcons.x,
+              label: 'Remove access to #${channel.name}',
+              onPressed: _revoking.contains(channel.channelId)
+                  ? null
+                  : () => _revoke(channel),
+            )
+          : HollowButton.outline(
+              onPressed: () => setState(() {
+                _pendingChannel = channel;
+                _view = _View.pickDuration;
+              }),
+              compact: true,
+              semanticLabel: 'Give access to #${channel.name}',
+              child: const Text('Give access'),
+            ),
     );
   }
 
@@ -391,79 +426,84 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
     if (channel == null) return const SizedBox.shrink();
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         HollowDialogText(
           'How long should $name have access to #${channel.name}?',
         ),
-        const SizedBox(height: HollowSpacing.md),
-        // A list of answers, not a confirm: all ghost, like the mute picker.
-        for (final (label, secs) in kGrantDurationOptions)
-          Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-            child: HollowButton.ghost(
-              onPressed: _busy ? null : () => _grant(channel, secs, label),
-              expand: true,
-              child: Text(label),
-            ),
-          ),
+        const SizedBox(height: HollowSpacing.lg),
+        HollowDurationPicker(
+          value: _duration,
+          onChanged: (d) {
+            if (actionRunning) return;
+            setState(() {
+              _duration = d;
+              actionError = null;
+            });
+          },
+        ),
       ],
     );
   }
 
-  Future<void> _grant(
-      ChannelInfo channel, int durationSecs, String label) async {
-    setState(() => _busy = true);
-    try {
-      await crdt_api.grantChannelAccess(
-        serverId: widget.serverId,
-        channelId: channel.channelId,
-        peerId: widget.peerId,
-        durationSecs: durationSecs,
-      );
-      await Future.delayed(const Duration(milliseconds: 150));
-      ref.invalidate(channelGrantsProvider(
-          (serverId: widget.serverId, channelId: channel.channelId)));
-      if (mounted) {
-        HollowToast.show(context, 'Access granted ($label)',
-            type: HollowToastType.success);
-        setState(() {
-          _busy = false;
-          _pendingChannel = null;
-          _view = _View.overview;
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not grant access',
-            type: HollowToastType.error);
-        setState(() => _busy = false);
-      }
-    }
+  Future<void> _grant() async {
+    final channel = _pendingChannel;
+    if (channel == null) return;
+    final duration = _duration;
+    final granted = await runDialogAction(() => crdt_api.grantChannelAccess(
+          serverId: widget.serverId,
+          channelId: channel.channelId,
+          peerId: widget.peerId,
+          durationSecs: duration?.inSeconds ?? 0,
+        ));
+    if (!granted || !mounted) return;
+    HollowToast.show(
+      context,
+      duration == null
+          ? 'Access given until someone removes it'
+          : 'Access given for ${hollowDurationLabel(duration)}',
+      type: HollowToastType.success,
+    );
+    setState(() {
+      actionRunning = false;
+      _grants[channel.channelId] = optimisticGrant(widget.peerId, duration);
+      _pendingChannel = null;
+      _view = _View.overview;
+    });
   }
 
   Future<void> _revoke(ChannelInfo channel) async {
-    setState(() => _busy = true);
+    final id = channel.channelId;
+    final had = _grants.containsKey(id);
+    final before = _grants[id];
+    // The row drops the grant now; a failure puts it back.
+    setState(() {
+      _revoking.add(id);
+      _grants[id] = null;
+    });
     try {
       await crdt_api.revokeChannelAccess(
         serverId: widget.serverId,
-        channelId: channel.channelId,
+        channelId: id,
         peerId: widget.peerId,
       );
-      await Future.delayed(const Duration(milliseconds: 150));
-      ref.invalidate(channelGrantsProvider(
-          (serverId: widget.serverId, channelId: channel.channelId)));
-      if (mounted) {
-        HollowToast.show(context, 'Access revoked',
-            type: HollowToastType.success);
-      }
-    } catch (_) {
-      if (mounted) {
-        HollowToast.show(context, 'Could not revoke access',
-            type: HollowToastType.error);
-      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        if (had) {
+          _grants[id] = before;
+        } else {
+          _grants.remove(id);
+        }
+      });
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't remove access to #${channel.name}. Try "
+                  'again.'),
+          type: HollowToastType.error);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _revoking.remove(id));
     }
   }
 }

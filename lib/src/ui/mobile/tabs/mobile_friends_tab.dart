@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
@@ -13,14 +14,17 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/profile_card_body.dart'
+    show showLocalNicknameDialog;
+import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -167,6 +171,12 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
               key: ValueKey(favFriends[index].peerId),
               peerId: favFriends[index].peerId,
               isFavourite: true,
+              // A phone has no drag, so the order moves from the sheet, as
+              // Move up and Move down do in the desktop Friends Manager.
+              onMove: (delta) => _moveFavourite(
+                  [for (final f in favFriends) f.peerId], index, delta),
+              canMoveUp: index > 0,
+              canMoveDown: index < favFriends.length - 1,
             ),
           ),
         ],
@@ -201,6 +211,27 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         const SliverPadding(padding: EdgeInsets.only(bottom: HollowSpacing.xl)),
       ],
     );
+  }
+
+  /// Moves the shown favourite at [index] one place by [delta], in the stored
+  /// list the desktop reorders too.
+  void _moveFavourite(List<String> shown, int index, int delta) {
+    final to = index + delta;
+    if (to < 0 || to >= shown.length) return;
+    final links = ref.read(deviceLinkProvider);
+    final notifier = ref.read(favouriteFriendsProvider.notifier);
+    final stored = [
+      for (final id in ref.read(favouriteFriendsProvider)) links.identityOf(id),
+    ];
+    final from = stored.indexOf(shown[index]);
+    final past = stored.indexOf(shown[to]);
+    if (from < 0 || past < 0) return;
+    notifier.reorder(from, past).catchError((Object _) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not move the favourite',
+            type: HollowToastType.error);
+      }
+    });
   }
 
   String _resolvedName(String peerId) {
@@ -246,8 +277,18 @@ void _openChat(BuildContext context, WidgetRef ref, String peerId) {
 class _FriendRow extends ConsumerWidget {
   final String peerId;
   final bool isFavourite;
+  final void Function(int delta)? onMove;
+  final bool canMoveUp;
+  final bool canMoveDown;
 
-  const _FriendRow({super.key, required this.peerId, this.isFavourite = false});
+  const _FriendRow({
+    super.key,
+    required this.peerId,
+    this.isFavourite = false,
+    this.onMove,
+    this.canMoveUp = false,
+    this.canMoveDown = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -304,204 +345,60 @@ class _FriendRow extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final profiles = ref.read(profileProvider);
     final localNicknames = ref.read(localNicknameProvider);
-    final favs = ref.read(favouriteFriendsProvider);
-    final isFav = favs.contains(peerId);
-    final name = localNicknames[peerId] ?? displayNameFor(profiles, peerId);
+    // Resolved to the master inside, so a friend favourited under a device
+    // id is not offered "Add to favourites" again.
+    final isFav =
+        ref.read(favouriteFriendsProvider.notifier).isFavourite(peerId);
+    final localNick = localNicknames[peerId];
+    final name = localNick ?? displayNameFor(profiles, peerId);
     // As on desktop: a call is offered only when it can start.
     final canCall = ref.read(onlineIdentitiesProvider).contains(peerId) &&
         ref.read(callProvider).status == CallStatus.idle;
 
+    Widget row(IconData icon, String label, VoidCallback onTap) =>
+        HollowListRow(
+          touch: true,
+          title: label,
+          leading: Icon(icon, size: 20, color: hollow.textSecondary),
+          onTap: () {
+            Navigator.pop(context);
+            onTap();
+          },
+        );
+
+    // The sheet's labels are the desktop person menu's.
     showHollowSheet(
       context: context,
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(name,
-                style: HollowTypography.subheading
-                    .copyWith(color: hollow.textPrimary)),
-            const SizedBox(height: HollowSpacing.md),
-            const HollowDivider(),
-
-            _ActionRow(
-              icon: LucideIcons.messageCircle,
-              label: 'Message',
-              onTap: () {
-                Navigator.pop(context);
-                _openChat(context, ref, peerId);
-              },
-            ),
-
+            HollowSheetTitle(name),
+            row(LucideIcons.messageCircle, 'Message',
+                () => _openChat(context, ref, peerId)),
             if (canCall)
-              _ActionRow(
-                icon: LucideIcons.phone,
-                label: 'Voice call',
-                onTap: () {
-                  Navigator.pop(context);
-                  startMobileDmCall(context, ref, peerId);
-                },
-              ),
-
-            _ActionRow(
-              icon: LucideIcons.user,
-              label: 'View profile',
-              onTap: () {
-                Navigator.pop(context);
-                showMobileProfileSheet(context, peerId: peerId);
-              },
-            ),
-
-            _ActionRow(
-              icon: isFav ? LucideIcons.starOff : LucideIcons.star,
-              label: isFav ? 'Remove from favourites' : 'Add to favourites',
-              onTap: () {
-                Navigator.pop(context);
-                ref.read(favouriteFriendsProvider.notifier).toggle(peerId);
-              },
-            ),
-
-            _ActionRow(
-              icon: LucideIcons.tag,
-              label: localNicknames[peerId] != null
-                  ? 'Edit nickname'
-                  : 'Set a nickname',
-              onTap: () {
-                Navigator.pop(context);
-                _showNicknameDialog(context, ref);
-              },
-            ),
-
+              row(LucideIcons.phone, 'Start a call',
+                  () => startMobileDmCall(context, ref, peerId)),
+            row(LucideIcons.user, 'Profile',
+                () => showMobileProfileSheet(context, peerId: peerId)),
+            row(isFav ? LucideIcons.starOff : LucideIcons.star,
+                isFav ? 'Remove favourite' : 'Add to favourites',
+                () => ref.read(favouriteFriendsProvider.notifier).toggle(peerId)),
+            if (onMove != null && canMoveUp)
+              row(LucideIcons.arrowUp, 'Move up', () => onMove!(-1)),
+            if (onMove != null && canMoveDown)
+              row(LucideIcons.arrowDown, 'Move down', () => onMove!(1)),
+            row(LucideIcons.tag,
+                localNick != null ? 'Edit nickname' : 'Set nickname',
+                () => showLocalNicknameDialog(context, ref, peerId,
+                    currentNickname: localNick ?? '')),
             const HollowDivider(),
-
-            _ActionRow(
-              icon: LucideIcons.userMinus,
-              label: 'Remove friend',
-              color: hollow.error,
-              onTap: () {
-                Navigator.pop(context);
-                _confirmRemove(context, ref, name);
-              },
-            ),
+            row(LucideIcons.userMinus, 'Remove friend',
+                () => confirmRemoveFriend(context, ref,
+                    peerId: peerId, name: name)),
+            const SizedBox(height: HollowSpacing.sm),
           ],
         ),
-      ),
-    );
-  }
-
-  void _showNicknameDialog(BuildContext context, WidgetRef ref) {
-    final current = ref.read(localNicknameProvider)[peerId] ?? '';
-    final controller = TextEditingController(text: current);
-    showHollowDialog(
-      context: context,
-      builder: (_) => HollowDialog(
-        title: 'Set nickname',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const HollowDialogText('Only visible to you.'),
-            const SizedBox(height: HollowSpacing.lg),
-            HollowTextField(
-              controller: controller,
-              hintText: 'Nickname',
-              maxLength: 32,
-              showCounter: true,
-              autofocus: true,
-            ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () async {
-              final nickname = controller.text.trim();
-              try {
-                await ref
-                    .read(localNicknameProvider.notifier)
-                    .setNickname(peerId, nickname);
-              } catch (_) {
-                if (context.mounted) {
-                  HollowToast.show(context, 'Could not save nickname',
-                      type: HollowToastType.error);
-                }
-                return;
-              }
-              if (!context.mounted) return;
-              Navigator.pop(context);
-              HollowToast.show(context,
-                  nickname.isEmpty ? 'Nickname cleared' : 'Nickname set',
-                  type: HollowToastType.success);
-            },
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _confirmRemove(
-      BuildContext context, WidgetRef ref, String name) async {
-    final confirmed = await showHollowConfirm(
-      context: context,
-      title: 'Remove $name?',
-      message: "You will both drop off each other's friend list. Your "
-          'conversation stays on this device.',
-      confirmLabel: 'Remove',
-      destructive: true,
-    );
-    if (!confirmed) return;
-    // The awaited removal rebuilds the friends list and may unmount this tile.
-    final favourites = ref.read(favouriteFriendsProvider.notifier);
-    try {
-      await ref.read(friendsProvider.notifier).removeFriend(peerId);
-    } catch (_) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Could not remove friend',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-    // Dropped from favourites too, so no stale entry lingers.
-    favourites.remove(peerId);
-    if (context.mounted) {
-      HollowToast.show(context, 'Friend removed',
-          type: HollowToastType.success);
-    }
-  }
-}
-
-class _ActionRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final Color? color;
-
-  const _ActionRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final c = color ?? hollow.textPrimary;
-    return HollowPressable(
-      onTap: onTap,
-      subtle: true,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg, vertical: HollowSpacing.md,
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 20, color: c),
-          const SizedBox(width: HollowSpacing.md),
-          Text(label, style: HollowTypography.bodyTouch.copyWith(color: c)),
-        ],
       ),
     );
   }
@@ -575,8 +472,7 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
           loading: _busy == 'accept',
           onPressed: () => _answer('accept',
               () => friends.acceptRequest(peerId),
-              'Could not accept request',
-              success: 'Friend request accepted'),
+              'Could not accept request'),
           child: const Text('Accept'),
         ),
       ] else
@@ -676,15 +572,15 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
       await sendFriendRequestTo(ref, input);
       if (mounted) {
         Navigator.of(context).pop();
-        HollowToast.show(
-          context,
-          isPeerIdInput(input) ? 'Friend request sent' : 'Looking up nickname...',
-          type: HollowToastType.success,
-        );
+        HollowToast.show(context, 'Friend request sent',
+            type: HollowToastType.success);
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not send request',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't send the request. Try again."),
             type: HollowToastType.error);
         setState(() => _sending = false);
       }
@@ -716,7 +612,7 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                       .copyWith(color: hollow.textPrimary),
                 ),
                 const SizedBox(height: HollowSpacing.lg),
-                const SettingsFieldLabel(label: 'Peer ID or nickname'),
+                const SettingsFieldLabel(label: 'User ID or nickname'),
                 const SizedBox(height: HollowSpacing.sm),
                 HollowTextField(
                   controller: _inputController,
