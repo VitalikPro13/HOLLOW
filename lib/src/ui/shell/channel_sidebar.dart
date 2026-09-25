@@ -6,7 +6,9 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/speaking_border.dart';
+import 'package:hollow/src/ui/call/call_theme.dart';
+import 'package:hollow/src/ui/call/speaking_ring.dart';
+import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -1374,6 +1376,14 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
               ),
             ),
           ),
+          if (isConnected && vcState.joinedAt != null)
+            CallDurationText(
+              startedAt: vcState.joinedAt!,
+              style: HollowTypography.monoSmall.copyWith(
+                color: hollow.textTertiary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
         ],
       ),
     );
@@ -1570,12 +1580,10 @@ class _VoiceParticipantRow extends ConsumerWidget {
         child: Row(
           children: [
             // The speaking cue hugs the avatar so a long name cannot push it
-            // out of view. SpeakingAvatarOutline, not SpeakingBorder: this row
-            // is dense, so the outline must take no layout space and stand no
-            // gap off the avatar.
-            SpeakingAvatarOutline(
-              isSpeaking: speaking,
-              size: kVoiceParticipantAvatarSize,
+            // out of view, and paints outside it so the row never re-lays out.
+            SpeakingRing.dense(
+              speaking: speaking && !isMuted,
+              color: callRingColor(hollow, isSelf: isSelf, master: master),
               radius: hollow.radiusMd,
               child: HollowAvatar(
                   peerId: master, size: kVoiceParticipantAvatarSize),
@@ -1585,7 +1593,9 @@ class _VoiceParticipantRow extends ConsumerWidget {
               child: Text(
                 name,
                 style: HollowTypography.label.copyWith(
-                  color: hollow.textSecondary,
+                  color: speaking && !isMuted
+                      ? hollow.textPrimary
+                      : hollow.textSecondary,
                 ),
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1602,30 +1612,14 @@ class _VoiceParticipantRow extends ConsumerWidget {
                   child: LinkHealthChip(snapshot: health, compact: true),
                 );
               }),
+            // Status by exception, in grey: a mark says what is true, it
+            // does not shout it.
             if (isScreenSharing)
-              const Padding(
-                padding: EdgeInsets.only(left: HollowSpacing.xxs),
-                child: Icon(LucideIcons.monitor,
-                    size: kVoiceParticipantIconSize, color: Colors.green),
-              ),
-            if (isCameraOn)
-              Padding(
-                padding: const EdgeInsets.only(left: HollowSpacing.xxs),
-                child: Icon(LucideIcons.video,
-                    size: kVoiceParticipantIconSize, color: hollow.accent),
-              ),
-            if (isMuted)
-              Padding(
-                padding: const EdgeInsets.only(left: HollowSpacing.xxs),
-                child: Icon(LucideIcons.micOff,
-                    size: kVoiceParticipantIconSize, color: hollow.error),
-              ),
+              _mark(LucideIcons.monitor, 'Sharing their screen', hollow),
+            if (isCameraOn) _mark(LucideIcons.video, 'Camera on', hollow),
+            if (isMuted) _mark(LucideIcons.micOff, 'Muted', hollow),
             if (isDeafened)
-              Padding(
-                padding: const EdgeInsets.only(left: HollowSpacing.xxs),
-                child: Icon(LucideIcons.headphones,
-                    size: kVoiceParticipantIconSize, color: hollow.error),
-              ),
+              _mark(LucideIcons.headphoneOff, 'Deafened', hollow),
             if (isRecording)
               const Padding(
                 padding: EdgeInsets.only(left: 4),
@@ -1637,4 +1631,11 @@ class _VoiceParticipantRow extends ConsumerWidget {
     );
   }
 
+  Widget _mark(IconData icon, String label, HollowTheme hollow) => Padding(
+        padding: const EdgeInsets.only(left: HollowSpacing.xxs),
+        child: Icon(icon,
+            size: kVoiceParticipantIconSize,
+            color: hollow.textTertiary,
+            semanticLabel: label),
+      );
 }

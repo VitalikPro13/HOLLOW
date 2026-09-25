@@ -558,7 +558,7 @@ class _MobileVoiceChannelRouteState
                             ? ref.watch(vcLocalSpeakingProvider)
                             : ref.watch(vcSpeakingProvider
                                 .select((s) => s.contains(peerId)));
-                        return SpeakingRing(
+                        return SpeakingOverlayRing(
                           isSpeaking: speaking,
                           borderRadius:
                               BorderRadius.circular(hollow.radiusMd),

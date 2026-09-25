@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
@@ -29,6 +30,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/components/voice_here_badge.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -294,10 +296,22 @@ class _FriendChip extends ConsumerWidget { // design-ignore: an avatar tab in th
         : 0;
     final status = profile?.status ?? '';
     final fill = selected ? hollow.accentMuted : null;
+    // Incoming calls carry the caller's DEVICE, so compare as people.
+    final inCall = ref.watch(callProvider.select((c) =>
+        c.status == CallStatus.active || c.status == CallStatus.connecting
+            ? c.peerId
+            : null));
+    final inCallWithThem = inCall != null &&
+        ref.watch(deviceLinkProvider).identityOf(inCall) == peerId;
+    final label = [
+      name,
+      if (inCallWithThem) 'in a call with you',
+      if (unread > 0) '$unread unread',
+    ].join(', ');
 
     Widget chip = HollowPressable(
       onTap: () => openDmConversation(ref, peerId),
-      semanticLabel: unread > 0 ? '$name, $unread unread' : name,
+      semanticLabel: label,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       backgroundColor: fill,
       padding: const EdgeInsets.fromLTRB(
@@ -326,6 +340,18 @@ class _FriendChip extends ConsumerWidget { // design-ignore: an avatar tab in th
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          if (inCallWithThem) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            ExcludeSemantics(
+              child: VoiceHereBadge(
+                ring: fill == null
+                    ? hollow.opaqueSurface
+                    : Color.alphaBlend(fill, hollow.opaqueSurface),
+                icon: LucideIcons.phone,
+                semanticLabel: 'In a call with you',
+              ),
+            ),
+          ],
           if (unread > 0) ...[
             const SizedBox(width: HollowSpacing.xs),
             ExcludeSemantics(child: HollowCountBadge(count: unread)),

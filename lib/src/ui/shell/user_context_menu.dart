@@ -23,6 +23,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -178,11 +179,7 @@ List<HollowMenuEntry> userMenuEntries({
       entries.add(HollowMenuItem(
         icon: LucideIcons.phone,
         label: 'Start a call',
-        onTap: () => _report(
-          context,
-          ref.read(callProvider.notifier).startCall(master),
-          'Could not start the call',
-        ),
+        onTap: () => startDmCallFlow(context, ref, master),
       ));
     }
   }

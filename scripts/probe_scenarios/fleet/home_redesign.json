@@ -87,7 +87,7 @@
     { "peer": "b", "op": "enter_text", "target": "field", "value": "@probe-a can you check the relay logs ${RUN}" },
     { "peer": "b", "op": "key", "value": "enter" },
     { "peer": "b", "op": "open_channel", "name": "lounge" },
-    { "peer": "b", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
 
     { "peer": "a", "op": "wait_for", "target": "text:#general", "timeout_ms": 60000, "soft": true },
     { "peer": "a", "op": "wait_for", "target": "text:Active Now", "timeout_ms": 10000 },

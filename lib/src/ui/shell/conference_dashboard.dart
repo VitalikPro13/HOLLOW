@@ -13,11 +13,14 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_stage.dart';
+import 'package:hollow/src/ui/call/call_stage_sources.dart';
+import 'package:hollow/src/ui/call/call_theme.dart';
+import 'package:hollow/src/ui/call/speaking_ring.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart'
     show ChatHeaderBar;
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -32,10 +35,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
-import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
-import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
-import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart';
 import 'package:hollow/src/ui/shell/place_header.dart';
@@ -787,19 +787,13 @@ class _CallViewState extends ConsumerState<_CallView> {
                   ),
                 ],
               ),
+              // Leaving is the bar's; ending it for everyone stays up here.
               if (conf.isHost)
                 HollowButton.outline(
                   compact: true,
                   danger: true,
                   onPressed: () => endConferenceMeeting(context, ref),
                   child: const Text('End meeting'),
-                )
-              else
-                HollowButton.ghost(
-                  compact: true,
-                  icon: const Icon(LucideIcons.phoneOff, size: 14),
-                  onPressed: () => leaveConferenceMeeting(context, ref),
-                  child: const Text('Leave'),
                 ),
             ],
           ),
@@ -1025,6 +1019,7 @@ class _ParticipantRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final name = isSelf ? 'You' : conferenceDisplayName(ref, peerId);
+    final master = ref.watch(deviceLinkProvider).identityOf(peerId);
     // Self reads the dedicated local flag: the set is device-id keyed, so a
     // self membership test silently misses (see [vcLocalSpeakingProvider]).
     final speaking = isSelf
@@ -1034,12 +1029,12 @@ class _ParticipantRow extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
       child: Row(
         children: [
-          SpeakingAvatarOutline(
-            isSpeaking: speaking,
-            size: _avatar,
+          SpeakingRing(
+            speaking: speaking,
+            color: callRingColor(hollow, isSelf: isSelf, master: master),
             radius: hollow.radiusMd,
             child: HollowAvatar(
-              peerId: ref.read(deviceLinkProvider).identityOf(peerId),
+              peerId: master,
               size: _avatar,
               semanticLabel: name,
             ),
@@ -1089,218 +1084,24 @@ class _ConferenceCallArea extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final vcState = ref.watch(voiceChannelProvider);
+    final hollow = HollowTheme.of(context);
     final serverId = conf.activeServerId;
-    final inThisCall = vcState.currentServerId == serverId &&
-        vcState.currentChannelId == kConferenceChannelId;
-
-    // Reuses the voice-channel pane's full-bleed views wholesale. Its chat
-    // drawer and floating pill are HIDDEN: the chat lives in the side panel,
-    // and the pill's Disconnect tears down the voice leg alone.
-    if (inThisCall && (vcState.showsShareSurface || vcState.isCameraActive)) {
-      return Column(
-        children: [
-          Expanded(
-            child: VoiceChannelPane(
-              key: ValueKey('conf-vc:$serverId'),
-              serverId: serverId,
-              channelId: kConferenceChannelId,
-              channelName: meetingName,
-              hideControlsPill: true,
-              hideChatOverlay: true,
-            ),
-          ),
-          _ConferenceControls(vcState: vcState),
-        ],
+    final inThisCall = ref.watch(voiceChannelProvider.select((s) =>
+        s.currentServerId == serverId &&
+        s.currentChannelId == kConferenceChannelId));
+    // The same stage and bar as a voice room (D1). Leave on the bar routes
+    // through the meeting, never the bare voice leg.
+    if (inThisCall) {
+      return CallStage(
+        key: ValueKey('conf-stage:$serverId'),
+        source: VcCallStageSource(
+            serverId: serverId, channelId: kConferenceChannelId),
       );
     }
-
-    final (:selfId, :all) = _meetingParticipants(ref, conf, vcState);
-    return Column(
-      children: [
-        Expanded(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              child: Wrap(
-                spacing: HollowSpacing.lg,
-                runSpacing: HollowSpacing.lg,
-                alignment: WrapAlignment.center,
-                children: [
-                  for (final peerId in all)
-                    _ParticipantTile(
-                      key: ValueKey(peerId),
-                      peerId: peerId,
-                      isSelf: peerId == selfId,
-                      vcState: vcState,
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        _ConferenceControls(vcState: vcState),
-      ],
-    );
-  }
-}
-
-class _ParticipantTile extends ConsumerWidget {
-  final String peerId;
-  final bool isSelf;
-  final VoiceChannelState vcState;
-  const _ParticipantTile({
-    super.key,
-    required this.peerId,
-    required this.isSelf,
-    required this.vcState,
-  });
-
-  static const double _avatar = 56;
-  static const double _width = 96;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    // Membership select, so only THIS tile rebuilds when its speaking flips.
-    // Self reads the dedicated local flag (see [vcLocalSpeakingProvider]).
-    final speaking = isSelf
-        ? ref.watch(vcLocalSpeakingProvider)
-        : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
-    final muted = isSelf
-        ? vcState.isMuted
-        : (vcState.peerAudioStates[peerId]?.isMuted ?? false);
-    final name = isSelf ? 'You' : conferenceDisplayName(ref, peerId);
-
-    return SizedBox(
-      width: _width,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              SpeakingAvatarOutline(
-                isSpeaking: speaking,
-                size: _avatar,
-                radius: hollow.radiusMd,
-                child: HollowAvatar(
-                  peerId: ref.read(deviceLinkProvider).identityOf(peerId),
-                  size: _avatar,
-                  semanticLabel: name,
-                ),
-              ),
-              if (muted)
-                Positioned(
-                  right: -HollowSpacing.xs,
-                  bottom: -HollowSpacing.xs,
-                  child: Container(
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    decoration: BoxDecoration(
-                      color: hollow.elevated,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: hollow.border),
-                    ),
-                    child: Icon(LucideIcons.micOff,
-                        size: 14,
-                        color: hollow.error,
-                        semanticLabel: 'Muted'),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            name,
-            style: HollowTypography.caption.copyWith(color: hollow.textPrimary),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ConferenceControls extends ConsumerWidget {
-  final VoiceChannelState vcState;
-  const _ConferenceControls({required this.vcState});
-
-  Future<void> _toggleScreenShare(BuildContext context, WidgetRef ref) async {
-    if (vcState.isScreenSharing) {
-      ref.read(voiceChannelProvider.notifier).stopScreenShare();
-      return;
-    }
-    final selection = await showScreenShareDialog(context);
-    if (selection != null && context.mounted) {
-      ref.read(voiceChannelProvider.notifier).startScreenShare(
-            selection.sourceId,
-            selection.width,
-            selection.height,
-            selection.fps,
-            shareAudio: selection.shareAudio,
-            pid: selection.pid,
-            windowHwnd: selection.windowHwnd,
-            profile: selection.profile,
-          );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final vcNotifier = ref.read(voiceChannelProvider.notifier);
-    // PTT-aware mic (issue #38): gated while idle, live on hold.
-    final mic = micButtonVisual(ref,
-        isMuted: vcState.isMuted,
-        hollow: hollow,
-        idleColor: hollow.textSecondary);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          HollowIconButton(
-            icon: mic.icon,
-            label: vcState.isMuted ? 'Unmute' : 'Mute',
-            tooltip: mic.tooltip,
-            color: mic.color,
-            selected: vcState.isMuted,
-            onPressed: vcNotifier.toggleMute,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowIconButton(
-            icon: vcState.isDeafened
-                ? LucideIcons.headphoneOff
-                : LucideIcons.headphones,
-            label: vcState.isDeafened ? 'Undeafen' : 'Deafen',
-            color: vcState.isDeafened ? hollow.error : null,
-            selected: vcState.isDeafened,
-            onPressed: vcNotifier.toggleDeafen,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowIconButton(
-            icon:
-                vcState.isCameraOn ? LucideIcons.video : LucideIcons.videoOff,
-            label: vcState.isCameraOn ? 'Turn camera off' : 'Turn camera on',
-            selected: vcState.isCameraOn,
-            onPressed: () =>
-                unawaited(vcNotifier.toggleCamera().catchError((_) {})),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowIconButton(
-            icon: LucideIcons.monitor,
-            label:
-                vcState.isScreenSharing ? 'Stop sharing' : 'Share your screen',
-            selected: vcState.isScreenSharing,
-            onPressed: () => unawaited(_toggleScreenShare(context, ref)),
-          ),
-        ],
+    return ColoredBox(
+      color: hollow.background,
+      child: const Center(
+        child: HollowEmptyState(title: 'Joining the meeting'),
       ),
     );
   }

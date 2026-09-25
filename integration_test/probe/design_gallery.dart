@@ -1,4 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/services/link_resilience.dart';
+import 'package:hollow/src/ui/call/call_person_tile.dart';
+import 'package:hollow/src/ui/call/call_stage_bar.dart';
+import 'package:hollow/src/ui/call/call_stage_data.dart';
+import 'package:hollow/src/ui/call/share_tile.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -38,7 +45,10 @@ class DesignGallery extends StatelessWidget {
     // ONE scroll view around both panes, not one each: the probe's `scroll` op
     // resolves to the first match, so two scrollables would drift apart and
     // the shot would compare different rows of the two themes.
-    return SingleChildScrollView(
+    // Material for the sliders sampled below, which need one above them.
+    return Material(
+      type: MaterialType.transparency,
+      child: SingleChildScrollView(
       child: IntrinsicHeight(
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -57,6 +67,7 @@ class DesignGallery extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -546,6 +557,10 @@ class _GalleryPane extends StatelessWidget {
               ),
               const SizedBox(height: HollowSpacing.xl),
 
+              const HollowSectionHeader('Calls'),
+              const _CallsSample(),
+              const SizedBox(height: HollowSpacing.xl),
+
               const HollowSectionHeader('Type roles'),
               _TypeRow('display 28/600', HollowTypography.display),
               _TypeRow('heading 20/600', HollowTypography.heading),
@@ -647,6 +662,161 @@ class _MessageSample extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+
+final _galleryQuiet = Provider<bool>((_) => false);
+final _galleryTalking = Provider<bool>((_) => true);
+final _galleryWeak = Provider<LinkHealthSnapshot?>(
+    (_) => const LinkHealthSnapshot(health: LinkHealth.unstable));
+
+/// The call pieces (session 21): person tiles at rest, speaking, muted with a
+/// weak link; share tiles as an offer, live, and yours with a watcher; the
+/// bar at rest and muted.
+class _CallsSample extends StatelessWidget {
+  const _CallsSample();
+
+  static const _tileW = 176.0;
+  static const _tileH = 99.0;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget large(Widget child) => Padding(
+        padding: const EdgeInsets.only(right: HollowSpacing.lg),
+        child: SizedBox(width: _tileW, height: _tileH, child: child));
+    Widget strip(Widget child) => Padding(
+        padding: const EdgeInsets.only(right: HollowSpacing.sm),
+        child: SizedBox(width: 132, height: 76, child: child));
+    CallPerson person(String id, String name,
+            {bool self = false,
+            bool muted = false,
+            bool talking = false,
+            bool weak = false}) =>
+        CallPerson(
+          id: id,
+          master: id,
+          isSelf: self,
+          name: name,
+          muted: muted,
+          speaking: talking ? _galleryTalking : _galleryQuiet,
+          link: weak ? _galleryWeak : null,
+        );
+    CallBarModel bar({bool muted = false}) => CallBarModel(
+          startedAt: DateTime.now().subtract(const Duration(minutes: 4)),
+          muted: muted,
+          deafened: false,
+          onMute: () {},
+          onDeafen: () {},
+          cameraOn: false,
+          onCamera: () {},
+          sharing: false,
+          onShare: () {},
+          layout: CallLayoutAction.showEveryone,
+          onLayout: () {},
+          fullscreen: false,
+          onFullscreen: () {},
+          watching: false,
+          leaveLabel: 'Leave the room',
+          onLeave: () {},
+        );
+
+    return ProviderScope(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Rows of fixed boxes, not a Wrap: the page sits in an
+          // IntrinsicHeight, and a Wrap dry-lays its children, which a tile's
+          // LayoutBuilder cannot do.
+          Row(
+            children: [
+              large(CallPersonTile(
+                  size: CallTileSize.large,
+                  person: person('gallery-you', 'You', self: true))),
+              large(CallPersonTile(
+                  size: CallTileSize.large,
+                  person: person('gallery-mira', 'Mira', talking: true))),
+              large(CallPersonTile(
+                  size: CallTileSize.large,
+                  person: person('gallery-juno', 'Juno',
+                      muted: true, weak: true))),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          Row(
+            children: [
+              large(ShareTile(
+                size: CallTileSize.large,
+                share: const CallShare(
+                  owner: 'gallery-kes',
+                  master: 'gallery-kes',
+                  isMine: false,
+                  name: 'Kestrel',
+                  watched: false,
+                  quality: '1080p60',
+                ),
+                onWatch: () {},
+              )),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          Row(
+            children: [
+              SizedBox(
+                width: 480,
+                height: 270,
+                child: ShareTile(
+                size: CallTileSize.large,
+                share: const CallShare(
+                  owner: 'gallery-you',
+                  master: 'gallery-you',
+                  isMine: true,
+                  name: 'You',
+                  watched: true,
+                  quality: '1080p60',
+                  watchers: ['gallery-mira'],
+                ),
+                onStopSharing: () {},
+              )),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          Row(
+            children: [
+              strip(CallPersonTile(
+                  size: CallTileSize.strip,
+                  person: person('gallery-mira', 'Mira', talking: true))),
+              strip(CallPersonTile(
+                  size: CallTileSize.strip,
+                  person: person('gallery-juno', 'Juno',
+                      muted: true, weak: true))),
+              strip(ShareTile(
+                size: CallTileSize.strip,
+                share: const CallShare(
+                  owner: 'gallery-kes',
+                  master: 'gallery-kes',
+                  isMine: false,
+                  name: 'Kestrel',
+                  watched: false,
+                ),
+                onWatch: () {},
+              )),
+              CallPersonTile(
+                  size: CallTileSize.compact,
+                  person: person('gallery-mira', 'Mira', talking: true)),
+              const SizedBox(width: HollowSpacing.md),
+              CallPersonTile(
+                  size: CallTileSize.compact,
+                  person: person('gallery-juno', 'Juno', muted: true)),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          CallStageBar(model: bar()),
+          const SizedBox(height: HollowSpacing.sm),
+          CallStageBar(model: bar(muted: true)),
+        ],
+      ),
     );
   }
 }

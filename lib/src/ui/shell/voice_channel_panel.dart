@@ -1,59 +1,50 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
-import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
-import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Voice channel controls, at the bottom of the channel sidebar while the user
-/// is in a voice channel.
+/// Classic's "you" block at the foot of the channel sidebar while in a call,
+/// a voice room or a DM: where it is, and mute, deafen and Leave as the dock
+/// has them. Classic has no dock, so this is how a call is reached from
+/// anywhere.
 class VoiceChannelPanel extends ConsumerWidget {
   const VoiceChannelPanel({super.key});
 
-  Future<void> _handleScreenShareToggle(
-    BuildContext context,
-    WidgetRef ref,
-    VoiceChannelState vcState,
-  ) async {
-    if (vcState.isScreenSharing) {
-      ref.read(voiceChannelProvider.notifier).stopScreenShare();
-    } else {
-      final selection = await showScreenShareDialog(context);
-      if (selection != null && context.mounted) {
-        ref.read(voiceChannelProvider.notifier).startScreenShare(
-              selection.sourceId,
-              selection.width,
-              selection.height,
-              selection.fps,
-              shareAudio: selection.shareAudio,
-              pid: selection.pid,
-              windowHwnd: selection.windowHwnd,
-              profile: selection.profile,
-            );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (!watchHasQuickControls(ref)) return const SizedBox.shrink();
     final vcState = ref.watch(voiceChannelProvider);
-    if (!vcState.isInVoiceChannel) return const SizedBox.shrink();
+    final call = ref.watch(callProvider.select((c) => (
+          status: c.status,
+          peerId: c.peerId,
+        )));
+    final dmMaster = call.status == CallStatus.idle || call.peerId == null
+        ? null
+        : ref.watch(deviceLinkProvider).identityOf(call.peerId!);
 
     final hollow = HollowTheme.of(context);
     final channels = ref.watch(channelListProvider);
-    final channelName =
-        channels[vcState.currentChannelId]?.name ?? 'Voice';
+    final where = dmMaster != null
+        ? dmCallPeerName(ref, dmMaster)
+        : channels[vcState.currentChannelId]?.name ??
+            vcState.currentChannelName ??
+            'Voice';
+    final status = dmMaster == null
+        ? 'Voice connected'
+        : call.status == CallStatus.ringing
+            ? 'Calling'
+            : 'In a call';
 
     // OUR OWN link, not the mesh's: a per-peer leg in trouble is labelled on
     // that member's row, and this line is the one case affecting everyone. A
@@ -97,18 +88,25 @@ class VoiceChannelPanel extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      connected ? 'Voice connected' : visual.label,
+                      connected ? status : visual.label,
                       style: HollowTypography.caption.copyWith(
                         color: connected ? hollow.success : visual.color,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    Text(
-                      channelName,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
+                    HollowPressable(
+                      subtle: true,
+                      semanticLabel: 'Open $where',
+                      onTap: dmMaster != null
+                          ? () => openDmConversation(ref, dmMaster)
+                          : null,
+                      child: Text(
+                        where,
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
                 ),
@@ -116,105 +114,9 @@ class VoiceChannelPanel extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: HollowSpacing.sm),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              // PTT-aware: a gated mic while idle, live on hold.
-              Builder(builder: (context) {
-                final mic = micButtonVisual(ref,
-                    isMuted: vcState.isMuted,
-                    hollow: hollow,
-                    idleColor: hollow.textPrimary);
-                return HollowTooltip(
-                  message: mic.tooltip,
-                  child: HollowPressable(
-                    semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
-                    onTap: () =>
-                        ref.read(voiceChannelProvider.notifier).toggleMute(),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    child: Icon(mic.icon, size: 18, color: mic.color),
-                  ),
-                );
-              }),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowTooltip(
-                message: vcState.isDeafened ? 'Undeafen' : 'Deafen',
-                child: HollowPressable(
-                  semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
-                  onTap: () =>
-                      ref.read(voiceChannelProvider.notifier).toggleDeafen(),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.all(HollowSpacing.sm),
-                  child: Icon(
-                    LucideIcons.headphones,
-                    size: 18,
-                    color: vcState.isDeafened
-                        ? hollow.error
-                        : hollow.textPrimary,
-                  ),
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowTooltip(
-                message: vcState.isCameraOn ? 'Turn off camera' : 'Turn on camera',
-                child: HollowPressable(
-                  semanticLabel: vcState.isCameraOn
-                      ? 'Turn off camera'
-                      : 'Turn on camera',
-                  onTap: () =>
-                      ref.read(voiceChannelProvider.notifier).toggleCamera(),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.all(HollowSpacing.sm),
-                  child: Icon(
-                    vcState.isCameraOn ? LucideIcons.video : LucideIcons.videoOff,
-                    size: 18,
-                    color: vcState.isCameraOn
-                        ? hollow.accent
-                        : hollow.textPrimary,
-                  ),
-                ),
-              ),
-              if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                HollowTooltip(
-                  message: vcState.isScreenSharing
-                      ? 'Stop sharing'
-                      : 'Share screen',
-                  child: HollowPressable(
-                    semanticLabel: vcState.isScreenSharing
-                        ? 'Stop sharing'
-                        : 'Share screen',
-                    onTap: () => _handleScreenShareToggle(context, ref, vcState),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    child: Icon(
-                      LucideIcons.monitor,
-                      size: 18,
-                      color: vcState.isScreenSharing
-                          ? hollow.accent
-                          : hollow.textPrimary,
-                    ),
-                  ),
-                ),
-              ],
-              const SizedBox(width: HollowSpacing.sm),
-              HollowTooltip(
-                message: 'Disconnect',
-                child: HollowPressable(
-                  semanticLabel: 'Disconnect',
-                  onTap: () => leaveVoiceRoom(context, ref),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.all(HollowSpacing.sm),
-                  child: Icon(
-                    LucideIcons.phoneOff,
-                    size: 18,
-                    color: hollow.error,
-                  ),
-                ),
-              ),
-            ],
-          ),
+          // The same three controls as the dock; camera and share live on the
+          // room's own bar.
+          const Center(child: VoiceQuickControls()),
         ],
       ),
     );

@@ -15,15 +15,15 @@ import 'package:flutter_test/flutter_test.dart';
 /// list: an incoming call has no speaking indicator to confuse, and "who is
 /// calling me" is exactly where identity decoration earns its place.
 ///
-/// Only files that are ENTIRELY call/VC surfaces are scanned. `chat_pane.dart`
-/// carries both (its inline call panel opts out; its DM header and profile
-/// card keep their frames), so it cannot be checked wholesale — those sites
-/// carry the reasoning in a comment instead.
+/// Only files that are ENTIRELY call/VC surfaces are scanned; `chat_pane.dart`
+/// keeps its frames in the DM header, and its call lives in `ui/call/`.
 void main() {
   test('voice and call avatars opt out of frames', () {
     const files = [
       'lib/src/ui/chat/voice_channel_pane.dart',
-      'lib/src/ui/components/call_video_view.dart',
+      'lib/src/ui/call/call_person_tile.dart',
+      'lib/src/ui/call/share_tile.dart',
+      'lib/src/ui/call/dm_call_row.dart',
       'lib/src/ui/mobile/mobile_call_video_view.dart',
       'lib/src/ui/mobile/mobile_voice_avatars.dart',
     ];

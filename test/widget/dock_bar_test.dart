@@ -212,14 +212,14 @@ void main() {
     expect(find.text('Jam room · Server 1'), findsOneWidget);
     expect(_label('Mute'), findsWidgets);
     expect(_label('Deafen'), findsWidgets);
-    expect(_label('Disconnect'), findsWidgets);
+    expect(_label('Leave the room'), findsWidgets);
     expect(find.byType(VoiceHereBadge), findsOneWidget,
         reason: 'the server holding the call carries the speaker');
   });
 
   testWidgets('out of a call there are no call controls', (tester) async {
     await _pumpDock(tester);
-    expect(_label('Disconnect'), findsNothing);
+    expect(_label('Leave the room'), findsNothing);
     expect(find.byType(VoiceHereBadge), findsNothing);
   });
 

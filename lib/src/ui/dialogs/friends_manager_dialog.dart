@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
@@ -585,19 +586,10 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
         widget.favourite ? widget.favouriteKey : widget.peerId);
   }
 
-  Future<void> _call() async {
-    final call = ref.read(callProvider.notifier);
-    final overlay = Navigator.of(context).overlay;
-    _closeDialog(context);
-    try {
-      await call.startCall(widget.peerId);
-    } catch (_) {
-      if (overlay != null && overlay.mounted) {
-        HollowToast.show(overlay.context, 'Could not start the call',
-            type: HollowToastType.error, overlayState: overlay);
-      }
-    }
-  }
+  /// The same start as the DM header: TURN check, the leave-the-room
+  /// confirm, then the call in its DM, and the manager closes behind it.
+  Future<void> _call() => startDmCallFlow(context, ref, widget.peerId,
+      beforeCall: () => _closeDialog(context));
 
   Future<void> _confirmRemove(String name) async {
     final confirmed = await showHollowConfirm(

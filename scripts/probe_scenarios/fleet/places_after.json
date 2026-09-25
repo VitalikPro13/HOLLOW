@@ -826,7 +826,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "semantics:Disconnect",
+   "target": "semantics:Leave the room",
    "index": 0
   },
   {

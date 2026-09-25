@@ -32,6 +32,10 @@ class HollowIconButton extends StatelessWidget {
   /// (push to talk) while the name stays the action.
   final String? tooltip;
 
+  /// A state fill that is not a selection: a call's muted mic reads as an
+  /// error wash. Wins over [selected]'s grey.
+  final Color? fill;
+
   const HollowIconButton({
     super.key,
     required this.icon,
@@ -42,6 +46,7 @@ class HollowIconButton extends StatelessWidget {
     this.color,
     this.count,
     this.tooltip,
+    this.fill,
   });
 
   @override
@@ -54,7 +59,7 @@ class HollowIconButton extends StatelessWidget {
         disabled: onPressed == null,
         semanticLabel: label,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        backgroundColor: selected ? hollow.hover : null,
+        backgroundColor: fill ?? (selected ? hollow.hover : null),
         child: _content(hollow),
       ),
     );

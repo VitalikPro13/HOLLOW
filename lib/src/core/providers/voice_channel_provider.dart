@@ -120,6 +120,10 @@ class VoiceChannelState {
 
   final Map<String, bool> peerCameraOn;
 
+  /// Who asked to watch OUR share (DEVICE ids), so the share can say who is
+  /// watching. Mirrors the notifier's private offer set.
+  final Set<String> shareWatchers;
+
   /// Mobile audio route: true = loudspeaker, false = earpiece.
   final bool isSpeakerOn;
 
@@ -146,6 +150,7 @@ class VoiceChannelState {
     this.isCameraOn = false,
     this.isFrontCamera = true,
     this.peerCameraOn = const {},
+    this.shareWatchers = const {},
     this.isSpeakerOn = false,
   });
 
@@ -220,6 +225,7 @@ class VoiceChannelState {
     bool? isCameraOn,
     bool? isFrontCamera,
     Map<String, bool>? peerCameraOn,
+    Set<String>? shareWatchers,
     bool? isSpeakerOn,
   }) {
     return VoiceChannelState(
@@ -280,6 +286,9 @@ class VoiceChannelState {
       peerCameraOn: clearCurrent
           ? const {}
           : (peerCameraOn ?? this.peerCameraOn),
+      shareWatchers: clearCurrent
+          ? const {}
+          : (shareWatchers ?? this.shareWatchers),
       isSpeakerOn: clearCurrent
           ? false
           : (isSpeakerOn ?? this.isSpeakerOn),
@@ -347,6 +356,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Peers that requested to watch OUR share via screen_watch (issue #38).
   /// We only ever send a screen offer to peers in this set.
   final Set<String> _watchers = {};
+
+  /// Publishes [_watchers] to [VoiceChannelState.shareWatchers] after a change.
+  void _syncWatchers() {
+    if (setEquals(state.shareWatchers, _watchers)) return;
+    state = state.copyWith(shareWatchers: Set.unmodifiable(_watchers));
+  }
 
   /// Per-watcher display resolution from screen_watch: clamps THAT viewer's
   /// stream to their monitor. Absent / 0x0 = unknown (old client) = no clamp.
@@ -1053,6 +1068,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     await _service!.onPeerLeftMyChannel(peerId);
     _watchers.remove(peerId);
+    _syncWatchers();
     _watcherDisplays.remove(peerId);
     _audioConnectedPeers.remove(peerId);
     _sframeFailures.removeWhere((k, _) => k.startsWith('$peerId|'));
@@ -1591,10 +1607,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
 
     final localPeerId = ref.read(identityProvider).peerId ?? '';
+    // Our own share takes focus only when nothing else holds it: focus moves
+    // on a click, never on a new source.
+    final keepFocus = state.focusedScreenSharePeerId != null;
     state = state.copyWith(
       isScreenSharing: true,
       screenShareLabel: qualityLabel,
-      focusedScreenSharePeerId: localPeerId,
+      focusedScreenSharePeerId: keepFocus ? null : localPeerId,
+      focusedSourceType: keepFocus ? null : 'screen',
     );
     SoundService.instance.play(HollowSound.joinStream, duringCall: true);
 
@@ -1682,6 +1702,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // window where VC voices play in-process is re-captured.
       await _stopMobileShareAudio();
       _watchers.clear();
+      _syncWatchers();
       _watcherDisplays.clear();
       _watcherRoutes.clear();
       _viewerFwdFailures.clear();
@@ -1756,6 +1777,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   void setFocusedScreenShare(String peerId) {
     state = state.copyWith(focusedScreenSharePeerId: peerId);
+  }
+
+  /// Nothing focused: the stage shows everyone.
+  void clearFocus() {
+    if (state.focusedScreenSharePeerId == null) return;
+    state = state.copyWith(clearFocusedSharer: true);
   }
 
   /// Set which source is focused (for mixed mode: screen share + cameras).
@@ -2236,6 +2263,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // Raced our stop; the peer's badge clears via screen_state{disabled}.
       if (!state.isScreenSharing || _screenCaptureStream == null) return;
       _watchers.add(peerId);
+      _syncWatchers();
       _watcherDisplays[peerId] =
           (w: viewerW, h: viewerH);
       _watcherRoutes[peerId] = (
@@ -2344,6 +2372,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     } else {
       _watchers.remove(peerId);
+      _syncWatchers();
       _watcherDisplays.remove(peerId);
       _watcherRoutes.remove(peerId);
       final branch = _branchOf(peerId);
@@ -3696,24 +3725,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           .where((e) => e.value && watching.contains(e.key))
           .map((e) => e.key)
           .firstOrNull;
+      // The next live share, else everyone: a camera never takes focus on
+      // its own.
       final nextFocus =
           nextWatched ?? (state.isScreenSharing ? localPeerId : null);
-      String? cameraFocus;
-      if (nextFocus == null) {
-        cameraFocus = state.isCameraOn
-            ? localPeerId
-            : state.peerCameraOn.entries
-                .where((e) => e.value)
-                .map((e) => e.key)
-                .firstOrNull;
-      }
       state = state.copyWith(
         watchingScreenShares: watching,
-        focusedScreenSharePeerId: nextFocus ?? cameraFocus,
-        clearFocusedSharer: nextFocus == null && cameraFocus == null,
-        focusedSourceType: nextFocus != null
-            ? 'screen'
-            : (cameraFocus != null ? 'camera' : state.focusedSourceType),
+        focusedScreenSharePeerId: nextFocus,
+        clearFocusedSharer: nextFocus == null,
+        focusedSourceType: 'screen',
       );
     } else {
       state = state.copyWith(
@@ -3817,6 +3837,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _routeReprobeTimers.remove(peerId)?.cancel();
     _lastRouteHintSent.remove(peerId);
     _watchers.remove(peerId);
+    _syncWatchers();
     _watcherDisplays.remove(peerId);
     _watcherRoutes.remove(peerId);
     // Their share ending ends our watch, the forwarding offer and the counter.
@@ -3929,6 +3950,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _routeReprobeTimers.clear();
     _lastRouteHintSent.clear();
     _watchers.clear();
+    _syncWatchers();
     _watcherDisplays.clear();
 
     // Leaving the channel drops every forwarder relationship; presence in the

@@ -2,14 +2,23 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
-/// A self-ticking mm:ss call-duration label. The tick lives INSIDE this leaf
-/// widget, so a call screen does not rebuild its whole Scaffold once a second
-/// for the life of the call.
+/// A self-ticking call-duration label, mm:ss and h:mm:ss past an hour. The
+/// tick lives INSIDE this leaf, so a call screen does not rebuild its whole
+/// Scaffold once a second for the life of the call.
 class CallDurationText extends StatefulWidget {
   final DateTime startedAt;
   final TextStyle? style;
 
   const CallDurationText({super.key, required this.startedAt, this.style});
+
+  static String format(Duration d) {
+    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
+    if (d.inHours == 0) {
+      return '${d.inMinutes.toString().padLeft(2, '0')}:$seconds';
+    }
+    final minutes = (d.inMinutes % 60).toString().padLeft(2, '0');
+    return '${d.inHours}:$minutes:$seconds';
+  }
 
   @override
   State<CallDurationText> createState() => _CallDurationTextState();
@@ -32,17 +41,11 @@ class _CallDurationTextState extends State<CallDurationText> {
     super.dispose();
   }
 
-  String _format(Duration d) {
-    final minutes = d.inMinutes.toString().padLeft(2, '0');
-    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
-  }
-
   @override
   Widget build(BuildContext context) {
     final elapsed = DateTime.now().difference(widget.startedAt);
     return Text(
-      _format(elapsed.isNegative ? Duration.zero : elapsed),
+      CallDurationText.format(elapsed.isNegative ? Duration.zero : elapsed),
       style: widget.style,
     );
   }

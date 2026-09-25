@@ -410,7 +410,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         Positioned.fill(
           child: Consumer(builder: (context, ref, _) {
             final speaking = ref.watch(callSpeakingProvider);
-            return SpeakingRing(
+            return SpeakingOverlayRing(
               isSpeaking: showLocalFull ? speaking.local : speaking.remote,
               borderRadius: BorderRadius.zero,
             );
@@ -470,7 +470,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                         ),
                       ),
                       Consumer(builder: (context, ref, _) {
-                        return SpeakingRing(
+                        return SpeakingOverlayRing(
                           isSpeaking: ref.watch(
                               callSpeakingProvider.select((s) => s.local)),
                           borderRadius: BorderRadius.circular(11),

@@ -3,6 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
@@ -29,6 +32,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/call/call_stage_sources.dart' show dmCallPeerName;
 import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
@@ -76,8 +80,7 @@ class BottomBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final inVoice =
-        ref.watch(voiceChannelProvider.select((s) => s.isInVoiceChannel));
+    final inCall = watchHasQuickControls(ref);
     final location = ref.watch(dockLocationProvider);
     final atSettings =
         location is _AtPlace && location.tab == ShellTab.settings;
@@ -98,7 +101,7 @@ class BottomBar extends ConsumerWidget {
               children: [
                 const SizedBox(width: HollowSpacing.md),
                 const DockIdentity(),
-                if (inVoice) ...[
+                if (inCall) ...[
                   const SizedBox(width: HollowSpacing.xs),
                   const VoiceQuickControls(),
                 ],
@@ -359,9 +362,37 @@ class DockIdentity extends ConsumerWidget {
         ? null
         : ref.watch(serverListProvider.select((m) => m[voice.$1]?.name));
 
+    final call = ref.watch(callProvider.select((c) => (
+          status: c.status,
+          direction: c.direction,
+          peerId: c.peerId,
+        )));
+    final callMaster = call.peerId == null
+        ? null
+        : ref.watch(deviceLinkProvider).identityOf(call.peerId!);
+    final dmCallShown = callMaster != null &&
+        call.status != CallStatus.idle &&
+        !(call.status == CallStatus.ringing &&
+            call.direction == CallDirection.incoming);
+
     final Widget? line;
     if (!overall.isOnline && !invisible) {
       line = _statusLine(visual.label, hollow.warning);
+    } else if (dmCallShown) {
+      final who = dmCallPeerName(ref, callMaster);
+      final text = call.status == CallStatus.ringing
+          ? 'Calling $who'
+          : 'In a call with $who';
+      line = HollowPressable(
+        subtle: true,
+        semanticLabel: '$text, open the conversation',
+        onTap: () => openDmConversation(ref, callMaster),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
+        child: _statusLine(text,
+            call.status == CallStatus.ringing
+                ? hollow.textSecondary
+                : hollow.success),
+      );
     } else if (voice.$1 != null && voice.$2 != null) {
       final room = voice.$3 ?? 'Voice';
       final text =

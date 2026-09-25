@@ -190,6 +190,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// because MLS authenticates each line instead.
   bool get _isConference => widget.serverId.startsWith('conf:');
 
+  /// Shown as the side panel beside a stage rather than as the page.
+  bool get _docked => _isConference || widget.headerTitle != null;
 
   @override
   void initState() {
@@ -1673,10 +1675,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             },
           ),
           // Members and split view are server concepts; a conference shows
-          // its participants in the call area instead. Members come last,
-          // next to the panel they open.
+          // its participants in the call area instead, and a chat docked
+          // beside a stage is that side's ONE panel. Members come last, next
+          // to the panel they open.
           if (width >= 200 &&
-              !_isConference &&
+              !_docked &&
               ref.watch(layoutModeProvider) == LayoutMode.dock)
             HollowIconButton(
               icon: LucideIcons.columns,
@@ -1684,7 +1687,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               selected: isSplit,
               onPressed: _handleSplitToggle,
             ),
-          if (!_isConference)
+          if (!_docked)
             HollowIconButton(
               icon: LucideIcons.users,
               label: membersOpen ? 'Hide members' : 'Show members',

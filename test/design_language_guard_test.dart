@@ -206,7 +206,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 222,
+    baseline: 187,
   ),
   _Rule(
     id: 'material-colors',
@@ -214,7 +214,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 149,
+    baseline: 102,
   ),
   _Rule(
     id: 'color-literal',
@@ -223,7 +223,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 93,
+    baseline: 91,
   ),
   _Rule(
     id: 'radius-literal',
@@ -231,7 +231,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 60,
+    baseline: 43,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -350,7 +350,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 97,
+    baseline: 81,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -359,7 +359,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 73,
+    baseline: 71,
   ),
   _Rule(
     id: 'gradient',
@@ -378,7 +378,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'blurRadius\s*:\s*(\d+(?:\.\d+)?)'),
     threshold: 12,
     excludeDirs: [_theme],
-    baseline: 11,
+    baseline: 7,
   ),
   _Rule(
     id: 'raw-dialog',
@@ -398,7 +398,7 @@ final _rules = <_Rule>[
         'a documented overlay host is the only exception',
     pattern: RegExp(r'(?<![\w.])Material\('),
     excludeDirs: [_theme, _components],
-    baseline: 20,
+    baseline: 19,
   ),
 ];
 

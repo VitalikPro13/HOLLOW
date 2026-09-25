@@ -34,6 +34,11 @@ class ConversationRow extends StatelessWidget {
   /// (design language 5.4). Pass a 48 px leading with it.
   final bool touch;
 
+  /// Replaces the preview line with something happening now (the call you
+  /// are in with them); [liveLabel] says it to screen readers.
+  final Widget? live;
+  final String? liveLabel;
+
   const ConversationRow({
     super.key,
     required this.leading,
@@ -47,6 +52,8 @@ class ConversationRow extends StatelessWidget {
     this.unread = 0,
     this.mention = false,
     this.touch = false,
+    this.live,
+    this.liveLabel,
   });
 
   bool get _hot => unread > 0 || mention;
@@ -119,6 +126,9 @@ class ConversationRow extends StatelessWidget {
                       ],
                     ],
                   ),
+                  if (live != null)
+                    DefaultTextStyle.merge(style: previewStyle, child: live!)
+                  else
                   Text.rich(
                     TextSpan(children: [
                       if (fromMe)
@@ -151,7 +161,7 @@ class ConversationRow extends StatelessWidget {
       title,
       ?detail,
       if (mention) 'mentioned you' else if (unread > 0) '$unread unread',
-      preview,
+      liveLabel ?? preview,
     ];
     return parts.join(', ');
   }

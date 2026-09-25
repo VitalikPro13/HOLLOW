@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
@@ -24,6 +25,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -932,6 +934,16 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
         _filter == HomeFilter.all &&
         (q.isEmpty || _kSavedTitle.toLowerCase().contains(q));
     final pinned = showSaved ? 1 : 0;
+    // The person you are in a call with says so where their preview was.
+    final call = ref.watch(callProvider.select((c) => (
+          status: c.status,
+          peerId: c.peerId,
+          startedAt: c.startedAt,
+        )));
+    final callMaster = call.status == CallStatus.active && call.peerId != null
+        ? ref.watch(deviceLinkProvider).identityOf(call.peerId!)
+        : null;
+    final callStartedAt = call.startedAt;
 
     return SliverMainAxisGroup(
       slivers: [
@@ -978,6 +990,7 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
                 );
               }
               final c = shown[i - pinned];
+              final inCall = c.peerId != null && c.peerId == callMaster;
               final row = ConversationRow(
                 leading: homeConversationLeading(c,
                     size: _kRowAvatar, ring: hollow.background),
@@ -989,6 +1002,8 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
                 unread: c.unread,
                 mention: c.mention,
                 onTap: () => _open(context, c),
+                live: inCall ? _InCallLine(startedAt: callStartedAt) : null,
+                liveLabel: inCall ? 'In a call' : null,
               );
               return KeyedSubtree(
                 key: ValueKey(c.key),
@@ -1033,6 +1048,28 @@ const _kSavedKey = 'saved';
 
 /// The self-DM, pinned first. No context menu: none of its actions apply to a
 /// conversation with yourself, and every message in it is yours, so no "You:".
+/// "In a call · 04:12" in a conversation row, in the success colour.
+class _InCallLine extends StatelessWidget {
+  final DateTime? startedAt;
+  const _InCallLine({required this.startedAt});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final started = startedAt;
+    final style = DefaultTextStyle.of(context).style.copyWith(
+          color: hollow.success,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        );
+    return Row(
+      children: [
+        Text(started == null ? 'In a call' : 'In a call · ', style: style),
+        if (started != null) CallDurationText(startedAt: started, style: style),
+      ],
+    );
+  }
+}
+
 class _SavedMessagesRow extends ConsumerWidget {
   final String peerId;
   const _SavedMessagesRow({required this.peerId});

@@ -2,7 +2,7 @@
 
 Primary file: `lib/src/ui/chat/chat_pane.dart` (~4500 lines). The ChatPane is the main one-to-one direct message view. It handles the message list, input bar, file attachments, voice recording, inline call panel (audio/video/screen share), a DM profile panel, reply/quote flow, link previews, typing indicators, and unread tracking. Supporting files: `lib/src/ui/chat/chat_drop_zone.dart` (drag-and-drop file attachment wrapper), `lib/src/ui/chat/chat_input_shortcuts.dart` (keyboard shortcuts and clipboard image paste), and `lib/src/ui/chat/chat_pane_shared.dart` (see wiki ui_chat_pane_shared -- shared twins' building blocks, re-exported from this file).
 
-**2026-07-15 S3776 decomposition:** every class in this file now follows the slim-build + section-builder shape (memory s3776-build-method-decomposition). `_ChatPaneState`: `build()` -> `_registerBuildListeners()` (chatProvider growth + windowFocused listeners as named methods) + `_buildHeader` (-> `_buildHeaderTitle`/`_buildConnectionStatus`/`_buildVoiceCallButton`/`_buildVideoCallButton`/`_buildProfileToggleButton`/`_buildMuteToggleButton`/`_buildSplitToggleButton`) + `_buildScreenShareLayout` (-> `_buildSourcePillOverlay`/`_buildChatOverlay`/`_buildControlsPillOverlay`) or `_InlineCallPanelSlider` + `_buildMessageArea`. Row actions are nullable callback factories (`_editStartFor`/`_deleteFor`/`_replyFor`/`_downloadFor`/`_copyFor`/`_copyImageFor`/`_infoFor`; `_toggleReaction` shared by wrapper + bubble). Top-level shared DM-call helpers in this file: `_countActiveDmSources`, `_dmActiveSources`, `_dmSourcePill` (pill shell used by the full-bleed pill AND the inline panel switcher), `_shareLabelChip`, `_toggleScreenShare`, `_muteCallButton`/`_cameraCallButton`/`_screenShareCallButton`/`_endCallButton` (used by `_InlineCallPanel` and `_ScreenShareControlsOverlay`).
+**2026-07-15 S3776 decomposition:** every class in this file now follows the slim-build + section-builder shape (memory s3776-build-method-decomposition). `_ChatPaneState`: `build()` -> `_registerBuildListeners()` (chatProvider growth + windowFocused listeners as named methods) + `_buildHeader` (-> `_buildHeaderTitle`/`_buildConnectionStatus`/`_buildVoiceCallButton`/`_buildVideoCallButton`/`_buildProfileToggleButton`/`_buildMuteToggleButton`/`_buildSplitToggleButton`) + `DmCallRow` + the call stage or `_buildMessageArea` (2026-09-25). Row actions are nullable callback factories (`_editStartFor`/`_deleteFor`/`_replyFor`/`_downloadFor`/`_copyFor`/`_copyImageFor`/`_infoFor`; `_toggleReaction` shared by wrapper + bubble). The DM-call helpers that lived here moved to `lib/src/ui/call/` (wiki ui_call_surfaces).
 
 ## Top-Level Providers Defined in This File
 
@@ -91,22 +91,6 @@ Guarded by `_historyLoaded` flag (prevents double-load). Calls `chatProvider.not
 
 In `build()`, a `ref.listen` on `chatProvider` compares previous and next message counts for this peerId. If `nextLen > prevLen` (new message arrived) AND `_isInAutoScrollZone` is true, calls `_scrollToBottom()`. Otherwise the unread pill handles notification.
 
-## Overlay Timer (Screen Share Mode)
-
-### _resetOverlayTimer()
-Cancels any existing hide timer. Sets `_overlaysVisible = true`. If the text input is focused or chat is pinned open, does not start a new timer. Otherwise starts a 1-second timer that sets `_overlaysVisible = false` (hides all overlay controls).
-
-### _pinOverlays()
-Cancels hide timer and ensures `_overlaysVisible = true` without restarting any timer. Used on mouse hover enter events.
-
-## Source Switcher (Screen Share)
-
-### _countActiveDmSources(CallState)
-Counts how many video sources are active: local camera, remote camera, local screen share, remote screen share. Returns 0-4.
-
-### _buildScreenShareSourcePill()
-Builds a floating pill with one tab per active source. Order: screens first, then cameras. Each tab shows an icon (monitor/video), avatar, and name ("You" for local). Tapping a tab sets `focusedDmSourceProvider` (defined in `lib/src/core/providers/call_provider.dart`) to that (peerId, type) pair. The focused tab gets `hollow.accentMuted` background and bold text.
-
 ## Text Input and Typing Indicators
 
 ### _onTextChanged(String text)
@@ -172,7 +156,7 @@ Top-level structure is a `Row`:
 1. `Expanded` containing `ChatDropZone` wrapping a `Column`
 2. RIGHT (since 2026-09-24): `_DmProfilePanelSlider` (instant show/hide, shown unless screen share is active) holding `DmProfilePanel`
 
-The Column's children depend on whether screen share is active:
+The Column's children: header, `DmCallRow`, search bar, banners, then either the call's stage (`watchDmStageShown`) or `_buildMessageArea()`. With the stage up the right slot is the stage panel (Chat or Profile) instead of `_DmProfilePanelSlider`. What follows is the pre-2026-09-25 shape, kept for history only:
 
 **If screen share active** (`isScreenShareActive`): Shows a `MouseRegion` + `Stack` with:
 - Layer 0: `_ScreenShareFullView` (full-bleed background)
@@ -308,89 +292,9 @@ Async. Reads image bytes from disk, determines format from extension, writes to 
 ### _wrapSelection()
 Takes controller, before string, and after string. If no text is selected, inserts `before + after` and places cursor between them. If text is selected, wraps the selection with the markers and preserves the selection within.
 
-## _InlineCallPanelSlider
+## The call in a DM (rebuilt 2026-09-25)
 
-`ConsumerWidget`. Selects `callProvider` for `call.peerId == peerId && (status == active || connecting)` and renders `_InlineCallPanel` when true, else `SizedBox.shrink()`. Instant: an animation here replayed every time the DM opened.
-
-## _InlineCallPanel
-
-`ConsumerStatefulWidget`. The actual call panel content -- shows below the DM header during a call.
-
-### State Variables
-- `_durationTimer` -- 1-second periodic timer updating `_duration`
-- `_remoteVolume` -- remote audio volume (0.0 to 2.0, default 1.0)
-- `_duration` -- current call duration
-- `_videoHeight` -- height of the video area (default 200, min 80, max 500)
-- `_expandedRenderer` -- `null` for side-by-side view, `'local'` or `'remote'` for fullscreen with PiP
-
-### build()
-Watches `callProvider`, `profileProvider`. Reads `identityProvider` for local peer ID. Starts duration timer when call is active with a `startedAt` timestamp.
-
-**Layout decisions**:
-- `hasVideoArea` = any video or screen share active
-- If screen share: video area uses `Expanded` (fills available space)
-- If camera only: video area uses `SizedBox(height: _videoHeight)` with a drag-to-resize handle below
-- Audio only: no video area, shows avatars (60px) side by side in the control bar
-
-**Video views**:
-- Side-by-side mode (`_expandedRenderer == null`): Two equal `Expanded` cells with `RTCVideoView` (local mirrored, remote not). Tapping a cell with active video sets `_expandedRenderer` to expand it
-- Fullscreen mode (`_expandedRenderer != null`): Main video fills the area with `ObjectFitCover`. PiP (120x90) in bottom-right corner with border and shadow. "Click to exit" hint top-left. Tapping resets to side-by-side
-- Source switcher pill shown when screen share active and 2+ sources
-
-**Control bar**: Row with:
-- Left: Green pulsing `StatusDot` + "Connecting..." or formatted duration (MM:SS with tabular figures)
-- Center (audio-only): Two 60px `HollowAvatar`s wrapped in `SpeakingBorder(isSpeaking: call.isLocalSpeaking / call.isRemoteSpeaking)` — animated accent glow border on voice activity
-- Right: `_buildControls()` -- Mute, Camera, Screen Share (desktop only), End Call buttons
-
-### _showVolumePopup()
-Right-click on the call panel shows an overlay popup with a volume slider (0-200%). Uses `OverlayEntry` with a dismiss-on-tap background. The slider adjusts `_remoteVolume` and calls `callProvider.notifier.setRemoteVolume(v)`.
-
-### _buildControls()
-Shared control row used by both the inline panel and the screen share overlay:
-- **Mute**: `LucideIcons.mic` / `micOff`. Red when muted. Calls `toggleMute()`
-- **Camera**: `LucideIcons.video` / `videoOff`. Accent when on. Calls `toggleVideo()`. Disabled when not active
-- **Screen share** (desktop only): `LucideIcons.monitor` / `monitorOff`. Opens `showScreenShareDialog()`. Calls `startScreenShare()` with sourceId, width, height, fps, shareAudio. Or `stopScreenShare()` if already sharing
-- **End call**: Red pill container with `LucideIcons.phoneOff`. Calls `endCall()`
-
-### _buildScreenShareView()
-Handles three cases:
-1. **Both sharing**: Stacked layout -- remote screen on top (`Expanded flex: 3`) with quality label, local banner on bottom ("You are also sharing" + Stop button)
-2. **Only local sharing**: Centered banner with monitor icon, "You are sharing your screen", optional quality label, Stop button
-3. **Only remote sharing**: Full `RTCVideoView` (Contain, never mirrored) with optional quality label
-
-### Source switcher helpers
-`_countActiveDmSources()`, `_buildDmSources()`, `_onDmSourceTapped()`, and `_buildDmSourceSwitcher()` handle the source-switcher pill. For cameras, tapping sets `_expandedRenderer` for fullscreen. For screens, tapping is a no-op in the inline panel (the full-bleed view takes over automatically).
-
-## _ChatOverlaySlider
-
-`StatelessWidget`. The chat panel over a screen share, shown and hidden instantly (a width animation would re-wrap the chat text every frame). Hidden = `SizedBox.shrink()`; visible = child in a `MouseRegion` that relays hover to `onHoverEnter`/`onHoverExit` (overlay timer management).
-
-## _ScreenShareFullView
-
-`ConsumerWidget`. Full-bleed background view during screen share. Renders the focused video source as a large tile filling the entire area.
-
-### _resolveBig()
-Determines which `RTCVideoRenderer` to show based on `focusedDmSourceProvider` state. If the focused source is active, uses it. Otherwise falls back in priority order: remote screen -> local screen -> remote camera -> local camera. Returns a record with `renderer`, `isCamera`, and `isLocal` flags.
-
-### _renderTile()
-Helper that wraps `RTCVideoView` in a `RepaintBoundary`. Cameras are mirrored when local; screens are never mirrored. Uses Contain fit.
-
-### build()
-Reads renderers from `callProvider.notifier.voiceService` (camera) and `callProvider.notifier.screenShareRenderer`/`localScreenShareRenderer` (screen share).
-
-**Both sharing**: Big tile showing focused source, PiP (220x132) showing the other screen in bottom-right. Tapping PiP swaps focus. Quality label top-left for screens. "Stop sharing" danger button top-right.
-
-**Single sharer**: Big tile showing the focused source. If local sharing: quality label + stop button top-right. If remote sharing: quality label top-right. Empty state shows centered monitor icon + status text.
-
-## _ScreenShareControlsOverlay
-
-`ConsumerStatefulWidget`. Floating pill at bottom center during screen share. Shows:
-- Green pulsing `StatusDot`
-- "Connecting..." or peer name + duration (tabular figures)
-- Mute, Camera, Screen Share (desktop only), End Call buttons
-- Pill shape with `HollowRadius.pill` border radius, semi-transparent surface background, border, drop shadow
-
-Has its own `_durationTimer` and `_handleScreenShareToggle()` (same pattern as inline panel).
+The call UI no longer lives in this file: see wiki `ui_call_surfaces`. Under the header sits `DmCallRow` (ringing out = "Calling X" + Cancel; in the call = both of you as compact tiles, "Voice call" + timer or "Weak connection", an inline share offer with Watch, camera / share / "Open the call" | mute / deafen | Leave). When `watchDmStageShown` is true the message list is replaced by `CallStage(source: DmCallStageSource(peerId))`, the header gets `_InCallMark` ("In a call" + timer) and two panel toggles (Chat, Profile) that swap the ONE right panel: `_StageChatPanel` (320 px, `surface`, the same `_buildMessageArea`) or `DmProfilePanel`. The header's call buttons hide during a call with this person and start through `startDmCallFlow`. Deleted: `_InlineCallPanel*`, `_ScreenShareFullView` (and its camera-promoting `_resolveBig`), `_ScreenShareControlsOverlay`, `_ChatOverlaySlider`, the source pill and helpers, the resizable video area, `components/active_call_bar.dart`, `components/call_video_view.dart`, `ChatOverlayToggleButton`.
 
 ## _DmProfilePanelSlider
 
@@ -419,25 +323,6 @@ Shared, in `chat_pane_shared.dart`; see wiki ui_chat_pane_shared.
 
 The `ScrollablePositionedList` uses a `ValueKey('dm-list-${peerId}')` so each pane gets its own independent scroll state even when both show the same DM.
 
-## Screen Share Mode -- Two Layout Paths
-
-When a DM call involves screen sharing (`isScreenShareActive` = the call peer's DM and ANY share, ours or theirs), the entire message area is replaced with a full-bleed screen share view. The chat becomes an overlay:
-
-1. **Background**: `_ScreenShareFullView` renders the focused video source
-2. **Source pill**: Top-center floating pill for switching between video sources (only if 2+ active). Unwatched remote-share tabs show an EYE icon and tapping them opts in (`watchRemoteScreenShare()`); a trailing grid toggle flips `dmShareGridViewProvider`
-3. **Chat overlay**: Right-side 360px panel shown and hidden instantly by `_ChatOverlaySlider`. Toggle button (chevron left/right) is always visible when overlays are visible. The chat panel contains the same `_buildMessageArea()` content as normal mode
-4. **Controls pill**: Bottom-center `_ScreenShareControlsOverlay` with all call controls
-
-All overlays fade out after 1 second of inactivity via `_overlayHideTimer`. Mouse movement or hover over overlay elements pins them visible. The chat panel can be permanently pinned open via `_chatOverlayPinned`.
-
-### Opt-in watching (issue #38)
-
-The remote share is media-gated: the sharer captures + self-previews immediately (provider-owned `_dmScreenStream` + preview renderer in call_provider, VC-style) but only sends the `screen_offer` after the peer's `call_screen_watch{want:true}` (`_sendDmScreenOffer` — SFrame + per-watch screen-audio capture ride along). `CallState.watchingRemoteShare` gates the receive side; unsolicited offers are dropped. **Receiver-driven resolution capping (media forwarding step 1, 2026-08-05):** the watch payload also carries `viewer_width/viewer_height`; the sharer clamps the peer's encoder via `_dmEffectiveCap()` (`ScreenShareService.effectiveViewerCap`); a re-sent watch on a live share tries `updateResolutionCap` and renegotiates via `_sendDmScreenOffer` when rejected. **The "Source quality" opt-out was REMOVED 2026-08-15** (the clamp is keyed to the viewer's MONITOR, so it already delivers everything they can display) — `setRemoteShareSourceQuality`, `CallState.watchingSourceQuality` and the toggle chip are gone; an older client's `source_quality` key is ignored. The quality chip is `ShareQualityChip` showing the RECEIVED resolution live (falls back to `remoteScreenShareLabel`; our own share keeps its source label). **Unwatched UX (owner decision — never a banner over chat, that broke the Column):** `_ScreenShareFullView` renders `_buildUnwatchedShareStack` — a clean avatar + "X is sharing their screen" + Watch placeholder, side-by-side with our own share tile when both share (matches the VC grid's placeholder tile). Stop watching (button top-right of the single-source stack) returns to that placeholder. 20s watch timeout reverts with a toast.
-
-### DM grid view (issue #38)
-
-`dmShareGridViewProvider` (StateProvider, session-sticky) → `_buildDmGridView`: own share, their share (live or Watch placeholder), and both cameras as tiles (1-2 side by side, 3-4 as 2×2 with the underfull row centered); tap a live tile to focus + exit grid; Stop sharing stays reachable top-right.
-
 ## Mobile Call UI
 
 **Files:** `lib/src/ui/mobile/mobile_call_video_view.dart`, `lib/src/ui/mobile/mobile_active_call_pill.dart`, `lib/src/ui/mobile/mobile_incoming_call.dart`
@@ -460,7 +345,7 @@ Thin green bar in `MobileChatRoute` (below header): "In call with X — Tap to r
 
 Floating draggable pill in `MobileShell` Stack. Shows during active/connecting calls. Positioned at `bottom: 80` (above nav bar). Mute, camera, hangup buttons + duration timer. Wrapped in `Material(color: transparent)` to prevent yellow underlines.
 
-### IncomingCallOverlay (desktop widget reused)
+### IncomingCallOverlay (desktop widget reused; rewritten 2026-09-25 as the 340 px card, see wiki ui_call_surfaces)
 
 The desktop `IncomingCallOverlay` (`lib/src/ui/dialogs/incoming_call_dialog.dart`) is reused on mobile. Placed in `MaterialApp.builder` in `app.dart` (above Navigator, so it renders over all pushed routes). Uses `MediaQuery.padding.top` for safe area positioning. Wrapped in `Material(color: transparent)` for yellow underline fix.
 

@@ -77,7 +77,7 @@
     { "peer": "b", "op": "enter_text", "target": "field", "value": "@probe-a can you check the relay logs ${RUN}" },
     { "peer": "b", "op": "key", "value": "enter" },
     { "peer": "b", "op": "open_channel", "name": "lounge" },
-    { "peer": "b", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000, "soft": true },
+    { "peer": "b", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000, "soft": true },
 
     { "peer": "c", "op": "tap", "target": "semantics:probe-a" },
     { "peer": "c", "op": "wait", "ms": 1500 },
@@ -147,18 +147,18 @@
 
     { "peer": "a", "op": "open_server", "name": "dock-probe" },
     { "peer": "a", "op": "open_channel", "name": "lounge" },
-    { "peer": "a", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000, "soft": true },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000, "soft": true },
     { "peer": "a", "op": "wait", "ms": 2500 },
     { "peer": "a", "op": "shot", "name": "k-11-in-voice" },
     { "peer": "a", "op": "tap", "target": "semantics:Home", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 1500 },
     { "peer": "a", "op": "shot", "name": "k-12-in-voice-home" },
-    { "peer": "a", "op": "tap", "target": "semantics:Disconnect", "index": 0, "soft": true }
+    { "peer": "a", "op": "tap", "target": "semantics:Leave the room", "index": 0, "soft": true }
   ],
   "cleanup": [
     { "peer": "all", "op": "key", "value": "escape" },
-    { "peer": "a", "op": "tap", "target": "semantics:Disconnect", "index": 0, "allowMiss": true },
-    { "peer": "b", "op": "tap", "target": "semantics:Disconnect", "index": 0, "allowMiss": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Leave the room", "index": 0, "allowMiss": true },
+    { "peer": "b", "op": "tap", "target": "semantics:Leave the room", "index": 0, "allowMiss": true },
     { "peer": "a", "op": "right_click", "target": "server:dock-probe" },
     { "peer": "a", "op": "tap", "target": "menu > text:Server settings" },
     { "peer": "a", "op": "wait", "ms": 400 },

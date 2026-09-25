@@ -65,7 +65,6 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/desktop_notification_service.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
@@ -78,7 +77,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/notification_overlay.dart';
-import 'package:hollow/src/ui/components/active_call_bar.dart';
+import 'package:hollow/src/ui/call/call_recording_toasts.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
@@ -1786,18 +1785,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool memberPanelOpen,
     required bool helpPanelOpen,
   }) {
-    // Field-tuple select: without it the whole SHELL rebuilds on ANY
-    // voice-channel state change, down to a per-peer audio map.
-    final vc = ref.watch(voiceChannelProvider.select((s) => (
-          s.currentChannelId,
-          s.isInVoiceChannel,
-          s.showsShareSurface || s.isCameraActive,
-        )));
+    // A voice room brings its own side panel (its chat), and there is only
+    // ever one, so the member panel steps aside.
     final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
-    final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
-        && vc.$2
-        && vc.$1 == selectedChannelId
-        && vc.$3;
+    final voiceRoomSelected =
+        selectedChannel?.channelType == ChannelType.voice;
 
     return Column(
       children: [
@@ -1850,7 +1842,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
               // Docked at every width: re-opening it has to PUSH the chat
               // over, because an overlay would cover the header's own toggle.
               _MemberPanelSlot(
-                visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
+                visible: selectedServerId != null && memberPanelOpen && !voiceRoomSelected,
               ),
               HelpPanelSlider(visible: helpPanelOpen),
               ],
@@ -1895,18 +1887,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }) {
     final splitState = ref.watch(splitViewProvider);
 
-    // Field-tuple select: without it the whole SHELL rebuilds on ANY
-    // voice-channel state change, down to a per-peer audio map.
-    final vc = ref.watch(voiceChannelProvider.select((s) => (
-          s.currentChannelId,
-          s.isInVoiceChannel,
-          s.showsShareSurface || s.isCameraActive,
-        )));
+    // A voice room brings its own side panel (its chat), and there is only
+    // ever one, so the member panel steps aside.
     final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
-    final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
-        && vc.$2
-        && vc.$1 == selectedChannelId
-        && vc.$3;
+    final voiceRoomSelected =
+        selectedChannel?.channelType == ChannelType.voice;
 
     // Closing the left pane in split mode leaves the right pane's context to be
     // applied to the global providers.
@@ -2018,8 +2003,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
               // pushes the chat over, keeping the header's toggle reachable.
               if (!splitState.isSplit)
                 _MemberPanelSlot(
-                  visible:
-                      effectiveServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
+                  visible: effectiveServerId != null &&
+                      memberPanelOpen &&
+                      !voiceRoomSelected,
                 ),
               HelpPanelSlider(visible: helpPanelOpen),
             ],
@@ -2578,7 +2564,7 @@ class _ShellScaffold extends ConsumerWidget {
         children: [
           body,
           const NotificationOverlay(),
-          const ActiveCallBar(),
+          const CallRecordingToasts(),
           const IncomingCallOverlay(),
         ],
       ),

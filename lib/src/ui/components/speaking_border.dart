@@ -2,19 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
-/// Speaking cue for VIDEO surfaces: an accent ring painted ON TOP of a tile
-/// rather than around it. Drop it in a `Positioned.fill` over the video.
+/// The phone's speaking cue over full-bleed VIDEO, painted ON TOP of it. The
+/// phone call screens move to `ui/call/speaking_ring.dart` when they are
+/// rebuilt; desktop uses that one only.
 ///
 /// [SpeakingBorder] pads its child, which would resize the tile on every VAD
 /// flip and relayout the texture 1-4x a second. This one is layout-neutral:
 /// only an overlay layer repaints, fading via [AnimatedOpacity] rather than by
 /// lerping a border colour from transparent.
-class SpeakingRing extends StatelessWidget {
+class SpeakingOverlayRing extends StatelessWidget {
   final bool isSpeaking;
   final BorderRadius borderRadius;
   final double borderWidth;
 
-  const SpeakingRing({
+  const SpeakingOverlayRing({
     super.key,
     required this.isSpeaking,
     required this.borderRadius,
@@ -46,86 +47,6 @@ class SpeakingRing extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// Speaking cue for an avatar in a DENSE row: an outline that hugs the
-/// avatar's edge and costs nothing in layout.
-///
-/// [SpeakingBorder] pads the child outward, growing it by
-/// `2 * (padding + borderWidth)`, which in a sidebar row reads as a fat, offset
-/// avatar. Here the outline is a sibling painted BEHIND the avatar and inset
-/// NEGATIVELY, so its inner edge lands on the avatar's edge (a rim drawn inside
-/// vanishes against a matching avatar) and the row's geometry never changes:
-/// the ring overflows into the surrounding padding instead of taking space.
-class SpeakingAvatarOutline extends StatelessWidget {
-  final bool isSpeaking;
-
-  /// The avatar's edge length. The outline hugs this box.
-  final double size;
-
-  /// Corner radius of the AVATAR. The outline is drawn concentric at
-  /// `radius + borderWidth`, so it never cuts across the corner.
-  final double radius;
-  final double borderWidth;
-  final Widget child;
-
-  const SpeakingAvatarOutline({
-    super.key,
-    required this.isSpeaking,
-    required this.size,
-    required this.radius,
-    required this.child,
-    this.borderWidth = 2.0,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Positioned(
-            left: -borderWidth,
-            top: -borderWidth,
-            right: -borderWidth,
-            bottom: -borderWidth,
-            child: IgnorePointer(
-              child: AnimatedOpacity(
-                opacity: isSpeaking ? 1.0 : 0.0,
-                duration: ReduceMotionController.instance.isReduced
-                    ? Duration.zero
-                    : const Duration(milliseconds: 200),
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius:
-                        BorderRadius.circular(radius + borderWidth),
-                    border:
-                        Border.all(color: hollow.accent, width: borderWidth),
-                    boxShadow: [
-                      BoxShadow(
-                        color: hollow.accent.withValues(alpha: 0.35),
-                        blurRadius: 6,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          // Kept in the tree in both states, so the avatar subtree never
-          // remounts on a flip.
-          Semantics(
-            label: isSpeaking ? 'Speaking' : null,
-            container: isSpeaking,
-            child: child,
-          ),
-        ],
       ),
     );
   }

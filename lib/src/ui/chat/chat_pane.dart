@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -33,16 +32,11 @@ import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
-import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
-import 'package:hollow/src/core/providers/recording_provider.dart';
-import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
-import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
@@ -53,43 +47,32 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
-import 'package:hollow/src/core/services/macos_version.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
-import 'package:hollow/src/ui/components/share_quality_chip.dart';
-import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
-import 'package:hollow/src/ui/components/link_health_chip.dart';
-import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
-import 'package:hollow/src/ui/components/status_dot.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
-import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_stage.dart';
+import 'package:hollow/src/ui/call/call_stage_sources.dart';
+import 'package:hollow/src/ui/call/dm_call_row.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/dm_profile_panel.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
-import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
-import 'package:hollow/src/ui/components/hollow_slider.dart';
 
 // The twins' shared building blocks live in chat_pane_shared.dart, re-exported
 // here for the existing consumers (mobile routes, archive viewers).
@@ -107,253 +90,6 @@ export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
         unreadDividerIndex;
 
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
-
-// Shared DM call helpers, kept top-level so the pane, the inline call panel and
-// the screen-share overlays cannot drift apart again.
-
-/// Active video sources (cameras and screens, both sides) in a DM call; the
-/// switcher pill appears from two.
-int _countActiveDmSources(CallState call) {
-  int count = 0;
-  if (call.isVideoEnabled) count++;
-  if (call.remoteVideoEnabled) count++;
-  if (call.isScreenSharing) count++;
-  if (call.remoteScreenSharing) count++;
-  return count;
-}
-
-/// Ordered source list for the switcher pills: screens first, then cameras,
-/// matching voice_channel_pane.
-List<({String peerId, String type})> _dmActiveSources(
-    CallState call, String localPeerId, String remotePeerId) {
-  return [
-    if (call.isScreenSharing) (peerId: localPeerId, type: 'screen'),
-    if (call.remoteScreenSharing) (peerId: remotePeerId, type: 'screen'),
-    if (call.isVideoEnabled) (peerId: localPeerId, type: 'camera'),
-    if (call.remoteVideoEnabled) (peerId: remotePeerId, type: 'camera'),
-  ];
-}
-
-/// The source-switcher pill shell, shared by the full-bleed screen-share pill
-/// and the inline call panel; only focus derivation and tap handling differ.
-Widget _dmSourcePill({ // design-ignore: floating call source switcher, not a label
-  required HollowTheme hollow,
-  required Map<String, storage_api.UserProfile> profiles,
-  required List<({String peerId, String type})> sources,
-  required String localPeerId,
-  required String? focusedPeerId,
-  required String? focusedType,
-  required void Function(String peerId, String type) onTapSource,
-  Set<String> unwatchedScreenPeerIds = const {},
-  Widget? trailing,
-}) {
-  return Container(
-    padding: const EdgeInsets.symmetric(
-      horizontal: HollowSpacing.sm,
-      vertical: HollowSpacing.xs,
-    ),
-    decoration: BoxDecoration(
-      color: hollow.overlay.withValues(alpha: 0.9),
-      borderRadius: BorderRadius.circular(HollowRadius.pill),
-      border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ...sources.map((source) {
-          final name = displayNameFor(profiles, source.peerId);
-          final isFocused =
-              source.peerId == focusedPeerId && source.type == focusedType;
-          final isUnwatched = source.type == 'screen' &&
-              unwatchedScreenPeerIds.contains(source.peerId);
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-            child: HollowPressable(
-              onTap: () => onTapSource(source.peerId, source.type),
-              semanticLabel: isUnwatched
-                  ? 'Watch screen share from $name'
-                  : null,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              backgroundColor: isFocused ? hollow.accentMuted : null,
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: HollowSpacing.xs,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    isUnwatched
-                        ? LucideIcons.eye
-                        : source.type == 'screen'
-                            ? LucideIcons.monitor
-                            : LucideIcons.video,
-                    size: 12,
-                    color: isFocused ? hollow.accent : hollow.textSecondary,
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  HollowAvatar(
-                    peerId: source.peerId,
-                    size: 18,
-                    frameId: '',
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  Text(
-                    source.peerId == localPeerId ? 'You' : name,
-                    style: HollowTypography.caption.copyWith(
-                      color:
-                          isFocused ? hollow.textPrimary : hollow.textSecondary,
-                      fontWeight: isFocused ? FontWeight.w600 : FontWeight.w400,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }),
-        ?trailing,
-      ],
-    ),
-  );
-}
-
-/// Screen-share quality/source label chip shown on the corner of share tiles.
-Widget _shareSourceLabel(HollowTheme hollow, String label) {
-  return Container(
-    padding: const EdgeInsets.symmetric(
-      horizontal: HollowSpacing.sm,
-      vertical: HollowSpacing.xs,
-    ),
-    decoration: BoxDecoration(
-      color: hollow.overlay.withValues(alpha: 0.85),
-      borderRadius: BorderRadius.circular(hollow.radiusXs),
-      border: Border.all(color: hollow.border),
-    ),
-    child: Text(
-      label,
-      style: HollowTypography.caption.copyWith(
-        color: hollow.textSecondary,
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
-      ),
-    ),
-  );
-}
-
-/// Toggles screen share, shared by the inline call panel and the controls
-/// overlay.
-Future<void> _toggleScreenShare(
-    BuildContext context, WidgetRef ref, CallState call) async {
-  if (call.isScreenSharing) {
-    ref.read(callProvider.notifier).stopScreenShare();
-  } else {
-    final selection = await showScreenShareDialog(context);
-    if (selection != null && context.mounted) {
-      ref.read(callProvider.notifier).startScreenShare(
-            sourceId: selection.sourceId,
-            width: selection.width,
-            height: selection.height,
-            fps: selection.fps,
-            shareAudio: selection.shareAudio,
-            pid: selection.pid,
-            windowHwnd: selection.windowHwnd,
-            profile: selection.profile,
-          );
-    }
-  }
-}
-
-// Call-control buttons shared by the inline call panel and the screen-share
-// controls overlay, which differ only in icon size and padding.
-
-Widget _muteCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
-    {required double iconSize, required EdgeInsetsGeometry padding}) {
-  // PTT-aware (issue #38): gated mic while PTT idles, accent while held.
-  final mic = micButtonVisual(ref,
-      isMuted: call.isMuted, hollow: hollow, idleColor: hollow.textSecondary);
-  return HollowTooltip(
-    message: mic.tooltip,
-    child: HollowPressable(
-      semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
-      onTap: () => ref.read(callProvider.notifier).toggleMute(),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: padding,
-      child: Icon(mic.icon, size: iconSize, color: mic.color),
-    ),
-  );
-}
-
-Widget _cameraCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
-    {required double iconSize, required EdgeInsetsGeometry padding}) {
-  final label = call.isVideoEnabled ? 'Turn off camera' : 'Turn on camera';
-  return HollowTooltip(
-    message: label,
-    child: HollowPressable(
-      semanticLabel: label,
-      onTap: call.status == CallStatus.active
-          ? () => ref.read(callProvider.notifier).toggleVideo()
-          : null,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: padding,
-      child: Icon(
-        call.isVideoEnabled ? LucideIcons.video : LucideIcons.videoOff,
-        size: iconSize,
-        color: call.isVideoEnabled ? hollow.accent : hollow.textSecondary,
-      ),
-    ),
-  );
-}
-
-Widget _screenShareCallButton(
-    BuildContext context, WidgetRef ref, HollowTheme hollow, CallState call,
-    {required double iconSize, required EdgeInsetsGeometry padding}) {
-  return HollowTooltip(
-    message: call.isScreenSharing ? 'Stop sharing' : 'Share screen',
-    child: HollowPressable(
-      semanticLabel:
-          call.isScreenSharing ? 'Stop sharing screen' : 'Share screen',
-      onTap: call.status == CallStatus.active
-          ? () => _toggleScreenShare(context, ref, call)
-          : null,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: padding,
-      child: Icon(
-        call.isScreenSharing ? LucideIcons.monitorOff : LucideIcons.monitor,
-        size: iconSize,
-        color: call.isScreenSharing ? hollow.accent : hollow.textSecondary,
-      ),
-    ),
-  );
-}
-
-Widget _endCallButton(WidgetRef ref, HollowTheme hollow,
-    {required double iconSize, required EdgeInsetsGeometry innerPadding}) {
-  return HollowTooltip(
-    message: 'End call',
-    child: HollowPressable(
-      semanticLabel: 'End call',
-      onTap: () => ref.read(callProvider.notifier).endCall(),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xs,
-      ),
-      child: Container(
-        padding: innerPadding,
-        decoration: BoxDecoration(
-          color: hollow.error.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-        ),
-        child: Icon(
-          LucideIcons.phoneOff,
-          size: iconSize,
-          color: hollow.error,
-        ),
-      ),
-    ),
-  );
-}
 
 class ChatPane extends ConsumerStatefulWidget {
   final String peerId;
@@ -428,9 +164,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   final LatePreviewAttacher _latePreview = LatePreviewAttacher();
   Timer? _urlDebounce;
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
-  Timer? _overlayHideTimer;
-  bool _overlaysVisible = true;
-  bool _chatOverlayPinned = false;
+
+  /// The one side panel while the call's stage is up: the chat by default.
+  _StagePanel? _stagePanel = _StagePanel.chat;
 
   @override
   void initState() {
@@ -499,96 +235,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         .requestMissingDmFilesOnOpen(widget.peerId);
   }
 
-  void _resetOverlayTimer() {
-    _overlayHideTimer?.cancel();
-    if (!_overlaysVisible) {
-      setState(() => _overlaysVisible = true);
-    }
-    if (_focusNode.hasFocus || _chatOverlayPinned) return;
-    _overlayHideTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) setState(() => _overlaysVisible = false);
-    });
-  }
-
-  void _pinOverlays() {
-    _overlayHideTimer?.cancel();
-    if (!_overlaysVisible) {
-      setState(() => _overlaysVisible = true);
-    }
-  }
-
-  /// Source switcher pill for the full-bleed screen share view: every tab is
-  /// clickable and sets [focusedDmSourceProvider] to that source.
-  Widget _buildScreenShareSourcePill( // design-ignore: floating call source switcher, not a label
-    HollowTheme hollow,
-    CallState call,
-    String localPeerId,
-    String remotePeerId,
-  ) {
-    final profiles = ref.watch(profileProvider);
-    final focused = ref.watch(focusedDmSourceProvider);
-    final gridOn = ref.watch(dmShareGridViewProvider);
-    // Opt-in watching (issue #38): until we opt in, the remote share tab shows
-    // an eye and tapping it starts watching instead of focusing.
-    final unwatched = {
-      if (call.remoteScreenSharing && !call.watchingRemoteShare) remotePeerId,
-    };
-    return MouseRegion(
-      onEnter: (_) => _pinOverlays(),
-      onExit: (_) => _resetOverlayTimer(),
-      child: _dmSourcePill(
-        hollow: hollow,
-        profiles: profiles,
-        sources: _dmActiveSources(call, localPeerId, remotePeerId),
-        localPeerId: localPeerId,
-        focusedPeerId: gridOn ? null : focused.peerId,
-        focusedType: gridOn ? null : focused.type,
-        unwatchedScreenPeerIds: unwatched,
-        onTapSource: (peerId, type) {
-          if (type == 'screen' && unwatched.contains(peerId)) {
-            ref.read(callProvider.notifier).watchRemoteScreenShare();
-          }
-          ref.read(focusedDmSourceProvider.notifier).state =
-              DmFocusedSource(peerId: peerId, type: type);
-          ref.read(dmShareGridViewProvider.notifier).state = false;
-        },
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 1,
-              height: 18,
-              margin:
-                  const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-              color: hollow.border.withValues(alpha: 0.6),
-            ),
-            HollowTooltip(
-              message: gridOn ? 'Exit grid view' : 'Grid view',
-              child: HollowPressable(
-                onTap: () =>
-                    ref.read(dmShareGridViewProvider.notifier).state = !gridOn,
-                semanticLabel: gridOn
-                    ? 'Exit grid view'
-                    : 'Show all sources in a grid',
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                backgroundColor: gridOn ? hollow.accentMuted : null,
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  LucideIcons.layoutGrid,
-                  size: 14,
-                  color: gridOn ? hollow.accent : hollow.textSecondary,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   void dispose() {
-    _overlayHideTimer?.cancel();
     _urlDebounce?.cancel();
     _latePreview.disarm();
     _emoteAutocomplete.dismiss();
@@ -1076,20 +724,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final profiles = ref.watch(profileProvider);
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
 
-    // Named-record select: this build reads only these four call fields, so
-    // video toggles, labels and renderer seq bumps do not rebuild the pane.
-    final call = ref.watch(callProvider.select((c) => (
-          peerId: c.peerId,
-          status: c.status,
-          isScreenSharing: c.isScreenSharing,
-          remoteScreenSharing: c.remoteScreenSharing,
-          watchingRemoteShare: c.watchingRemoteShare,
-        )));
-    final isCallWithThisPeer = call.peerId == widget.peerId;
-    // Any share engages the surface; opt-in watching (issue #38) gates the
-    // MEDIA, so an unwatched remote share renders as a Watch placeholder tile.
-    final isScreenShareActive = isCallWithThisPeer &&
-        (call.isScreenSharing || call.remoteScreenSharing);
+    // The call's stage replaces the message list while a camera or a share
+    // needs it, or the user opened it (D2); the chat moves to the side panel.
+    final stageShown = watchDmStageShown(ref, widget.peerId);
 
     // Saved messages is a DM with our OWN master identity: only the header and
     // the call buttons differ, everything below works like any other DM.
@@ -1110,7 +747,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       children: [
         _buildHeader(hollow,
             isSavedMessages: isSavedMessages,
-            showProfilePanel: showProfilePanel),
+            showProfilePanel: showProfilePanel,
+            stageShown: stageShown),
+
+        DmCallRow(peerMaster: widget.peerId),
 
         if (ref.watch(chatSearchOpenProvider))
           _buildSearchBar(hollow, isSavedMessages),
@@ -1122,23 +762,30 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         if (!isSavedMessages)
           IdentityDestroyedBanner(peerId: widget.peerId),
 
-        if (isScreenShareActive)
-          _buildScreenShareLayout(
-              hollow, messages, typingPeers, profiles, localPeerId,
-              anyScreenSharing:
-                  call.isScreenSharing || call.remoteScreenSharing)
-        else ...[
-          _InlineCallPanelSlider(peerId: widget.peerId),
+        if (stageShown)
+          Expanded(
+            child: CallStage(source: DmCallStageSource(widget.peerId)),
+          )
+        else
           ..._buildMessageArea(hollow, messages, typingPeers, profiles, localPeerId),
-        ],
       ],
           ),
           ),
         ),
-        _DmProfilePanelSlider(
-          visible: showProfilePanel && !isScreenShareActive,
-          peerId: widget.peerId,
-        ),
+        if (stageShown)
+          switch (_stagePanel) {
+            _StagePanel.chat => _StageChatPanel(
+                children: _buildMessageArea(
+                    hollow, messages, typingPeers, profiles, localPeerId),
+              ),
+            _StagePanel.profile => DmProfilePanel(peerId: widget.peerId),
+            null => const SizedBox.shrink(),
+          }
+        else
+          _DmProfilePanelSlider(
+            visible: showProfilePanel,
+            peerId: widget.peerId,
+          ),
       ],
       ),
     );
@@ -1230,7 +877,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   /// DM header: avatar, name(s), connection status, and pane actions.
   Widget _buildHeader(HollowTheme hollow,
-      {required bool isSavedMessages, required bool showProfilePanel}) {
+      {required bool isSavedMessages,
+      required bool showProfilePanel,
+      required bool stageShown}) {
     final searchOpen = ref.watch(chatSearchOpenProvider);
     final isSplit = ref.watch(splitViewProvider).isSplit;
     final profile =
@@ -1251,9 +900,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             ),
       title: isSavedMessages ? 'Saved messages' : (hasNick ? localNick : realName),
       subtitle: isSavedMessages ? null : (hasNick ? realName : status),
+      badges: [if (stageShown) const _InCallMark()],
       actions: [
-        // Hidden for Saved messages: you cannot call yourself.
-        if (!isSavedMessages) ...[
+        // Hidden for Saved messages (you cannot call yourself) and during a
+        // call with this person, which has its own controls.
+        if (!isSavedMessages && !_inCallWithPeer()) ...[
           _buildVoiceCallButton(hollow),
           _buildVideoCallButton(hollow),
         ],
@@ -1277,17 +928,38 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             selected: isSplit,
             onPressed: () => _handleSplitToggle(ref),
           ),
-        // Last, next to the panel it opens.
-        HollowIconButton(
-          icon: LucideIcons.circleUser,
-          label: showProfilePanel ? 'Hide profile' : 'Show profile',
-          selected: showProfilePanel,
-          onPressed: () => ref.read(dmProfilePanelProvider.notifier).state =
-              !showProfilePanel,
-        ),
+        // Last, next to the ONE panel they swap.
+        if (stageShown) ...[
+          _stagePanelButton(_StagePanel.chat, LucideIcons.messageSquare,
+              'Show the chat', 'Hide the chat'),
+          _stagePanelButton(_StagePanel.profile, LucideIcons.circleUser,
+              'Show profile', 'Hide profile'),
+        ] else
+          HollowIconButton(
+            icon: LucideIcons.circleUser,
+            label: showProfilePanel ? 'Hide profile' : 'Show profile',
+            selected: showProfilePanel,
+            onPressed: () => ref.read(dmProfilePanelProvider.notifier).state =
+                !showProfilePanel,
+          ),
       ],
     );
   }
+
+  /// Panels swap instantly: a width animation re-lays the stage.
+  Widget _stagePanelButton(
+      _StagePanel panel, IconData icon, String show, String hide) {
+    final open = _stagePanel == panel;
+    return HollowIconButton(
+      icon: icon,
+      label: open ? hide : show,
+      selected: open,
+      onPressed: () => setState(() => _stagePanel = open ? null : panel),
+    );
+  }
+
+  bool _inCallWithPeer() =>
+      isDmCallWith(ref, ref.watch(callProvider), widget.peerId);
 
   /// In-conversation message search: query field + up to 20 tappable results.
   Widget _buildSearchBar(HollowTheme hollow, bool isSavedMessages) {
@@ -1345,190 +1017,29 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       onTap: () => _jumpToSearchResult(msg),
     );
   }
-  /// `widget.peerId` is the friend's MASTER id while `peersProvider` is keyed by
-  /// the DEVICE ids the relay reports, so a direct `peers[master]` lookup is
-  /// always null for a multi-device friend and the header would read Offline
-  /// while the dots and call buttons read online. Scan for ANY device of this
-  /// master with an encrypted session.
-  /// Confirms leaving a server voice channel, which starting a DM call
-  /// disconnects (issue #49). Returns true to proceed.
-  Future<bool> _confirmLeaveVoiceForCall() async {
-    final vc = ref.read(voiceChannelProvider);
-    if (!vc.isInVoiceChannel) return true;
-    final channelName = vc.currentChannelName ?? 'voice';
-    final confirmed = await showHollowConfirm(
-      context: context,
-      title: 'Start call?',
-      message: 'Starting this call will disconnect you from #$channelName.',
-      confirmLabel: 'Start call',
-    );
-    return confirmed && mounted;
-  }
-
-  Future<void> _startDmCall({required bool withVideo}) async {
-    if (!await ensureTurnForCall(context, ref)) return;
-    if (!mounted) return;
-    if (!await _confirmLeaveVoiceForCall()) return;
-    await ref
-        .read(callProvider.notifier)
-        .startCall(widget.peerId, withVideo: withVideo);
-  }
-
   Widget _buildVoiceCallButton(HollowTheme hollow) {
-    final call = ref.watch(callProvider);
     final isOnline = identityIsOnline(ref, widget.peerId);
-    final isInCall = call.status != CallStatus.idle;
-    final withThisPeer = call.peerId == widget.peerId && isInCall;
+    final isInCall = ref.watch(
+        callProvider.select((c) => c.status != CallStatus.idle));
     return HollowIconButton(
-      icon: withThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
-      label: withThisPeer ? 'In call' : 'Start voice call',
-      color: withThisPeer ? hollow.success : null,
+      icon: LucideIcons.phone,
+      label: 'Start voice call',
       onPressed: isOnline && !isInCall
-          ? () => _startDmCall(withVideo: false)
+          ? () => startDmCallFlow(context, ref, widget.peerId)
           : null,
     );
   }
 
   Widget _buildVideoCallButton(HollowTheme hollow) {
-    final call = ref.watch(callProvider);
     final isOnline = identityIsOnline(ref, widget.peerId);
-    final isInCall = call.status != CallStatus.idle;
+    final isInCall = ref.watch(
+        callProvider.select((c) => c.status != CallStatus.idle));
     return HollowIconButton(
       icon: LucideIcons.video,
       label: 'Start video call',
-      onPressed:
-          isOnline && !isInCall ? () => _startDmCall(withVideo: true) : null,
-    );
-  }
-  /// Full-bleed screen-share layout: the share fills the pane and the source
-  /// pill, chat overlay and controls pill float above it, auto-hiding together.
-  Widget _buildScreenShareLayout(
-    HollowTheme hollow,
-    List<ChatMessage> messages,
-    Set<String> typingPeers,
-    Map<String, storage_api.UserProfile> profiles,
-    String localPeerId, {
-    required bool anyScreenSharing,
-  }) {
-    return Expanded(
-      child: MouseRegion(
-        onHover: (_) => _resetOverlayTimer(),
-        onEnter: (_) => _resetOverlayTimer(),
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: _ScreenShareFullView(peerId: widget.peerId),
-            ),
-            // Only with a share active and two or more sources to switch
-            // between; a camera-only DM needs no switcher.
-            if (anyScreenSharing) _buildSourcePillOverlay(hollow),
-            _buildChatOverlay(
-                hollow, messages, typingPeers, profiles, localPeerId),
-            _buildControlsPillOverlay(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Scoped Consumer: the pill needs the FULL call state, so it is watched here
-  /// rather than pane-wide.
-  Widget _buildSourcePillOverlay(HollowTheme hollow) { // design-ignore: floating call source switcher, not a label
-    return Consumer(builder: (context, ref, _) {
-      final fullCall = ref.watch(callProvider);
-      if (_countActiveDmSources(fullCall) < 2) {
-        // MUST stay Positioned: a non-positioned child makes the Stack size to
-        // it (0x0) and blanks the whole share view.
-        return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
-      }
-      return Positioned(
-        top: HollowSpacing.md,
-        left: 0,
-        right: 0,
-        child: AnimatedOpacity(
-          opacity: _overlaysVisible ? 1.0 : 0.0,
-          duration: HollowDurations.normal,
-          child: IgnorePointer(
-            ignoring: !_overlaysVisible,
-            child: Center(
-              child: _buildScreenShareSourcePill(
-                hollow,
-                fullCall,
-                ref.read(identityProvider).peerId ?? '',
-                widget.peerId,
-              ),
-            ),
-          ),
-        ),
-      );
-    });
-  }
-
-  Widget _buildChatOverlay(
-    HollowTheme hollow,
-    List<ChatMessage> messages,
-    Set<String> typingPeers,
-    Map<String, storage_api.UserProfile> profiles,
-    String localPeerId,
-  ) {
-    return Positioned(
-      right: 0,
-      top: 0,
-      bottom: 0,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          ChatOverlayToggleButton(
-            overlaysVisible: _overlaysVisible,
-            pinned: _chatOverlayPinned,
-            onTap: () =>
-                setState(() => _chatOverlayPinned = !_chatOverlayPinned),
-            onHoverEnter: _pinOverlays,
-            onHoverExit: _resetOverlayTimer,
-          ),
-          _ChatOverlaySlider(
-            visible: _chatOverlayPinned,
-            onHoverEnter: _pinOverlays,
-            onHoverExit: _resetOverlayTimer,
-            child: Container(
-              width: 360,
-              decoration: BoxDecoration(
-                color: hollow.overlay.withValues(alpha: 0.88),
-                border: Border(
-                  left: BorderSide(
-                    color: hollow.border.withValues(alpha: 0.5),
-                  ),
-                ),
-              ),
-              child: Column(
-                children: _buildMessageArea(
-                    hollow, messages, typingPeers, profiles, localPeerId),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildControlsPillOverlay() { // design-ignore: floating call controls, not a label
-    return Positioned(
-      bottom: HollowSpacing.lg,
-      left: 0,
-      right: 0,
-      child: AnimatedOpacity(
-        opacity: _overlaysVisible ? 1.0 : 0.0,
-        duration: HollowDurations.normal,
-        child: IgnorePointer(
-          ignoring: !_overlaysVisible,
-          child: Center(
-            child: _ScreenShareControlsOverlay(
-              peerId: widget.peerId,
-            ),
-          ),
-        ),
-      ),
+      onPressed: isOnline && !isInCall
+          ? () => startDmCallFlow(context, ref, widget.peerId, withVideo: true)
+          : null,
     );
   }
   /// Opens the GIF picker anchored to the composer button. The pick arrives as
@@ -2273,1692 +1784,67 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 }
 
-/// The inline call panel under the DM header during a call with this peer. It
-/// appears instantly: it was re-animating every time the DM opened.
-class _InlineCallPanelSlider extends ConsumerWidget {
-  final String peerId;
-  const _InlineCallPanelSlider({required this.peerId});
+/// What the one side panel shows while the call's stage is up.
+enum _StagePanel { chat, profile }
 
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final isCallWithThisPeer = ref.watch(callProvider.select((call) =>
-        call.peerId == peerId &&
-        (call.status == CallStatus.active ||
-            call.status == CallStatus.connecting)));
-    if (!isCallWithThisPeer) return const SizedBox.shrink();
-    return _InlineCallPanel(peerId: peerId);
-  }
-}
+/// The conversation beside the call's stage: messages and composer, the same
+/// ones the page shows without a call, in chrome at the side.
+class _StageChatPanel extends StatelessWidget {
+  final List<Widget> children;
+  const _StageChatPanel({required this.children});
 
-/// The call panel content: an audio bar, or a video view with controls.
-class _InlineCallPanel extends ConsumerStatefulWidget {
-  final String peerId;
-  const _InlineCallPanel({required this.peerId});
-
-  @override
-  ConsumerState<_InlineCallPanel> createState() => _InlineCallPanelState();
-}
-
-class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
-  double _remoteVolume = 1.0;
-  double _videoHeight = 200;
-  static const _minVideoHeight = 80.0;
-  static const _maxVideoHeight = 2000.0;
-  String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
-
-  /// Handles a tap on a source switcher tab. A camera goes fullscreen with the
-  /// other side as PiP; a screen is a no-op here, because the full-bleed share
-  /// view takes over on its own.
-  void _onDmSourceTapped(String peerId, String type, String localPeerId) {
-    if (type != 'camera') return;
-    setState(() {
-      _expandedRenderer = peerId == localPeerId ? 'local' : 'remote';
-    });
-  }
-
-  /// Source switcher pill for DM calls, one tab per active video source. Only
-  /// cameras highlight, since screens are not interactive in the inline panel.
-  Widget _buildDmSourceSwitcher(
-    HollowTheme hollow,
-    CallState call,
-    String localPeerId,
-    String remotePeerId,
-  ) {
-    final profiles = ref.watch(profileProvider);
-    String? focusedPeerId;
-    if (_expandedRenderer == 'local') {
-      focusedPeerId = localPeerId;
-    } else if (_expandedRenderer == 'remote') {
-      focusedPeerId = remotePeerId;
-    }
-    // Opt-in watching (issue #38): until we opt in the remote screen tab shows
-    // an eye, and tapping it starts watching.
-    final unwatched = {
-      if (call.remoteScreenSharing && !call.watchingRemoteShare) remotePeerId,
-    };
-    return _dmSourcePill(
-      hollow: hollow,
-      profiles: profiles,
-      sources: _dmActiveSources(call, localPeerId, remotePeerId),
-      localPeerId: localPeerId,
-      focusedPeerId: focusedPeerId,
-      focusedType: focusedPeerId != null ? 'camera' : null,
-      unwatchedScreenPeerIds: unwatched,
-      onTapSource: (peerId, type) {
-        if (type == 'screen' && unwatched.contains(peerId)) {
-          ref.read(callProvider.notifier).watchRemoteScreenShare();
-          return;
-        }
-        _onDmSourceTapped(peerId, type, localPeerId);
-      },
-    );
-  }
-
-  // Call duration is a self-ticking leaf: a per-second setState here rebuilds
-  // the ENTIRE inline call panel every second of every call.
+  static const double width = 320;
 
   @override
   Widget build(BuildContext context) {
-    final call = ref.watch(callProvider);
     final hollow = HollowTheme.of(context);
-    final peerProfile = ref.watch(profileProvider.select((p) => p[widget.peerId]));
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final displayName = displayNameForPeer(peerProfile, widget.peerId);
-
-    final hasRemoteVideo = call.remoteVideoEnabled;
-    final hasLocalVideo = call.isVideoEnabled;
-    final hasAnyVideo = hasRemoteVideo || hasLocalVideo;
-    final isScreenShare = call.isScreenSharing || call.remoteScreenSharing;
-    final hasVideoArea = hasAnyVideo || isScreenShare;
-    final voiceService = ref.read(callProvider.notifier).voiceService;
-    final remoteRenderer = voiceService?.remoteRenderer;
-    final localRenderer = voiceService?.localRenderer;
-
-    if (!hasAnyVideo && _expandedRenderer != null) {
-      _expandedRenderer = null;
-    }
-
-    // Leave just enough room for the controls and input bar, so the video can
-    // be dragged to nearly the full window height.
-    final screenHeight = MediaQuery.of(context).size.height;
-    final maxH = (screenHeight * 0.8).clamp(_minVideoHeight, _maxVideoHeight);
-
-    return GestureDetector(
-      onSecondaryTapUp: (details) {
-        if (call.status == CallStatus.active) {
-          _showVolumePopup(context, details.globalPosition);
-        }
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          color: hollow.surface,
-          border: Border(
-            bottom: BorderSide(color: hollow.border),
-          ),
-        ),
-        child: Column(
-          mainAxisSize: isScreenShare ? MainAxisSize.max : MainAxisSize.min,
-          children: [
-            // Above the video rather than beside it: this is about the call,
-            // not about one participant's tile.
-            _buildLinkHealthBanner(),
-            // A screen share fills the available space; a camera keeps a fixed,
-            // drag-resizable height.
-            if (hasVideoArea) ...[
-              if (isScreenShare)
-                Expanded(
-                  child: _buildScreenShareView(call, hollow, remoteRenderer),
-                )
-              else
-                _buildCameraArea(call, hollow, displayName, remoteRenderer,
-                    localRenderer, hasRemoteVideo, hasLocalVideo, localPeerId),
-              if (!isScreenShare) _buildResizeHandle(hollow, maxH),
-            ],
-            _buildControlBar(call, hollow, hasAnyVideo, localPeerId),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLinkHealthBanner() =>
-      LinkHealthHeader(snapshot: ref.watch(callLinkHealthProvider));
-
-  Widget _buildCameraArea(
-    CallState call,
-    HollowTheme hollow,
-    String displayName,
-    RTCVideoRenderer? remoteRenderer,
-    RTCVideoRenderer? localRenderer,
-    bool hasRemoteVideo,
-    bool hasLocalVideo,
-    String localPeerId,
-  ) {
-    return SizedBox(
-      height: _videoHeight,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: _expandedRenderer != null
-                ? _buildFullscreenVideo(hollow, displayName, remoteRenderer,
-                    localRenderer, hasRemoteVideo, hasLocalVideo)
-                : _buildSideBySideVideo(hollow, displayName, remoteRenderer,
-                    localRenderer, hasRemoteVideo, hasLocalVideo),
-          ),
-          // Only with a share active and two or more sources to switch
-          // between; a camera-only DM needs no switcher.
-          if ((call.isScreenSharing || call.remoteScreenSharing) &&
-              _countActiveDmSources(call) >= 2)
-            Positioned(
-              top: HollowSpacing.sm,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: _buildDmSourceSwitcher(
-                    hollow, call, localPeerId, widget.peerId),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildResizeHandle(HollowTheme hollow, double maxH) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeRow,
-      child: GestureDetector(
-        onVerticalDragUpdate: (details) {
-          setState(() {
-            _videoHeight =
-                (_videoHeight + details.delta.dy).clamp(_minVideoHeight, maxH);
-          });
-        },
-        child: Container(
-          height: 8,
-          color: Colors.transparent,
-          child: Center(
-            child: Container(
-              width: 32,
-              height: 3,
-              decoration: BoxDecoration(
-                color: hollow.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Control bar: timer, avatars while audio-only, then the controls.
-  Widget _buildControlBar(
-      CallState call, HollowTheme hollow, bool hasAnyVideo, String localPeerId) {
-    return Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: hasAnyVideo ? HollowSpacing.sm : HollowSpacing.md,
-      ),
-      child: Row(
-        children: [
-          StatusDot(color: hollow.success, size: 8),
-          const SizedBox(width: HollowSpacing.sm),
-          if (call.status == CallStatus.connecting || call.startedAt == null)
-            Text(
-              'Connecting...',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-              ),
-            )
-          else
-            CallDurationText(
-              startedAt: call.startedAt!,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-                fontFeatures: [const FontFeature.tabularFigures()],
-              ),
-            ),
-          // With video on, the avatars are in the rectangles instead.
-          if (!hasAnyVideo) ...[
-            const Spacer(),
-            _buildAudioAvatars(call, hollow, localPeerId),
-          ],
-          const Spacer(),
-          _buildControls(call, hollow),
-        ],
-      ),
-    );
-  }
-
-  /// Speaking state arrives through a scoped Consumer so a VAD flip rebuilds
-  /// only these two avatars, not the whole inline call panel.
-  Widget _buildAudioAvatars(
-      CallState call, HollowTheme hollow, String localPeerId) {
-    return Consumer(builder: (context, ref, _) {
-      final speaking = ref.watch(callSpeakingProvider);
-      return Row(children: [
-        SpeakingBorder(
-          isSpeaking: speaking.local,
-          child: _badgedCallAvatar(
-            hollow: hollow,
-            peerId: localPeerId,
-            muted: call.isMuted,
-            deafened: call.isDeafened,
-          ),
-        ),
-        const SizedBox(width: HollowSpacing.sm),
-        SpeakingBorder(
-          isSpeaking: speaking.remote,
-          child: _badgedCallAvatar(
-            hollow: hollow,
-            peerId: widget.peerId,
-            muted: call.remoteMuted,
-            deafened: call.remoteDeafened,
-          ),
-        ),
-      ]);
-    });
-  }
-
-  void _showVolumePopup(BuildContext context, Offset globalPosition) {
-    var volume = _remoteVolume;
-    final peerId = widget.peerId;
-    showHollowMenu(
-      context: context,
-      anchor: overlayPositionOf(context, globalPosition),
-      builder: (menuContext, menuRef) => [
-        HollowMenuCustom(StatefulBuilder(builder: (popupContext, setPopupState) {
-          final hollow = HollowTheme.of(popupContext);
-          final call = menuRef.watch(callProvider);
-          return Row(children: [
-            Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
-            Expanded(child: HollowSlider(
-              value: volume,
-              min: 0,
-              max: 2,
-              label: '${(volume * 100).round()}%',
-              onChanged: call.peerId == peerId ? (value) {
-                setPopupState(() => volume = value);
-                if (mounted) setState(() => _remoteVolume = value);
-                menuRef.read(callProvider.notifier).setRemoteVolume(value)
-                    .catchError((Object error) {
-                  debugPrint('[HOLLOW-VOICE] Volume change failed: $error');
-                });
-              } : null,
-            )),
-            Text('${(volume * 100).round()}%',
-                style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
-          ]);
-        })),
-      ],
-    );
-  }
-
-  /// Puts the speaking ring on a call video tile (issue #37). The ring is an
-  /// overlay INSIDE the tile's clip, so a VAD flip never resizes the video
-  /// texture, and the scoped [Consumer] keeps the flip to this one layer.
-  Widget _speakingWrapped({
-    required bool local,
-    required BorderRadius radius,
-    required Widget child,
-    double borderWidth = 2.5,
-  }) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        child,
-        Consumer(builder: (context, ref, _) {
-          final speaking = ref.watch(callSpeakingProvider
-              .select((s) => local ? s.local : s.remote));
-          return SpeakingRing(
-            isSpeaking: speaking,
-            borderRadius: radius,
-            borderWidth: borderWidth,
-          );
-        }),
-      ],
-    );
-  }
-
-  /// Two equal video rectangles side by side; a click expands one.
-  Widget _buildSideBySideVideo(
-    HollowTheme hollow,
-    String displayName,
-    RTCVideoRenderer? remoteRenderer,
-    RTCVideoRenderer? localRenderer,
-    bool hasRemoteVideo,
-    bool hasLocalVideo,
-  ) {
-    return Row(
-      children: [
-        Expanded(
-          child: GestureDetector(
-            onTap: hasLocalVideo
-                ? () => setState(() => _expandedRenderer = 'local')
-                : null,
-            child: Container(
-              margin: const EdgeInsets.only(left: 4, top: 4, bottom: 4, right: 2),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: _speakingWrapped(
-                local: true,
-                radius: BorderRadius.circular(hollow.radiusMd),
-                child: hasLocalVideo && localRenderer != null
-                    ? RepaintBoundary(
-                        child: RTCVideoView(
-                          localRenderer,
-                          mirror: true,
-                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                        ),
-                      )
-                    : Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            HollowAvatar(
-                              peerId: ref.read(identityProvider).peerId ?? '',
-                              size: 48,
-                              frameId: '',
-                            ),
-                            const SizedBox(height: HollowSpacing.xs),
-                            Text(
-                              'You',
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textSecondary,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-              ),
-            ),
-          ),
-        ),
-        Expanded(
-          child: GestureDetector(
-            onTap: hasRemoteVideo
-                ? () => setState(() => _expandedRenderer = 'remote')
-                : null,
-            child: Container(
-              margin: const EdgeInsets.only(left: 2, top: 4, bottom: 4, right: 4),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: _speakingWrapped(
-                local: false,
-                radius: BorderRadius.circular(hollow.radiusMd),
-                child: hasRemoteVideo && remoteRenderer != null
-                    ? RepaintBoundary(
-                        child: RTCVideoView(
-                          remoteRenderer,
-                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                        ),
-                      )
-                    : Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            HollowAvatar(
-                              peerId: widget.peerId,
-                              size: 48,
-                              frameId: '',
-                            ),
-                            const SizedBox(height: HollowSpacing.xs),
-                            Text(
-                              displayName,
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textSecondary,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// One video fills the area with the other as PiP; a click exits.
-  Widget _buildFullscreenVideo(
-    HollowTheme hollow,
-    String displayName,
-    RTCVideoRenderer? remoteRenderer,
-    RTCVideoRenderer? localRenderer,
-    bool hasRemoteVideo,
-    bool hasLocalVideo,
-  ) {
-    final isLocalExpanded = _expandedRenderer == 'local';
-    final mainRenderer = isLocalExpanded ? localRenderer : remoteRenderer;
-    final pipRenderer = isLocalExpanded ? remoteRenderer : localRenderer;
-    final hasPip = isLocalExpanded ? hasRemoteVideo : hasLocalVideo;
-
-    return GestureDetector(
-      onTap: () => setState(() {
-        _expandedRenderer = null;
-      }),
-      child: Stack(
-        clipBehavior: Clip.hardEdge,
-        children: [
-          // Contain, because letterbox bars beat cropping someone out of the
-          // frame they just expanded.
-          Positioned.fill(
-            child: _speakingWrapped(
-              local: isLocalExpanded,
-              radius: BorderRadius.zero,
-              child: mainRenderer != null
-                  ? RepaintBoundary(
-                      child: RTCVideoView(
-                        mainRenderer,
-                        mirror: isLocalExpanded,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                      ),
-                    )
-                  : Container(color: hollow.elevated),
-            ),
-          ),
-
-          if (hasPip && pipRenderer != null)
-            Positioned(
-              right: 8,
-              bottom: 8,
-              child: Container(
-                width: 120,
-                height: 90,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: hollow.border, width: 1),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.3),
-                      blurRadius: 8,
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(7),
-                  child: _speakingWrapped(
-                    local: !isLocalExpanded,
-                    radius: BorderRadius.circular(7),
-                    borderWidth: 2,
-                    child: RepaintBoundary(
-                      child: RTCVideoView(
-                        pipRenderer,
-                        mirror: !isLocalExpanded,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-          Positioned(
-            left: 8,
-            top: 8,
-            child: AnimatedOpacity(
-              opacity: 0.7,
-              duration: HollowDurations.fast,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: 3,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.5),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  'Click to exit',
-                  style: HollowTypography.caption.copyWith(
-                    color: Colors.white70,
-                    fontSize: 10,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Screen share view: local sharing, remote sharing, or both.
-  Widget _buildScreenShareView(
-      CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
-    if (call.isScreenSharing && call.remoteScreenSharing) {
-      return _buildBothSharingView(call, hollow, remoteRenderer);
-    }
-    if (call.isScreenSharing) {
-      return _buildLocalShareBanner(call, hollow);
-    }
-    return _buildRemoteShareView(call, hollow, remoteRenderer);
-  }
-
-  /// Both sharing: their screen on top, our banner below.
-  Widget _buildBothSharingView(
-      CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
-    return Column(
-      children: [
-        Expanded(
-          flex: 3,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: Container(
-                  color: Colors.black,
-                  child: remoteRenderer != null
-                      ? RepaintBoundary(
-                          child: RTCVideoView(
-                            remoteRenderer,
-                            mirror: false,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitContain,
-                          ),
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-              if (call.remoteScreenShareLabel != null)
-                Positioned(
-                  top: HollowSpacing.md,
-                  right: HollowSpacing.md,
-                  child: ShareQualityChip(
-                    renderer: remoteRenderer,
-                    sourceLabel: call.remoteScreenShareLabel,
-                  ),
-                ),
-            ],
-          ),
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-          color: hollow.elevated,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(LucideIcons.monitor,
-                  size: 16, color: hollow.accent.withValues(alpha: 0.6)),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'You are also sharing',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 12,
-                ),
-              ),
-              if (call.screenShareLabel != null) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                _shareSourceLabel(hollow, call.screenShareLabel!),
-              ],
-              const SizedBox(width: HollowSpacing.md),
-              HollowButton.danger(
-                onPressed: () =>
-                    ref.read(callProvider.notifier).stopScreenShare(),
-                compact: true,
-                child: const Text('Stop'),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// Only we are sharing, so a banner is enough.
-  Widget _buildLocalShareBanner(CallState call, HollowTheme hollow) {
     return Container(
-      color: hollow.elevated,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.monitor,
-              size: 40,
-              color: hollow.accent.withValues(alpha: 0.6),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'You are sharing your screen',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            if (call.screenShareLabel != null) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              _shareSourceLabel(hollow, call.screenShareLabel!),
-            ],
-            const SizedBox(height: HollowSpacing.md),
-            HollowButton.danger(
-              onPressed: () =>
-                  ref.read(callProvider.notifier).stopScreenShare(),
-              compact: true,
-              child: const Text('Stop Sharing'),
-            ),
-          ],
-        ),
+      width: width,
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(left: BorderSide(color: hollow.border)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ChatHeaderBar(
+            leading: Icon(LucideIcons.messageSquare,
+                size: 20, color: hollow.textTertiary),
+            title: 'Chat',
+          ),
+          ...children,
+        ],
       ),
     );
   }
+}
 
-  /// Only they are sharing: their screen, contained and never mirrored.
-  Widget _buildRemoteShareView(
-      CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Container(
-            color: Colors.black,
-            child: remoteRenderer != null
-                ? RepaintBoundary(
-                    child: RTCVideoView(
-                      remoteRenderer,
-                      mirror: false,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                    ),
-                  )
-                : Center(
-                    child: Text(
-                      'Waiting for screen share...',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                  ),
-          ),
-        ),
-        if (call.remoteScreenShareLabel != null)
-          Positioned(
-            top: HollowSpacing.md,
-            right: HollowSpacing.md,
-            child: ShareQualityChip(
-              renderer: remoteRenderer,
-              sourceLabel: call.remoteScreenShareLabel,
-            ),
-          ),
-      ],
-    );
-  }
+/// After the name while the stage is up: "In a call" and the timer.
+class _InCallMark extends ConsumerWidget {
+  const _InCallMark();
 
-  /// Call avatar with muted and deafened badges, in the same corners as the
-  /// mobile voice avatars.
-  Widget _badgedCallAvatar({
-    required HollowTheme hollow,
-    required String peerId,
-    required bool muted,
-    required bool deafened,
-  }) {
-    Widget badge(IconData icon) => Container(
-          padding: const EdgeInsets.all(2),
-          decoration: BoxDecoration(
-            color: hollow.error,
-            borderRadius: BorderRadius.circular(hollow.radiusXs),
-            border: Border.all(color: hollow.background, width: 1.5),
-          ),
-          child: Icon(icon, size: 10, color: Colors.white),
-        );
-
-    return Stack(
-      children: [
-        // No frame on an avatar that carries a speaking ring of its own: a
-        // built-in frame is a coloured ring in the same accent family, so a
-        // quiet person with a teal frame would read as talking. Tile-rim cues
-        // are a different shape in a different place and keep theirs.
-        HollowAvatar(peerId: peerId, size: 60, frameId: ''),
-        if (muted)
-          Positioned(left: 0, bottom: 0, child: badge(LucideIcons.micOff)),
-        if (deafened)
-          Positioned(
-              right: 0, bottom: 0, child: badge(LucideIcons.headphoneOff)),
-      ],
-    );
-  }
-
-  /// Shared row of call controls.
-  Widget _buildControls(CallState call, HollowTheme hollow) {
-    final rec = ref.watch(recordingProvider);
-    const iconSize = 20.0;
-    const buttonPadding = EdgeInsets.all(HollowSpacing.sm);
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final startedAt = ref.watch(callProvider.select((c) => c.startedAt));
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (rec.isMyRecording) ...[
-          RecordingIndicator(startedAt: rec.myStartedAt),
-          const SizedBox(width: HollowSpacing.sm),
-        ] else if (rec.remoteRecorders.isNotEmpty) ...[
-          const RecordingIndicator(),
-          const SizedBox(width: HollowSpacing.sm),
-        ],
-        _muteCallButton(ref, hollow, call,
-            iconSize: iconSize, padding: buttonPadding),
+        Icon(LucideIcons.phone, size: 14, color: hollow.success),
         const SizedBox(width: HollowSpacing.xs),
-        _buildDeafenButton(call, hollow, iconSize, buttonPadding),
-        const SizedBox(width: HollowSpacing.xs),
-        _cameraCallButton(ref, hollow, call,
-            iconSize: iconSize, padding: buttonPadding),
-        if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
-          const SizedBox(width: HollowSpacing.xs),
-          _screenShareCallButton(context, ref, hollow, call,
-              iconSize: iconSize, padding: buttonPadding),
-        ],
-        // Windows and macOS only: macOS before 13.0 has no native recorder (the
-        // button explains itself) and Linux has none at all.
-        if (Platform.isWindows || Platform.isMacOS) ...[
-          const SizedBox(width: HollowSpacing.xs),
-          _buildRecordButton(rec, hollow, iconSize, buttonPadding),
-        ],
-        const SizedBox(width: HollowSpacing.sm),
-        _endCallButton(ref, hollow,
-            iconSize: iconSize,
-            innerPadding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md,
-              vertical: HollowSpacing.sm,
-            )),
-      ],
-    );
-  }
-
-  Widget _buildDeafenButton(CallState call, HollowTheme hollow,
-      double iconSize, EdgeInsetsGeometry padding) {
-    final label = call.isDeafened ? 'Undeafen' : 'Deafen';
-    return HollowTooltip(
-      message: label,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: call.status == CallStatus.active
-            ? () => ref.read(callProvider.notifier).toggleDeafen()
-            : null,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: padding,
-        child: Icon(
-          LucideIcons.headphones,
-          size: iconSize,
-          color: call.isDeafened ? hollow.error : hollow.textSecondary,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildRecordButton(RecordingState rec, HollowTheme hollow,
-      double iconSize, EdgeInsetsGeometry padding) {
-    return HollowTooltip(
-      message: MacOsScreenAudioSupport.recordBlockedByOldOs
-          ? 'Recording needs macOS 13.0 or later'
-          : (rec.isMyRecording ? 'Stop recording' : 'Record this call'),
-      child: HollowPressable(
-        disabled: MacOsScreenAudioSupport.recordBlockedByOldOs,
-        semanticLabel:
-            rec.isMyRecording ? 'Stop recording' : 'Record this call',
-        onTap: () {
-          final notifier = ref.read(recordingProvider.notifier);
-          if (rec.isMyRecording) {
-            notifier.stopRecording();
-          } else {
-            notifier.startRecording();
-          }
-        },
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: padding,
-        child: Icon(
-          rec.isMyRecording ? LucideIcons.stopCircle : LucideIcons.circle,
-          size: iconSize,
-          color:
-              rec.isMyRecording ? const Color(0xFFE53935) : hollow.textSecondary,
-        ),
-      ),
-    );
-  }
-}
-
-/// The chat panel over a screen share. It shows and hides instantly: a width
-/// animation would re-wrap the chat text on every frame.
-class _ChatOverlaySlider extends StatelessWidget {
-  final bool visible;
-  final Widget child;
-  final VoidCallback onHoverEnter;
-  final VoidCallback onHoverExit;
-
-  const _ChatOverlaySlider({
-    required this.visible,
-    required this.child,
-    required this.onHoverEnter,
-    required this.onHoverExit,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (!visible) return const SizedBox.shrink();
-    return MouseRegion(
-      onEnter: (_) => onHoverEnter(),
-      onExit: (_) => onHoverExit(),
-      child: child,
-    );
-  }
-}
-
-// Screen share full-bleed view, filling the chat area as its background.
-
-class _ScreenShareFullView extends ConsumerWidget {
-  final String peerId;
-  const _ScreenShareFullView({required this.peerId});
-
-  /// Mirrors a local camera; a screen is never mirrored.
-  Widget _renderTile(RTCVideoRenderer? renderer,
-      {required bool isCamera, required bool isLocal}) {
-    if (renderer == null) return const SizedBox.shrink();
-    return RepaintBoundary(
-      child: RTCVideoView(
-        renderer,
-        mirror: isCamera && isLocal,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final call = ref.watch(callProvider);
-    final hollow = HollowTheme.of(context);
-    final notifier = ref.read(callProvider.notifier);
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final voice = notifier.voiceService;
-    final remoteScreen = notifier.screenShareRenderer;
-    final localScreen = notifier.localScreenShareRenderer;
-    final remoteCamera = voice?.remoteRenderer;
-    final localCamera = voice?.localRenderer;
-    // Opt-in watching (issue #38): the remote share counts only once Watch was
-    // pressed; unwatched it stays a pill tab or grid placeholder.
-    final bothSharing = call.isScreenSharing &&
-        call.remoteScreenSharing &&
-        call.watchingRemoteShare;
-
-    // Zoom-style grid of all sources (issue #38).
-    if (ref.watch(dmShareGridViewProvider)) {
-      return _buildDmGridView(
-        ref, call, hollow, localPeerId,
-        remoteScreen: remoteScreen,
-        localScreen: localScreen,
-        remoteCamera: remoteCamera,
-        localCamera: localCamera,
-      );
-    }
-
-    // Their share exists but is unwatched, so the surface shows an avatar and a
-    // Watch placeholder while the media stays gated (issue #38).
-    if (call.remoteScreenSharing && !call.watchingRemoteShare) {
-      return _buildUnwatchedShareStack(
-          ref, call, hollow, localScreen: localScreen);
-    }
-
-    // Falls back to a default when the focused source is not currently active.
-    final focused = ref.watch(focusedDmSourceProvider);
-    final ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})
-        bigChoice = _resolveBig(
-      focused: focused,
-      call: call,
-      localPeerId: localPeerId,
-      remotePeerId: peerId,
-      remoteScreen: remoteScreen,
-      localScreen: localScreen,
-      remoteCamera: remoteCamera,
-      localCamera: localCamera,
-    );
-
-    // No auto-focus on build: it fought the screen-share toggling dance, so no
-    // tab highlights until one is tapped and the big tile uses the fallback.
-
-    if (bothSharing) {
-      return _buildBothSharingStack(
-          ref, call, hollow, bigChoice, remoteScreen, localScreen, localPeerId);
-    }
-    return _buildSingleSourceStack(call, hollow, notifier, bigChoice);
-  }
-
-  /// The placeholder surface for a share we have not opted into, split with our
-  /// own share when both are sharing.
-  Widget _buildUnwatchedShareStack(
-    WidgetRef ref,
-    CallState call,
-    HollowTheme hollow, {
-    required RTCVideoRenderer? localScreen,
-  }) {
-    final profiles = ref.watch(profileProvider);
-    final name = displayNameFor(profiles, peerId);
-
-    final placeholder = Container(
-      margin: call.isScreenSharing ? const EdgeInsets.all(2) : EdgeInsets.zero,
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: call.isScreenSharing
-            ? BorderRadius.circular(hollow.radiusMd)
-            : BorderRadius.zero,
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            HollowAvatar(peerId: peerId, size: 64, frameId: ''),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              '$name is sharing their screen',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-            if (call.remoteScreenShareLabel != null) ...[
-              const SizedBox(height: HollowSpacing.xs),
-              Text(
-                call.remoteScreenShareLabel!,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textTertiary,
-                  fontSize: 11,
-                ),
-              ),
-            ],
-            const SizedBox(height: HollowSpacing.md),
-            HollowButton.filled(
-              compact: true,
-              icon: const Icon(LucideIcons.eye, size: 14),
-              onPressed: () => ref
-                  .read(callProvider.notifier)
-                  .watchRemoteScreenShare(),
-              child: const Text('Watch'),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    if (!call.isScreenSharing) {
-      return Container(color: Colors.black, child: placeholder);
-    }
-
-    // Both sharing with theirs unwatched: our share left, their placeholder
-    // right, the same side-by-side the VC grid shows.
-    final ownTile = Container(
-      margin: const EdgeInsets.all(2),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (localScreen != null)
-            _renderTile(localScreen, isCamera: false, isLocal: true)
-          else
-            Center(
-              child: Icon(LucideIcons.monitor,
-                  size: 32,
-                  color: hollow.textSecondary.withValues(alpha: 0.4)),
-            ),
-          Positioned(
-            left: 6,
-            bottom: 6,
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.6),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                call.screenShareLabel != null
-                    ? 'You · ${call.screenShareLabel}'
-                    : 'You',
-                style: HollowTypography.caption.copyWith(
-                  color: Colors.white,
-                  fontSize: 10,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    return Container(
-      color: Colors.black,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: Row(
-              children: [
-                Expanded(child: ownTile),
-                Expanded(child: placeholder),
-              ],
-            ),
-          ),
-          Positioned(
-            top: HollowSpacing.md,
-            right: HollowSpacing.md,
-            child: HollowButton.danger(
-              onPressed: () =>
-                  ref.read(callProvider.notifier).stopScreenShare(),
-              compact: true,
-              icon: const Icon(LucideIcons.monitorOff, size: 14),
-              child: const Text('Stop sharing'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Zoom-style grid (issue #38): every active source as a tile, a remote share
-  /// staying a Watch placeholder until opted in. Tapping a live tile focuses it.
-  Widget _buildDmGridView(
-    WidgetRef ref,
-    CallState call,
-    HollowTheme hollow,
-    String localPeerId, {
-    required RTCVideoRenderer? remoteScreen,
-    required RTCVideoRenderer? localScreen,
-    required RTCVideoRenderer? remoteCamera,
-    required RTCVideoRenderer? localCamera,
-  }) {
-    void focusSource(String srcPeerId, String type) {
-      ref.read(focusedDmSourceProvider.notifier).state =
-          DmFocusedSource(peerId: srcPeerId, type: type);
-      ref.read(dmShareGridViewProvider.notifier).state = false;
-    }
-
-    Widget liveTile({
-      required RTCVideoRenderer? renderer,
-      required bool isCamera,
-      required bool isLocal,
-      required String label,
-      String? quality,
-      VoidCallback? onTap,
-    }) {
-      return GestureDetector(
-        onTap: onTap,
-        child: Container(
-          margin: const EdgeInsets.all(2),
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              if (renderer != null)
-                _renderTile(renderer, isCamera: isCamera, isLocal: isLocal)
-              else
-                Center(
-                  child: Icon(
-                    isCamera ? LucideIcons.video : LucideIcons.monitor,
-                    size: 32,
-                    color: hollow.textSecondary.withValues(alpha: 0.4),
-                  ),
-                ),
-              Positioned(
-                left: 6,
-                bottom: 6,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    quality != null ? '$label · $quality' : label,
-                    style: HollowTypography.caption.copyWith(
-                      color: Colors.white,
-                      fontSize: 10,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    final tiles = <Widget>[
-      if (call.isScreenSharing)
-        liveTile(
-          renderer: localScreen,
-          isCamera: false,
-          isLocal: true,
-          label: 'Your screen',
-          quality: call.screenShareLabel,
-          onTap: () => focusSource(localPeerId, 'screen'),
-        ),
-      if (call.remoteScreenSharing && call.watchingRemoteShare)
-        liveTile(
-          renderer: remoteScreen,
-          isCamera: false,
-          isLocal: false,
-          label: 'Their screen',
-          quality: call.remoteScreenShareLabel,
-          onTap: () => focusSource(peerId, 'screen'),
-        ),
-      if (call.remoteScreenSharing && !call.watchingRemoteShare)
-        // Unwatched: only the Watch button acts.
-        Container(
-          margin: const EdgeInsets.all(2),
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                HollowAvatar(peerId: peerId, size: 48, frameId: ''),
-                const SizedBox(height: HollowSpacing.sm),
-                Text(
-                  'Sharing their screen',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(height: HollowSpacing.sm),
-                HollowButton.filled(
-                  compact: true,
-                  icon: const Icon(LucideIcons.eye, size: 14),
-                  onPressed: () => ref
-                      .read(callProvider.notifier)
-                      .watchRemoteScreenShare(),
-                  child: const Text('Watch'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      if (call.isVideoEnabled)
-        liveTile(
-          renderer: localCamera,
-          isCamera: true,
-          isLocal: true,
-          label: 'Your camera',
-          onTap: () => focusSource(localPeerId, 'camera'),
-        ),
-      if (call.remoteVideoEnabled)
-        liveTile(
-          renderer: remoteCamera,
-          isCamera: true,
-          isLocal: false,
-          label: 'Their camera',
-          onTap: () => focusSource(peerId, 'camera'),
-        ),
-    ];
-
-    // One or two tiles side by side, three or four in a 2x2 with an underfull
-    // row centred.
-    Widget grid;
-    if (tiles.isEmpty) {
-      grid = const SizedBox.shrink();
-    } else if (tiles.length <= 2) {
-      grid = Row(children: [for (final t in tiles) Expanded(child: t)]);
-    } else {
-      final top = tiles.sublist(0, 2);
-      final bottom = tiles.sublist(2);
-      grid = Column(
-        children: [
-          Expanded(
-              child:
-                  Row(children: [for (final t in top) Expanded(child: t)])),
-          Expanded(
-            child: Row(
-              children: [
-                if (bottom.length == 1) const Spacer(),
-                for (final t in bottom) Expanded(flex: 2, child: t),
-                if (bottom.length == 1) const Spacer(),
-              ],
-            ),
-          ),
-        ],
-      );
-    }
-
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Container(color: Colors.black, child: grid),
-        ),
-        // Stop sharing has to stay reachable from the grid.
-        if (call.isScreenSharing)
-          Positioned(
-            top: HollowSpacing.md,
-            right: HollowSpacing.md,
-            child: HollowButton.danger(
-              onPressed: () =>
-                  ref.read(callProvider.notifier).stopScreenShare(),
-              compact: true,
-              icon: const Icon(LucideIcons.monitorOff, size: 14),
-              child: const Text('Stop sharing'),
-            ),
-          ),
-      ],
-    );
-  }
-
-  /// Both sharing: the focused source in the big tile, the other screen as PiP.
-  Widget _buildBothSharingStack(
-    WidgetRef ref,
-    CallState call,
-    HollowTheme hollow,
-    ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) bigChoice,
-    RTCVideoRenderer? remoteScreen,
-    RTCVideoRenderer? localScreen,
-    String localPeerId,
-  ) {
-    final isLocalBig = bigChoice.isLocal && !bigChoice.isCamera;
-    final pipRenderer = isLocalBig ? remoteScreen : localScreen;
-    final bigLabel = bigChoice.isLocal
-        ? call.screenShareLabel
-        : call.remoteScreenShareLabel;
-
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Container(
-            color: Colors.black,
-            child: _renderTile(
-              bigChoice.renderer,
-              isCamera: bigChoice.isCamera,
-              isLocal: bigChoice.isLocal,
-            ),
-          ),
-        ),
-        // Tap swaps the focus.
-        Positioned(
-          right: HollowSpacing.md,
-          bottom: HollowSpacing.md,
-          child: _buildPipTile(ref, hollow, pipRenderer,
-              pipIsLocal: !isLocalBig, localPeerId: localPeerId),
-        ),
-        // A remote big tile shows the RECEIVED resolution live; our own share
-        // keeps its source label.
-        if (!bigChoice.isCamera && bigLabel != null)
-          Positioned(
-            top: HollowSpacing.md,
-            left: HollowSpacing.md,
-            child: ShareQualityChip(
-              renderer: bigChoice.isLocal ? null : bigChoice.renderer,
-              sourceLabel: bigLabel,
-            ),
-          ),
-        Positioned(
-          top: HollowSpacing.md,
-          right: HollowSpacing.md,
-          child: HollowButton.danger(
-            onPressed: () => ref.read(callProvider.notifier).stopScreenShare(),
-            compact: true,
-            icon: const Icon(LucideIcons.monitorOff, size: 14),
-            child: const Text('Stop sharing'),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPipTile(
-    WidgetRef ref,
-    HollowTheme hollow,
-    RTCVideoRenderer? pipRenderer, {
-    required bool pipIsLocal,
-    required String localPeerId,
-  }) {
-    return GestureDetector(
-      onTap: () {
-        ref.read(focusedDmSourceProvider.notifier).state = DmFocusedSource(
-          peerId: pipIsLocal ? localPeerId : peerId,
-          type: 'screen',
-        );
-      },
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(HollowRadius.md),
-        child: Container(
-          width: 220,
-          height: 132,
-          decoration: BoxDecoration(
-            color: Colors.black,
-            border: Border.all(
-              color: hollow.border.withValues(alpha: 0.6),
-              width: 1,
-            ),
-          ),
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: _renderTile(
-                  pipRenderer,
-                  isCamera: false,
-                  isLocal: pipIsLocal,
-                ),
-              ),
-              Positioned(
-                left: HollowSpacing.xs,
-                bottom: HollowSpacing.xs,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.xs,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    pipIsLocal ? 'You' : 'Them',
-                    style: HollowTypography.caption.copyWith(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// One sharer, or only cameras when a camera focus tap opened this view: the
-  /// big tile shows whatever the focus resolved to.
-  Widget _buildSingleSourceStack(
-    CallState call,
-    HollowTheme hollow,
-    CallNotifier notifier,
-    ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) bigChoice,
-  ) {
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Container(
-            color: Colors.black,
-            child: bigChoice.renderer != null
-                ? _renderTile(
-                    bigChoice.renderer,
-                    isCamera: bigChoice.isCamera,
-                    isLocal: bigChoice.isLocal,
-                  )
-                : Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          LucideIcons.monitor,
-                          size: 48,
-                          color: hollow.textSecondary.withValues(alpha: 0.3),
-                        ),
-                        const SizedBox(height: HollowSpacing.md),
-                        Text(
-                          call.isScreenSharing
-                              ? 'You are sharing your screen'
-                              : 'Waiting for screen share...',
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
-        ),
-        if (call.isScreenSharing)
-          Positioned(
-            top: HollowSpacing.md,
-            right: HollowSpacing.md,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (call.screenShareLabel != null)
-                  _shareSourceLabel(hollow, call.screenShareLabel!),
-                if (call.screenShareLabel != null)
-                  const SizedBox(width: HollowSpacing.sm),
-                HollowButton.danger(
-                  onPressed: () => notifier.stopScreenShare(),
-                  compact: true,
-                  icon: const Icon(LucideIcons.monitorOff, size: 14),
-                  child: const Text('Stop sharing'),
-                ),
-              ],
-            ),
-          )
-        else if (call.remoteScreenSharing)
-          Positioned(
-            top: HollowSpacing.md,
-            right: HollowSpacing.md,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (call.remoteScreenShareLabel != null) ...[
-                  // Only when the big tile IS the remote share: a focused
-                  // camera has no share renderer to measure.
-                  ShareQualityChip(
-                    renderer: !bigChoice.isCamera && !bigChoice.isLocal
-                        ? bigChoice.renderer
-                        : null,
-                    sourceLabel: call.remoteScreenShareLabel,
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                ],
-                // Leaving the stream stays one tap (issue #38).
-                if (call.watchingRemoteShare)
-                  HollowButton.ghost(
-                    onPressed: () =>
-                        notifier.stopWatchingRemoteScreenShare(),
-                    compact: true,
-                    icon: const Icon(LucideIcons.eyeOff, size: 14),
-                    child: const Text('Stop watching'),
-                  ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  /// The renderer for the big tile, from the focus state and what is actually
-  /// active, falling back when the focused source is not currently sharing.
-  ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) _resolveBig({
-    required DmFocusedSource focused,
-    required CallState call,
-    required String localPeerId,
-    required String remotePeerId,
-    required RTCVideoRenderer? remoteScreen,
-    required RTCVideoRenderer? localScreen,
-    required RTCVideoRenderer? remoteCamera,
-    required RTCVideoRenderer? localCamera,
-  }) {
-    final fromFocus = _resolveFocusedSource(
-      focused: focused,
-      call: call,
-      localPeerId: localPeerId,
-      remoteScreen: remoteScreen,
-      localScreen: localScreen,
-      remoteCamera: remoteCamera,
-      localCamera: localCamera,
-    );
-    if (fromFocus != null) return fromFocus;
-
-    // Fallback priority: remote screen, local screen, remote camera, local
-    // camera.
-    if (call.remoteScreenSharing && remoteScreen != null) {
-      return (renderer: remoteScreen, isCamera: false, isLocal: false);
-    }
-    if (call.isScreenSharing && localScreen != null) {
-      return (renderer: localScreen, isCamera: false, isLocal: true);
-    }
-    if (call.remoteVideoEnabled && remoteCamera != null) {
-      return (renderer: remoteCamera, isCamera: true, isLocal: false);
-    }
-    if (call.isVideoEnabled && localCamera != null) {
-      return (renderer: localCamera, isCamera: true, isLocal: true);
-    }
-    return (renderer: null, isCamera: false, isLocal: false);
-  }
-
-  /// The focused source, or null when nothing is focused or it is not active.
-  ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})?
-      _resolveFocusedSource({
-    required DmFocusedSource focused,
-    required CallState call,
-    required String localPeerId,
-    required RTCVideoRenderer? remoteScreen,
-    required RTCVideoRenderer? localScreen,
-    required RTCVideoRenderer? remoteCamera,
-    required RTCVideoRenderer? localCamera,
-  }) {
-    if (focused.peerId == null || focused.type == null) return null;
-    final isLocal = focused.peerId == localPeerId;
-    if (focused.type == 'screen') {
-      return _sourceIfActive(
-        isLocal ? localScreen : remoteScreen,
-        isLocal ? call.isScreenSharing : call.remoteScreenSharing,
-        isCamera: false,
-        isLocal: isLocal,
-      );
-    }
-    if (focused.type == 'camera') {
-      return _sourceIfActive(
-        isLocal ? localCamera : remoteCamera,
-        isLocal ? call.isVideoEnabled : call.remoteVideoEnabled,
-        isCamera: true,
-        isLocal: isLocal,
-      );
-    }
-    return null;
-  }
-
-  ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})? _sourceIfActive(
-    RTCVideoRenderer? renderer,
-    bool active, {
-    required bool isCamera,
-    required bool isLocal,
-  }) {
-    if (!active || renderer == null) return null;
-    return (renderer: renderer, isCamera: isCamera, isLocal: isLocal);
-  }
-}
-
-// Screen share controls overlay: a floating pill of call controls.
-
-class _ScreenShareControlsOverlay extends ConsumerStatefulWidget {
-  final String peerId;
-  const _ScreenShareControlsOverlay({required this.peerId});
-
-  @override
-  ConsumerState<_ScreenShareControlsOverlay> createState() =>
-      _ScreenShareControlsOverlayState();
-}
-
-class _ScreenShareControlsOverlayState
-    extends ConsumerState<_ScreenShareControlsOverlay> {
-  // Duration is a self-ticking leaf: a per-second setState here rebuilds the
-  // whole overlay over a live screen-share video.
-
-  @override
-  Widget build(BuildContext context) {
-    final call = ref.watch(callProvider);
-    final hollow = HollowTheme.of(context);
-
-    final peerProfile = ref.watch(profileProvider.select((p) => p[widget.peerId]));
-    final displayName = displayNameForPeer(peerProfile, widget.peerId);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.overlay.withValues(alpha: 0.9),
-        borderRadius: BorderRadius.circular(HollowRadius.pill),
-        border: Border.all(
-          color: hollow.border.withValues(alpha: 0.5),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.3),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          StatusDot(color: hollow.success, size: 8),
+        Text('In a call',
+            style: HollowTypography.bodySmall.copyWith(color: hollow.success)),
+        if (startedAt != null) ...[
           const SizedBox(width: HollowSpacing.sm),
-          if (call.status == CallStatus.connecting)
-            Text(
-              'Connecting...',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-              ),
-            )
-          else ...[
-            Text(
-              displayName,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
-              ),
+          CallDurationText(
+            startedAt: startedAt,
+            style: HollowTypography.monoSmall.copyWith(
+              color: hollow.textTertiary,
+              fontFeatures: const [FontFeature.tabularFigures()],
             ),
-            const SizedBox(width: HollowSpacing.sm),
-            CallDurationText(
-              startedAt: call.startedAt ?? DateTime.now(),
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-                fontFeatures: [const FontFeature.tabularFigures()],
-              ),
-            ),
-          ],
-          const SizedBox(width: HollowSpacing.lg),
-          _muteCallButton(ref, hollow, call,
-              iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
-          const SizedBox(width: HollowSpacing.xs),
-          // Independent of the screen share: separate peer connections.
-          _cameraCallButton(ref, hollow, call,
-              iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
-          if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            _screenShareCallButton(context, ref, hollow, call,
-                iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
-          ],
-          if (call.remoteScreenSharing) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            const ShareVolumeButton(),
-          ],
-          const SizedBox(width: HollowSpacing.sm),
-          _endCallButton(ref, hollow,
-              iconSize: 14,
-              innerPadding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: 4,
-              )),
+          ),
         ],
-      ),
+      ],
     );
   }
 }

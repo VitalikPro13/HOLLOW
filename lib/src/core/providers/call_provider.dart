@@ -75,6 +75,10 @@ class CallState {
   /// we pressed Watch — [remoteScreenSharing] alone is just the badge.
   final bool watchingRemoteShare;
 
+  /// Sharer side: the peer asked to receive our share, so our own share can
+  /// say who is watching it.
+  final bool peerWatchingMyShare;
+
   /// Viewer asked for SOURCE quality on the remote share. OFF by default: the
   /// sharer clamps to our display until this is on. Per watch session, never sticky.
   final String sframeKey; // hex-encoded 32-byte SFrame key for E2EE
@@ -116,6 +120,7 @@ class CallState {
     this.isScreenSharing = false,
     this.remoteScreenSharing = false,
     this.watchingRemoteShare = false,
+    this.peerWatchingMyShare = false,
     this.sframeKey = '',
     this.isSpeakerOn = false,
     this.isDeafened = false,
@@ -140,6 +145,7 @@ class CallState {
     bool? isScreenSharing,
     bool? remoteScreenSharing,
     bool? watchingRemoteShare,
+    bool? peerWatchingMyShare,
     String? sframeKey,
     bool? isSpeakerOn,
     bool? isDeafened,
@@ -165,6 +171,7 @@ class CallState {
         isScreenSharing: isScreenSharing ?? this.isScreenSharing,
         remoteScreenSharing: remoteScreenSharing ?? this.remoteScreenSharing,
         watchingRemoteShare: watchingRemoteShare ?? this.watchingRemoteShare,
+        peerWatchingMyShare: peerWatchingMyShare ?? this.peerWatchingMyShare,
         sframeKey: sframeKey ?? this.sframeKey,
         isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
         isDeafened: isDeafened ?? this.isDeafened,
@@ -249,6 +256,9 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Last user-chosen remote volume — restored when un-deafening.
   double _lastRemoteVolume = 1.0;
+
+  /// How loud the peer plays, 0.0-2.0, for the volume slider to start from.
+  double get remoteVolume => _lastRemoteVolume;
 
   /// Separate PCs for screen sharing (one per direction).
   ScreenShareService? _outgoingScreenShare; // We share our screen to them
@@ -1276,7 +1286,11 @@ class CallNotifier extends Notifier<CallState> {
       const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
       final shortSide = height < width ? height : width;
       final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
-      state = state.copyWith(isScreenSharing: true, screenShareLabel: qualityLabel);
+      state = state.copyWith(
+        isScreenSharing: true,
+        screenShareLabel: qualityLabel,
+        peerWatchingMyShare: _dmPeerWantsShare,
+      );
       SoundService.instance.play(HollowSound.joinStream, duringCall: true);
 
       // Freeze the mic servo so speaker bleed can't re-calibrate the trim.
@@ -1483,7 +1497,10 @@ class CallNotifier extends Notifier<CallState> {
     _outgoingScreenShare = null;
     await _disarmVoiceRedirect();
     await _teardownDmShareCapture();
-    state = state.copyWith(isScreenSharing: false, clearScreenShareLabel: true);
+    state = state.copyWith(
+        isScreenSharing: false,
+        peerWatchingMyShare: false,
+        clearScreenShareLabel: true);
 
     final peerId = state.peerId;
     final callId = state.callId;
@@ -1510,6 +1527,9 @@ class CallNotifier extends Notifier<CallState> {
       _dmViewerWidth = viewerW;
       _dmViewerHeight = viewerH;
       if (!state.isScreenSharing) return;
+      if (!state.peerWatchingMyShare) {
+        state = state.copyWith(peerWatchingMyShare: true);
+      }
       if (_outgoingScreenShare != null) {
         // A re-sent watch is a cap change: try live setParameters first, and
         // renegotiate when the sender rejects it (Windows libwebrtc always does),
@@ -1526,6 +1546,9 @@ class CallNotifier extends Notifier<CallState> {
       }
     } else {
       _dmPeerWantsShare = false;
+      if (state.peerWatchingMyShare) {
+        state = state.copyWith(peerWatchingMyShare: false);
+      }
       final outgoing = _outgoingScreenShare;
       _outgoingScreenShare = null;
       await outgoing?.close();

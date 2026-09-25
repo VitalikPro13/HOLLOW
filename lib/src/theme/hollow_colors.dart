@@ -22,6 +22,12 @@ abstract final class HollowColors {
 
   static const border = Color(0x14FFFFFF); // ~8% white
 
+  // Over live video, in both themes: a picture is not a theme surface, so a
+  // label on it sits on a dark scrim with white text whatever the app theme.
+  static const mediaScrim = Color(0x9E000000); // ~62% black
+  static const onMedia = Color(0xFFFFFFFF);
+  static const mediaBlack = Color(0xFF000000);
+
   static const error = Color(0xFFEF4444);
   static const success = Color(0xFF10B981);
   static const warning = Color(0xFFFBBF24);

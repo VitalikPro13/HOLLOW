@@ -49,19 +49,19 @@
     { "peer": "a", "op": "wait_for", "target": "text:probe-b", "timeout_ms": 60000 },
 
     { "peer": "a", "op": "open_channel", "name": "vc-test" },
-    { "peer": "a", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
     { "peer": "b", "op": "open_channel", "name": "vc-test" },
-    { "peer": "b", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait_for", "target": "semantics:Leave the room", "timeout_ms": 30000 },
 
     { "peer": "a", "op": "log", "message": "15 s in the channel together: SFrame keys, ICE and the audio streams settle in the logs" },
     { "peer": "all", "op": "wait", "ms": 15000 },
     { "peer": "all", "op": "shot", "name": "in_voice_channel" },
     { "peer": "all", "op": "dump", "name": "in_voice_channel" },
 
-    { "peer": "a", "op": "tap", "target": "semantics:Disconnect", "index": 0 },
-    { "peer": "a", "op": "wait_for", "gone": "semantics:Disconnect", "timeout_ms": 30000 },
-    { "peer": "b", "op": "tap", "target": "semantics:Disconnect", "index": 0 },
-    { "peer": "b", "op": "wait_for", "gone": "semantics:Disconnect", "timeout_ms": 30000 }
+    { "peer": "a", "op": "tap", "target": "semantics:Leave the room", "index": 0 },
+    { "peer": "a", "op": "wait_for", "gone": "semantics:Leave the room", "timeout_ms": 30000 },
+    { "peer": "b", "op": "tap", "target": "semantics:Leave the room", "index": 0 },
+    { "peer": "b", "op": "wait_for", "gone": "semantics:Leave the room", "timeout_ms": 30000 }
   ],
   "cleanup": [
     { "peer": "a", "op": "right_click", "target": "server:fleet-vc" },
