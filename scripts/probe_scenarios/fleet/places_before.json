@@ -1,0 +1,591 @@
+{
+ "_": [
+  "Archive, Share and Conferences before the redesign, on throwaway peers.",
+  "a and b befriend and trade DMs, a creates a server, posts, and attaches a",
+  "40 MB file (a Share-backed server file). Then every Archive tab, Share,",
+  "and Conferences: empty, a room, the join dialog, a live meeting and its",
+  "manage drawer. Cleanup ends the meeting and deletes the server.",
+  "attach_file reads a 40 MB file from the session scratchpad; point it anywhere.",
+  "run (after places_setup): powershell -File scripts\fleet.ps1 -Scenario places_before -Peers a,b -Attach"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "Synth Lab"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:Synth Lab",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "Synth Lab"
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "field"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "stems for the Tuesday session are going up ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "attach_file",
+   "path": "C:/Users/Jabun/AppData/Local/Temp/claude/C--Users-Jabun-Documents-Coding-HOLLOW/0c889268-561a-4de8-95dc-0532b7667522/scratchpad/files/synth-session-stems.zip"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Send as Share",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 6000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Archive",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-01-archive-dms"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:DMs",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:ArchiveConversationList > text:probe-b",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-02-archive-dm-open"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Search messages",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-03-archive-search"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Channels",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-04-archive-channel"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Vault Files",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-05-archive-vault"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Imported Archives",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-06-archive-imported"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:My Data",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:DMs",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:ArchiveConversationList > text:probe-b",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-07-archive-dm-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Share",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-08-share-mine"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Server Files",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-09-share-server"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:My Shares",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Paste Link",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-10-share-paste"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Conferences",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-11-conf-empty"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create Room",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:e.g. Weekly sync",
+   "value": "Tuesday mix review"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-12-conf-create"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create Room",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:e.g. Weekly sync",
+   "value": "Open patch hour"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Waiting room",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-13-conf-rooms"
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "text:Tuesday mix review",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-14-conf-room-hover"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Join Meeting",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-15-conf-join"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Start meeting",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 4000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-16-conf-meeting"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Show meeting panel",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-17-conf-meeting-panel"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-18-conf-meeting-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:End meeting",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "pb-19-conf-rooms-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:End meeting",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:Synth Lab"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:Synth Lab",
+   "timeout_ms": 30000
+  }
+ ]
+}

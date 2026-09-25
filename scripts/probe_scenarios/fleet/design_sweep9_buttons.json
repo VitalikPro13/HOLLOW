@@ -453,7 +453,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Create Room",
+   "target": "text:Create a room",
    "index": 0,
    "soft": true
   },

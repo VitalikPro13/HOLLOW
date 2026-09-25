@@ -1,33 +1,47 @@
-
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
-import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/models/archive_conversation.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/archive/archive_message_viewer.dart'
+    show archiveLoadError, jumpToArchiveDate, toggleArchiveSearch;
 import 'package:hollow/src/ui/archive/shared/archive_message_list.dart';
 import 'package:hollow/src/ui/archive/shared/archive_sender_filter.dart';
-import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/media/media_viewer_scope.dart';
+import 'package:hollow/src/ui/components/long_press_message.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
-import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Full-screen archive message viewer for My Data (DMs and channels).
+/// The time a message was sent, for the long-press sheet: `14:05` today, a
+/// day in words before it.
+String archiveMessageTimeLabel(DateTime at) {
+  final clock =
+      '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+  final now = DateTime.now();
+  final today = at.year == now.year && at.month == now.month && at.day == now.day;
+  return today ? clock : '${calendarDateLabel(at, now: now)}, $clock';
+}
+
+/// Reading back one conversation from Messages on a phone. The tab resets the
+/// viewer's search and filter when this route closes.
 class MobileArchiveViewerRoute extends ConsumerStatefulWidget {
   final String? peerId;
   final String? serverId;
@@ -50,21 +64,6 @@ class MobileArchiveViewerRoute extends ConsumerStatefulWidget {
 class _MobileArchiveViewerRouteState
     extends ConsumerState<MobileArchiveViewerRoute> {
   final _listController = ArchiveMessageListController();
-  bool _isPicking = false;
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      try {
-        ref.read(archiveFilterSenderProvider.notifier).state = null;
-        ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
-        ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-        ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-        ref.read(archiveJumpToDateProvider.notifier).state = null;
-      } catch (_) {}
-    });
-    super.dispose();
-  }
 
   Duration _scrollDuration() => ReduceMotionController.instance.isReduced
       ? Duration.zero
@@ -73,76 +72,75 @@ class _MobileArchiveViewerRouteState
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-
-    if (widget.isDm) {
-      return _buildDmViewer(hollow);
-    }
-    return _buildChannelViewer(hollow);
-  }
-
-  Widget _buildDmViewer(HollowTheme hollow) {
-    final peerId = widget.peerId!;
-    final messagesAsync = ref.watch(archiveDmMessagesProvider(peerId));
-    final peerProfile =
-        ref.watch(profileProvider.select((p) => p[peerId]));
-    final displayName = displayNameForPeer(peerProfile, peerId);
-    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
-    final allMessages = messagesAsync.valueOrNull ?? [];
-
     return Scaffold(
       backgroundColor: hollow.background,
       body: SafeArea(
-        child: Column(
-          children: [
-            ArchiveMobileToolbar(
-              leading: HollowAvatar(peerId: peerId, size: 24),
-              title: displayName,
-              searchOpen: searchOpen,
-              onBack: () => Navigator.pop(context),
-              onToggleSearch: () => _toggleSearch(),
-              onJumpToDate:
-                  allMessages.isNotEmpty ? () => _pickDate(allMessages.first.timestamp, allMessages.last.timestamp) : null,
-              onExport: () => showExportArchiveDialog(
-                context,
-                isDm: true,
-                peerId: peerId,
-                name: displayName,
-                messageCount: allMessages.length,
-              ),
-            ),
-            if (searchOpen)
-              ArchiveListSearchBar(
-                texts: [for (final m in allMessages) m.text],
-                controller: _listController,
-              ),
-            Expanded(
-              child: messagesAsync.when(
-                loading: () =>
-                    const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
-                error: (e, _) => Center(
-                  key: const ValueKey('error'),
-                  child: Text('Failed to load: $e',
-                      style: TextStyle(color: hollow.error)),
-                ),
-                data: (messages) =>
-                    _buildDmMessageList(messages, peerId),
-              ),
-            ),
-          ],
-        ),
+        child: widget.isDm ? _dmViewer() : _channelViewer(hollow),
       ),
     );
   }
 
-  Widget _buildDmMessageList(List<ChatMessage> messages, String peerId) {
+  Widget _dmViewer() {
+    final peerId = widget.peerId!;
+    final messagesAsync = ref.watch(archiveDmMessagesProvider(peerId));
+    final isSaved = peerId == ref.watch(savedMessagesPeerIdProvider);
+    final peerProfile = ref.watch(profileProvider.select((p) => p[peerId]));
+    final displayName =
+        isSaved ? 'Saved messages' : displayNameForPeer(peerProfile, peerId);
+    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
+    final allMessages = messagesAsync.valueOrNull ?? const <ChatMessage>[];
+
+    return Column(
+      children: [
+        ArchiveMobileToolbar(
+          leading: isSaved
+              ? const SavedMessagesAvatar(size: 28)
+              : HollowAvatar(peerId: peerId, size: 28),
+          title: displayName,
+          subtitle: messagesAsync.hasValue
+              ? archiveCountLabel(allMessages.length)
+              : null,
+          searchOpen: searchOpen,
+          onBack: () => Navigator.pop(context),
+          onToggleSearch: () => toggleArchiveSearch(ref),
+          onJumpToDate: allMessages.isNotEmpty
+              ? () => jumpToArchiveDate(
+                  context, ref, [for (final m in allMessages) m.timestamp])
+              : null,
+          onExport: () => showExportArchiveDialog(
+            context,
+            isDm: true,
+            peerId: peerId,
+            name: displayName,
+            messageCount: allMessages.length,
+          ),
+        ),
+        if (searchOpen)
+          ArchiveListSearchBar(
+            texts: [for (final m in allMessages) m.text],
+            controller: _listController,
+          ),
+        Expanded(
+          child: messagesAsync.when(
+            loading: () => const Center(child: HollowSpinner.large()),
+            error: (_, _) => archiveLoadError(
+                () => ref.invalidate(archiveDmMessagesProvider(peerId))),
+            data: (messages) => _dmList(messages, peerId),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _dmList(List<ChatMessage> messages, String peerId) {
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
-    final profiles = ref.watch(profileProvider);
     final editsMap =
         ref.watch(archiveDmEditsProvider(peerId)).valueOrNull ?? {};
 
     return MediaViewerScope(
       // Read-only: an archived file can be saved and nothing else.
-      actions: MediaViewerActions(onSaveAs: _saveFile),
+      actions: MediaViewerActions(
+          onSaveAs: (a) => saveArchivedAttachmentMobile(context, a)),
       child: ArchiveDmMessageList(
         messages: messages,
         peerId: peerId,
@@ -153,326 +151,206 @@ class _MobileArchiveViewerRouteState
         controller: _listController,
         scrollDuration: _scrollDuration,
         actionWrapper: (context, msg, child) => LongPressMessage(
-          onLongPress: () => _showDmMessageActions(
-            msg, msg.isMe ? localPeerId : peerId, profiles, localPeerId, peerId,
-          ),
+          onLongPress: () {
+            final sender = msg.isMe ? localPeerId : peerId;
+            _showActions(
+              text: msg.text,
+              timestamp: msg.timestamp,
+              senderPeerId: sender,
+              attachment: msg.fileAttachment,
+              proof: msg.messageId == null
+                  ? null
+                  : (profiles) => MessageProofData(
+                        senderPeerId: sender,
+                        senderDisplayName: displayNameFor(profiles, sender),
+                        text: msg.text,
+                        timestampMs: (msg.editedAt ?? msg.timestamp)
+                            .millisecondsSinceEpoch,
+                        signature: msg.signature,
+                        publicKey: msg.publicKey,
+                        messageId: msg.messageId,
+                        context: msg.isMe ? peerId : localPeerId,
+                        msgType: 'dm',
+                        fileAttachment: msg.fileAttachment,
+                        preverified: msg.archiveSignatureValid,
+                      ),
+            );
+          },
           child: child,
         ),
       ),
     );
   }
 
-  void _showDmMessageActions(
-    ChatMessage msg,
-    String senderPeerId,
-    Map<String, storage_api.UserProfile> profiles,
-    String localPeerId,
-    String peerId,
-  ) {
-    final time =
-        '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
-    showMobileArchiveMessageActions(
-      context: context,
-      messageText:
-          messagePreviewText(msg.text, attachment: msg.fileAttachment),
-      senderName: displayNameFor(profiles, senderPeerId),
-      timestamp: time,
-      onCopy: msg.text.isNotEmpty && !msg.text.startsWith('[file:')
-          ? () {
-              Clipboard.setData(ClipboardData(text: msg.text));
-              HollowToast.show(context, 'Copied to clipboard',
-                  type: HollowToastType.success);
-            }
-          : null,
-      onDownload: msg.fileAttachment != null &&
-              msg.fileAttachment!.diskPath != null
-          ? () => _saveFile(msg.fileAttachment!)
-          : null,
-      onInfo: msg.messageId != null
-          ? () {
-              showMessageProofDialog(
-                context,
-                MessageProofData(
-                  senderPeerId: senderPeerId,
-                  senderDisplayName:
-                      displayNameFor(profiles, senderPeerId),
-                  text: msg.text,
-                  timestampMs: (msg.editedAt ?? msg.timestamp)
-                      .millisecondsSinceEpoch,
-                  signature: msg.signature,
-                  publicKey: msg.publicKey,
-                  messageId: msg.messageId,
-                  context: msg.isMe ? peerId : localPeerId,
-                  msgType: 'dm',
-                  fileAttachment: msg.fileAttachment,
-                ),
-              );
-            }
-          : null,
-    );
-  }
-
-  Widget _buildChannelViewer(HollowTheme hollow) {
-    final key = '${widget.serverId}:${widget.channelId}';
+  Widget _channelViewer(HollowTheme hollow) {
+    final serverId = widget.serverId!;
+    final channelId = widget.channelId!;
+    final key = '$serverId:$channelId';
     final messagesAsync = ref.watch(archiveChannelMessagesProvider(key));
     final filterSender = ref.watch(archiveFilterSenderProvider);
     final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
 
-    final channelGroups =
-        ref.watch(archiveChannelListProvider).valueOrNull;
-    String channelName = widget.channelId ?? '';
-    String serverName = widget.serverId ?? '';
-    if (channelGroups != null) {
-      for (final group in channelGroups) {
-        for (final ch in group.channels) {
-          if (ch.serverId == widget.serverId &&
-              ch.channelId == widget.channelId) {
-            channelName = ch.channelName;
-            serverName = ch.serverName;
-            break;
-          }
+    var channelName = channelId;
+    var serverName = serverId;
+    for (final group in ref.watch(archiveChannelListProvider).valueOrNull ??
+        const <ArchiveChannelGroup>[]) {
+      for (final ch in group.channels) {
+        if (ch.serverId == serverId && ch.channelId == channelId) {
+          channelName = ch.channelName;
+          serverName = ch.serverName;
         }
       }
     }
 
-    final allMessages = messagesAsync.valueOrNull ?? [];
+    final allMessages =
+        messagesAsync.valueOrNull ?? const <ChannelChatMessage>[];
     final uniqueSenders =
         allMessages.map((m) => m.senderId).toSet().toList()..sort();
     final profiles = ref.watch(profileProvider);
-    final senderNames = {
-      for (final id in uniqueSenders) id: displayNameFor(profiles, id),
-    };
     final filtered = filterSender == null
         ? allMessages
-        : allMessages
-            .where((m) => m.senderId == filterSender)
-            .toList();
+        : allMessages.where((m) => m.senderId == filterSender).toList();
 
-    return Scaffold(
-      backgroundColor: hollow.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            ArchiveMobileToolbar(
-              leading: Text(
-                '#',
-                style: TextStyle(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 18,
-                ),
-              ),
-              title: channelName,
-              subtitle: 'in $serverName',
-              searchOpen: searchOpen,
-              onBack: () => Navigator.pop(context),
-              onToggleSearch: () => _toggleSearch(),
-              onFilter: uniqueSenders.length > 1
-                  ? () => _showFilterSheet(
-                      uniqueSenders, filterSender, senderNames)
-                  : null,
-              filterActive: filterSender != null,
-              onJumpToDate: filtered.isNotEmpty
-                  ? () => _pickDate(
-                      filtered.first.timestamp, filtered.last.timestamp)
-                  : null,
-              onExport: () => showExportArchiveDialog(
-                context,
-                isDm: false,
-                serverId: widget.serverId,
-                channelId: widget.channelId,
-                channelName: channelName,
-                name: channelName,
-                messageCount: allMessages.length,
-              ),
-            ),
-            if (searchOpen)
-              ArchiveListSearchBar(
-                texts: [for (final m in filtered) m.text],
-                controller: _listController,
-              ),
-            Expanded(
-              child: messagesAsync.when(
-                loading: () =>
-                    const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
-                error: (e, _) => Center(
-                  key: const ValueKey('error'),
-                  child: Text('Failed to load: $e',
-                      style: TextStyle(color: hollow.error)),
-                ),
-                data: (_) => _buildChannelMessageList(
-                    filtered, allMessages),
-              ),
-            ),
-          ],
+    return Column(
+      children: [
+        ArchiveMobileToolbar(
+          leading:
+              Icon(LucideIcons.hash, size: 20, color: hollow.textSecondary),
+          title: channelName,
+          subtitle: serverName,
+          searchOpen: searchOpen,
+          onBack: () => Navigator.pop(context),
+          onToggleSearch: () => toggleArchiveSearch(ref),
+          onFilter: uniqueSenders.length > 1
+              ? () => showArchiveFilterSheet(
+                    context,
+                    senderIds: uniqueSenders,
+                    selectedSender: filterSender,
+                    senderNames: {
+                      for (final id in uniqueSenders)
+                        id: displayNameFor(profiles, id),
+                    },
+                    onSelected: _setSender,
+                  )
+              : null,
+          filterActive: filterSender != null,
+          onJumpToDate: filtered.isNotEmpty
+              ? () => jumpToArchiveDate(
+                  context, ref, [for (final m in filtered) m.timestamp])
+              : null,
+          onExport: () => showExportArchiveDialog(
+            context,
+            isDm: false,
+            serverId: serverId,
+            channelId: channelId,
+            channelName: channelName,
+            name: channelName,
+            messageCount: allMessages.length,
+          ),
         ),
-      ),
+        if (searchOpen)
+          ArchiveListSearchBar(
+            texts: [for (final m in filtered) m.text],
+            controller: _listController,
+          ),
+        Expanded(
+          child: messagesAsync.when(
+            loading: () => const Center(child: HollowSpinner.large()),
+            error: (_, _) => archiveLoadError(
+                () => ref.invalidate(archiveChannelMessagesProvider(key))),
+            data: (_) => _channelList(filtered, allMessages, serverId, key),
+          ),
+        ),
+      ],
     );
   }
 
-  Widget _buildChannelMessageList(
+  Widget _channelList(
     List<ChannelChatMessage> messages,
     List<ChannelChatMessage> allMessages,
+    String serverId,
+    String proofContext,
   ) {
-    final profiles = ref.watch(profileProvider);
-    final editsMap = ref
-            .watch(archiveChannelEditsProvider(
-                '${widget.serverId}:${widget.channelId}'))
-            .valueOrNull ??
-        {};
+    final editsMap =
+        ref.watch(archiveChannelEditsProvider(proofContext)).valueOrNull ?? {};
 
     return MediaViewerScope(
       // Read-only: an archived file can be saved and nothing else.
-      actions: MediaViewerActions(onSaveAs: _saveFile),
+      actions: MediaViewerActions(
+          onSaveAs: (a) => saveArchivedAttachmentMobile(context, a)),
       child: ArchiveChannelMessageList(
         messages: messages,
         allMessages: allMessages,
-        serverId: widget.serverId!,
+        serverId: serverId,
         editsMap: editsMap,
-        proofContext: '${widget.serverId}:${widget.channelId}',
+        proofContext: proofContext,
         proofMsgType: 'ch',
         controller: _listController,
         scrollDuration: _scrollDuration,
         actionWrapper: (context, msg, child) => LongPressMessage(
-          onLongPress: () => _showChannelMessageActions(msg, profiles),
+          onLongPress: () => _showActions(
+            text: msg.text,
+            timestamp: msg.timestamp,
+            senderPeerId: msg.senderId,
+            attachment: msg.fileAttachment,
+            proof: msg.messageId == null
+                ? null
+                : (profiles) => MessageProofData(
+                      senderPeerId: msg.senderId,
+                      senderDisplayName:
+                          displayNameFor(profiles, msg.senderId),
+                      text: msg.text,
+                      timestampMs: (msg.editedAt ?? msg.timestamp)
+                          .millisecondsSinceEpoch,
+                      signature: msg.signature,
+                      publicKey: msg.publicKey,
+                      messageId: msg.messageId,
+                      context: proofContext,
+                      msgType: 'ch',
+                      fileAttachment: msg.fileAttachment,
+                      preverified: msg.archiveSignatureValid,
+                    ),
+          ),
           child: child,
         ),
       ),
     );
   }
 
-  void _showChannelMessageActions(
-    ChannelChatMessage msg,
-    Map<String, storage_api.UserProfile> profiles,
-  ) {
-    final time =
-        '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
+  void _setSender(String? sender) {
+    ref.read(archiveFilterSenderProvider.notifier).state = sender;
+    ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+    ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+  }
+
+  void _showActions({
+    required String text,
+    required DateTime timestamp,
+    required String senderPeerId,
+    required FileAttachment? attachment,
+    required MessageProofData Function(
+            Map<String, storage_api.UserProfile> profiles)?
+        proof,
+  }) {
+    final profiles = ref.read(profileProvider);
     showMobileArchiveMessageActions(
       context: context,
-      messageText:
-          messagePreviewText(msg.text, attachment: msg.fileAttachment),
-      senderName: displayNameFor(profiles, msg.senderId),
-      timestamp: time,
-      onCopy: msg.text.isNotEmpty && !msg.text.startsWith('[file:')
+      messageText: messagePreviewText(text, attachment: attachment),
+      senderName: displayNameFor(profiles, senderPeerId),
+      timestamp: archiveMessageTimeLabel(timestamp),
+      onCopy: text.isNotEmpty && !text.startsWith('[file:')
           ? () {
-              Clipboard.setData(ClipboardData(text: msg.text));
+              Clipboard.setData(ClipboardData(text: text));
               HollowToast.show(context, 'Copied to clipboard',
                   type: HollowToastType.success);
             }
           : null,
-      onDownload: msg.fileAttachment != null &&
-              msg.fileAttachment!.diskPath != null
-          ? () => _saveFile(msg.fileAttachment!)
+      onDownload: attachment?.diskPath != null
+          ? () => saveArchivedAttachmentMobile(context, attachment!)
           : null,
-      onInfo: msg.messageId != null
-          ? () {
-              showMessageProofDialog(
-                context,
-                MessageProofData(
-                  senderPeerId: msg.senderId,
-                  senderDisplayName:
-                      displayNameFor(profiles, msg.senderId),
-                  text: msg.text,
-                  timestampMs: (msg.editedAt ?? msg.timestamp)
-                      .millisecondsSinceEpoch,
-                  signature: msg.signature,
-                  publicKey: msg.publicKey,
-                  messageId: msg.messageId,
-                  context:
-                      '${widget.serverId}:${widget.channelId}',
-                  msgType: 'ch',
-                  fileAttachment: msg.fileAttachment,
-                ),
-              );
-            }
-          : null,
+      onInfo: proof == null
+          ? null
+          : () => showMessageProofDialog(context, proof(profiles)),
     );
-  }
-
-  void _toggleSearch() {
-    final open = ref.read(archiveMessageSearchOpenProvider);
-    ref.read(archiveMessageSearchOpenProvider.notifier).state = !open;
-    if (open) {
-      ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-      ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-    }
-  }
-
-  Future<void> _pickDate(DateTime first, DateTime last) async {
-    final hollow = HollowTheme.of(context);
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: last,
-      firstDate: first,
-      lastDate: last,
-      builder: (context, child) => Theme(
-        data: ThemeData.dark().copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: hollow.accent,
-            surface: hollow.overlay,
-          ),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      ref.read(archiveJumpToDateProvider.notifier).state = picked;
-    }
-  }
-
-  void _showFilterSheet(
-    List<String> senderIds,
-    String? selectedSender,
-    Map<String, String> senderNames,
-  ) {
-    showArchiveFilterSheet(
-      context,
-      senderIds: senderIds,
-      selectedSender: selectedSender,
-      senderNames: senderNames,
-      onSelected: (sender) {
-        ref.read(archiveFilterSenderProvider.notifier).state = sender;
-        ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-        ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-      },
-    );
-  }
-
-  Future<void> _saveFile(FileAttachment attachment) async {
-    if (_isPicking || attachment.diskPath == null) return;
-    _isPicking = true;
-    try {
-      Uint8List bytes;
-      if (attachment.isImage && attachment.fileExt == 'webp') {
-        bytes = await network_api.convertImageFormat(
-          sourcePath: attachment.diskPath!,
-          targetFormat: 'png',
-        );
-      } else {
-        bytes = await AtRest.read(attachment.diskPath!);
-      }
-
-      final fileName = attachment.isImage && attachment.fileExt == 'webp'
-          ? '${attachment.fileName.contains('.') ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.')) : attachment.fileName}.png'
-          : attachment.fileName;
-
-      await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: fileName,
-        bytes: bytes,
-      );
-
-      if (mounted) {
-        HollowToast.show(context, 'File saved',
-            type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Save failed: $e',
-            type: HollowToastType.error);
-      }
-    } finally {
-      _isPicking = false;
-    }
   }
 }

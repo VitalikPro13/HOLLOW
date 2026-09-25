@@ -91,6 +91,10 @@ class ChannelChatPane extends ConsumerStatefulWidget {
   /// The text chat of a voice channel: its name carries no `#`.
   final bool isVoice;
 
+  /// Replaces the channel name in the header, for a chat docked in a panel
+  /// whose place already names the room ("Chat" beside a meeting).
+  final String? headerTitle;
+
   const ChannelChatPane({
     super.key,
     required this.serverId,
@@ -98,6 +102,7 @@ class ChannelChatPane extends ConsumerStatefulWidget {
     required this.channelName,
     this.splitPaneIndex,
     this.isVoice = false,
+    this.headerTitle,
   });
 
   @override
@@ -1617,14 +1622,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       final width = constraints.maxWidth;
       return ChatHeaderBar(
         leading: Icon(
-            _isConference
-                ? LucideIcons.video
-                : widget.isVoice
-                    ? LucideIcons.volume2
-                    : LucideIcons.hash,
+            widget.headerTitle != null
+                ? LucideIcons.messageSquare
+                : _isConference
+                    ? LucideIcons.video
+                    : widget.isVoice
+                        ? LucideIcons.volume2
+                        : LucideIcons.hash,
             size: 20,
             color: hollow.textTertiary),
-        title: widget.channelName,
+        title: widget.headerTitle ?? widget.channelName,
         badges: [
           if (_isConference)
             const HollowTooltip(

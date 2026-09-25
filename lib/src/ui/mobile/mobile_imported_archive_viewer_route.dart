@@ -1,47 +1,43 @@
-
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
-import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
-import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/archive/archive_message_viewer.dart'
+    show archiveLoadError, jumpToArchiveDate, toggleArchiveSearch;
 import 'package:hollow/src/ui/archive/shared/archive_message_list.dart';
 import 'package:hollow/src/ui/archive/shared/archive_sender_filter.dart';
-import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/archive/shared/archive_verification_banner.dart';
 import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/media/media_viewer_scope.dart';
-import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
-import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
-import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/long_press_message.dart';
+import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
+import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
+import 'package:hollow/src/ui/mobile/mobile_archive_viewer_route.dart'
+    show archiveMessageTimeLabel;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Full-screen route for viewing an imported .hollow-archive file.
+/// Reading an imported .hollow-archive on a phone, its signatures checked.
 class MobileImportedArchiveViewerRoute extends ConsumerStatefulWidget {
   final String path;
 
-  const MobileImportedArchiveViewerRoute({
-    super.key,
-    required this.path,
-  });
+  const MobileImportedArchiveViewerRoute({super.key, required this.path});
 
   @override
   ConsumerState<MobileImportedArchiveViewerRoute> createState() =>
@@ -51,36 +47,16 @@ class MobileImportedArchiveViewerRoute extends ConsumerStatefulWidget {
 class _MobileImportedArchiveViewerRouteState
     extends ConsumerState<MobileImportedArchiveViewerRoute> {
   final _listController = ArchiveMessageListController();
-  bool _isPicking = false;
 
   @override
   void initState() {
     super.initState();
+    // Past the first frame: a provider written while the tree builds asserts.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(archiveFilterSenderProvider.notifier).state = null;
-      ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
-      ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-      ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-      ref.read(archiveJumpToDateProvider.notifier).state = null;
-      ref.read(importedArchiveSelectedChannelProvider.notifier).state =
-          null;
+      if (!mounted) return;
+      resetArchiveViewerState(ref.read);
+      ref.read(importedArchiveSelectedChannelProvider.notifier).state = null;
     });
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      try {
-        ref.read(archiveFilterSenderProvider.notifier).state = null;
-        ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
-        ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-        ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-        ref.read(archiveJumpToDateProvider.notifier).state = null;
-        ref.read(importedArchiveSelectedChannelProvider.notifier).state =
-            null;
-      } catch (_) {}
-    });
-    super.dispose();
   }
 
   Duration _scrollDuration() => ReduceMotionController.instance.isReduced
@@ -90,28 +66,23 @@ class _MobileImportedArchiveViewerRouteState
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final dataAsync =
-        ref.watch(importedArchiveDataProvider(widget.path));
+    final dataAsync = ref.watch(importedArchiveDataProvider(widget.path));
 
     return Scaffold(
       backgroundColor: hollow.background,
       body: SafeArea(
         child: dataAsync.when(
-          loading: () =>
-              const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
-          error: (e, _) => Column(
-            key: const ValueKey('error'),
+          loading: () => const Center(child: HollowSpinner.large()),
+          error: (_, _) => Column(
             children: [
               _backHeader(hollow),
               Expanded(
-                child: Center(
-                  child: Text('Failed to load: $e',
-                      style: TextStyle(color: hollow.error)),
-                ),
+                child: archiveLoadError(() => ref
+                    .invalidate(importedArchiveDataProvider(widget.path))),
               ),
             ],
           ),
-          data: (data) => _buildArchiveViewer(hollow, data),
+          data: (data) => _viewer(hollow, data),
         ),
       ),
     );
@@ -119,44 +90,39 @@ class _MobileImportedArchiveViewerRouteState
 
   Widget _backHeader(HollowTheme hollow) {
     return Container(
-      constraints: const BoxConstraints(minHeight: 52),
-      padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.xs, vertical: HollowSpacing.sm),
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
       decoration: BoxDecoration(
+        color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
       child: Row(
         children: [
-          HollowPressable(
-            onTap: () => Navigator.pop(context),
-            semanticLabel: 'Back',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(8),
-            child: Icon(LucideIcons.chevronLeft,
-                size: 20, color: hollow.textPrimary),
+          HollowIconButton(
+            icon: LucideIcons.chevronLeft,
+            label: 'Back',
+            size: 44,
+            onPressed: () => Navigator.pop(context),
           ),
           Expanded(
-            child: Text('Imported Archive',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                )),
+            child: Text(
+              'Imported archive',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.subheading
+                  .copyWith(color: hollow.textPrimary),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildArchiveViewer(
-      HollowTheme hollow, archive_api.ArchiveData data) {
+  Widget _viewer(HollowTheme hollow, archive_api.ArchiveData data) {
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final profiles = ref.watch(profileProvider);
     final filterSender = ref.watch(archiveFilterSenderProvider);
     final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
-    final selectedChannelId =
-        ref.watch(importedArchiveSelectedChannelProvider);
+    final selectedChannelId = ref.watch(importedArchiveSelectedChannelProvider);
 
     final prep = prepareImportedArchive(
       data: data,
@@ -164,221 +130,172 @@ class _MobileImportedArchiveViewerRouteState
       filterSender: filterSender,
       selectedChannelId: selectedChannelId,
       displayNameOf: (id) => displayNameFor(profiles, id),
-      mobile: true,
     );
     final isDm = prep.isDm;
-    final exporterPeerId = data.verification.exporterPeerId;
-
-    final Widget headerLeading = isDm
-        ? HollowAvatar(peerId: data.peerId ?? '', size: 24)
-        : Text('#',
-            style: TextStyle(
-                color: hollow.textSecondary,
-                fontWeight: FontWeight.w700,
-                fontSize: 18));
-
-    final visibleMessages = isDm
-        ? (prep.dmMessages! as List<dynamic>)
-        : (prep.channelMessages! as List<dynamic>);
+    final List<(DateTime, String)> shown = isDm
+        ? [for (final m in prep.dmMessages!) (m.timestamp, m.text)]
+        : [for (final m in prep.channelMessages!) (m.timestamp, m.text)];
 
     return Column(
       children: [
         ArchiveMobileToolbar(
-          leading: headerLeading,
+          leading: isDm
+              ? HollowAvatar(peerId: data.peerId ?? '', size: 28)
+              : Icon(LucideIcons.hash, size: 20, color: hollow.textSecondary),
           title: prep.headerTitle,
           subtitle: prep.headerSubtitle,
           onBack: () => Navigator.pop(context),
-          onFilter: !isDm &&
-                  prep.uniqueSenders != null &&
-                  prep.uniqueSenders!.length > 1
-              ? () => _showFilterSheet(
-                  prep.uniqueSenders!, filterSender, prep.senderNames)
+          onFilter: !isDm && (prep.uniqueSenders?.length ?? 0) > 1
+              ? () => showArchiveFilterSheet(
+                    context,
+                    senderIds: prep.uniqueSenders!,
+                    selectedSender: filterSender,
+                    senderNames: prep.senderNames,
+                    onSelected: _setSender,
+                  )
               : null,
           filterActive: filterSender != null,
-          onJumpToDate: visibleMessages.isNotEmpty
-              ? () {
-                  final first = visibleMessages.first is ChatMessage
-                      ? (visibleMessages.first as ChatMessage).timestamp
-                      : (visibleMessages.first as ChannelChatMessage)
-                          .timestamp;
-                  final last = visibleMessages.last is ChatMessage
-                      ? (visibleMessages.last as ChatMessage).timestamp
-                      : (visibleMessages.last as ChannelChatMessage)
-                          .timestamp;
-                  _pickDate(first, last);
-                }
+          onJumpToDate: shown.isNotEmpty
+              ? () => jumpToArchiveDate(
+                  context, ref, [for (final m in shown) m.$1])
               : null,
-          onToggleSearch: _toggleSearch,
+          onToggleSearch: () => toggleArchiveSearch(ref),
           searchOpen: searchOpen,
         ),
-
         ArchiveVerificationBanner(
           archiveSigValid: prep.archiveSigValid,
           archiveSigText: prep.archiveSigText,
           msgSigWarning: prep.msgSigWarning,
           msgSigText: prep.msgSigText,
-          dense: true,
         ),
-
         if (prep.isServer && data.channels.length > 1)
           ArchiveChannelSelector(
             channels: data.channels,
             activeChannelId: prep.activeChannelId,
             onChannelSelected: (channelId) {
-              ref
-                  .read(importedArchiveSelectedChannelProvider.notifier)
-                  .state = channelId;
-              ref.read(archiveFilterSenderProvider.notifier).state = null;
-              ref.read(archiveMessageSearchQueryProvider.notifier).state =
-                  '';
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+              ref.read(importedArchiveSelectedChannelProvider.notifier).state =
+                  channelId;
+              _setSender(null);
             },
           ),
-
         if (searchOpen)
           ArchiveListSearchBar(
-            texts: [
-              for (final m in visibleMessages)
-                m is ChatMessage ? m.text : (m as ChannelChatMessage).text,
-            ],
+            texts: [for (final m in shown) m.$2],
             controller: _listController,
           ),
-
         Expanded(
-          child: visibleMessages.isEmpty
+          child: shown.isEmpty
               ? const HollowEmptyState(title: 'No messages')
-              : isDm
-                  ? _buildDmMessageList(
-                      prep.dmMessages!, profiles, localPeerId, data,
-                      prep.editsMap, prep.proofContext, prep.proofMsgType,
-                      exporterPeerId)
-                  : _buildChannelMessageList(
-                      prep.channelMessages!,
-                      prep.unfilteredChannelMessages ?? prep.channelMessages!,
-                      profiles, prep.editsMap, prep.proofContext,
-                      prep.proofMsgType),
+              : MediaViewerScope(
+                  // Read-only: an archived file can be saved and nothing else.
+                  actions: MediaViewerActions(
+                      onSaveAs: (a) => saveArchivedAttachmentMobile(context, a)),
+                  child: isDm
+                      ? _dmList(prep, data, localPeerId)
+                      : _channelList(prep),
+                ),
         ),
       ],
     );
   }
 
-  Widget _buildDmMessageList(
-    List<ChatMessage> messages,
-    Map<String, storage_api.UserProfile> profiles,
-    String localPeerId,
-    archive_api.ArchiveData data,
-    Map<String, List<ArchiveEditEntry>> editsMap,
-    String proofContext,
-    String proofMsgType,
-    String exporterPeerId,
-  ) {
-    // The proof context is relative to the exporter, not to us.
-    String dmProofCtxFor(ChatMessage msg) {
-      final senderPeerId = msg.isMe ? localPeerId : (data.peerId ?? '');
-      return proofMsgType == 'dm'
-          ? (senderPeerId == exporterPeerId ? proofContext : exporterPeerId)
-          : proofContext;
+  Widget _dmList(ImportedArchivePrep prep, archive_api.ArchiveData data,
+      String localPeerId) {
+    final peerId = data.peerId ?? '';
+    final exporter = data.verification.exporterPeerId;
+    // A DM is signed for the OTHER side: the exporter's messages name the
+    // peer, the peer's name the exporter.
+    String proofContextFor(ChatMessage msg) {
+      final sender = msg.isMe ? localPeerId : peerId;
+      return prep.proofMsgType == 'dm'
+          ? (sender == exporter ? prep.proofContext : exporter)
+          : prep.proofContext;
     }
 
-    return MediaViewerScope(
-      // Read-only: an archived file can be saved and nothing else.
-      actions: MediaViewerActions(onSaveAs: _saveFile),
-      child: ArchiveDmMessageList(
-        messages: messages,
-        peerId: data.peerId ?? '',
-        localPeerId: localPeerId,
-        editsMap: editsMap,
-        proofContextFor: dmProofCtxFor,
-        proofMsgType: proofMsgType,
-        controller: _listController,
-        scrollDuration: _scrollDuration,
-        actionWrapper: (context, msg, child) {
-          final senderPeerId =
-              msg.isMe ? localPeerId : (data.peerId ?? '');
-          return LongPressMessage(
-            onLongPress: () => _showActions(
-              msg.text,
-              displayNameFor(profiles, senderPeerId),
-              msg.timestamp,
-              senderPeerId,
-              msg.signature,
-              msg.publicKey,
-              msg.messageId,
-              msg.editedAt,
-              dmProofCtxFor(msg),
-              proofMsgType,
-              msg.fileAttachment,
-              profiles,
-            ),
-            child: child,
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildChannelMessageList(
-    List<ChannelChatMessage> messages,
-    List<ChannelChatMessage> allMessages,
-    Map<String, storage_api.UserProfile> profiles,
-    Map<String, List<ArchiveEditEntry>> editsMap,
-    String proofContext,
-    String proofMsgType,
-  ) {
-    return MediaViewerScope(
-      // Read-only: an archived file can be saved and nothing else.
-      actions: MediaViewerActions(onSaveAs: _saveFile),
-      child: ArchiveChannelMessageList(
-        messages: messages,
-        allMessages: allMessages,
-        serverId: proofContext.split(':').first,
-        editsMap: editsMap,
-        proofContext: proofContext,
-        proofMsgType: proofMsgType,
-        controller: _listController,
-        scrollDuration: _scrollDuration,
-        actionWrapper: (context, msg, child) => LongPressMessage(
-          onLongPress: () => _showActions(
-            msg.text,
-            displayNameFor(profiles, msg.senderId),
-            msg.timestamp,
-            msg.senderId,
-            msg.signature,
-            msg.publicKey,
-            msg.messageId,
-            msg.editedAt,
-            proofContext,
-            proofMsgType,
-            msg.fileAttachment,
-            profiles,
-          ),
-          child: child,
+    return ArchiveDmMessageList(
+      messages: prep.dmMessages!,
+      peerId: peerId,
+      localPeerId: localPeerId,
+      editsMap: prep.editsMap,
+      proofContextFor: proofContextFor,
+      proofMsgType: prep.proofMsgType,
+      controller: _listController,
+      scrollDuration: _scrollDuration,
+      actionWrapper: (context, msg, child) => LongPressMessage(
+        onLongPress: () => _showActions(
+          text: msg.text,
+          timestamp: msg.timestamp,
+          editedAt: msg.editedAt,
+          senderPeerId: msg.isMe ? localPeerId : peerId,
+          signature: msg.signature,
+          publicKey: msg.publicKey,
+          messageId: msg.messageId,
+          proofContext: proofContextFor(msg),
+          proofMsgType: prep.proofMsgType,
+          attachment: msg.fileAttachment,
+          preverified: msg.archiveSignatureValid,
         ),
+        child: child,
       ),
     );
   }
 
-  void _showActions(
-    String text,
-    String senderName,
-    DateTime timestamp,
-    String senderPeerId,
-    String? signature,
-    String? publicKey,
-    String? messageId,
-    DateTime? editedAt,
-    String proofContext,
-    String proofMsgType,
-    FileAttachment? fileAttachment,
-    Map<String, storage_api.UserProfile> profiles,
-  ) {
-    final time =
-        '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
+  Widget _channelList(ImportedArchivePrep prep) {
+    return ArchiveChannelMessageList(
+      messages: prep.channelMessages!,
+      allMessages: prep.unfilteredChannelMessages ?? prep.channelMessages!,
+      serverId: prep.proofContext.split(':').first,
+      editsMap: prep.editsMap,
+      proofContext: prep.proofContext,
+      proofMsgType: prep.proofMsgType,
+      controller: _listController,
+      scrollDuration: _scrollDuration,
+      actionWrapper: (context, ChannelChatMessage msg, child) =>
+          LongPressMessage(
+        onLongPress: () => _showActions(
+          text: msg.text,
+          timestamp: msg.timestamp,
+          editedAt: msg.editedAt,
+          senderPeerId: msg.senderId,
+          signature: msg.signature,
+          publicKey: msg.publicKey,
+          messageId: msg.messageId,
+          proofContext: prep.proofContext,
+          proofMsgType: prep.proofMsgType,
+          attachment: msg.fileAttachment,
+          preverified: msg.archiveSignatureValid,
+        ),
+        child: child,
+      ),
+    );
+  }
+
+  void _setSender(String? sender) {
+    ref.read(archiveFilterSenderProvider.notifier).state = sender;
+    ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+    ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+  }
+
+  void _showActions({
+    required String text,
+    required DateTime timestamp,
+    required DateTime? editedAt,
+    required String senderPeerId,
+    required String? signature,
+    required String? publicKey,
+    required String? messageId,
+    required String proofContext,
+    required String proofMsgType,
+    required FileAttachment? attachment,
+    required bool? preverified,
+  }) {
+    final profiles = ref.read(profileProvider);
+    final senderName = displayNameFor(profiles, senderPeerId);
     showMobileArchiveMessageActions(
       context: context,
-      messageText: messagePreviewText(text, attachment: fileAttachment),
+      messageText: messagePreviewText(text, attachment: attachment),
       senderName: senderName,
-      timestamp: time,
+      timestamp: archiveMessageTimeLabel(timestamp),
       onCopy: text.isNotEmpty && !text.startsWith('[file:')
           ? () {
               Clipboard.setData(ClipboardData(text: text));
@@ -386,118 +303,27 @@ class _MobileImportedArchiveViewerRouteState
                   type: HollowToastType.success);
             }
           : null,
-      onDownload:
-          fileAttachment != null && fileAttachment.diskPath != null
-              ? () => _saveFile(fileAttachment)
-              : null,
-      onInfo: messageId != null
-          ? () {
-              showMessageProofDialog(
+      onDownload: attachment?.diskPath != null
+          ? () => saveArchivedAttachmentMobile(context, attachment!)
+          : null,
+      onInfo: messageId == null
+          ? null
+          : () => showMessageProofDialog(
                 context,
                 MessageProofData(
                   senderPeerId: senderPeerId,
-                  senderDisplayName:
-                      displayNameFor(profiles, senderPeerId),
+                  senderDisplayName: senderName,
                   text: text,
-                  timestampMs: (editedAt ?? timestamp)
-                      .millisecondsSinceEpoch,
+                  timestampMs: (editedAt ?? timestamp).millisecondsSinceEpoch,
                   signature: signature,
                   publicKey: publicKey,
                   messageId: messageId,
                   context: proofContext,
                   msgType: proofMsgType,
-                  fileAttachment: fileAttachment,
+                  fileAttachment: attachment,
+                  preverified: preverified,
                 ),
-              );
-            }
-          : null,
+              ),
     );
-  }
-
-  void _toggleSearch() {
-    final open = ref.read(archiveMessageSearchOpenProvider);
-    ref.read(archiveMessageSearchOpenProvider.notifier).state = !open;
-    if (open) {
-      ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-      ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-    }
-  }
-
-  Future<void> _pickDate(DateTime first, DateTime last) async {
-    final hollow = HollowTheme.of(context);
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: last,
-      firstDate: first,
-      lastDate: last,
-      builder: (context, child) => Theme(
-        data: ThemeData.dark().copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: hollow.accent,
-            surface: hollow.overlay,
-          ),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      ref.read(archiveJumpToDateProvider.notifier).state = picked;
-    }
-  }
-
-  void _showFilterSheet(
-    List<String> senderIds,
-    String? selectedSender,
-    Map<String, String> senderNames,
-  ) {
-    showArchiveFilterSheet(
-      context,
-      senderIds: senderIds,
-      selectedSender: selectedSender,
-      senderNames: senderNames,
-      onSelected: (sender) {
-        ref.read(archiveFilterSenderProvider.notifier).state = sender;
-        ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-        ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-      },
-    );
-  }
-
-  Future<void> _saveFile(FileAttachment attachment) async {
-    if (_isPicking || attachment.diskPath == null) return;
-    _isPicking = true;
-    try {
-      Uint8List bytes;
-      if (attachment.isImage && attachment.fileExt == 'webp') {
-        bytes = await network_api.convertImageFormat(
-          sourcePath: attachment.diskPath!,
-          targetFormat: 'png',
-        );
-      } else {
-        bytes = await AtRest.read(attachment.diskPath!);
-      }
-
-      final fileName = attachment.isImage && attachment.fileExt == 'webp'
-          ? '${attachment.fileName.contains('.') ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.')) : attachment.fileName}.png'
-          : attachment.fileName;
-
-      await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: fileName,
-        bytes: bytes,
-      );
-
-      if (mounted) {
-        HollowToast.show(context, 'File saved',
-            type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Save failed: $e',
-            type: HollowToastType.error);
-      }
-    } finally {
-      _isPicking = false;
-    }
   }
 }

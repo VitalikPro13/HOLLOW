@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -32,7 +32,6 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
   String? _shareLink;
   String? _fileName;
   int _totalSize = 0;
-  int _chunkCount = 0;
   int _loadingStartMs = 0;
   Timer? _countdownTimer;
 
@@ -67,12 +66,11 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && _state == _DialogState.loading) {
             _countdownTimer?.cancel();
-            final (name, size, count) = manifest;
+            final (name, size, _) = manifest;
             setState(() {
               _state = _DialogState.confirm;
               _fileName = name;
               _totalSize = size;
-              _chunkCount = count;
             });
           }
         });
@@ -85,7 +83,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
               _cleanup();
               setState(() {
                 _state = _DialogState.input;
-                _errorText = 'No seeders found. Try again later';
+                _errorText = 'Nobody sharing this file is online. Try again later.';
               });
             }
           });
@@ -94,7 +92,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
     }
 
     return HollowDialog(
-      title: 'Open share link',
+      title: 'Open a share link',
       width: 420,
       content: _buildContent(hollow),
       actions: _buildActions(),
@@ -123,18 +121,22 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
         return SizedBox(
           width: double.infinity,
           child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: HollowSpacing.lg),
-            const HollowSpinner.medium(),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'Looking for seeders... ${remaining}s',
-              style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-          ],
-        ));
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: HollowSpacing.lg),
+              const HollowSpinner.medium(),
+              const SizedBox(height: HollowSpacing.md),
+              Text(
+                'Looking for someone who has the file (${remaining}s)',
+                style: HollowTypography.bodySmall.copyWith(
+                  color: hollow.textSecondary,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              const SizedBox(height: HollowSpacing.lg),
+            ],
+          ),
+        );
       case _DialogState.confirm:
         final downloadPath = ref.watch(shareDownloadPathProvider).valueOrNull ?? '';
         final displayPath = downloadPath.isEmpty
@@ -144,23 +146,14 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _fileName ?? '',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w500,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: HollowSpacing.sm),
             Text(
-              '${ShareCard.formatSize(_totalSize)}  ·  $_chunkCount chunks',
+              _fileName ?? '',
+              style: HollowTypography.label.copyWith(color: hollow.textPrimary),
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: HollowSpacing.xs),
+            Text(
+              ShareCard.formatSize(_totalSize),
               style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.md),
@@ -227,7 +220,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
   Future<void> _onOpen() async {
     final link = _controller.text.trim();
     if (link.isEmpty) {
-      setState(() => _errorText = 'Please paste a share link');
+      setState(() => _errorText = 'Paste a share link first');
       return;
     }
 
@@ -251,7 +244,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
       });
       await share_api.shareOpenLink(link: link);
     } catch (e) {
-      setState(() => _errorText = 'Invalid share link');
+      setState(() => _errorText = "That isn't a share link");
     }
   }
 

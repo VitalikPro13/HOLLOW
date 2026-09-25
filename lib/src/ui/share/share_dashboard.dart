@@ -1,4 +1,4 @@
-﻿import 'package:file_picker/file_picker.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -13,11 +13,17 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
+import 'package:hollow/src/ui/shell/place_header.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 
 enum _ShareSubTab { myShares, serverFiles }
+
+/// The list's side inset: with a row's own padding it puts the row text on
+/// the place title's edge.
+const double _kListInset = HollowSpacing.xs;
 
 class ShareDashboard extends ConsumerStatefulWidget {
   const ShareDashboard({super.key});
@@ -28,7 +34,7 @@ class ShareDashboard extends ConsumerStatefulWidget {
 
 class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   _ShareSubTab _subTab = _ShareSubTab.myShares;
-  // Gates "Share a File" while the whole file is chunked and hashed into the
+  // Gates "Share a file" while the whole file is chunked and hashed into the
   // vault, which takes seconds on a large one.
   bool _sharing = false;
 
@@ -51,7 +57,7 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       child: Column(
         children: [
           _buildHeader(hollow, userShares.length, serverFileShares.length),
-          _buildStunWarning(hollow),
+          _buildDirectWarning(hollow),
           Expanded(
             child: _subTab == _ShareSubTab.myShares
                 ? _buildMyShares(userShares, hollow)
@@ -63,87 +69,71 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   }
 
   Widget _buildHeader(HollowTheme hollow, int userCount, int serverCount) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          Text('Share', style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
-          const SizedBox(width: HollowSpacing.lg),
-          HollowChip(
-            label: 'My Shares${userCount > 0 ? ' ($userCount)' : ''}',
-            selected: _subTab == _ShareSubTab.myShares,
-            onTap: () => setState(() => _subTab = _ShareSubTab.myShares),
+    return PlaceHeader(
+      title: 'Share',
+      tabs: [
+        HollowChip(
+          label: 'My shares',
+          hint: userCount > 0 ? '$userCount' : null,
+          selected: _subTab == _ShareSubTab.myShares,
+          onTap: () => setState(() => _subTab = _ShareSubTab.myShares),
+        ),
+        HollowChip(
+          label: 'Server files',
+          hint: serverCount > 0 ? '$serverCount' : null,
+          selected: _subTab == _ShareSubTab.serverFiles,
+          onTap: () => setState(() => _subTab = _ShareSubTab.serverFiles),
+        ),
+      ],
+      actions: [
+        if (_subTab == _ShareSubTab.myShares) ...[
+          HollowButton.ghost(
+            compact: true,
+            icon: const Icon(LucideIcons.link, size: 14),
+            onPressed: _showPasteDialog,
+            child: const Text('Paste a link'),
           ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowChip(
-            label: 'Server Files${serverCount > 0 ? ' ($serverCount)' : ''}',
-            selected: _subTab == _ShareSubTab.serverFiles,
-            onTap: () => setState(() => _subTab = _ShareSubTab.serverFiles),
+          HollowButton.filled(
+            compact: true,
+            loading: _sharing,
+            icon: const Icon(LucideIcons.filePlus, size: 14),
+            onPressed: _pickFile,
+            child: const Text('Share a file'),
           ),
-          const Spacer(),
-          if (_subTab == _ShareSubTab.myShares) ...[
-            HollowButton.ghost(
-              compact: true,
-              loading: _sharing,
-              icon: const Icon(LucideIcons.filePlus, size: 14),
-              onPressed: _sharing ? null : _pickFile,
-              child: const Text('Share a File'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              compact: true,
-              icon: const Icon(LucideIcons.link, size: 14),
-              onPressed: _showPasteDialog,
-              child: const Text('Paste Link'),
-            ),
-          ],
         ],
-      ),
+      ],
     );
   }
 
-  /// Advisory strip: Share transfers are STUN-only, with no TURN relay
-  /// fallback, so one can fail behind a symmetric NAT.
-  ///
-  /// While "Always relay calls" is on it also names the carve-out at the point
-  /// of action, because a privacy switch with a silent exception is worse than
-  /// no switch.
-  Widget _buildStunWarning(HollowTheme hollow) {
-    final color = Colors.amber.shade700;
+  /// Always shown (Vitalik: it matters). Share transfers are STUN-only, with
+  /// no TURN fallback, so a strict network can stop one and the other side
+  /// sees your address. While "Always relay calls" is on it also names that
+  /// carve-out: a privacy switch with a silent exception is worse than none.
+  Widget _buildDirectWarning(HollowTheme hollow) {
     final alwaysRelay = ref.watch(alwaysRelayCallsProvider);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.lg,
-        vertical: 10,
+        vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        border: Border(
-          bottom: BorderSide(color: hollow.border.withValues(alpha: 0.3)),
-        ),
+        color: hollow.noticeSurface(hollow.warning),
+        border: Border(bottom: BorderSide(color: hollow.border)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(LucideIcons.alertTriangle, size: 14, color: color),
+          Icon(LucideIcons.alertTriangle, size: 16, color: hollow.warning),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Text(
               'Share transfers are direct peer-to-peer (STUN-only, no relay '
               'fallback). Transfers may fail behind strict or symmetric NATs '
-              'if a direct connection can\'t be established.'
+              "if a direct connection can't be established."
               '${alwaysRelay ? ' "Always relay calls" does not cover Share. '
                   'The person you share with will see your IP address.' : ''}',
-              style: HollowTypography.caption.copyWith(
-                color: color,
-                fontSize: 11,
-              ),
+              style: HollowTypography.bodySmall.copyWith(color: hollow.warning),
             ),
           ),
         ],
@@ -156,33 +146,19 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       return const HollowEmptyState(
         glyph: LucideIcons.share2,
         title: 'No shares yet',
-        description: 'Paste a link or share a file to get started.',
+        description: 'Share a file or paste a link to start.',
       );
     }
 
-    final downloading = userShares.where((s) => s.state == 'downloading' || s.state == 'failed').toList();
+    final downloading = userShares
+        .where((s) => s.state == 'downloading' || s.state == 'failed')
+        .toList();
     final seeding = userShares.where((s) => s.state == 'completed').toList();
 
-    return ListView(
-      padding: const EdgeInsets.all(HollowSpacing.lg),
-      children: [
-        if (downloading.isNotEmpty) ...[
-          _sectionHeader('Downloading (${downloading.length})', hollow),
-          const SizedBox(height: HollowSpacing.sm),
-          for (final item in downloading) ...[
-            ShareCard(item: item),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-          const SizedBox(height: HollowSpacing.lg),
-        ],
-        if (seeding.isNotEmpty) ...[
-          _sectionHeader('Seeding (${seeding.length})', hollow),
-          const SizedBox(height: HollowSpacing.sm),
-          for (final item in seeding) ...[
-            ShareCard(item: item),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-        ],
+    return _ShareList(
+      sections: [
+        if (downloading.isNotEmpty) ('Downloading', downloading),
+        if (seeding.isNotEmpty) ('Seeding', seeding),
       ],
     );
   }
@@ -192,49 +168,21 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       return const HollowEmptyState(
         glyph: LucideIcons.server,
         title: 'No server files',
-        description: 'Large files sent in server channels appear here.',
+        description: 'Large files sent in server channels show up here.',
       );
     }
 
     final serverMap = ref.watch(serverListProvider);
-
     final grouped = <String, List<ShareItemState>>{};
     for (final s in serverFiles) {
       grouped.putIfAbsent(s.serverId!, () => []).add(s);
     }
 
-    return ListView(
-      padding: const EdgeInsets.all(HollowSpacing.lg),
-      children: [
-        for (final entry in grouped.entries) ...[
-          _sectionHeader(
-            '${_serverName(entry.key, serverMap)} (${entry.value.length})',
-            hollow,
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          for (final item in entry.value) ...[
-            ShareCard(item: item),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-          const SizedBox(height: HollowSpacing.lg),
-        ],
+    return _ShareList(
+      sections: [
+        for (final entry in grouped.entries)
+          (serverMap[entry.key]?.name ?? 'Server', entry.value),
       ],
-    );
-  }
-
-  String _serverName(String serverId, Map<String, dynamic> serverMap) {
-    final info = serverMap[serverId];
-    if (info != null) return info.name;
-    return 'Server';
-  }
-
-  Widget _sectionHeader(String label, HollowTheme hollow) {
-    return Padding(
-      padding: const EdgeInsets.only(left: HollowSpacing.xs),
-      child: Text(
-        label,
-        style: HollowTypography.label.copyWith(color: hollow.textSecondary),
-      ),
     );
   }
 
@@ -247,7 +195,7 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       await share_api.shareCreateFromFile(sourcePath: result.files.single.path!);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Could not share file: $e',
+        HollowToast.show(context, "Couldn't share the file: $e",
             type: HollowToastType.error);
       }
     } finally {
@@ -263,3 +211,36 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   }
 }
 
+/// Titled groups of share rows.
+class _ShareList extends StatelessWidget {
+  final List<(String, List<ShareItemState>)> sections;
+  const _ShareList({required this.sections});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+        _kListInset,
+        HollowSpacing.md,
+        _kListInset,
+        HollowSpacing.lg,
+      ),
+      children: [
+        for (final (i, (title, items)) in sections.indexed) ...[
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              HollowSpacing.md,
+              i == 0 ? 0 : HollowSpacing.lg,
+              HollowSpacing.md,
+              0,
+            ),
+            child: HollowSectionHeader(title,
+                dense: true, count: '${items.length}'),
+          ),
+          for (final item in items)
+            ShareRow(key: ValueKey(item.rootHash), item: item),
+        ],
+      ],
+    );
+  }
+}

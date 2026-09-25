@@ -1,323 +1,288 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/archive_conversation.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
-/// Left panel of "My Data" — DMs|Channels inner tabs + search + scrollable list.
-class ArchiveConversationList extends ConsumerWidget {
+/// Everything this device keeps, in the sidebar's order: direct messages, then
+/// each server's channels. One list, one search.
+class ArchiveConversationList extends ConsumerStatefulWidget {
   const ArchiveConversationList({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final innerTab = ref.watch(myDataInnerTabProvider);
-
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.md, HollowSpacing.md, HollowSpacing.md, HollowSpacing.xs,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: HollowChip(
-                  label: 'DMs',
-                  expand: true,
-                  selected: innerTab == MyDataInnerTab.dms,
-                  onTap: () => ref.read(myDataInnerTabProvider.notifier).state =
-                      MyDataInnerTab.dms,
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: HollowChip(
-                  label: 'Channels',
-                  expand: true,
-                  selected: innerTab == MyDataInnerTab.channels,
-                  onTap: () => ref.read(myDataInnerTabProvider.notifier).state =
-                      MyDataInnerTab.channels,
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: HollowChip(
-                  label: 'Vault Files',
-                  expand: true,
-                  selected: innerTab == MyDataInnerTab.vaultFiles,
-                  onTap: () => ref.read(myDataInnerTabProvider.notifier).state =
-                      MyDataInnerTab.vaultFiles,
-                ),
-              ),
-            ],
-          ),
-        ),
-
-        if (innerTab != MyDataInnerTab.vaultFiles)
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md,
-              vertical: HollowSpacing.xs,
-            ),
-            child: HollowTextField(
-              hintText: 'Search...',
-              isDense: true,
-              prefixIcon: Icon(LucideIcons.search, size: 14, color: hollow.textSecondary),
-              onChanged: (val) =>
-                  ref.read(archiveSearchProvider.notifier).state = val,
-            ),
-          ),
-
-        const SizedBox(height: HollowSpacing.xs),
-
-        Expanded(
-          child: switch (innerTab) {
-            MyDataInnerTab.dms => const _DmList(),
-            MyDataInnerTab.channels => const _ChannelList(),
-            MyDataInnerTab.vaultFiles => const _VaultFilesPlaceholder(),
-          },
-        ),
-      ],
-    );
-  }
+  ConsumerState<ArchiveConversationList> createState() =>
+      _ArchiveConversationListState();
 }
 
-class _DmList extends ConsumerStatefulWidget {
-  const _DmList();
-
-  @override
-  ConsumerState<_DmList> createState() => _DmListState();
-}
-
-class _DmListState extends ConsumerState<_DmList> {
+class _ArchiveConversationListState
+    extends ConsumerState<ArchiveConversationList> {
   bool _hiddenExpanded = false;
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final dmListAsync = ref.watch(archiveDmListProvider);
-    final search = ref.watch(archiveSearchProvider).toLowerCase();
-    final selectedDm = ref.watch(archiveSelectedDmProvider);
+    final dmsAsync = ref.watch(archiveDmListProvider);
+    final channelsAsync = ref.watch(archiveChannelListProvider);
+    final search = ref.watch(archiveSearchProvider).trim().toLowerCase();
+
+    final field = Padding(
+      padding: const EdgeInsets.all(HollowSpacing.md),
+      child: HollowTextField(
+        hintText: 'Search conversations',
+        isDense: true,
+        prefixIcon:
+            Icon(LucideIcons.search, size: 14, color: hollow.textSecondary),
+        onChanged: (val) => ref.read(archiveSearchProvider.notifier).state = val,
+      ),
+    );
+
+    if (dmsAsync.isLoading || channelsAsync.isLoading) {
+      return Column(children: [
+        field,
+        const Expanded(child: Center(child: HollowSpinner.medium())),
+      ]);
+    }
+    if (dmsAsync.hasError || channelsAsync.hasError) {
+      return Column(children: [
+        field,
+        Expanded(
+          child: HollowEmptyState(
+            title: "Your conversations didn't load",
+            action: HollowButton.ghost(
+              compact: true,
+              onPressed: () {
+                ref.invalidate(archiveDmListProvider);
+                ref.invalidate(archiveChannelListProvider);
+              },
+              child: const Text('Try again'),
+            ),
+          ),
+        ),
+      ]);
+    }
+
     final profiles = ref.watch(profileProvider);
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
     final hiddenSet = ref.watch(hiddenArchiveDmsProvider);
 
-    return dmListAsync.when(
-      loading: () => const Center(child: HollowSpinner.large()),
-      error: (e, _) => Center(
-        child: Text('Failed to load: $e',
-            style: TextStyle(color: hollow.error)),
-      ),
-      data: (entries) {
-        // The self-DM renders as "Saved messages", so search matches that
-        // label rather than your own profile name.
-        final savedId = ref.watch(savedMessagesPeerIdProvider);
-        final filtered = search.isEmpty
-            ? entries
-            : entries.where((e) {
-                final name = e.peerId == savedId
-                    ? 'saved messages'
-                    : displayNameFor(profiles, e.peerId).toLowerCase();
-                return name.contains(search);
-              }).toList();
+    // The self-DM renders as "Saved messages", so search matches that label
+    // rather than your own profile name.
+    String dmName(String peerId) => peerId == savedId
+        ? 'Saved messages'
+        : displayNameFor(profiles, peerId);
 
-        final visible =
-            filtered.where((e) => !hiddenSet.contains(e.peerId)).toList();
-        final hidden =
-            filtered.where((e) => hiddenSet.contains(e.peerId)).toList();
+    final dms = [
+      for (final e in dmsAsync.value ?? const <ArchiveDmEntry>[])
+        if (search.isEmpty || dmName(e.peerId).toLowerCase().contains(search))
+          e,
+    ];
+    final visible = dms.where((e) => !hiddenSet.contains(e.peerId)).toList();
+    final hidden = dms.where((e) => hiddenSet.contains(e.peerId)).toList();
 
-        if (visible.isEmpty && hidden.isEmpty) {
-          return HollowEmptyState(
-            title: search.isEmpty ? 'No DM conversations' : 'No matches',
-          );
-        }
+    final groups = <(ArchiveChannelGroup, List<ArchiveChannelEntry>)>[
+      for (final g in channelsAsync.value ?? const <ArchiveChannelGroup>[])
+        (
+          g,
+          [
+            for (final ch in g.channels)
+              if (search.isEmpty ||
+                  ch.channelName.toLowerCase().contains(search) ||
+                  ch.serverName.toLowerCase().contains(search))
+                ch,
+          ]
+        ),
+    ].where((g) => g.$2.isNotEmpty).toList();
 
-        return ListView(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-          children: [
-            for (final entry in visible)
-              _DmRow(
-                entry: entry,
-                isSelected: selectedDm == entry.peerId,
-                isHidden: false,
-                onTap: () {
-                  ref.read(archiveSelectedDmProvider.notifier).state =
-                      entry.peerId;
-                  ref.read(archiveSelectedChannelProvider.notifier).state =
-                      null;
-                },
-                onToggleHidden: () => ref
-                    .read(hiddenArchiveDmsProvider.notifier)
-                    .hide(entry.peerId),
-              ),
-            if (hidden.isNotEmpty) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              _HiddenHeader(
-                count: hidden.length,
-                expanded: _hiddenExpanded,
-                onTap: () =>
-                    setState(() => _hiddenExpanded = !_hiddenExpanded),
-              ),
-              AnimatedSize(
-                duration: HollowDurations.fast,
-                curve: HollowCurves.subtle,
-                alignment: Alignment.topCenter,
-                child: _hiddenExpanded
-                    ? Column(
-                        children: [
-                          const SizedBox(height: HollowSpacing.xs),
-                          for (final entry in hidden)
-                            _DmRow(
-                              entry: entry,
-                              isSelected: selectedDm == entry.peerId,
-                              isHidden: true,
-                              onTap: () {
-                                ref
-                                    .read(archiveSelectedDmProvider.notifier)
-                                    .state = entry.peerId;
-                                ref
-                                    .read(
-                                        archiveSelectedChannelProvider.notifier)
-                                    .state = null;
-                              },
-                              onToggleHidden: () => ref
-                                  .read(hiddenArchiveDmsProvider.notifier)
-                                  .unhide(entry.peerId),
-                            ),
-                        ],
-                      )
-                    : const SizedBox(width: double.infinity, height: 0),
-              ),
+    if (dms.isEmpty && groups.isEmpty) {
+      return Column(children: [
+        field,
+        Expanded(
+          child: search.isEmpty
+              ? const HollowEmptyState(
+                  title: 'No conversations yet',
+                  description: 'Direct messages and channel history you keep '
+                      'on this device show up here.',
+                )
+              : const HollowEmptyState(title: 'No matches'),
+        ),
+      ]);
+    }
+
+    return Column(
+      children: [
+        field,
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(
+                HollowSpacing.sm, 0, HollowSpacing.sm, HollowSpacing.lg),
+            children: [
+              if (dms.isNotEmpty) ...[
+                const _GroupLabel('Direct messages'),
+                for (final e in visible)
+                  _DmRow(entry: e, name: dmName(e.peerId), isSaved: e.peerId == savedId),
+                if (hidden.isNotEmpty) ...[
+                  _HiddenToggle(
+                    count: hidden.length,
+                    expanded: _hiddenExpanded,
+                    onTap: () =>
+                        setState(() => _hiddenExpanded = !_hiddenExpanded),
+                  ),
+                  if (_hiddenExpanded || search.isNotEmpty)
+                    for (final e in hidden)
+                      _DmRow(
+                          entry: e,
+                          name: dmName(e.peerId),
+                          isSaved: e.peerId == savedId,
+                          hidden: true),
+                ],
+              ],
+              for (final (group, channels) in groups) ...[
+                _GroupLabel(group.serverName, action: _exportServer(group)),
+                for (final ch in channels) _ChannelRow(entry: ch),
+              ],
             ],
-          ],
-        );
-      },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _exportServer(ArchiveChannelGroup g) {
+    return HollowIconButton(
+      icon: LucideIcons.fileOutput,
+      label: 'Export ${g.serverName}',
+      size: 24,
+      onPressed: () => showExportArchiveDialog(
+        context,
+        isDm: false,
+        isServer: true,
+        serverId: g.serverId,
+        serverName: g.serverName,
+        channels: [
+          for (final c in g.channels)
+            {'channel_id': c.channelId, 'channel_name': c.channelName},
+        ],
+        name: g.serverName,
+        messageCount: g.channels.fold<int>(0, (s, c) => s + c.messageCount),
+      ),
     );
   }
 }
 
+/// A group's name above its rows, its text on the rows' text edge.
+class _GroupLabel extends StatelessWidget {
+  final String title;
+  final Widget? action;
+  const _GroupLabel(this.title, {this.action});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          HollowSpacing.md, HollowSpacing.md, HollowSpacing.xs, 0),
+      child: HollowSectionHeader(title, dense: true, action: action),
+    );
+  }
+}
+
+/// How many messages a conversation holds, quiet at the row's end.
+Widget _count(HollowTheme hollow, int n) => Text(
+      '$n',
+      style: HollowTypography.caption.copyWith(
+        color: hollow.textTertiary,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
+
 class _DmRow extends ConsumerWidget {
   final ArchiveDmEntry entry;
-  final bool isSelected;
-  final bool isHidden;
-  final VoidCallback onTap;
-  final VoidCallback onToggleHidden;
+  final String name;
+  final bool isSaved;
+  final bool hidden;
 
   const _DmRow({
     required this.entry,
-    required this.isSelected,
-    required this.isHidden,
-    required this.onTap,
-    required this.onToggleHidden,
+    required this.name,
+    required this.isSaved,
+    this.hidden = false,
   });
+
+  void _open(WidgetRef ref) =>
+      selectArchiveConversation(ref.read, dm: entry.peerId);
+
+  void _menu(BuildContext context, WidgetRef ref, Offset anchor) {
+    final hiddenDms = ref.read(hiddenArchiveDmsProvider.notifier);
+    showHollowMenu(
+      context: context,
+      anchor: anchor,
+      builder: (_, _) => [
+        HollowMenuItem(
+          icon: LucideIcons.fileOutput,
+          label: 'Export conversation',
+          onTap: () => showExportArchiveDialog(
+            context,
+            isDm: true,
+            peerId: entry.peerId,
+            name: name,
+            messageCount: entry.messageCount,
+          ),
+        ),
+        HollowMenuItem(
+          icon: hidden ? LucideIcons.eye : LucideIcons.eyeOff,
+          label: hidden ? 'Show in the list' : 'Hide from the list',
+          onTap: () => hidden
+              ? hiddenDms.unhide(entry.peerId)
+              : hiddenDms.hide(entry.peerId),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Self-DM = Saved messages: a bookmark avatar and fixed label instead of
-    // your own name and picture.
-    final isSaved = entry.peerId == ref.watch(savedMessagesPeerIdProvider);
-    final peerProfile = ref.watch(
-        profileProvider.select((p) => p[entry.peerId]));
-    final name =
-        isSaved ? 'Saved messages' : displayNameForPeer(peerProfile, entry.peerId);
-
-    // ONE box: the selection fill lives on the pressable itself, so the hover
-    // rect and the selected rect are the same shape.
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: HollowPressable(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        backgroundColor:
-            isSelected ? hollow.accent.withValues(alpha: 0.12) : null,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm + HollowSpacing.sm,
-          vertical: HollowSpacing.sm + HollowSpacing.xs,
-        ),
-        child: Row(
-          children: [
-            if (isSaved)
-              const SavedMessagesAvatar(size: 28)
-            else
-              HollowAvatar(
-                peerId: entry.peerId,
-                size: 28,
-              ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                name,
-                style: HollowTypography.body.copyWith(
-                  color: isSelected
-                      ? hollow.accent
-                      : hollow.textPrimary,
-                  fontWeight:
-                      isSelected ? FontWeight.w600 : FontWeight.normal,
-                  fontSize: 13,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            HollowPressable(
-              onTap: onToggleHidden,
-              semanticLabel: isHidden
-                  ? 'Show conversation'
-                  : 'Hide conversation',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(4),
-              child: Icon(
-                isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
-                size: 13,
-                color: hollow.textSecondary,
-              ),
-            ),
-            const SizedBox(width: 4),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                '${entry.messageCount}',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 10,
-                ),
-              ),
-            ),
-          ],
-        ),
+    final selected =
+        ref.watch(archiveSelectedDmProvider.select((id) => id == entry.peerId));
+    return ContextMenuTarget(
+      semanticLabel: 'Conversation actions',
+      onOpen: (anchor) => _menu(context, ref, anchor),
+      child: HollowListRow(
+        title: name,
+        selected: selected,
+        leading: isSaved
+            ? const SavedMessagesAvatar(size: 24)
+            : HollowAvatar(peerId: entry.peerId, size: 24),
+        trailing: _count(hollow, entry.messageCount),
+        onTap: () => _open(ref),
       ),
     );
   }
 }
 
-class _HiddenHeader extends StatelessWidget {
+class _HiddenToggle extends StatelessWidget {
   final int count;
   final bool expanded;
   final VoidCallback onTap;
 
-  const _HiddenHeader({
+  const _HiddenToggle({
     required this.count,
     required this.expanded,
     required this.onTap,
@@ -328,248 +293,51 @@ class _HiddenHeader extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     return HollowPressable(
       onTap: onTap,
+      subtle: true,
+      semanticLabel: expanded
+          ? 'Hide the $count hidden conversations'
+          : 'Show the $count hidden conversations',
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xs,
-      ),
+          horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
       child: Row(
         children: [
-          AnimatedRotation(
-            turns: expanded ? 0.25 : 0,
-            duration: HollowDurations.fast,
-            curve: HollowCurves.subtle,
-            child: Icon(
-              LucideIcons.chevronRight,
-              size: 12,
-              color: hollow.textSecondary,
-            ),
-          ),
+          Icon(expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+              size: 14, color: hollow.textTertiary),
           const SizedBox(width: HollowSpacing.xs),
-          Text(
-            'Hidden',
-            style: HollowTypography.label.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              '$count',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
-            ),
-          ),
+          Text('Hidden',
+              style:
+                  HollowTypography.label.copyWith(color: hollow.textSecondary)),
+          const Spacer(),
+          _count(hollow, count),
         ],
       ),
     );
   }
 }
 
-class _ChannelList extends ConsumerWidget {
-  const _ChannelList();
+class _ChannelRow extends ConsumerWidget {
+  final ArchiveChannelEntry entry;
+  const _ChannelRow({required this.entry});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final channelListAsync = ref.watch(archiveChannelListProvider);
-    final search = ref.watch(archiveSearchProvider).toLowerCase();
-    final selectedChannel = ref.watch(archiveSelectedChannelProvider);
-
-    return channelListAsync.when(
-      loading: () => const Center(child: HollowSpinner.large()),
-      error: (e, _) => Center(
-        child: Text('Failed to load: $e',
-            style: TextStyle(color: hollow.error)),
+    final key = '${entry.serverId}:${entry.channelId}';
+    final selected =
+        ref.watch(archiveSelectedChannelProvider.select((k) => k == key));
+    return HollowListRow(
+      title: entry.channelName,
+      selected: selected,
+      // The avatar column's width, so channel names line up with DM names.
+      leading: SizedBox.square(
+        dimension: 24,
+        child: Icon(LucideIcons.hash,
+            size: 16,
+            color: selected ? hollow.accentText : hollow.textTertiary),
       ),
-      data: (groups) {
-        final items = <_ChannelListItem>[];
-        for (final group in groups) {
-          final matchingChannels = group.channels.where((ch) {
-            if (search.isEmpty) return true;
-            return ch.channelName.toLowerCase().contains(search) ||
-                ch.serverName.toLowerCase().contains(search);
-          }).toList();
-
-          if (matchingChannels.isNotEmpty) {
-            items.add(_ChannelListItem.header(group.serverName, group));
-            for (final ch in matchingChannels) {
-              items.add(_ChannelListItem.channel(ch));
-            }
-          }
-        }
-
-        if (items.isEmpty) {
-          return HollowEmptyState(
-            title: search.isEmpty ? 'No channel history' : 'No matches',
-          );
-        }
-
-        return ListView.builder(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-          itemCount: items.length,
-          itemBuilder: (context, index) {
-            final item = items[index];
-
-            if (item.isHeader) {
-              return Padding(
-                padding: EdgeInsets.only(
-                  left: HollowSpacing.sm,
-                  right: HollowSpacing.sm,
-                  top: index == 0 ? 0 : HollowSpacing.md,
-                ),
-                child: HollowSectionHeader(
-                  item.headerName!,
-                  dense: true,
-                  action: item.group == null
-                      ? null
-                      : HollowPressable(
-                        onTap: () {
-                          final g = item.group!;
-                          final totalMsgCount = g.channels
-                              .fold<int>(0, (s, c) => s + c.messageCount);
-                          showExportArchiveDialog(
-                            context,
-                            isDm: false,
-                            isServer: true,
-                            serverId: g.serverId,
-                            serverName: g.serverName,
-                            channels: g.channels
-                                .map((c) => {
-                                      'channel_id': c.channelId,
-                                      'channel_name': c.channelName,
-                                    })
-                                .toList(),
-                            name: g.serverName,
-                            messageCount: totalMsgCount,
-                          );
-                        },
-                        semanticLabel: 'Export conversation',
-                        borderRadius:
-                            BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(3),
-                        child: Icon(LucideIcons.fileOutput,
-                            size: 12, color: hollow.accent),
-                      ),
-                ),
-              );
-            }
-
-            final ch = item.entry!;
-            final key = '${ch.serverId}:${ch.channelId}';
-            final isSelected = selectedChannel == key;
-
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 2),
-              child: HollowPressable(
-                onTap: () {
-                  ref.read(archiveSelectedChannelProvider.notifier).state =
-                      key;
-                  ref.read(archiveSelectedDmProvider.notifier).state = null;
-                },
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                // ONE box: the selection fill on the pressable itself, so
-                // hover and selection share the same rect.
-                backgroundColor: isSelected
-                    ? hollow.accent.withValues(alpha: 0.12)
-                    : null,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm + HollowSpacing.sm,
-                  vertical: HollowSpacing.xs + HollowSpacing.xs,
-                ),
-                child: Row(
-                    children: [
-                      Text(
-                        '#',
-                        style: TextStyle(
-                          color: isSelected
-                              ? hollow.accent
-                              : hollow.textSecondary,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                      Expanded(
-                        child: Text(
-                          ch.channelName,
-                          style: HollowTypography.body.copyWith(
-                            color: isSelected
-                                ? hollow.accent
-                                : hollow.textPrimary,
-                            fontWeight: isSelected
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                            fontSize: 13,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: hollow.elevated,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          '${ch.messageCount}',
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 10,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-/// Helper for the flat channel list (mix of headers and entries).
-class _ChannelListItem {
-  final bool isHeader;
-  final String? headerName;
-  final ArchiveChannelGroup? group;
-  final ArchiveChannelEntry? entry;
-
-  _ChannelListItem.header(this.headerName, this.group)
-      : isHeader = true,
-        entry = null;
-  _ChannelListItem.channel(this.entry)
-      : isHeader = false,
-        headerName = null,
-        group = null;
-}
-
-class _VaultFilesPlaceholder extends StatelessWidget {
-  const _VaultFilesPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Padding(
-      padding: const EdgeInsets.all(HollowSpacing.lg),
-      child: Text(
-        'Vault file details are shown in the right panel.',
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontSize: 11,
-        ),
-      ),
+      trailing: _count(hollow, entry.messageCount),
+      onTap: () => selectArchiveConversation(ref.read, channel: key),
     );
   }
 }

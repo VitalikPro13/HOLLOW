@@ -1,21 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/vault_file_status_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Dashboard for an active recovery pool. Shows progress, members, and actions.
+/// A running recovery pool: how many of the server's vault files are back, who
+/// is helping, and what came back.
 class RecoveryPoolDashboard extends ConsumerWidget {
   const RecoveryPoolDashboard({super.key});
 
@@ -25,319 +31,179 @@ class RecoveryPoolDashboard extends ConsumerWidget {
     final pool = ref.watch(recoveryPoolProvider);
 
     if (pool == null) {
-      return const HollowEmptyState(title: 'No active recovery pool');
+      return const HollowEmptyState(title: 'No recovery pool is running');
     }
 
     // Local vault file data stands in until the pool status arrives.
     final localStatus = ref.watch(vaultFileStatusProvider(pool.serverId));
-    int totalFiles = pool.totalFiles;
-    int reconstructable = pool.reconstructable;
-    int partial = pool.partial;
-    int noShards = pool.noShards;
+    var totalFiles = pool.totalFiles;
+    var reconstructable = pool.reconstructable;
+    var partial = pool.partial;
+    var noShards = pool.noShards;
     if (totalFiles == 0 && localStatus.hasValue) {
       final files = localStatus.value!;
       totalFiles = files.length;
       reconstructable = files.where((f) => f.isReconstructable).length;
-      partial = files.where((f) => !f.isReconstructable && f.localShardCount > 0).length;
+      partial = files
+          .where((f) => !f.isReconstructable && f.localShardCount > 0)
+          .length;
       noShards = files.where((f) => f.localShardCount == 0).length;
     }
+    final serverName =
+        ref.watch(serverListProvider)[pool.serverId]?.name ?? 'this server';
+    final links = ref.watch(deviceLinkProvider);
+    final profiles = ref.watch(profileProvider);
 
-    return Align(
-      alignment: Alignment.topLeft,
-      child: SingleChildScrollView(
+    return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              StatusDot(
-                color: pool.isActive ? const Color(0xFF4CAF50) : hollow.textSecondary,
-                size: 10,
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  'Recovery Pool',
-                  style: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 18,
-                  ),
-                ),
-              ),
-              if (pool.isInitiator && pool.isActive)
-                HollowButton.danger(
-                  onPressed: () => _stopPool(context, ref, pool.serverId),
-                  compact: true,
-                  icon: const Icon(LucideIcons.square, size: 12),
-                  child: const Text('Stop Pool'),
-                ),
-              if (!pool.isInitiator && pool.isActive)
-                HollowButton.ghost(
-                  onPressed: () => _leavePool(context, ref, pool.serverId),
-                  compact: true,
-                  icon: const Icon(LucideIcons.logOut, size: 12),
-                  child: const Text('Leave Pool'),
-                ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            pool.isActive ? 'Active: exchanging shards' : 'Pool stopped',
-            style: HollowTypography.caption.copyWith(
-              color: pool.isActive ? const Color(0xFF4CAF50) : hollow.textSecondary,
-              fontSize: 12,
-            ),
-          ),
-
-          if (pool.inviteLink.isNotEmpty) ...[
-            const SizedBox(height: HollowSpacing.md),
-            Container(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-              ),
-              child: Row(
-                children: [
-                  Icon(LucideIcons.link, size: 14, color: hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      pool.inviteLink,
-                      style: HollowTypography.mono.copyWith(
-                        color: hollow.accent,
-                        fontSize: 11,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowPressable(
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: pool.inviteLink));
-                      HollowToast.show(context, 'Link copied', type: HollowToastType.success);
-                    },
-                    semanticLabel: 'Copy',
-                    borderRadius: BorderRadius.circular(4),
-                    padding: const EdgeInsets.all(6),
-                    child: Icon(LucideIcons.copy, size: 14, color: hollow.textSecondary),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          const SizedBox(height: HollowSpacing.lg),
-
-          _buildProgressRing(hollow, totalFiles, reconstructable),
-          const SizedBox(height: HollowSpacing.lg),
-
-          Row(
-            children: [
-              _StatCard(
-                label: 'Recovered',
-                value: '$reconstructable',
-                color: const Color(0xFF4CAF50),
-                hollow: hollow,
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              _StatCard(
-                label: 'Partial',
-                value: '$partial',
-                color: const Color(0xFFFFA726),
-                hollow: hollow,
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              _StatCard(
-                label: 'Missing',
-                value: '$noShards',
-                color: hollow.textSecondary,
-                hollow: hollow,
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-
-          HollowSectionHeader(
-            'Members',
-            dense: true,
-            count: '${pool.memberPeerIds.length}',
-          ),
-          if (pool.memberPeerIds.isEmpty)
-            Text(
-              'Waiting for members to join...',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-              ),
-            )
-          else
-            for (final peerId in pool.memberPeerIds)
-              Padding(
-                padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.md,
-                    vertical: HollowSpacing.sm,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.elevated,
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(LucideIcons.user, size: 14, color: hollow.textSecondary),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          peerId.length > 12
-                              ? '${peerId.substring(0, 6)}...${peerId.substring(peerId.length - 6)}'
-                              : peerId,
-                          style: HollowTypography.mono.copyWith(
-                            color: hollow.textPrimary,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      const StatusDot(
-                        color: Color(0xFF4CAF50),
-                        size: 6,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          const SizedBox(height: HollowSpacing.lg),
-
-          if (pool.recoveredFiles.isNotEmpty) ...[
-            HollowSectionHeader(
-              'Recovered files',
-              dense: true,
-              count: '${pool.recoveredFiles.length}',
-            ),
-            for (final file in pool.recoveredFiles)
-              Padding(
-                padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.md,
-                    vertical: HollowSpacing.sm,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF4CAF50).withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    border: Border.all(
-                      color: const Color(0xFF4CAF50).withValues(alpha: 0.2),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(LucideIcons.checkCircle, size: 14, color: Color(0xFF4CAF50)),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          file.contentId.length > 16
-                              ? '${file.contentId.substring(0, 8)}...${file.contentId.substring(file.contentId.length - 8)}'
-                              : file.contentId,
-                          style: HollowTypography.mono.copyWith(
-                            color: hollow.textPrimary,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        ],
-      ),
-    ),
-    );
-  }
-
-  Widget _buildProgressRing(HollowTheme hollow, int total, int recovered) {
-    final progress = total > 0 ? recovered / total : 0.0;
-
-    return Center(
-      child: SizedBox(
-        width: 120,
-        height: 120,
-        child: Stack(
-          fit: StackFit.expand,
+      children: [
+        Row(
           children: [
-            CircularProgressIndicator( // design-ignore: a 120px gauge, not a spinner
-              value: progress,
-              strokeWidth: 8,
-              backgroundColor: hollow.border,
-              valueColor: const AlwaysStoppedAnimation(Color(0xFF4CAF50)),
-            ),
-            Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '$recovered/$total',
-                    style: HollowTypography.heading.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 22,
-                    ),
-                  ),
-                  Text(
-                    'files',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
+            Expanded(
+              child: HollowSectionHeader(
+                'Recovery pool',
+                subtitle: pool.isActive
+                    ? 'Gathering shards for $serverName'
+                    : 'Stopped',
               ),
             ),
+            if (pool.isActive && pool.isInitiator)
+              HollowButton.outline(
+                danger: true,
+                compact: true,
+                onPressed: () => _stop(context, ref, pool.serverId,
+                    initiator: true),
+                child: const Text('Stop the pool'),
+              )
+            else if (pool.isActive)
+              HollowButton.ghost(
+                compact: true,
+                onPressed: () => _stop(context, ref, pool.serverId,
+                    initiator: false),
+                child: const Text('Leave the pool'),
+              ),
           ],
         ),
-      ),
+        if (pool.inviteLink.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  pool.inviteLink,
+                  style: HollowTypography.monoSmall
+                      .copyWith(color: hollow.textSecondary),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowIconButton(
+                icon: LucideIcons.copy,
+                label: 'Copy the pool invite link',
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: pool.inviteLink));
+                  HollowToast.show(context, 'Link copied',
+                      type: HollowToastType.success);
+                },
+              ),
+            ],
+          ),
+        ],
+        const SizedBox(height: HollowSpacing.xl),
+        // Wraps rather than overflows on a phone at a large text size.
+        Wrap(
+          spacing: HollowSpacing.xl,
+          runSpacing: HollowSpacing.md,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            SizedBox.square(
+              dimension: 96,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CircularProgressIndicator( // design-ignore: a gauge, not a spinner
+                    value: totalFiles > 0 ? reconstructable / totalFiles : 0,
+                    strokeWidth: 6,
+                    backgroundColor: hollow.border,
+                    valueColor: AlwaysStoppedAnimation(hollow.success),
+                  ),
+                  Center(
+                    child: Text(
+                      '$reconstructable of $totalFiles',
+                      style: HollowTypography.label.copyWith(
+                        color: hollow.textPrimary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            _Stat(value: reconstructable, label: 'Recovered', tone: hollow.success),
+            _Stat(value: partial, label: 'Partly here', tone: hollow.warning),
+            _Stat(value: noShards, label: 'Missing', tone: hollow.textSecondary),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.xl),
+        HollowSectionHeader('Helping',
+            dense: true, count: '${pool.memberPeerIds.length}'),
+        if (pool.memberPeerIds.isEmpty)
+          const HollowEmptyState(
+            dense: true,
+            title: 'Waiting for someone to join',
+            description: 'Send the invite link to another member.',
+          )
+        else
+          for (final peerId in pool.memberPeerIds)
+            HollowListRow(
+              leading: HollowAvatar(
+                  peerId: links.identityOf(peerId), size: 24),
+              title: displayNameFor(profiles, links.identityOf(peerId)),
+            ),
+        if (pool.recoveredFiles.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.xl),
+          HollowSectionHeader('Recovered files',
+              dense: true, count: '${pool.recoveredFiles.length}'),
+          for (final file in pool.recoveredFiles)
+            HollowListRow(
+              leading: Icon(LucideIcons.checkCircle,
+                  size: 20, color: hollow.success),
+              title: file.diskPath.isNotEmpty
+                  ? file.diskPath.split(RegExp(r'[\\/]')).last
+                  : file.contentId,
+            ),
+        ],
+      ],
     );
   }
 
-  Future<void> _stopPool(BuildContext context, WidgetRef ref, String serverId) async {
-    try {
-      await crdt_api.stopRecoveryPool(serverId: serverId);
-      ref.read(recoveryPoolProvider.notifier).clear();
-      if (context.mounted) {
-        HollowToast.show(
-          context,
-          'Recovery pool stopped',
-          type: HollowToastType.info,
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(
-          context,
-          'Failed to stop pool: $e',
-          type: HollowToastType.error,
-        );
-      }
+  Future<void> _stop(BuildContext context, WidgetRef ref, String serverId,
+      {required bool initiator}) async {
+    if (initiator) {
+      final ok = await showHollowConfirm(
+        context: context,
+        title: 'Stop the recovery pool?',
+        message: 'Everyone helping is disconnected from it. Files already '
+            'recovered stay on your device.',
+        confirmLabel: 'Stop the pool',
+        destructive: true,
+      );
+      if (!ok) return;
     }
-  }
-
-  Future<void> _leavePool(BuildContext context, WidgetRef ref, String serverId) async {
     try {
       await crdt_api.stopRecoveryPool(serverId: serverId);
       ref.read(recoveryPoolProvider.notifier).clear();
       if (context.mounted) {
         HollowToast.show(
-          context,
-          'Left recovery pool',
-          type: HollowToastType.info,
-        );
+            context, initiator ? 'Recovery pool stopped' : 'You left the pool',
+            type: HollowToastType.info);
       }
     } catch (e) {
       if (context.mounted) {
         HollowToast.show(
           context,
-          'Failed to leave pool: $e',
+          initiator ? "Couldn't stop the pool: $e" : "Couldn't leave the pool: $e",
           type: HollowToastType.error,
         );
       }
@@ -345,48 +211,32 @@ class RecoveryPoolDashboard extends ConsumerWidget {
   }
 }
 
-class _StatCard extends StatelessWidget {
+/// One figure with its word underneath, the figure in its status colour.
+class _Stat extends StatelessWidget {
+  final int value;
   final String label;
-  final String value;
-  final Color color;
-  final HollowTheme hollow;
+  final Color tone;
 
-  const _StatCard({
-    required this.label,
-    required this.value,
-    required this.color,
-    required this.hollow,
-  });
+  const _Stat({required this.value, required this.label, required this.tone});
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(HollowSpacing.md),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
+    final hollow = HollowTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          '$value',
+          style: HollowTypography.heading.copyWith(
+            color: tone,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
         ),
-        child: Column(
-          children: [
-            Text(
-              value,
-              style: HollowTypography.heading.copyWith(
-                color: color,
-                fontSize: 20,
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.xxs),
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
-              ),
-            ),
-          ],
-        ),
-      ),
+        Text(label,
+            style: HollowTypography.caption
+                .copyWith(color: hollow.textSecondary)),
+      ],
     );
   }
 }

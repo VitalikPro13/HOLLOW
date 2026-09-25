@@ -1,189 +1,26 @@
 import 'package:flutter/material.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Size preset: the desktop dialog and the mobile sheet keep their own
-/// dimensions.
-class _FilterListStyle {
-  final EdgeInsets searchPadding;
-  final double searchIconSize;
-  final EdgeInsets allRowPadding;
-  final double allIconSize;
-  final EdgeInsets rowPadding;
-  final double avatarSize;
-  final double checkIconSize;
-  final double fontSize;
+String _senderName(Map<String, String> names, String id) =>
+    names[id] ?? (id.length > 8 ? id.substring(0, 8) : id);
 
-  const _FilterListStyle({
-    required this.searchPadding,
-    required this.searchIconSize,
-    required this.allRowPadding,
-    required this.allIconSize,
-    required this.rowPadding,
-    required this.avatarSize,
-    required this.checkIconSize,
-    required this.fontSize,
-  });
-}
-
-const _desktopStyle = _FilterListStyle(
-  searchPadding: EdgeInsets.all(HollowSpacing.sm),
-  searchIconSize: 12,
-  allRowPadding:
-      EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 6),
-  allIconSize: 14,
-  rowPadding: EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 5),
-  avatarSize: 20,
-  checkIconSize: 14,
-  fontSize: 13,
-);
-
-const _mobileStyle = _FilterListStyle(
-  searchPadding: EdgeInsets.all(HollowSpacing.md),
-  searchIconSize: 14,
-  allRowPadding:
-      EdgeInsets.symmetric(horizontal: HollowSpacing.lg, vertical: 10),
-  allIconSize: 16,
-  rowPadding: EdgeInsets.symmetric(horizontal: HollowSpacing.lg, vertical: 8),
-  avatarSize: 24,
-  checkIconSize: 16,
-  fontSize: 14,
-);
-
-/// Search field, "All participants" row and sender rows. [onPick] receives null
-/// for "All participants", and [wrapList] must bound the ListView.
-class _SenderFilterList extends StatefulWidget {
-  final List<String> senderIds;
-  final String? selectedSender;
-  final Map<String, String> senderNames;
-  final _FilterListStyle style;
-  final void Function(String? id) onPick;
-  final Widget Function(Widget list) wrapList;
-
-  const _SenderFilterList({
-    required this.senderIds,
-    required this.selectedSender,
-    required this.senderNames,
-    required this.style,
-    required this.onPick,
-    required this.wrapList,
-  });
-
-  @override
-  State<_SenderFilterList> createState() => _SenderFilterListState();
-}
-
-class _SenderFilterListState extends State<_SenderFilterList> {
-  String _query = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final style = widget.style;
-
-    final filtered = _query.isEmpty
-        ? widget.senderIds
-        : widget.senderIds.where((id) {
-            final name = (widget.senderNames[id] ?? id).toLowerCase();
-            return name.contains(_query.toLowerCase());
-          }).toList();
-
-    final allActive = widget.selectedSender == null;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Padding(
-          padding: style.searchPadding,
-          child: HollowTextField(
-            hintText: 'Search participants...',
-            isDense: true,
-            autofocus: true,
-            prefixIcon: Icon(LucideIcons.search,
-                size: style.searchIconSize, color: hollow.textSecondary),
-            onChanged: (val) => setState(() => _query = val),
-          ),
-        ),
-        HollowPressable(
-          onTap: () => widget.onPick(null),
-          padding: style.allRowPadding,
-          child: Row(
-            children: [
-              Icon(LucideIcons.users,
-                  size: style.allIconSize,
-                  color: allActive ? hollow.accent : hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'All participants',
-                style: HollowTypography.body.copyWith(
-                  color: allActive ? hollow.accent : hollow.textPrimary,
-                  fontWeight:
-                      allActive ? FontWeight.w600 : FontWeight.normal,
-                  fontSize: style.fontSize,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const HollowDivider(),
-        widget.wrapList(
-          ListView.builder(
-            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-            shrinkWrap: true,
-            itemCount: filtered.length,
-            itemBuilder: (_, index) {
-              final id = filtered[index];
-              final name = widget.senderNames[id] ?? id.substring(0, 8);
-              final isActive = widget.selectedSender == id;
-
-              return HollowPressable(
-                onTap: () => widget.onPick(id),
-                padding: style.rowPadding,
-                child: Row(
-                  children: [
-                    HollowAvatar(peerId: id, size: style.avatarSize),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Expanded(
-                      child: Text(
-                        name,
-                        style: HollowTypography.body.copyWith(
-                          color:
-                              isActive ? hollow.accent : hollow.textPrimary,
-                          fontWeight: isActive
-                              ? FontWeight.w600
-                              : FontWeight.normal,
-                          fontSize: style.fontSize,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (isActive)
-                      Icon(LucideIcons.check,
-                          size: style.checkIconSize, color: hollow.accent),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-}
-
+/// The desktop "Filter by sender" control: a menu hanging off the button, the
+/// current choice checked.
 class ArchiveFilterButton extends StatelessWidget {
   final List<String> senderIds;
   final String? selectedSender;
   final Map<String, String> senderDisplayNames;
-  final Map<String, dynamic> senderAvatars;
   final ValueChanged<String?>? onSenderFilterChanged;
 
   const ArchiveFilterButton({
@@ -191,98 +28,49 @@ class ArchiveFilterButton extends StatelessWidget {
     required this.senderIds,
     this.selectedSender,
     required this.senderDisplayNames,
-    this.senderAvatars = const {},
     this.onSenderFilterChanged,
   });
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: () async {
-        final picked = await showDialog<String?>( // design-ignore: anchored popover inside SelectionArea
-          context: context,
-          barrierColor: Colors.transparent,
-          builder: (ctx) => ArchiveFilterDialog(
-            senderIds: senderIds,
-            selectedSender: selectedSender,
-            senderDisplayNames: senderDisplayNames,
-            senderAvatars: senderAvatars,
-          ),
-        );
-        if (picked != null) {
-          // '_clear_' is the sentinel for "All participants".
-          onSenderFilterChanged?.call(picked == '_clear_' ? null : picked);
-        }
-      },
-      semanticLabel: 'Filter by sender',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(6),
-      child: Icon(
-        LucideIcons.filter,
-        size: 16,
-        color: selectedSender != null
-            ? hollow.accent
-            : hollow.textSecondary,
-      ),
-    );
-  }
-}
-
-class ArchiveFilterDialog extends StatelessWidget {
-  final List<String> senderIds;
-  final String? selectedSender;
-  final Map<String, String> senderDisplayNames;
-  final Map<String, dynamic> senderAvatars;
-
-  const ArchiveFilterDialog({
-    super.key,
-    required this.senderIds,
-    this.selectedSender,
-    required this.senderDisplayNames,
-    this.senderAvatars = const {},
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Align(
-      alignment: Alignment.topRight,
-      child: Padding(
-        padding: const EdgeInsets.only(top: 100, right: 80),
-        child: Material(
-          type: MaterialType.transparency,
-          child: Container(
-            width: 240,
-            constraints: const BoxConstraints(maxHeight: 360),
-            decoration: BoxDecoration(
-              color: hollow.overlay,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.3),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
-                ),
-              ],
+    final sorted = [...senderIds]..sort((a, b) =>
+        _senderName(senderDisplayNames, a)
+            .toLowerCase()
+            .compareTo(_senderName(senderDisplayNames, b).toLowerCase()));
+    return Builder(
+      builder: (buttonContext) => HollowIconButton(
+        icon: LucideIcons.filter,
+        label: 'Filter by sender',
+        selected: selectedSender != null,
+        onPressed: () => showHollowMenu(
+          context: buttonContext,
+          alignEnd: true,
+          anchor: overlayAnchorOf(buttonContext,
+              localOffset: Offset(
+                  buttonContext.size?.width ?? 0,
+                  buttonContext.size?.height ?? 0)),
+          builder: (_, _) => [
+            HollowMenuItem(
+              label: 'Everyone',
+              isChecked: selectedSender == null,
+              onTap: () => onSenderFilterChanged?.call(null),
             ),
-            child: _SenderFilterList(
-              senderIds: senderIds,
-              selectedSender: selectedSender,
-              senderNames: senderDisplayNames,
-              style: _desktopStyle,
-              onPick: (id) => Navigator.of(context).pop(id ?? '_clear_'),
-              wrapList: (list) => Flexible(child: list),
-            ),
-          ),
+            const HollowMenuDivider(),
+            for (final id in sorted)
+              HollowMenuItem(
+                label: _senderName(senderDisplayNames, id),
+                isChecked: selectedSender == id,
+                onTap: () => onSenderFilterChanged?.call(id),
+              ),
+          ],
         ),
       ),
     );
   }
 }
 
+/// The phone's sender filter: a sheet with a search field, since a long
+/// channel's senders outgrow a menu on a small screen.
 void showArchiveFilterSheet(
   BuildContext context, {
   required List<String> senderIds,
@@ -302,7 +90,7 @@ void showArchiveFilterSheet(
   );
 }
 
-class ArchiveFilterSheet extends StatelessWidget {
+class ArchiveFilterSheet extends StatefulWidget {
   final List<String> senderIds;
   final String? selectedSender;
   final Map<String, String> senderNames;
@@ -317,26 +105,72 @@ class ArchiveFilterSheet extends StatelessWidget {
   });
 
   @override
+  State<ArchiveFilterSheet> createState() => _ArchiveFilterSheetState();
+}
+
+class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
+  String _query = '';
+
+  void _pick(String? id) {
+    Navigator.pop(context);
+    widget.onSelected(id);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final q = _query.toLowerCase();
+    final shown = widget.senderIds
+        .where((id) =>
+            q.isEmpty ||
+            _senderName(widget.senderNames, id).toLowerCase().contains(q))
+        .toList();
+    final check = Icon(LucideIcons.check, size: 20, color: hollow.accentText);
+
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _SenderFilterList(
-            senderIds: senderIds,
-            selectedSender: selectedSender,
-            senderNames: senderNames,
-            style: _mobileStyle,
-            onPick: (id) {
-              Navigator.pop(context);
-              onSelected(id);
-            },
-            wrapList: (list) => ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(context).size.height * 0.4,
-              ),
-              child: list,
+          Padding(
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            child: HollowTextField(
+              hintText: 'Search people',
+              isDense: true,
+              prefixIcon: Icon(LucideIcons.search,
+                  size: 16, color: hollow.textSecondary),
+              onChanged: (val) => setState(() => _query = val),
             ),
+          ),
+          HollowListRow(
+            title: 'Everyone',
+            leading:
+                Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
+            trailing: widget.selectedSender == null ? check : null,
+            onTap: () => _pick(null),
+          ),
+          const HollowDivider(),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.4,
+            ),
+            child: shown.isEmpty
+                ? const HollowEmptyState(dense: true, title: 'No matches')
+                : ListView.builder(
+                    padding:
+                        const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+                    shrinkWrap: true,
+                    itemCount: shown.length,
+                    itemBuilder: (_, index) {
+                      final id = shown[index];
+                      return HollowListRow(
+                        title: _senderName(widget.senderNames, id),
+                        leading: HollowAvatar(peerId: id, size: 28),
+                        trailing:
+                            widget.selectedSender == id ? check : null,
+                        onTap: () => _pick(id),
+                      );
+                    },
+                  ),
           ),
           const SizedBox(height: HollowSpacing.sm),
         ],

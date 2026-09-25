@@ -14,18 +14,18 @@
   ],
   "peers": ["a"],
   "steps": [
-    { "peer": "a", "op": "log", "message": "Archive: My Data / Imported sub-tabs, DMs / Channels / Vault inner tabs" },
+    { "peer": "a", "op": "log", "message": "Archive: the one chip row, Messages / Vault files / Imported" },
     { "peer": "a", "op": "tap", "target": "semantics:Archive", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 2000 },
     { "peer": "a", "op": "shot", "name": "mobile-archive-mydata" },
     { "peer": "a", "op": "dump", "name": "mobile-archive" },
 
-    { "peer": "a", "op": "log", "message": "the inner tab row, selected on Channels" },
-    { "peer": "a", "op": "tap", "target": "text:Channels", "index": 0, "soft": true },
+    { "peer": "a", "op": "log", "message": "the chip row, selected on Vault files" },
+    { "peer": "a", "op": "tap", "target": "text:Vault files", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 1500 },
-    { "peer": "a", "op": "shot", "name": "mobile-archive-channels" },
+    { "peer": "a", "op": "shot", "name": "mobile-archive-vault" },
 
-    { "peer": "a", "op": "log", "message": "the sub-tab row, selected on Imported" },
+    { "peer": "a", "op": "log", "message": "the chip row, selected on Imported" },
     { "peer": "a", "op": "tap", "target": "text:Imported", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 1500 },
     { "peer": "a", "op": "shot", "name": "mobile-archive-imported" },

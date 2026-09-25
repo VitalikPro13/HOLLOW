@@ -6,6 +6,7 @@ import 'package:hollow/src/core/models/archive_conversation.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart' show ProviderRead;
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -13,23 +14,37 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 /// Controls whether the Archive tab is open (replaces main content area).
 final archiveTabOpenProvider = StateProvider<bool>((ref) => false);
 
-/// Which top-level tab is active.
-enum ArchiveSubTab { myData, importedArchives }
+/// The Archive's three views: this device's conversations, the servers' vault
+/// files, and archives someone exported.
+enum ArchiveSection { messages, vault, imported }
 
-final archiveSubTabProvider =
-    StateProvider<ArchiveSubTab>((ref) => ArchiveSubTab.myData);
-
-/// Which inner tab is active in "My Data".
-enum MyDataInnerTab { dms, channels, vaultFiles }
-
-final myDataInnerTabProvider =
-    StateProvider<MyDataInnerTab>((ref) => MyDataInnerTab.dms);
+final archiveSectionProvider =
+    StateProvider<ArchiveSection>((ref) => ArchiveSection.messages);
 
 /// Currently selected DM peer in the archive viewer.
 final archiveSelectedDmProvider = StateProvider<String?>((ref) => null);
 
 /// Currently selected channel ("serverId:channelId" composite key).
 final archiveSelectedChannelProvider = StateProvider<String?>((ref) => null);
+
+/// Opens one conversation in the archive viewer and resets what belonged to the
+/// last one (sender filter, search, a pending date jump). Called from the tap,
+/// never from a build: a provider written during build asserts.
+void selectArchiveConversation(ProviderRead read,
+    {String? dm, String? channel}) {
+  read(archiveSelectedDmProvider.notifier).state = dm;
+  read(archiveSelectedChannelProvider.notifier).state = channel;
+  resetArchiveViewerState(read);
+}
+
+/// Clears the viewer's per-conversation state.
+void resetArchiveViewerState(ProviderRead read) {
+  read(archiveFilterSenderProvider.notifier).state = null;
+  read(archiveMessageSearchOpenProvider.notifier).state = false;
+  read(archiveMessageSearchQueryProvider.notifier).state = '';
+  read(archiveSearchMatchIndexProvider.notifier).state = 0;
+  read(archiveJumpToDateProvider.notifier).state = null;
+}
 
 /// Search query for filtering the conversation list.
 final archiveSearchProvider = StateProvider<String>((ref) => '');

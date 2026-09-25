@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_progress_bar.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
@@ -261,9 +262,9 @@ class _GalleryPane extends StatelessWidget {
               Row(
                 children: [
                   for (final (label, sel) in [
-                    ('DMs', true),
-                    ('Channels', false),
-                    ('Vault Files', false),
+                    ('Messages', true),
+                    ('Vault files', false),
+                    ('Imported', false),
                   ]) ...[
                     Expanded(
                       child: HollowChip(
@@ -273,7 +274,7 @@ class _GalleryPane extends StatelessWidget {
                         onTap: () {},
                       ),
                     ),
-                    if (label != 'Vault Files')
+                    if (label != 'Imported')
                       const SizedBox(width: HollowSpacing.sm),
                   ],
                 ],
@@ -404,6 +405,23 @@ class _GalleryPane extends StatelessWidget {
                   HollowSpinner.large(),
                   SizedBox(width: HollowSpacing.lg),
                   HollowSpinner.medium(value: 0.65),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Progress bar'),
+              Row(
+                children: [
+                  const Expanded(child: HollowProgressBar(value: 0.35)),
+                  const SizedBox(width: HollowSpacing.lg),
+                  Expanded(
+                    child: Builder(
+                      builder: (context) => HollowProgressBar(
+                          value: 1, color: HollowTheme.of(context).success),
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.lg),
+                  const Expanded(child: HollowProgressBar(value: 0)),
                 ],
               ),
               const SizedBox(height: HollowSpacing.xl),

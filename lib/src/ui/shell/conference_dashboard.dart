@@ -7,29 +7,39 @@ import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart'
+    show ChatHeaderBar;
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
-import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
-import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart';
+import 'package:hollow/src/ui/shell/place_header.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Human-readable joiner-side denial message.
 String conferenceDenyMessage(String? reason) {
@@ -127,15 +137,31 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
         case ConferenceLobbyStatus.inCall:
           return _CallView(conf: conf);
         case ConferenceLobbyStatus.none:
-          break; // Inconsistent transient — fall through to the room list.
+          break; // Inconsistent transient: fall through to the room list.
       }
     }
 
-    return Container(
+    return ColoredBox(
       color: hollow.background,
       child: Column(
         children: [
-          _buildHeader(hollow, conf),
+          PlaceHeader(
+            title: 'Conferences',
+            actions: [
+              HollowButton.ghost(
+                compact: true,
+                icon: const Icon(LucideIcons.logIn, size: 14),
+                onPressed: () => showJoinConferenceDialog(context),
+                child: const Text('Join a meeting'),
+              ),
+              HollowButton.filled(
+                compact: true,
+                icon: const Icon(LucideIcons.plus, size: 14),
+                onPressed: () => showConferenceRoomFormDialog(context),
+                child: const Text('Create a room'),
+              ),
+            ],
+          ),
           Expanded(
             child: conf.rooms.isEmpty
                 ? const HollowEmptyState(
@@ -144,221 +170,86 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
                     description: 'Create a room and share its link to meet '
                         'anyone. No server or friendship needed.',
                   )
-                : _buildRoomList(conf),
+                : ListView(
+                    // Plus the row's own padding, the names sit on the
+                    // title's edge.
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    children: [
+                      for (final room in conf.rooms)
+                        _RoomRow(key: ValueKey(room.confId), room: room),
+                    ],
+                  ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildHeader(HollowTheme hollow, ConferenceState conf) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          Text('Conferences',
-              style: HollowTypography.heading
-                  .copyWith(color: hollow.textPrimary)),
-          const SizedBox(width: HollowSpacing.sm),
-          if (conf.rooms.isNotEmpty)
-            Text(
-              '${conf.rooms.length} ${conf.rooms.length == 1 ? 'room' : 'rooms'}',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary),
-            ),
-          const Spacer(),
-          HollowButton.ghost(
-            compact: true,
-            icon: const Icon(LucideIcons.logIn, size: 14),
-            onPressed: () => showJoinConferenceDialog(context),
-            child: const Text('Join Meeting'),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.filled(
-            compact: true,
-            icon: const Icon(LucideIcons.plus, size: 14),
-            onPressed: () => showConferenceRoomFormDialog(context),
-            child: const Text('Create Room'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRoomList(ConferenceState conf) {
-    return ListView(
-      padding: const EdgeInsets.all(HollowSpacing.lg),
-      children: [
-        for (final room in conf.rooms) ...[
-          _RoomCard(room: room),
-          const SizedBox(height: HollowSpacing.sm),
-        ],
-      ],
     );
   }
 }
 
-class _RoomCard extends ConsumerWidget {
+/// One room: its name, what it asks of a joiner, and its actions. Edit and
+/// Delete sit in More (and a right click), out of reach at rest.
+class _RoomRow extends ConsumerWidget {
   final ConferenceRoom room;
-  const _RoomCard({required this.room});
+  const _RoomRow({super.key, required this.room});
 
-  String _formatDate(int ms) {
-    if (ms <= 0) return '';
-    final d = DateTime.fromMillisecondsSinceEpoch(ms);
-    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  void _openMenu(BuildContext context, WidgetRef ref, Offset anchor,
+      {bool alignEnd = false}) {
+    showConferenceRoomMenu(
+      context,
+      ref,
+      room,
+      anchor: anchor,
+      alignEnd: alignEnd,
+      onEdit: () => showConferenceRoomFormDialog(context, room: room),
+    );
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-
-    return Container(
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: hollow.accent.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
+    return ContextMenuTarget(
+      semanticLabel: 'Room actions',
+      onOpen: (anchor) => _openMenu(context, ref, anchor),
+      child: HollowListRow(
+        title: room.name,
+        subtitle: conferenceRoomFacts(room),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            HollowIconButton(
+              icon: LucideIcons.link,
+              label: 'Copy invite link for ${room.name}',
+              tooltip: 'Copy invite link',
+              onPressed: () => copyConferenceInviteLink(context, ref, room),
             ),
-            child: Icon(LucideIcons.video, size: 20, color: hollow.accent),
-          ),
-          const SizedBox(width: HollowSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  room.name,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+            const SizedBox(width: HollowSpacing.sm),
+            HollowButton.outline(
+              compact: true,
+              icon: const Icon(LucideIcons.video, size: 14),
+              onPressed: () =>
+                  ref.read(conferenceProvider.notifier).startMeeting(room),
+              child: const Text('Start meeting'),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+            Builder(
+              builder: (buttonContext) => HollowIconButton(
+                icon: LucideIcons.moreHorizontal,
+                label: 'More actions for ${room.name}',
+                tooltip: 'More',
+                onPressed: () => _openMenu(
+                  context,
+                  ref,
+                  overlayAnchorOf(buttonContext,
+                      localOffset: Offset(
+                          (buttonContext.size?.width ?? 0),
+                          buttonContext.size?.height ?? 0)),
+                  alignEnd: true,
                 ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    Text(
-                      'Created ${_formatDate(room.createdAt)}',
-                      style: HollowTypography.caption
-                          .copyWith(color: hollow.textSecondary),
-                    ),
-                    if (room.waitingRoom) ...[
-                      const SizedBox(width: HollowSpacing.sm),
-                      _badge(hollow, LucideIcons.doorOpen, 'Waiting room'),
-                    ],
-                    if (room.hasAccessCode) ...[
-                      const SizedBox(width: HollowSpacing.sm),
-                      _badge(hollow, LucideIcons.keyRound, 'Access code'),
-                    ],
-                  ],
-                ),
-              ],
+              ),
             ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.ghost(
-            compact: true,
-            icon: const Icon(LucideIcons.link, size: 14),
-            onPressed: () => _copyLink(context, ref),
-            child: const Text('Copy link'),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.outline(
-            compact: true,
-            icon: const Icon(LucideIcons.video, size: 14),
-            onPressed: () =>
-                ref.read(conferenceProvider.notifier).startMeeting(room),
-            child: const Text('Start meeting'),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowTooltip(
-            message: 'Edit room',
-            child: HollowPressable(
-              semanticLabel: 'Edit room ${room.name}',
-              onTap: () => showConferenceRoomFormDialog(context, room: room),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(LucideIcons.pencil,
-                  size: 16, color: hollow.textSecondary),
-            ),
-          ),
-          HollowTooltip(
-            message: 'Delete room',
-            child: HollowPressable(
-              semanticLabel: 'Delete room ${room.name}',
-              onTap: () => _confirmDelete(context, ref),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(LucideIcons.trash2,
-                  size: 16, color: hollow.textSecondary),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
-  }
-
-  Widget _badge(HollowTheme hollow, IconData icon, String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.xs,
-        vertical: 1,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.accent.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(hollow.radiusXs),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 10, color: hollow.accentText),
-          const SizedBox(width: 3),
-          Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.accentText,
-              fontSize: 10,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _copyLink(BuildContext context, WidgetRef ref) {
-    Clipboard.setData(ClipboardData(
-        text: room.inviteLink(ref.read(relayDomainProvider))));
-    HollowToast.show(context, 'Invite link copied',
-        type: HollowToastType.success);
-  }
-
-  Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showHollowConfirm(
-      context: context,
-      title: 'Delete room?',
-      message: 'Delete "${room.name}"? Its invite link stops working forever.',
-      confirmLabel: 'Delete',
-      destructive: true,
-    );
-    if (confirmed) {
-      await ref.read(conferenceProvider.notifier).deleteRoom(room.confId);
-    }
   }
 }
 
@@ -693,53 +584,56 @@ class _LobbyView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final hostName = conf.hostName;
+    final hostKnown = hostName != null && hostName.isNotEmpty;
 
-    return Container(
+    return ColoredBox(
       color: hollow.background,
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (conf.hostPeerId != null)
-              HollowAvatar(
-                // LobbyInfo carries the host's DEVICE id, and profiles are
-                // keyed by their MASTER.
-                peerId: ref
-                    .watch(deviceLinkProvider)
-                    .identityOf(conf.hostPeerId!),
-                size: 64,
-                semanticLabel: hostName ?? 'Meeting host',
-              )
-            else
-              Icon(LucideIcons.video, size: 48, color: hollow.accent),
-            const SizedBox(height: HollowSpacing.lg),
-            Text(
-              hostName != null && hostName.isNotEmpty
-                  ? "You're in the waiting room for $hostName's meeting"
-                  : 'Waiting for the host to start the meeting',
-              style: HollowTypography.heading
-                  .copyWith(color: hollow.textPrimary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              // LobbyInfo is the host's reply to our knock, so until it arrives
-              // the meeting has not started.
-              hostName != null && hostName.isNotEmpty
-                  ? 'Waiting for the host to let you in…'
-                  : "You'll join automatically once it begins.",
-              style: HollowTypography.bodySmall
-                  .copyWith(color: hollow.textSecondary),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            const HollowSpinner.medium(),
-            const SizedBox(height: HollowSpacing.xl),
-            HollowButton.ghost(
-              onPressed: () =>
-                  ref.read(conferenceProvider.notifier).leaveMeeting(),
-              child: const Text('Cancel'),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (conf.hostPeerId != null) ...[
+                HollowAvatar(
+                  // LobbyInfo carries the host's DEVICE id, and profiles are
+                  // keyed by their MASTER.
+                  peerId: ref
+                      .watch(deviceLinkProvider)
+                      .identityOf(conf.hostPeerId!),
+                  size: 64,
+                  semanticLabel: hostName ?? 'Meeting host',
+                ),
+                const SizedBox(height: HollowSpacing.lg),
+              ],
+              Text(
+                hostKnown
+                    ? "You're in the waiting room for $hostName's meeting"
+                    : 'Waiting for the host to start the meeting',
+                style: HollowTypography.subheading
+                    .copyWith(color: hollow.textPrimary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: HollowSpacing.xs),
+              Text(
+                // LobbyInfo is the host's reply to our knock, so until it
+                // arrives the meeting has not started.
+                hostKnown
+                    ? 'The host will let you in.'
+                    : "You'll join automatically once it begins.",
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: HollowSpacing.lg),
+              const HollowSpinner.medium(),
+              const SizedBox(height: HollowSpacing.lg),
+              HollowButton.ghost(
+                onPressed: () => leaveConferenceMeeting(context, ref),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -755,39 +649,25 @@ class _DeniedView extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final wrongCode = conf.denyReason == 'wrong_code';
 
-    return Container(
+    return ColoredBox(
       color: hollow.background,
-      child: Center(
-        child: Column(
+      child: HollowEmptyState(
+        glyph: LucideIcons.doorClosed,
+        title: conferenceDenyMessage(conf.denyReason),
+        action: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(LucideIcons.doorClosed,
-                size: 48, color: hollow.textSecondary.withValues(alpha: 0.5)),
-            const SizedBox(height: HollowSpacing.lg),
-            Text(
-              conferenceDenyMessage(conf.denyReason),
-              style: HollowTypography.heading
-                  .copyWith(color: hollow.textPrimary),
-              textAlign: TextAlign.center,
+            HollowButton.ghost(
+              onPressed: () => leaveConferenceMeeting(context, ref),
+              child: const Text('Back'),
             ),
-            const SizedBox(height: HollowSpacing.xl),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                HollowButton.ghost(
-                  onPressed: () =>
-                      ref.read(conferenceProvider.notifier).leaveMeeting(),
-                  child: const Text('Back'),
-                ),
-                if (wrongCode) ...[
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowButton.filled(
-                    onPressed: () => _retryWithCode(context, ref),
-                    child: const Text('Enter access code'),
-                  ),
-                ],
-              ],
-            ),
+            if (wrongCode) ...[
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.filled(
+                onPressed: () => _retryWithCode(context, ref),
+                child: const Text('Enter access code'),
+              ),
+            ],
           ],
         ),
       ),
@@ -797,43 +677,146 @@ class _DeniedView extends ConsumerWidget {
   Future<void> _retryWithCode(BuildContext context, WidgetRef ref) async {
     final confId = conf.activeConfId;
     if (confId == null) return;
+    final notifier = ref.read(conferenceProvider.notifier);
     final code = await promptConferenceAccessCode(context);
     if (code == null || code.isEmpty) return;
-    await ref
-        .read(conferenceProvider.notifier)
-        .requestJoin(confId, accessCode: code);
+    await notifier.requestJoin(confId, accessCode: code);
   }
 }
 
-class _CallView extends ConsumerWidget {
+/// What the meeting's one side panel shows.
+enum _MeetingPanel { chat, people }
+
+/// Everyone in the meeting, us first. The participant set is DEVICE-keyed,
+/// so seeding it with the MASTER id would list us twice.
+({String selfId, List<String> all}) _meetingParticipants(
+    WidgetRef ref, ConferenceState conf, VoiceChannelState vcState) {
+  final localPeerId = ref.watch(identityProvider).peerId ?? '';
+  final selfId = vcState.selfParticipantId(
+        conf.activeServerId,
+        kConferenceChannelId,
+        master: localPeerId,
+        device: ref.watch(localDevicePeerIdProvider).valueOrNull,
+      ) ??
+      localPeerId;
+  final all = <String>{
+    selfId,
+    ...vcState.getParticipants(conf.activeServerId, kConferenceChannelId),
+  }.where((p) => p.isNotEmpty).toList();
+  return (selfId: selfId, all: all);
+}
+
+String _meetingName(ConferenceState conf) {
+  if (conf.isHost) return conf.roomById(conf.activeConfId!)?.name ?? 'Meeting';
+  final hostName = conf.hostName;
+  return hostName != null && hostName.isNotEmpty
+      ? "$hostName's meeting"
+      : 'Meeting';
+}
+
+/// The meeting: the stage, and ONE side panel on the right holding the chat
+/// or the people in it.
+class _CallView extends ConsumerStatefulWidget {
   final ConferenceState conf;
   const _CallView({required this.conf});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final meetingName = conf.isHost
-        ? (conf.roomById(conf.activeConfId!)?.name ?? 'Meeting')
-        : (conf.hostName != null && conf.hostName!.isNotEmpty
-            ? "${conf.hostName}'s meeting"
-            : 'Meeting');
+  ConsumerState<_CallView> createState() => _CallViewState();
+}
 
-    return Container(
+class _CallViewState extends ConsumerState<_CallView> {
+  _MeetingPanel? _panel = _MeetingPanel.chat;
+
+  // Panels show and hide instantly: a width animation re-lays the stage.
+  void _toggle(_MeetingPanel panel) {
+    setState(() => _panel = _panel == panel ? null : panel);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final conf = widget.conf;
+    final meetingName = _meetingName(conf);
+    final waiting = conf.isHost ? conf.waiting.length : 0;
+
+    // A knock deserves attention, so the host sees who is waiting.
+    ref.listen(
+        conferenceProvider.select((s) => s.isHost ? s.waiting.length : 0),
+        (prev, next) {
+      if (prev != null && next > prev) {
+        setState(() => _panel = _MeetingPanel.people);
+      }
+    });
+
+    return ColoredBox(
       color: hollow.background,
       child: Column(
         children: [
-          _buildHeader(context, ref, hollow, meetingName),
-          Expanded(
-            child: Stack(
-              children: [
-                _ConferenceCallArea(conf: conf, meetingName: meetingName),
-                // The chat drawer's mirror twin on the LEFT edge.
-                Positioned(
-                  left: 0,
-                  top: 0,
-                  bottom: 0,
-                  child: _ManageDrawer(conf: conf),
+          PlaceHeader(
+            title: meetingName,
+            actions: [
+              if (conf.isHost)
+                HollowButton.ghost(
+                  compact: true,
+                  icon: const Icon(LucideIcons.link, size: 14),
+                  onPressed: () {
+                    final link = webConferenceInviteLink(conf.activeConfId!,
+                        relay: ref.read(relayDomainProvider));
+                    Clipboard.setData(ClipboardData(text: link));
+                    HollowToast.show(context, 'Invite link copied',
+                        type: HollowToastType.success);
+                  },
+                  child: const Text('Copy link'),
                 ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  HollowIconButton(
+                    icon: LucideIcons.messageSquare,
+                    label: 'Chat',
+                    selected: _panel == _MeetingPanel.chat,
+                    onPressed: () => _toggle(_MeetingPanel.chat),
+                  ),
+                  const SizedBox(width: HollowSpacing.xs),
+                  HollowIconButton(
+                    icon: LucideIcons.users,
+                    label: 'People',
+                    count: waiting > 0 ? '$waiting' : null,
+                    selected: _panel == _MeetingPanel.people,
+                    onPressed: () => _toggle(_MeetingPanel.people),
+                  ),
+                ],
+              ),
+              if (conf.isHost)
+                HollowButton.outline(
+                  compact: true,
+                  danger: true,
+                  onPressed: () => endConferenceMeeting(context, ref),
+                  child: const Text('End meeting'),
+                )
+              else
+                HollowButton.ghost(
+                  compact: true,
+                  icon: const Icon(LucideIcons.phoneOff, size: 14),
+                  onPressed: () => leaveConferenceMeeting(context, ref),
+                  child: const Text('Leave'),
+                ),
+            ],
+          ),
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: _ConferenceCallArea(
+                      conf: conf, meetingName: meetingName),
+                ),
+                if (_panel != null)
+                  _MeetingSidePanel(
+                    conf: conf,
+                    meetingName: meetingName,
+                    panel: _panel!,
+                  ),
               ],
             ),
           ),
@@ -841,183 +824,69 @@ class _CallView extends ConsumerWidget {
       ),
     );
   }
-
-  Widget _buildHeader(BuildContext context, WidgetRef ref, HollowTheme hollow,
-      String meetingName) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          Icon(LucideIcons.video, size: 18, color: hollow.accent),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              meetingName,
-              style: HollowTypography.heading
-                  .copyWith(color: hollow.textPrimary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (conf.isHost) ...[
-            HollowButton.ghost(
-              compact: true,
-              icon: const Icon(LucideIcons.link, size: 14),
-              onPressed: () {
-                final link = webConferenceInviteLink(conf.activeConfId!,
-                    relay: ref.read(relayDomainProvider));
-                Clipboard.setData(ClipboardData(text: link));
-                HollowToast.show(context, 'Invite link copied',
-                    type: HollowToastType.success);
-              },
-              child: const Text('Copy link'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.danger(
-              compact: true,
-              onPressed: () =>
-                  ref.read(conferenceProvider.notifier).endMeeting(),
-              child: const Text('End meeting'),
-            ),
-          ] else
-            HollowButton.ghost(
-              compact: true,
-              icon: const Icon(LucideIcons.phoneOff, size: 14),
-              onPressed: () =>
-                  ref.read(conferenceProvider.notifier).leaveMeeting(),
-              child: const Text('Leave'),
-            ),
-        ],
-      ),
-    );
-  }
 }
 
-/// The chat drawer's mirror twin on the LEFT edge of the call surface: search,
-/// the host's waiting room and the participant roster. Auto-opens on a knock,
-/// so the host never misses one.
-class _ManageDrawer extends ConsumerStatefulWidget {
+/// The meeting's side panel, built like the member panel: chrome, a hairline
+/// on its inner edge, full height.
+class _MeetingSidePanel extends StatelessWidget {
   final ConferenceState conf;
-  const _ManageDrawer({required this.conf});
+  final String meetingName;
+  final _MeetingPanel panel;
 
-  @override
-  ConsumerState<_ManageDrawer> createState() => _ManageDrawerState();
-}
+  const _MeetingSidePanel({
+    required this.conf,
+    required this.meetingName,
+    required this.panel,
+  });
 
-class _ManageDrawerState extends ConsumerState<_ManageDrawer> {
-  bool _open = false;
-
-  // Opens and closes instantly: a width animation re-lays the stage every frame.
-  void _setOpen(bool open) {
-    if (_open == open) return;
-    setState(() => _open = open);
-  }
+  static const double _width = 300;
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final pending = ref.watch(
-        conferenceProvider.select((s) => s.isHost ? s.waiting.length : 0));
-
-    // A knock deserves attention, so the drawer pops open for the host.
-    ref.listen(
-        conferenceProvider.select((s) => s.isHost ? s.waiting.length : 0),
-        (prev, next) {
-      if (prev != null && next > prev) _setOpen(true);
-    });
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        if (_open)
-          Container(
-            width: 300,
-            decoration: BoxDecoration(
-              color: hollow.overlay.withValues(alpha: 0.88),
-              border: Border(
-                right: BorderSide(color: hollow.border.withValues(alpha: 0.5)),
-              ),
-            ),
-            child: _ManagePanelContent(conf: widget.conf),
-          ),
-        GestureDetector(
-          onTap: () => _setOpen(!_open),
-          child: Semantics(
-            label: _open ? 'Hide meeting panel' : 'Show meeting panel',
-            button: true,
-            child: Container(
-              width: 24,
-              height: 48,
-              decoration: BoxDecoration(
-                color: hollow.overlay.withValues(alpha: 0.88),
-                borderRadius: const BorderRadius.horizontal(
-                  right: Radius.circular(8),
+    return Container(
+      width: _width,
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(left: BorderSide(color: hollow.border)),
+      ),
+      // The header's Chat and People buttons switch it; its own header names
+      // what it shows, so nothing here repeats them.
+      child: panel == _MeetingPanel.chat
+          ? ChannelChatPane(
+              // The ONE conference chat, RAM-only under a 'conf:' key.
+              serverId: conf.activeServerId,
+              channelId: kConferenceChannelId,
+              // Also the composer's hint, which a long room name would wrap.
+              channelName: 'the meeting',
+              headerTitle: 'Chat',
+              isVoice: true,
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ChatHeaderBar(
+                  leading: Icon(LucideIcons.users,
+                      size: 20, color: hollow.textTertiary),
+                  title: 'People',
                 ),
-                border: Border(
-                  right: BorderSide(
-                      color: hollow.border.withValues(alpha: 0.5)),
-                  top: BorderSide(
-                      color: hollow.border.withValues(alpha: 0.5)),
-                  bottom: BorderSide(
-                      color: hollow.border.withValues(alpha: 0.5)),
-                ),
-              ),
-              child: Stack(
-                clipBehavior: Clip.none,
-                alignment: Alignment.center,
-                children: [
-                  Icon(
-                    _open ? LucideIcons.chevronLeft : LucideIcons.users,
-                    size: 14,
-                    color: hollow.textSecondary,
-                  ),
-                  if (!_open && pending > 0)
-                    Positioned(
-                      top: 4,
-                      right: 2,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: hollow.accent,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '$pending',
-                          style: HollowTypography.micro.copyWith(
-                            color: hollow.background,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+                Expanded(child: _PeoplePanel(conf: conf)),
+              ],
             ),
-          ),
-        ),
-      ],
     );
   }
 }
 
-class _ManagePanelContent extends ConsumerStatefulWidget {
+/// Search, the host's waiting room, and everyone in the meeting.
+class _PeoplePanel extends ConsumerStatefulWidget {
   final ConferenceState conf;
-  const _ManagePanelContent({required this.conf});
+  const _PeoplePanel({required this.conf});
 
   @override
-  ConsumerState<_ManagePanelContent> createState() =>
-      _ManagePanelContentState();
+  ConsumerState<_PeoplePanel> createState() => _PeoplePanelState();
 }
 
-class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
+class _PeoplePanelState extends ConsumerState<_PeoplePanel> {
   final _searchController = TextEditingController();
   String _query = '';
 
@@ -1027,93 +896,54 @@ class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
     super.dispose();
   }
 
-  bool _matches(String name, String peerId) {
-    if (_query.isEmpty) return true;
-    final q = _query.toLowerCase();
-    return name.toLowerCase().contains(q) ||
-        peerId.toLowerCase().contains(q);
-  }
+  bool _matches(String name) =>
+      _query.isEmpty || name.toLowerCase().contains(_query.toLowerCase());
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final conf = ref.watch(conferenceProvider);
     final vcState = ref.watch(voiceChannelProvider);
-    final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final links = ref.watch(deviceLinkProvider);
-
-    // The participant set is DEVICE-keyed, so seeding it with the MASTER id
-    // lists us twice, the second time with a Kick button.
-    final selfId = vcState.selfParticipantId(
-          conf.activeServerId,
-          kConferenceChannelId,
-          master: localPeerId,
-          device: ref.watch(localDevicePeerIdProvider).valueOrNull,
-        ) ??
-        localPeerId;
-    final participants = <String>{
-      selfId,
-      ...vcState.getParticipants(conf.activeServerId, kConferenceChannelId),
-    }.where((p) => p.isNotEmpty).toList();
+    final (:selfId, :all) = _meetingParticipants(ref, conf, vcState);
 
     final waiting = conf.isHost
-        ? conf.waiting
-            .where((w) => _matches(w.displayName, w.peerId))
-            .toList()
+        ? conf.waiting.where((w) => _matches(w.displayName)).toList()
         : const <WaitingEntry>[];
-    final shownParticipants = participants.where((p) {
-      final name = p == selfId ? 'You' : conferenceDisplayName(ref, p);
-      return _matches(name, p);
-    }).toList();
+    final shown = all
+        .where((p) =>
+            _matches(p == selfId ? 'You' : conferenceDisplayName(ref, p)))
+        .toList();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.md),
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-              HollowSpacing.md, HollowSpacing.md, HollowSpacing.md, 0),
-          child: HollowTextField(
-            controller: _searchController,
-            hintText: 'Search people',
-            isDense: true,
-            onChanged: (v) => setState(() => _query = v.trim()),
-          ),
+        HollowTextField(
+          controller: _searchController,
+          hintText: 'Search people',
+          isDense: true,
+          prefixIcon: Icon(LucideIcons.search,
+              size: 14, color: hollow.textSecondary),
+          onChanged: (v) => setState(() => _query = v.trim()),
         ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.all(HollowSpacing.md),
-            children: [
-              if (waiting.isNotEmpty) ...[
-                _sectionLabel(hollow, 'Waiting Room (${waiting.length})'),
-                for (final entry in waiting)
-                  _WaitingRow(entry: entry, links: links),
-                const SizedBox(height: HollowSpacing.md),
-              ],
-              _sectionLabel(
-                  hollow, 'Participants (${shownParticipants.length})'),
-              for (final peerId in shownParticipants)
-                _ParticipantRow(
-                  peerId: peerId,
-                  isSelf: peerId == selfId,
-                  canKick: conf.isHost && peerId != selfId,
-                ),
-            ],
+        const SizedBox(height: HollowSpacing.md),
+        if (waiting.isNotEmpty) ...[
+          HollowSectionHeader('Waiting room',
+              dense: true, count: '${waiting.length}'),
+          for (final entry in waiting)
+            _WaitingRow(key: ValueKey(entry.peerId), entry: entry, links: links),
+          const SizedBox(height: HollowSpacing.lg),
+        ],
+        HollowSectionHeader('In the meeting',
+            dense: true, count: '${shown.length}'),
+        for (final peerId in shown)
+          _ParticipantRow(
+            key: ValueKey(peerId),
+            peerId: peerId,
+            isSelf: peerId == selfId,
+            canKick: conf.isHost && peerId != selfId,
           ),
-        ),
       ],
-    );
-  }
-
-  Widget _sectionLabel(HollowTheme hollow, String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-      child: Text(
-        text,
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
     );
   }
 }
@@ -1121,14 +951,14 @@ class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
 class _WaitingRow extends ConsumerWidget {
   final WaitingEntry entry;
   final DeviceLinkState links;
-  const _WaitingRow({required this.entry, required this.links});
+  const _WaitingRow({super.key, required this.entry, required this.links});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final shortId = entry.peerId.length > 10
-        ? '${entry.peerId.substring(0, 10)}…'
-        : entry.peerId;
+    final notifier = ref.read(conferenceProvider.notifier);
+    final name =
+        entry.displayName.isNotEmpty ? entry.displayName : 'Someone';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
       child: Row(
@@ -1138,82 +968,39 @@ class _WaitingRow extends ConsumerWidget {
             // the person's master.
             peerId: links.identityOf(entry.peerId),
             size: 28,
-            semanticLabel: entry.displayName,
+            semanticLabel: name,
           ),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        entry.displayName.isNotEmpty
-                            ? entry.displayName
-                            : shortId,
-                        style: HollowTypography.bodySmall.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (entry.isFriend) ...[
-                      const SizedBox(width: HollowSpacing.xs),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: HollowSpacing.xs, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: hollow.success.withValues(alpha: 0.15),
-                          borderRadius:
-                              BorderRadius.circular(hollow.radiusXs),
-                        ),
-                        child: Text(
-                          'Friend',
-                          style: HollowTypography.micro.copyWith(
-                            color: hollow.success,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                Text(
-                  shortId,
-                  style: HollowTypography.mono.copyWith(
-                    color: hollow.textTertiary,
-                    fontSize: 10,
+                Flexible(
+                  child: Text(
+                    name,
+                    style: HollowTypography.label
+                        .copyWith(color: hollow.textPrimary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                if (entry.isFriend) ...[
+                  const SizedBox(width: HollowSpacing.xs),
+                  const HollowBadge('Friend', kind: HollowBadgeKind.success),
+                ],
               ],
             ),
           ),
-          HollowTooltip(
-            message: 'Decline',
-            child: HollowPressable(
-              semanticLabel: 'Decline join request',
-              onTap: () =>
-                  ref.read(conferenceProvider.notifier).deny(entry.peerId),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(LucideIcons.x, size: 16, color: hollow.error),
-            ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => notifier.deny(entry.peerId),
+            child: const Text('Decline'),
           ),
-          HollowTooltip(
-            message: 'Admit',
-            child: HollowPressable(
-              semanticLabel: 'Admit to meeting',
-              onTap: () =>
-                  ref.read(conferenceProvider.notifier).admit(entry.peerId),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child:
-                  Icon(LucideIcons.check, size: 16, color: hollow.accent),
-            ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.outline(
+            compact: true,
+            onPressed: () => notifier.admit(entry.peerId),
+            child: const Text('Admit'),
           ),
         ],
       ),
@@ -1226,10 +1013,13 @@ class _ParticipantRow extends ConsumerWidget {
   final bool isSelf;
   final bool canKick;
   const _ParticipantRow({
+    super.key,
     required this.peerId,
     required this.isSelf,
     required this.canKick,
   });
+
+  static const double _avatar = 28;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1244,18 +1034,13 @@ class _ParticipantRow extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
       child: Row(
         children: [
-          Container(
-            padding: const EdgeInsets.all(1),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: speaking ? hollow.accent : Colors.transparent,
-                width: 1.5,
-              ),
-            ),
+          SpeakingAvatarOutline(
+            isSpeaking: speaking,
+            size: _avatar,
+            radius: hollow.radiusMd,
             child: HollowAvatar(
               peerId: ref.read(deviceLinkProvider).identityOf(peerId),
-              size: 26,
+              size: _avatar,
               semanticLabel: name,
             ),
           ),
@@ -1263,23 +1048,19 @@ class _ParticipantRow extends ConsumerWidget {
           Expanded(
             child: Text(
               name,
-              style: HollowTypography.bodySmall
-                  .copyWith(color: hollow.textPrimary),
+              style:
+                  HollowTypography.label.copyWith(color: hollow.textPrimary),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
           ),
           if (canKick)
-            HollowTooltip(
-              message: 'Remove from meeting',
-              child: HollowPressable(
-                semanticLabel: 'Remove from meeting',
-                onTap: () => _confirmKick(context, ref, name),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(LucideIcons.userMinus,
-                    size: 15, color: hollow.textSecondary),
-              ),
+            HollowIconButton(
+              icon: LucideIcons.userMinus,
+              label: 'Remove $name from the meeting',
+              tooltip: 'Remove from meeting',
+              size: 28,
+              onPressed: () => _confirmKick(context, ref, name),
             ),
         ],
       ),
@@ -1288,6 +1069,7 @@ class _ParticipantRow extends ConsumerWidget {
 
   Future<void> _confirmKick(
       BuildContext context, WidgetRef ref, String name) async {
+    final notifier = ref.read(conferenceProvider.notifier);
     final confirmed = await showHollowConfirm(
       context: context,
       title: 'Remove from meeting?',
@@ -1296,9 +1078,7 @@ class _ParticipantRow extends ConsumerWidget {
       confirmLabel: 'Remove',
       destructive: true,
     );
-    if (confirmed) {
-      await ref.read(conferenceProvider.notifier).kick(peerId);
-    }
+    if (confirmed) await notifier.kick(peerId);
   }
 }
 
@@ -1314,10 +1094,9 @@ class _ConferenceCallArea extends ConsumerWidget {
     final inThisCall = vcState.currentServerId == serverId &&
         vcState.currentChannelId == kConferenceChannelId;
 
-    // Reuses the voice-channel pane's full-bleed views wholesale; its chat
-    // overlay is the ONE conference chat, and it falls back to channel chat
-    // only when no video is up. The floating controls pill is HIDDEN, because
-    // its Disconnect tears down the voice leg alone and strands the meeting.
+    // Reuses the voice-channel pane's full-bleed views wholesale. Its chat
+    // drawer and floating pill are HIDDEN: the chat lives in the side panel,
+    // and the pill's Disconnect tears down the voice leg alone.
     if (inThisCall && (vcState.showsShareSurface || vcState.isCameraActive)) {
       return Column(
         children: [
@@ -1328,6 +1107,7 @@ class _ConferenceCallArea extends ConsumerWidget {
               channelId: kConferenceChannelId,
               channelName: meetingName,
               hideControlsPill: true,
+              hideChatOverlay: true,
             ),
           ),
           _ConferenceControls(vcState: vcState),
@@ -1335,78 +1115,31 @@ class _ConferenceCallArea extends ConsumerWidget {
       );
     }
 
-    return _ParticipantsView(
-        conf: conf, vcState: vcState, meetingName: meetingName);
-  }
-}
-
-class _ParticipantsView extends ConsumerWidget {
-  final ConferenceState conf;
-  final VoiceChannelState vcState;
-  final String meetingName;
-  const _ParticipantsView({
-    required this.conf,
-    required this.vcState,
-    required this.meetingName,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final localPeerId = ref.watch(identityProvider).peerId ?? '';
-    // DEVICE-keyed set: seeded with the id form it uses, or we tile ourselves
-    // twice (see the roster above).
-    final selfId = vcState.selfParticipantId(
-          conf.activeServerId,
-          kConferenceChannelId,
-          master: localPeerId,
-          device: ref.watch(localDevicePeerIdProvider).valueOrNull,
-        ) ??
-        localPeerId;
-    final participants = <String>{
-      selfId,
-      ...vcState.getParticipants(conf.activeServerId, kConferenceChannelId),
-    }.where((p) => p.isNotEmpty).toList();
-
-    return Stack(
+    final (:selfId, :all) = _meetingParticipants(ref, conf, vcState);
+    return Column(
       children: [
-        Column(
-          children: [
-            Expanded(
-              child: Center(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(HollowSpacing.lg),
-                  child: Wrap(
-                    spacing: HollowSpacing.lg,
-                    runSpacing: HollowSpacing.lg,
-                    alignment: WrapAlignment.center,
-                    children: [
-                      for (final peerId in participants)
-                        _ParticipantTile(
-                          peerId: peerId,
-                          isSelf: peerId == selfId,
-                          vcState: vcState,
-                        ),
-                    ],
-                  ),
-                ),
+        Expanded(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              child: Wrap(
+                spacing: HollowSpacing.lg,
+                runSpacing: HollowSpacing.lg,
+                alignment: WrapAlignment.center,
+                children: [
+                  for (final peerId in all)
+                    _ParticipantTile(
+                      key: ValueKey(peerId),
+                      peerId: peerId,
+                      isSelf: peerId == selfId,
+                      vcState: vcState,
+                    ),
+                ],
               ),
             ),
-            _ConferenceControls(vcState: vcState),
-          ],
-        ),
-        // The SAME right-side chat drawer screen share uses: one conference
-        // chat everywhere, RAM-only under a 'conf:' key.
-        Positioned(
-          right: 0,
-          top: 0,
-          bottom: 0,
-          child: VcChatOverlay(
-            serverId: conf.activeServerId,
-            channelId: kConferenceChannelId,
-            channelName: meetingName,
-            initiallyOpen: true,
           ),
         ),
+        _ConferenceControls(vcState: vcState),
       ],
     );
   }
@@ -1417,10 +1150,14 @@ class _ParticipantTile extends ConsumerWidget {
   final bool isSelf;
   final VoiceChannelState vcState;
   const _ParticipantTile({
+    super.key,
     required this.peerId,
     required this.isSelf,
     required this.vcState,
   });
+
+  static const double _avatar = 56;
+  static const double _width = 96;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1436,51 +1173,46 @@ class _ParticipantTile extends ConsumerWidget {
     final name = isSelf ? 'You' : conferenceDisplayName(ref, peerId);
 
     return SizedBox(
-      width: 96,
+      width: _width,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Stack(
             clipBehavior: Clip.none,
             children: [
-              Container(
-                padding: const EdgeInsets.all(2),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-                  border: Border.all(
-                    color:
-                        speaking ? hollow.accent : Colors.transparent,
-                    width: 2,
-                  ),
-                ),
+              SpeakingAvatarOutline(
+                isSpeaking: speaking,
+                size: _avatar,
+                radius: hollow.radiusMd,
                 child: HollowAvatar(
                   peerId: ref.read(deviceLinkProvider).identityOf(peerId),
-                  size: 56,
+                  size: _avatar,
                   semanticLabel: name,
                 ),
               ),
               if (muted)
                 Positioned(
-                  right: -2,
-                  bottom: -2,
+                  right: -HollowSpacing.xs,
+                  bottom: -HollowSpacing.xs,
                   child: Container(
-                    padding: const EdgeInsets.all(3),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
                     decoration: BoxDecoration(
                       color: hollow.elevated,
                       shape: BoxShape.circle,
                       border: Border.all(color: hollow.border),
                     ),
-                    child:
-                        Icon(LucideIcons.micOff, size: 10, color: hollow.error),
+                    child: Icon(LucideIcons.micOff,
+                        size: 14,
+                        color: hollow.error,
+                        semanticLabel: 'Muted'),
                   ),
                 ),
             ],
           ),
-          const SizedBox(height: HollowSpacing.xs),
+          const SizedBox(height: HollowSpacing.sm),
           Text(
             name,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textPrimary),
+            style: HollowTypography.caption.copyWith(color: hollow.textPrimary),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             textAlign: TextAlign.center,
@@ -1519,28 +1251,11 @@ class _ConferenceControls extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
-
-    Widget control({
-      required IconData icon,
-      required String label,
-      required VoidCallback onTap,
-      bool active = false,
-    }) {
-      return HollowTooltip(
-        message: label,
-        child: HollowPressable(
-          semanticLabel: label,
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: Icon(
-            icon,
-            size: 20,
-            color: active ? hollow.error : hollow.textPrimary,
-          ),
-        ),
-      );
-    }
+    // PTT-aware mic (issue #38): gated while idle, live on hold.
+    final mic = micButtonVisual(ref,
+        isMuted: vcState.isMuted,
+        hollow: hollow,
+        idleColor: hollow.textSecondary);
 
     return Container(
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
@@ -1550,46 +1265,40 @@ class _ConferenceControls extends ConsumerWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Builder(builder: (context) {
-            // PTT-aware mic (issue #38): gated while idle, live on hold.
-            final mic = micButtonVisual(ref,
-                isMuted: vcState.isMuted,
-                hollow: hollow,
-                idleColor: hollow.textPrimary);
-            return control(
-              icon: mic.icon,
-              label: mic.tooltip,
-              active: vcState.isMuted,
-              onTap: vcNotifier.toggleMute,
-            );
-          }),
+          HollowIconButton(
+            icon: mic.icon,
+            label: vcState.isMuted ? 'Unmute' : 'Mute',
+            tooltip: mic.tooltip,
+            color: mic.color,
+            selected: vcState.isMuted,
+            onPressed: vcNotifier.toggleMute,
+          ),
           const SizedBox(width: HollowSpacing.sm),
-          control(
+          HollowIconButton(
             icon: vcState.isDeafened
                 ? LucideIcons.headphoneOff
                 : LucideIcons.headphones,
             label: vcState.isDeafened ? 'Undeafen' : 'Deafen',
-            active: vcState.isDeafened,
-            onTap: vcNotifier.toggleDeafen,
+            color: vcState.isDeafened ? hollow.error : null,
+            selected: vcState.isDeafened,
+            onPressed: vcNotifier.toggleDeafen,
           ),
           const SizedBox(width: HollowSpacing.sm),
-          control(
+          HollowIconButton(
             icon:
                 vcState.isCameraOn ? LucideIcons.video : LucideIcons.videoOff,
-            label:
-                vcState.isCameraOn ? 'Turn camera off' : 'Turn camera on',
-            active: vcState.isCameraOn,
-            onTap: () => unawaited(
-                vcNotifier.toggleCamera().catchError((_) {})),
+            label: vcState.isCameraOn ? 'Turn camera off' : 'Turn camera on',
+            selected: vcState.isCameraOn,
+            onPressed: () =>
+                unawaited(vcNotifier.toggleCamera().catchError((_) {})),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          control(
+          HollowIconButton(
             icon: LucideIcons.monitor,
-            label: vcState.isScreenSharing
-                ? 'Stop sharing'
-                : 'Share your screen',
-            active: vcState.isScreenSharing,
-            onTap: () => unawaited(_toggleScreenShare(context, ref)),
+            label:
+                vcState.isScreenSharing ? 'Stop sharing' : 'Share your screen',
+            selected: vcState.isScreenSharing,
+            onPressed: () => unawaited(_toggleScreenShare(context, ref)),
           ),
         ],
       ),

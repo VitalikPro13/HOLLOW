@@ -6,10 +6,15 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Leaves the voice room, toasting when the leave fails.
+/// Leaves the voice room, toasting when the leave fails. Inside a conference
+/// it leaves (or, for the host, ends) the meeting instead.
 Future<void> leaveVoiceRoom(BuildContext context, WidgetRef ref) async {
+  if (inActiveConferenceCall(ref)) {
+    return endOrLeaveConferenceMeeting(context, ref);
+  }
   try {
     await ref.read(voiceChannelProvider.notifier).leaveChannel();
   } catch (_) {

@@ -1,80 +1,58 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/vault_file_status_provider.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
+import 'package:hollow/src/ui/share/share_card.dart' show ShareCard;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
-/// Right panel for the Vault Files tab: every server the user belongs to, with
-/// expandable sections listing its vault files and their shard status.
+/// Vault files: every server you belong to, each opening to the files it keeps
+/// spread across its members and how many shards of each this device holds.
 class VaultFilesView extends ConsumerWidget {
   const VaultFilesView({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final servers = ref.watch(serverListProvider);
 
     if (servers.isEmpty) {
-      return const HollowEmptyState(title: 'No servers');
+      return const HollowEmptyState(
+        glyph: LucideIcons.hardDrive,
+        title: 'No vault files yet',
+        description: 'A server keeps its large files as shards across its '
+            'members. Join one and its files show up here.',
+      );
     }
 
-    return Column(
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.sm),
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.xs,
-          ),
-          child: Row(
-            children: [
-              _ActionButton(
-                icon: LucideIcons.logIn,
-                label: 'Join Recovery Pool',
-                onTap: () => showJoinRecoveryPoolDialog(context),
-                hollow: hollow,
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.lg,
-              vertical: HollowSpacing.xs,
-            ),
-            itemCount: servers.length,
-            itemBuilder: (context, index) {
-              final entry = servers.entries.elementAt(index);
-              return _ServerVaultSection(
-                serverId: entry.key,
-                server: entry.value,
-              );
-            },
-          ),
-        ),
+        for (final entry in servers.entries)
+          _ServerVaultSection(serverId: entry.key, server: entry.value),
       ],
     );
   }
 }
 
-/// Expandable section for one server showing its vault files.
+/// One server, opening to its vault files. Open by default when it has any.
 class _ServerVaultSection extends ConsumerStatefulWidget {
   final String serverId;
   final ServerInfo server;
 
-  const _ServerVaultSection({
-    required this.serverId,
-    required this.server,
-  });
+  const _ServerVaultSection({required this.serverId, required this.server});
 
   @override
   ConsumerState<_ServerVaultSection> createState() =>
@@ -95,204 +73,181 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
     }
     final expanded = _expanded ?? false;
 
+    final Widget status = statusAsync.when(
+      loading: () => const HollowSpinner(),
+      error: (_, _) => Text("Didn't load",
+          style: HollowTypography.caption.copyWith(color: hollow.error)),
+      data: (files) {
+        if (files.isEmpty) {
+          return Text('No vault files',
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.textTertiary));
+        }
+        final recoverable = files.where((f) => f.isReconstructable).length;
+        return Text(
+          '$recoverable of ${files.length} recoverable',
+          style: HollowTypography.caption.copyWith(
+            color: recoverable == files.length
+                ? hollow.success
+                : hollow.textSecondary,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        );
+      },
+    );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         HollowPressable(
           onTap: () => setState(() => _expanded = !expanded),
+          subtle: true,
+          semanticLabel:
+              '${widget.server.name}, ${expanded ? 'collapse' : 'expand'}',
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.sm,
-          ),
+              horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
           child: Row(
             children: [
               Icon(
                 expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
                 size: 16,
-                color: hollow.textSecondary,
+                color: hollow.textTertiary,
               ),
-              const SizedBox(width: HollowSpacing.sm),
-              Icon(LucideIcons.server, size: 16, color: hollow.accent),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
                   widget.server.name,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                  ),
+                  style: HollowTypography.subheading
+                      .copyWith(color: hollow.textPrimary),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              statusAsync.when(
-                data: (files) {
-                  if (files.isEmpty) {
-                    return Text(
-                      'No vault files',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
-                      ),
-                    );
-                  }
-                  final recoverable =
-                      files.where((f) => f.isReconstructable).length;
-                  return Text(
-                    '$recoverable/${files.length} recoverable',
-                    style: HollowTypography.caption.copyWith(
-                      color: recoverable == files.length
-                          ? const Color(0xFF4CAF50)
-                          : hollow.textSecondary,
-                      fontSize: 11,
-                    ),
-                  );
-                },
-                loading: () => const HollowSpinner(),
-                error: (_, _) => Text(
-                  'Error',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.error,
-                    fontSize: 11,
-                  ),
-                ),
-              ),
+              const SizedBox(width: HollowSpacing.md),
+              status,
             ],
           ),
         ),
-
         if (expanded)
           statusAsync.when(
-            data: (files) {
-              if (files.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.only(
-                    left: HollowSpacing.xxl,
-                    bottom: HollowSpacing.md,
-                  ),
-                  child: HollowEmptyState(
-                    dense: true,
-                    title: 'No erasure-coded files for this server',
-                  ),
-                );
-              }
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.lg,
-                      vertical: HollowSpacing.xs,
-                    ),
-                    child: Row(
-                      children: [
-                        _ActionButton(
-                          icon: LucideIcons.download,
-                          label: 'Export Shards',
-                          onTap: () => showExportShardsDialog(
-                            context,
-                            serverId: widget.serverId,
-                            serverName: widget.server.name,
-                            shardCount: files.fold<int>(
-                              0, (sum, f) => sum + f.localShardCount),
-                          ),
-                          hollow: hollow,
-                        ),
-                        const SizedBox(width: HollowSpacing.sm),
-                        _ActionButton(
-                          icon: LucideIcons.upload,
-                          label: 'Import Shards',
-                          onTap: () => showImportShardsDialog(
-                            context,
-                            onImported: () => ref.invalidate(
-                              vaultFileStatusProvider(widget.serverId),
-                            ),
-                          ),
-                          hollow: hollow,
-                        ),
-                        const SizedBox(width: HollowSpacing.sm),
-                        _ActionButton(
-                          icon: LucideIcons.shield,
-                          label: 'Start Recovery Pool',
-                          onTap: () => showInitiateRecoveryPoolDialog(
-                            context,
-                            serverId: widget.serverId,
-                            serverName: widget.server.name,
-                          ),
-                          hollow: hollow,
-                        ),
-                      ],
-                    ),
-                  ),
-                  _buildGroupedFileList(files, hollow),
-                ],
-              );
-            },
             loading: () => const Padding(
               padding: EdgeInsets.all(HollowSpacing.lg),
               child: Center(child: HollowSpinner.medium()),
             ),
-            error: (e, _) => Padding(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              child: Text(
-                'Failed to load: $e',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.error,
-                  fontSize: 12,
+            error: (_, _) => Padding(
+              padding: const EdgeInsets.fromLTRB(HollowSpacing.xxl,
+                  HollowSpacing.xs, HollowSpacing.md, HollowSpacing.md),
+              child: HollowEmptyState(
+                dense: true,
+                title: "This server's vault files didn't load",
+                action: HollowButton.ghost(
+                  compact: true,
+                  onPressed: () => ref
+                      .invalidate(vaultFileStatusProvider(widget.serverId)),
+                  child: const Text('Try again'),
                 ),
               ),
             ),
+            data: (files) => files.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.fromLTRB(HollowSpacing.xxl,
+                        HollowSpacing.xs, HollowSpacing.md, HollowSpacing.md),
+                    child: HollowEmptyState(
+                      dense: true,
+                      title: 'No vault files on this server yet',
+                    ),
+                  )
+                : _files(files),
           ),
+        const SizedBox(height: HollowSpacing.sm),
       ],
     );
   }
 
-  Widget _buildGroupedFileList(List<VaultFileStatus> files, HollowTheme hollow) {
+  Widget _files(List<VaultFileStatus> files) {
     final groups = <_FileCategory, List<VaultFileStatus>>{};
     for (final file in files) {
-      final cat = _categorize(file.fileName);
-      (groups[cat] ??= []).add(file);
+      (groups[_categorize(file.fileName)] ??= []).add(file);
     }
-
     for (final list in groups.values) {
       list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     }
 
-    const order = _FileCategory.values;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final cat in order)
-          if (groups.containsKey(cat)) ...[
-            Padding(
-              padding: const EdgeInsets.only(
-                left: HollowSpacing.lg,
-                top: HollowSpacing.sm,
-                right: HollowSpacing.lg,
-              ),
-              child: HollowSectionHeader(
-                cat.label,
-                dense: true,
-                count: '${groups[cat]!.length}',
-              ),
+    return Padding(
+      // Under the server name, past the chevron.
+      padding: const EdgeInsets.only(left: HollowSpacing.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.md, vertical: HollowSpacing.xs),
+            child: Wrap(
+              spacing: HollowSpacing.sm,
+              runSpacing: HollowSpacing.sm,
+              children: [
+                HollowButton.ghost(
+                  compact: true,
+                  icon: const Icon(LucideIcons.download, size: 14),
+                  onPressed: () => showExportShardsDialog(
+                    context,
+                    serverId: widget.serverId,
+                    serverName: widget.server.name,
+                    shardCount:
+                        files.fold<int>(0, (sum, f) => sum + f.localShardCount),
+                  ),
+                  child: const Text('Export shards'),
+                ),
+                HollowButton.ghost(
+                  compact: true,
+                  icon: const Icon(LucideIcons.upload, size: 14),
+                  onPressed: () => showImportShardsDialog(
+                    context,
+                    onImported: () => ref
+                        .invalidate(vaultFileStatusProvider(widget.serverId)),
+                  ),
+                  child: const Text('Import shards'),
+                ),
+                HollowButton.ghost(
+                  compact: true,
+                  icon: const Icon(LucideIcons.shield, size: 14),
+                  onPressed: () => showInitiateRecoveryPoolDialog(
+                    context,
+                    serverId: widget.serverId,
+                    serverName: widget.server.name,
+                  ),
+                  child: const Text('Start a recovery pool'),
+                ),
+              ],
             ),
-            for (final file in groups[cat]!)
-              _VaultFileRow(file: file, hollow: hollow),
-          ],
-        const SizedBox(height: HollowSpacing.md),
-      ],
+          ),
+          for (final cat in _FileCategory.values)
+            if (groups.containsKey(cat)) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(HollowSpacing.md,
+                    HollowSpacing.sm, HollowSpacing.md, 0),
+                child: HollowSectionHeader(cat.label,
+                    dense: true, count: '${groups[cat]!.length}'),
+              ),
+              for (final file in groups[cat]!) _VaultFileRow(file: file),
+            ],
+        ],
+      ),
     );
   }
 
   static _FileCategory _categorize(String fileName) {
     final ext = fileName.split('.').last.toLowerCase();
     return switch (ext) {
-      'mp4' || 'webm' || 'mov' || 'mkv' || 'avi' || 'm4v' => _FileCategory.videos,
-      'mp3' || 'ogg' || 'wav' || 'flac' || 'm4a' || 'aac' || 'wma' => _FileCategory.audio,
-      'png' || 'jpg' || 'jpeg' || 'gif' || 'webp' || 'bmp' || 'svg' => _FileCategory.images,
-      'pdf' || 'doc' || 'docx' || 'xls' || 'xlsx' || 'txt' || 'md' => _FileCategory.documents,
+      'mp4' || 'webm' || 'mov' || 'mkv' || 'avi' || 'm4v' =>
+        _FileCategory.videos,
+      'mp3' || 'ogg' || 'wav' || 'flac' || 'm4a' || 'aac' || 'wma' =>
+        _FileCategory.audio,
+      'png' || 'jpg' || 'jpeg' || 'gif' || 'webp' || 'bmp' || 'svg' =>
+        _FileCategory.images,
+      'pdf' || 'doc' || 'docx' || 'xls' || 'xlsx' || 'txt' || 'md' =>
+        _FileCategory.documents,
       _ => _FileCategory.other,
     };
   }
@@ -309,116 +264,34 @@ enum _FileCategory {
   const _FileCategory(this.label);
 }
 
-/// A single vault file row with shard status indicator.
+/// One vault file and how many of the shards needed to rebuild it are here.
 class _VaultFileRow extends StatelessWidget {
   final VaultFileStatus file;
-  final HollowTheme hollow;
 
-  const _VaultFileRow({required this.file, required this.hollow});
+  const _VaultFileRow({required this.file});
 
   @override
   Widget build(BuildContext context) {
-    final shardText = '${file.localShardCount}/${file.k} shards';
-    final Color badgeColor;
-    final Color badgeBg;
-    if (file.isReconstructable) {
-      badgeColor = const Color(0xFF4CAF50);
-      badgeBg = const Color(0xFF4CAF50).withValues(alpha: 0.12);
-    } else if (file.localShardCount > 0) {
-      badgeColor = const Color(0xFFFFA726);
-      badgeBg = const Color(0xFFFFA726).withValues(alpha: 0.12);
-    } else {
-      badgeColor = hollow.textSecondary;
-      badgeBg = hollow.textSecondary.withValues(alpha: 0.08);
-    }
+    final hollow = HollowTheme.of(context);
+    final kind = file.isReconstructable
+        ? HollowBadgeKind.success
+        : (file.localShardCount > 0
+            ? HollowBadgeKind.warning
+            : HollowBadgeKind.neutral);
+    final created =
+        DateTime.fromMillisecondsSinceEpoch(file.createdAt * 1000);
 
-    final progress = file.k > 0 ? file.localShardCount / file.k : 0.0;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.xxs,
-      ),
-      child: Container(
-        padding: const EdgeInsets.all(HollowSpacing.md),
-        decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              _iconForFile(file.fileName),
-              size: 20,
-              color: hollow.accent,
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    file.fileName,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: HollowSpacing.xxs),
-                  Row(
-                    children: [
-                      Text(
-                        '${_formatDate(file.createdAt)}  ·  ${_formatSize(file.originalSize)}',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Expanded(
-                        child: SizedBox(
-                          height: 3,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(2),
-                            child: LinearProgressIndicator(
-                              value: progress.clamp(0.0, 1.0),
-                              backgroundColor: hollow.border,
-                              valueColor:
-                                  AlwaysStoppedAnimation(badgeColor),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: HollowSpacing.xxs,
-              ),
-              decoration: BoxDecoration(
-                color: badgeBg,
-                borderRadius: BorderRadius.circular(hollow.radiusXs),
-              ),
-              child: Text(
-                shardText,
-                style: HollowTypography.caption.copyWith(
-                  color: badgeColor,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
+    return HollowListRow(
+      leading: Icon(_iconForFile(file.fileName),
+          size: 20, color: hollow.textSecondary),
+      title: file.fileName,
+      subtitle: '${calendarDateLabel(created)} · '
+          '${ShareCard.formatSize(file.originalSize)}',
+      trailing: HollowBadge(
+        file.isReconstructable
+            ? 'Recoverable'
+            : '${file.localShardCount} of ${file.k} shards',
+        kind: kind,
       ),
     );
   }
@@ -432,67 +305,5 @@ class _VaultFileRow extends StatelessWidget {
       'zip' || 'rar' || '7z' || 'tar' => LucideIcons.fileArchive,
       _ => LucideIcons.file,
     };
-  }
-
-  static const _months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
-  static String _formatDate(int epochSeconds) {
-    final dt = DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
-    return '${_months[dt.month - 1]} ${dt.day}, ${dt.year}';
-  }
-
-  static String _formatSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-  }
-}
-
-/// Small action button used for Export/Import in the vault files view.
-class _ActionButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final HollowTheme hollow;
-
-  const _ActionButton({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    required this.hollow,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      backgroundColor: hollow.elevated,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.xs),
-          Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }

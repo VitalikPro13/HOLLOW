@@ -13,6 +13,8 @@ import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/shell/conference_actions.dart'
+    show endOrLeaveConferenceMeeting, inActiveConferenceCall;
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -767,9 +769,11 @@ class _MobileVoiceChannelRouteState
             color: Colors.white,
             backgroundColor: hollow.error,
             semanticLabel: 'Leave call',
-            onTap: () {
-              vcNotifier.leaveChannel();
-            },
+            // A meeting is more than its voice leg: leaving only the voice
+            // would strand the meeting state.
+            onTap: () => inActiveConferenceCall(ref)
+                ? endOrLeaveConferenceMeeting(context, ref)
+                : vcNotifier.leaveChannel(),
           ),
         ],
       ),

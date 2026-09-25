@@ -530,6 +530,29 @@ void main() {
       final title = tester.widget<Text>(find.text('Vitalik'));
       expect(title.style!.color, hollow.accentText);
     });
+
+    testWidgets('a touch row is at least a finger tall and a step bigger',
+        (tester) async {
+      await _pump(
+        tester,
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            HollowListRow(
+                key: const Key('touch'), title: 'Touch', touch: true,
+                onTap: () {}),
+            HollowListRow(
+                key: const Key('desk'), title: 'Desk', onTap: () {}),
+          ],
+        ),
+      );
+
+      expect(tester.getSize(find.byKey(const Key('touch'))).height,
+          greaterThanOrEqualTo(HollowListRow.touchMinHeight));
+      final touch = tester.widget<Text>(find.text('Touch')).style!.fontSize!;
+      final desk = tester.widget<Text>(find.text('Desk')).style!.fontSize!;
+      expect(touch, greaterThan(desk));
+    });
   });
 
   group('HollowSkeleton', () {

@@ -42,23 +42,24 @@ Ad-hoc meetings between people who share no server and no friendship. A host cre
 - `onJoinRequest` computes the Friend badge from OUR OWN friend list (identityOf collapse; no graph queries).
 - event_provider: 7 dispatch cases; `conf:` guards on VoiceChannelJoined/Left so a conference join never hijacks `selectedChannelProvider`; ConferenceChatMessage feeds `channelChatProvider.receiveMessage` with message id `conf-{sender}-{ts}`.
 
-## Chat = the screen-share drawer (ONE surface)
+## Chat (ONE surface)
 
-- `VcChatOverlay` (public, in `voice_channel_pane.dart`) packages the chevron toggle + `_OverlaySlider` + 360px `ChannelChatPane`. Conference audio-only view embeds it; video states use VoiceChannelPane's built-in overlay. NEVER a separate meeting-chat panel.
-- `channelChatProvider`: `sendMessage` branches on `conf:` → `conferenceSendChat` FFI + optimistic insert (id `conf-{self}-{lamportTs}`); `loadHistory` early-returns (RAM-only, no DB, no sync request); `clearServerCache('conf:x')` wipes it.
-- `ChannelChatPane` conf-gating (`_isConference`): attach/mic buttons hidden; member-panel + split-view header buttons hidden; onInfo/reactions/pins/edits/replies disabled (MLS authenticates — the Ed25519 proof dialog would read Unsigned); header shows a video icon + **"Ephemeral"** chip ("Meeting chat isn't stored…" tooltip).
+- Desktop: the conference chat is `ChannelChatPane(isVoice: true, headerTitle: 'Chat', channelName: 'the meeting')` inside the meeting's ONE side panel (see Desktop UI); video states pass `VoiceChannelPane(hideChatOverlay: true)` so there is never a second chat. `VcChatOverlay` remains for other hosts. NEVER a separate meeting-chat implementation.
+- `channelChatProvider`: `sendMessage` branches on `conf:` -> `conferenceSendChat` FFI + optimistic insert (id `conf-{self}-{lamportTs}`); `loadHistory` early-returns (RAM-only, no DB, no sync request); `clearServerCache('conf:x')` wipes it.
+- `ChannelChatPane` conf-gating (`_isConference`): attach/mic buttons hidden; member-panel + split-view header buttons hidden; onInfo/reactions/pins/edits/replies disabled (MLS authenticates, and the Ed25519 proof dialog would read Unsigned); the header shows an **"Ephemeral"** badge ("Meeting chat isn't stored..." tooltip).
 
-## Desktop UI (`lib/src/ui/shell/conference_dashboard.dart`)
+## Desktop UI (`lib/src/ui/shell/conference_dashboard.dart`, redesigned 2026-09-25)
 
-- Entry: FriendsBar icon between Saved Messages and Help (ONLY there — bottom-bar button removed by request). Opens via `conferenceProvider.openTab()` (canonical sibling-clear sequence).
-- Views switch instantly (`KeyedSubtree` keyed by `_viewKey`, which resets each view's state): rooms list (create/edit/delete/copy-link/start + **Join Meeting** dialog `showJoinConferenceDialog` — accepts either link form or a bare id) ↔ lobby ↔ denied (wrong_code → access-code prompt + retry) ↔ call.
-- Lobby copy keys on hostName: null = "Waiting for the host to start the meeting" (LobbyInfo is the proof the meeting runs; re-knock delivers it); set = "waiting room for X's meeting". Host avatar collapses `identityOf(hostPeerId)` — LobbyInfo carries the DEVICE id.
-- Call surface: video states embed `VoiceChannelPane(hideControlsPill: true)` + static `_ConferenceControls` bar below (the floating pill's Disconnect stranded the meeting — crash fixed by removal); audio-only = participant tile grid + the same controls + `VcChatOverlay`. Camera control paints red when active (parity with screen share).
-- **`_ManageDrawer`**: left-edge mirror of the chat slider — search field, Waiting Room rows (admit ✓ / decline ✗, Friend chip, avatar via identityOf), Participants roster (speaking rings, kick with confirm dialog, host-only). Auto-opens on a knock; collapsed toggle shows a pending-count badge. Opens and closes instantly (a width animation re-lays the stage every frame).
+- Entry: the dock's Places group (Conferences), `conferenceProvider.openTab()`.
+- Views switch instantly (`KeyedSubtree` keyed by `_viewKey`): rooms <-> lobby <-> denied (wrong_code -> access-code prompt + retry, `HollowEmptyState`) <-> call.
+- **Rooms:** `PlaceHeader` "Conferences" + ghost "Join a meeting" (`showJoinConferenceDialog`: link form or bare id) + filled "Create a room". Rows = `HollowListRow`, subtitle = the facts (`conferenceRoomFacts`: "Waiting room · Access code" / "Anyone with the link can join"), trailing copy-link icon, compact OUTLINE "Start meeting", More (Edit room, Delete room with confirm); right-click opens the same menu. No tinted icon box, no ISO date.
+- Lobby copy keys on hostName (null = "Waiting for the host to start the meeting"; set = "waiting room for X's meeting"). The host avatar collapses `identityOf(hostPeerId)`: LobbyInfo carries the DEVICE id.
+- **Call:** `PlaceHeader` (meeting name, no accent icon) + host ghost "Copy link", `HollowIconButton` toggles **Chat** and **People** (waiting count), host `outline(danger)` "End meeting" behind "End the meeting?", joiner ghost "Leave". Stage = participant tiles (speaking outline) or `VoiceChannelPane(hideControlsPill: true, hideChatOverlay: true)` in video states, + `_ConferenceControls` (`HollowIconButton`s; red ONLY for muted/deafened, camera on / sharing = grey selected). **ONE right side panel** (300, `surface`, hairline, instant): Chat, or People (`ChatHeaderBar` "People", search, "Waiting room" rows with a Friend badge + ghost Decline + outline Admit, "In the meeting" rows with kick + confirm). A knock switches it to People for the host. The old left `_ManageDrawer` (its tab sat in the pointer-dead 8 px window edge) is gone.
+- **`shell/conference_actions.dart`:** `inActiveConferenceCall`, `endConferenceMeeting` (confirm), `leaveConferenceMeeting`, `endOrLeaveConferenceMeeting`, `copyConferenceInviteLink`, `confirmDeleteConferenceRoom`, `showConferenceRoomMenu`. **Leaving the VOICE leg alone strands the meeting**: the dock's Disconnect (`leaveVoiceRoom`) and the phone's "Leave call" (`mobile_voice_channel_route.dart`) route through `endOrLeaveConferenceMeeting` when in the active conference.
 
 ## Mobile (`lib/src/ui/mobile/mobile_conferences_route.dart`)
 
-Entry icon in the Chats-tab header. Rooms list + create/edit + join dialog + lobby/denied states + host admit/deny list; the call pushes `MobileVoiceChannelRoute('conf:x','main', name)`. No chat on mobile — mobile VCs have no chat overlay either; conferences inherit it whenever mobile VC chat lands (same surface).
+Entry icon in the Chats-tab header. 44 px grey header icons ("Join a meeting", "Create a room"); touch room rows with the facts + a touch outline "Start meeting" + More (long press: Copy invite link, Edit, Delete); in a meeting: filled "Open call", the host's End meeting as outline danger WITH the confirm (it had none), a joiner's ghost "Leave meeting"; waiting rows Decline + Admit (touch), no peer id. The call pushes `MobileVoiceChannelRoute('conf:x','main', name)`. No chat on mobile yet.
 
 ## Links & website
 

@@ -40,12 +40,17 @@ class VoiceChannelPane extends ConsumerStatefulWidget {
   /// and strands the meeting state.
   final bool hideControlsPill;
 
+  /// Hides the chat drawer over the stage, for a host that shows the chat in
+  /// its own side panel (the conference surface).
+  final bool hideChatOverlay;
+
   const VoiceChannelPane({
     super.key,
     required this.serverId,
     required this.channelId,
     required this.channelName,
     this.hideControlsPill = false,
+    this.hideChatOverlay = false,
   });
 
   @override
@@ -226,6 +231,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             ),
           ),
 
+          if (!widget.hideChatOverlay)
           Positioned(
             right: 0,
             top: 0,
@@ -602,6 +608,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               ),
             ),
 
+          if (!widget.hideChatOverlay)
           Positioned(
             right: 0,
             top: 0,

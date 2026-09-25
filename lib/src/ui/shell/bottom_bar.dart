@@ -230,8 +230,7 @@ void _openPlace(WidgetRef ref, ShellTab tab) {
       _closeSplit(ref);
       ref.invalidate(archiveDmListProvider);
       ref.invalidate(archiveChannelListProvider);
-      ref.read(archiveSelectedDmProvider.notifier).state = null;
-      ref.read(archiveSelectedChannelProvider.notifier).state = null;
+      selectArchiveConversation(ref.read);
       setShellTab(ref.read, tab);
       _clearSelection(ref);
     case ShellTab.settings:

@@ -46,4 +46,10 @@ void main() {
         '4 days ago');
     expect(relativeTimeLabel(DateTime(2026, 9, 1), now: now), 'on Sep 1');
   });
+
+  test('a calendar date is a day in words, never a time of day', () {
+    expect(calendarDateLabel(DateTime(2026, 9, 23, 18, 5), now: now), 'Sep 23');
+    expect(calendarDateLabel(DateTime(2025, 12, 31), now: now),
+        'Dec 31, 2025');
+  });
 }

@@ -1,114 +1,22 @@
 # Share UI, Animations, and Reusable Components
 
-## ShareDashboard
+## ShareDashboard (redesigned 2026-09-25)
 
-File: `lib/src/ui/share/share_dashboard.dart`
+File: `lib/src/ui/share/share_dashboard.dart`. Desktop only (no phone Share place).
 
-Top-level Share tab view. `ConsumerStatefulWidget` that displays the full share management interface with two sub-tabs.
+- `PlaceHeader`: "Share", `HollowChip`s "My shares" / "Server files" (counts in `hint`); on My shares, ghost "Paste a link" (`PasteLinkDialog`) + filled "Share a file" (`loading:` while hashing).
+- **STUN-only warning strip, ALWAYS shown** (Vitalik: "it's really important"; a session-20 move to a quiet footnote was reverted the same day): `noticeSurface(warning)` + `alertTriangle`, text in `hollow.warning`; while `alwaysRelayCallsProvider` is on it adds that Always relay calls does not cover Share and the other side sees your IP. Memory `feedback_share_stun_warning_stays`.
+- `userShares` = `contextType == null`, `serverFileShares` = `serverId != null`. **Known gap:** a file YOU send in a server channel (>34 MB, `file_transfer_provider` -> `shareCreateFromFile`) carries no server context, so it lands in My shares; Server files only lists channel files you downloaded (`share_start_from_ref` passes server_id/context_type).
+- `_ShareList`: dense `HollowSectionHeader`s with counts (Downloading = downloading + failed, Seeding; or one per server); list inset `xs` so row text sits on the title's edge.
 
-### State
+## ShareRow
 
-- `_subTab` (`_ShareSubTab`) — enum with values `myShares` and `serverFiles`. Controls which sub-tab content is displayed.
-- On `initState`, fires `ref.read(shareTabProvider.notifier).loadAll()` via `Future.microtask`.
+File: `lib/src/ui/share/share_card.dart`. A flush list row (no card), right-clickable (`ContextMenuTarget`). File icon, name + size (textTertiary), one state line:
+- downloading: `HollowProgressBar` + "12.0 MB of 40.0 MB · 1.2 MB/s · from 2 people" (or "looking for someone to download from"); ghost Cancel.
+- completed: "Seeding to N people" / "Seeding" / "Paused" (+ "· X sent"); `HollowToggle` (with a tooltip), compact OUTLINE "Copy link", More.
+- failed: the error in `error`; outline Retry (if there is a link), More.
 
-### Data Flow
-
-- Watches `shareTabProvider` which returns `List<ShareItemState>`.
-- Splits shares into two lists:
-  - `userShares` — items where `contextType == null` (user's personal shares).
-  - `serverFileShares` — items where `serverId != null` (files sent in server channels).
-
-### Layout
-
-Container with `hollow.background` color, Column with header + STUN-only warning strip + Expanded content area.
-
-### STUN-only warning strip (`_buildStunWarning`)
-
-Yellow advisory strip rendered directly below `_buildHeader`. Styled to match the imported-archive verification banner: `Colors.amber.shade700` text/icon, `color.withValues(alpha: 0.08)` background, bottom border `hollow.border.withValues(alpha: 0.3)`, `LucideIcons.alertTriangle` (size 14) + caption text (fontSize 11). Static advisory (always shown): Share transfers are direct P2P/STUN-only with no relay fallback, so they may fail behind strict/symmetric NATs. No state — purely informational.
-
-### Header (`_buildHeader`)
-
-Row containing:
-- "Share" heading text.
-- Two `_SubTabPill` widgets for sub-tab switching, showing counts in parentheses when > 0.
-- Right-aligned action buttons (only visible on "My Shares" tab):
-  - "Share a File" — `HollowButton.ghost` with `LucideIcons.filePlus`, calls `_pickFile()`.
-  - "Paste Link" — `HollowButton.filled` with `LucideIcons.link`, calls `_showPasteDialog()`.
-
-### My Shares Tab (`_buildMyShares`)
-
-- Empty state: centered icon (`LucideIcons.share2`), title "No shares yet", subtitle.
-- Non-empty: ListView with padding `HollowSpacing.lg`, sections for:
-  - "Downloading" — items where `state == 'downloading' || state == 'failed'`.
-  - "Seeding" — items where `state == 'completed'`.
-- Each item rendered as `ShareCard(item: item)`.
-
-### Server Files Tab (`_buildServerFiles`)
-
-- Empty state: `LucideIcons.server`, "No server files", subtitle about large files.
-- Groups items by `serverId` using a `Map<String, List<ShareItemState>>`.
-- Reads `serverListProvider` to resolve server names via `_serverName()`.
-- Each group has a section header with server name + count, then `ShareCard` per item.
-
-### Actions
-
-- `_pickFile()` — opens `FilePicker.platform.pickFiles()`, calls `share_api.shareCreateFromFile(sourcePath:)`.
-- `_showPasteDialog()` — opens `showHollowDialog` with `PasteLinkDialog`.
-
-### _SubTabPill
-
-Private `StatelessWidget`. Pill-shaped sub-tab button using `HollowPressable`. When `isSelected`:
-- Background: `hollow.accent` at 15% alpha.
-- Border: `hollow.accent` at 30% alpha.
-- Text: accent color, `FontWeight.w600`.
-
-When not selected: transparent background, `hollow.border` border, `hollow.textSecondary` text.
-
-
-## ShareCard
-
-File: `lib/src/ui/share/share_card.dart`
-
-`ConsumerWidget` displaying a single share item inside a `HollowCard`. Takes `ShareItemState item` as required parameter.
-
-### Layout
-
-`HollowCard` with `HollowSpacing.lg` padding. Column with header + conditional body based on `item.state`.
-
-### Header (`_buildHeader`)
-
-Row: file icon (`LucideIcons.file`) + file name (ellipsized, colored red on failure) + formatted size.
-
-### Download Body (`_buildDownloadBody`, state == 'downloading')
-
-- `LinearProgressIndicator` with `chunksHave / chunksTotal` progress.
-- Status row: chunk count, seeder/leecher counts, download speed in accent color.
-- Cancel button: calls `share_api.shareCancel(rootHash:)`.
-
-### Seeding Body (`_buildSeedingBody`, state == 'completed')
-
-- Upload stats: bytes uploaded, seeder/leecher counts.
-- Action row:
-  - "Copy Link" — copies `item.shareLink` to clipboard, shows success toast.
-  - "Show" — opens parent directory in `explorer.exe` (only if `diskPath` is non-null).
-  - "Remove" — danger button, opens `_confirmRemove` dialog.
-  - "Seeding" toggle — `HollowToggle` calling `share_api.shareSetSeeding(rootHash:, seeding:)`.
-
-### Failed Body (`_buildFailedBody`, state == 'failed')
-
-- Error text in `hollow.error` color.
-- "Retry" button (if `shareLink` is non-empty): calls `share_api.shareOpenLink(link:)`.
-- "Remove" danger button.
-
-### Remove Confirmation (`_confirmRemove`)
-
-Opens `showHollowDialog` with `HollowDialog` asking to confirm removal. On confirm: calls `share_api.shareRemove(rootHash:, deleteFile: false)` and `shareTabProvider.notifier.removeShare(rootHash)`.
-
-### Static Utility Methods
-
-- `formatSize(int bytes)` — B / KB / MB / GB with appropriate precision.
-- `formatSpeed(int bytesPerSec)` — same format, appended with "/s" by callers.
-
+More / right-click menu: Copy link (right-click only; the row has the button), Show in folder (`core/services/reveal_in_folder.dart`, shared with the download manager: explorer /select on Windows, `open -R` on macOS, the folder on Linux; was `explorer.exe` on every platform), Cancel download, Remove (danger, confirm, the file stays on disk). Every action awaits and toasts a failure. `ShareCard` survives only as the static `formatSize` / `formatSpeed` holder.
 
 ## PasteLinkDialog
 

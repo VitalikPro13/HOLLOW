@@ -26,6 +26,16 @@ String conversationTimeLabel(DateTime at, {DateTime? now}) {
   return at.year == today.year ? monthDay : '$monthDay, ${at.year}';
 }
 
+/// A day in words for a sentence ("signed on Sep 17"): `Sep 17` this year,
+/// `Sep 17, 2025` before it. Never the time of day, unlike
+/// [conversationTimeLabel].
+String calendarDateLabel(DateTime at, {DateTime? now}) {
+  final monthDay = '${_months[at.month - 1]} ${at.day}';
+  return at.year == (now ?? DateTime.now()).year
+      ? monthDay
+      : '$monthDay, ${at.year}';
+}
+
 /// How long ago [at] was, for a status line: `just now`, `5 minutes ago`,
 /// `3 hours ago`, `yesterday`, `4 days ago`, then `on Sep 17`.
 String relativeTimeLabel(DateTime at, {DateTime? now}) {

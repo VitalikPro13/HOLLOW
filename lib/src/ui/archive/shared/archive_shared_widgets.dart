@@ -2,13 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// Where a message's text starts, past the avatar column, so the markers under
+/// a message line up with its words.
+const double _kMessageTextInset = 42;
+
+String _clock(DateTime at) =>
+    '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
 
 class ArchiveSearchBar extends StatefulWidget {
   final int matchCount;
@@ -19,6 +28,7 @@ class ArchiveSearchBar extends StatefulWidget {
   final VoidCallback onClose;
 
   const ArchiveSearchBar({
+    super.key,
     required this.matchCount,
     required this.currentMatch,
     required this.onQueryChanged,
@@ -55,7 +65,6 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
     final hollow = HollowTheme.of(context);
 
     return Container(
-      constraints: const BoxConstraints(minHeight: 40),
       padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.md, vertical: HollowSpacing.xs),
       decoration: BoxDecoration(
@@ -68,60 +77,50 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
             child: HollowTextField(
               controller: _controller,
               focusNode: _focusNode,
-              hintText: 'Search messages...',
+              hintText: 'Search messages',
               isDense: true,
               prefixIcon: Icon(LucideIcons.search,
                   size: 14, color: hollow.textSecondary),
-              onChanged: widget.onQueryChanged,
+              onChanged: (q) {
+                setState(() {});
+                widget.onQueryChanged(q);
+              },
               onSubmitted: (_) => widget.onNext?.call(),
             ),
           ),
-          const SizedBox(width: HollowSpacing.sm),
           // Plain, non-flex: a Flexible here would share the Row's free space
           // with the Expanded field and halve the text field whenever the
           // counter appears.
-          if (_controller.text.isNotEmpty)
+          if (_controller.text.isNotEmpty) ...[
+            const SizedBox(width: HollowSpacing.sm),
             Text(
               widget.matchCount > 0
                   ? '${widget.currentMatch + 1} of ${widget.matchCount}'
-                  : '0 results',
+                  : 'No results',
               maxLines: 1,
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
-                fontSize: 11,
+                fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
+          ],
           const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            onTap: widget.onPrev,
-            semanticLabel: 'Previous match',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(4),
-            child: Icon(LucideIcons.chevronUp,
-                size: 14,
-                color: widget.onPrev != null
-                    ? hollow.textPrimary
-                    : hollow.textSecondary.withValues(alpha: 0.3)),
-          ),
-          HollowPressable(
-            onTap: widget.onNext,
-            semanticLabel: 'Next match',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(4),
-            child: Icon(LucideIcons.chevronDown,
-                size: 14,
-                color: widget.onNext != null
-                    ? hollow.textPrimary
-                    : hollow.textSecondary.withValues(alpha: 0.3)),
+          HollowIconButton(
+            icon: LucideIcons.chevronUp,
+            label: 'Previous match',
+            onPressed: widget.onPrev,
           ),
           const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            onTap: widget.onClose,
-            semanticLabel: 'Close search',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(4),
-            child: Icon(LucideIcons.x,
-                size: 14, color: hollow.textSecondary),
+          HollowIconButton(
+            icon: LucideIcons.chevronDown,
+            label: 'Next match',
+            onPressed: widget.onNext,
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          HollowIconButton(
+            icon: LucideIcons.x,
+            label: 'Close search',
+            onPressed: widget.onClose,
           ),
         ],
       ),
@@ -129,6 +128,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
   }
 }
 
+/// A message someone deleted, kept in the archive: faded, with when it went.
 class ArchiveDeletedOverlay extends StatelessWidget {
   final DateTime hiddenAt;
   final Widget child;
@@ -139,44 +139,40 @@ class ArchiveDeletedOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final time =
-        '${hiddenAt.hour.toString().padLeft(2, '0')}:${hiddenAt.minute.toString().padLeft(2, '0')}';
 
-    return AnimatedOpacity(
-      opacity: 0.4,
-      duration: Duration.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          child,
-          Padding(
-            padding: const EdgeInsets.only(left: 42, top: 2),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(LucideIcons.trash2,
-                    size: 11,
-                    color: hollow.error.withValues(alpha: 0.7)),
-                const SizedBox(width: 4),
-                Text(
-                  'Deleted at $time',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.error.withValues(alpha: 0.7),
-                    fontSize: 10,
-                    fontStyle: FontStyle.italic,
-                  ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AnimatedOpacity(
+          opacity: 0.5,
+          duration: Duration.zero,
+          child: child,
+        ),
+        Padding(
+          padding: const EdgeInsets.only(
+              left: _kMessageTextInset, top: HollowSpacing.xxs),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.trash2, size: 14, color: hollow.error),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                'Deleted at ${_clock(hiddenAt)}',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.error,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
 
-/// Shows "Edited N times -> view history" below a message bubble, expanding to
-/// a timeline of every prior version.
+/// "Edited 2 times" under a message, opening to every earlier version with its
+/// signature.
 class EditHistoryIndicator extends StatefulWidget {
   final List<ArchiveEditEntry> edits;
   final String? senderPeerId;
@@ -214,139 +210,122 @@ class _EditHistoryIndicatorState extends State<EditHistoryIndicator> {
     final count = widget.edits.length;
 
     return Padding(
-      padding: const EdgeInsets.only(left: 42, top: 2),
+      padding: const EdgeInsets.only(
+          left: _kMessageTextInset, top: HollowSpacing.xxs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           HollowPressable(
             onTap: () => setState(() => _expanded = !_expanded),
-            padding: const EdgeInsets.symmetric(vertical: 2),
+            semanticLabel: _expanded ? 'Hide edit history' : 'Show edit history',
+            borderRadius: BorderRadius.circular(hollow.radiusXs),
+            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(LucideIcons.pencil,
-                    size: 11,
-                    color: hollow.accent.withValues(alpha: 0.7)),
-                const SizedBox(width: 4),
                 Text(
                   'Edited $count ${count == 1 ? 'time' : 'times'}',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent.withValues(alpha: 0.7),
-                    fontSize: 10,
-                  ),
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.accentText),
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: HollowSpacing.xs),
                 Icon(
-                  _expanded ? LucideIcons.chevronUp : LucideIcons.chevronRight,
-                  size: 10,
-                  color: hollow.accent.withValues(alpha: 0.5),
+                  _expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+                  size: 14,
+                  color: hollow.accentText,
                 ),
               ],
             ),
           ),
           if (_expanded) ...[
-            const SizedBox(height: 4),
-            for (int i = 0; i < widget.edits.length; i++) ...[
-              () {
-                final e = widget.edits[i];
-                final time =
-                    '${e.editedAt.hour.toString().padLeft(2, '0')}:${e.editedAt.minute.toString().padLeft(2, '0')}';
-                final dateStr =
-                    '${e.editedAt.year}-${e.editedAt.month.toString().padLeft(2, '0')}-${e.editedAt.day.toString().padLeft(2, '0')}';
-                // The row shows e.oldText, and the signature that covers it is
-                // the original message's for i==0, else the previous edit's:
-                // that one signed its newText, which is this row's oldText.
-                final String? proofSig;
-                final String? proofPk;
-                final int? proofTs;
-                if (i == 0) {
-                  proofSig = e.prevSignature ?? widget.originalSignature;
-                  proofPk = e.prevPublicKey ?? widget.originalPublicKey;
-                  proofTs = e.prevTimestampMs ?? widget.originalTimestampMs;
-                } else {
-                  final prev = widget.edits[i - 1];
-                  proofSig = prev.signature;
-                  proofPk = prev.publicKey;
-                  proofTs = prev.editedAt.millisecondsSinceEpoch;
-                }
-                final hasSig = proofSig != null && proofPk != null;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Container(
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    decoration: BoxDecoration(
-                      color: hollow.elevated,
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Text(
-                              '$dateStr $time',
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textSecondary,
-                                fontSize: 10,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            HollowPressable(
-                              onTap: hasSig && widget.senderPeerId != null
-                                  ? () {
-                                      final profiles =
-                                          ProviderScope.containerOf(context)
-                                              .read(profileProvider);
-                                      showMessageProofDialog(
-                                        context,
-                                        MessageProofData(
-                                          senderPeerId: widget.senderPeerId!,
-                                          senderDisplayName: displayNameFor(
-                                              profiles, widget.senderPeerId!),
-                                          text: e.oldText,
-                                          timestampMs: proofTs!,
-                                          signature: proofSig,
-                                          publicKey: proofPk,
-                                          messageId: widget.messageId ?? e.messageId,
-                                          context: widget.proofContext ?? '',
-                                          msgType: widget.proofMsgType ?? 'ch',
-                                        ),
-                                      );
-                                    }
-                                  : null,
-                              semanticLabel: 'View signature details',
-                              padding: const EdgeInsets.all(2),
-                              child: Icon(
-                                hasSig
-                                    ? LucideIcons.shieldCheck
-                                    : LucideIcons.shieldOff,
-                                size: 10,
-                                color: hasSig
-                                    ? hollow.accent.withValues(alpha: 0.6)
-                                    : hollow.textSecondary.withValues(alpha: 0.4),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          e.oldText,
-                          style: HollowTypography.body.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 12,
-                            decoration: TextDecoration.lineThrough,
-                            decorationColor:
-                                hollow.textSecondary.withValues(alpha: 0.4),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }(),
-            ],
+            const SizedBox(height: HollowSpacing.xs),
+            for (int i = 0; i < widget.edits.length; i++) _version(hollow, i),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _version(HollowTheme hollow, int i) {
+    final e = widget.edits[i];
+    // The row shows e.oldText, and the signature that covers it is the
+    // original message's for i==0, else the previous edit's: that one signed
+    // its newText, which is this row's oldText.
+    final String? proofSig;
+    final String? proofPk;
+    final int? proofTs;
+    if (i == 0) {
+      proofSig = e.prevSignature ?? widget.originalSignature;
+      proofPk = e.prevPublicKey ?? widget.originalPublicKey;
+      proofTs = e.prevTimestampMs ?? widget.originalTimestampMs;
+    } else {
+      final prev = widget.edits[i - 1];
+      proofSig = prev.signature;
+      proofPk = prev.publicKey;
+      proofTs = prev.editedAt.millisecondsSinceEpoch;
+    }
+    final canVerify =
+        proofSig != null && proofPk != null && widget.senderPeerId != null;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+      child: Container(
+        padding: const EdgeInsets.all(HollowSpacing.sm),
+        decoration: BoxDecoration(
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  '${calendarDateLabel(e.editedAt)}, ${_clock(e.editedAt)}',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textTertiary),
+                ),
+                const Spacer(),
+                HollowIconButton(
+                  icon: canVerify ? LucideIcons.shieldCheck : LucideIcons.shieldOff,
+                  label: canVerify
+                      ? 'View signature details'
+                      : 'This version was not signed',
+                  size: 24,
+                  onPressed: canVerify
+                      ? () {
+                          final profiles = ProviderScope.containerOf(context)
+                              .read(profileProvider);
+                          showMessageProofDialog(
+                            context,
+                            MessageProofData(
+                              senderPeerId: widget.senderPeerId!,
+                              senderDisplayName: displayNameFor(
+                                  profiles, widget.senderPeerId!),
+                              text: e.oldText,
+                              timestampMs: proofTs!,
+                              signature: proofSig,
+                              publicKey: proofPk,
+                              messageId: widget.messageId ?? e.messageId,
+                              context: widget.proofContext ?? '',
+                              msgType: widget.proofMsgType ?? 'ch',
+                            ),
+                          );
+                        }
+                      : null,
+                ),
+              ],
+            ),
+            Text(
+              e.oldText,
+              style: HollowTypography.bodySmall.copyWith(
+                color: hollow.textSecondary,
+                decoration: TextDecoration.lineThrough,
+                decorationColor: hollow.textTertiary,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

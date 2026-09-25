@@ -1,4 +1,5 @@
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart'
     show
@@ -60,8 +61,7 @@ class ImportedArchivePrep {
 }
 
 /// Converts and filters an imported archive into everything the viewers render.
-/// [mobile] picks that form factor's banner wording; [avatarOf] is desktop-only
-/// and omitted on mobile.
+/// [avatarOf] is desktop-only and omitted on mobile.
 ImportedArchivePrep prepareImportedArchive({
   required archive_api.ArchiveData data,
   required String localPeerId,
@@ -69,41 +69,31 @@ ImportedArchivePrep prepareImportedArchive({
   required String? selectedChannelId,
   required String Function(String peerId) displayNameOf,
   dynamic Function(String peerId)? avatarOf,
-  required bool mobile,
 }) {
   final v = data.verification;
   final isDm = data.archiveType == 'dm';
   final isServer = data.archiveType == 'server';
 
-  final exportDate = DateTime.fromMillisecondsSinceEpoch(v.exportTimestamp);
-  final dateStr =
-      '${exportDate.year}-${exportDate.month.toString().padLeft(2, '0')}-${exportDate.day.toString().padLeft(2, '0')}';
+  final dateStr = calendarDateLabel(
+      DateTime.fromMillisecondsSinceEpoch(v.exportTimestamp));
   final exporterName = displayNameOf(v.exporterPeerId);
 
   final archiveSigValid = v.archiveSignatureValid;
-  final String archiveSigText;
-  if (archiveSigValid) {
-    archiveSigText = mobile
-        ? 'Signed by $exporterName on $dateStr'
-        : 'Archive signed by $exporterName on $dateStr';
-  } else {
-    archiveSigText = mobile
-        ? 'Signature invalid: may be tampered'
-        : 'Archive signature invalid: may have been tampered with';
-  }
+  final archiveSigText = archiveSigValid
+      ? 'Signed by $exporterName on $dateStr'
+      : "The archive's signature doesn't match, so it may have been changed";
 
   final msgSigWarning = v.messagesWithInvalidSig > 0;
   final String msgSigText;
   if (msgSigWarning) {
-    msgSigText = mobile
-        ? '${v.messagesWithInvalidSig}/${v.messageCount} messages failed verification'
-        : '${v.messagesWithInvalidSig} of ${v.messageCount} messages failed signature verification';
+    msgSigText = '${v.messagesWithInvalidSig} of ${v.messageCount} messages '
+        'failed their signature check';
   } else if (v.messagesWithValidSig > 0) {
-    msgSigText = mobile
-        ? '${v.messagesWithValidSig} messages verified'
-        : '${v.messagesWithValidSig} messages verified from original senders';
+    msgSigText = v.messagesWithValidSig == 1
+        ? '1 message verified from its sender'
+        : '${v.messagesWithValidSig} messages verified from their senders';
   } else {
-    msgSigText = '${v.messageCount} messages (no signatures)';
+    msgSigText = '${v.messageCount} messages, none of them signed';
   }
 
   String? activeChannelId;
@@ -181,10 +171,10 @@ ImportedArchivePrep prepareImportedArchive({
     headerTitle = displayNameOf(data.peerId ?? '');
   } else if (isServer) {
     headerTitle = activeChannelName ?? 'Channel';
-    headerSubtitle = 'in ${data.serverName ?? 'Server'}';
+    headerSubtitle = data.serverName ?? 'Server';
   } else {
     headerTitle = data.channelName ?? 'Channel';
-    headerSubtitle = data.serverName != null ? 'in ${data.serverName}' : null;
+    headerSubtitle = data.serverName;
   }
 
   return ImportedArchivePrep(

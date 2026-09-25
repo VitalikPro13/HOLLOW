@@ -222,7 +222,7 @@ slider; `onMedia: true` over video) · `HollowToggle` (the only switch, with a
 `HollowCountBadge` (the unread counter: accent for unread, error plus `@` for a
 mention, never hand-drawn) · `ConversationRow` + `PresenceAvatar` (the one
 conversation row) · `HollowTextLink` (a link inside prose, on the text's edge) ·
-`ServerAvatar` · `HollowIconButton` (every icon-only control: `label` is
+`HollowProgressBar` (a determinate transfer, 4 px, never animates on its own) · `PlaceHeader` (`shell/place_header.dart`: a place's title strip, fixed 52 px, title, tab chips beside it, actions on the trailing edge; Archive, Share, Conferences) · `HollowListRow(touch: true)` on a phone · `ServerAvatar` · `HollowIconButton` (every icon-only control: `label` is
 tooltip and screen-reader name, `size` 32 desktop / 44 touch, `selected` is a
 grey fill never the accent, siblings `xs` apart). A person's name in a chat is
 `nameColorFor(master, hollow)`, yours `accentText`; panels and people lists

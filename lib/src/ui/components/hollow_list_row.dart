@@ -33,6 +33,13 @@ class HollowListRow extends StatelessWidget {
   /// Usually null: [title] names the row.
   final String? semanticLabel;
 
+  /// Phone metrics (design language 5.4): at least 48 tall, type one step up,
+  /// full bleed so the row meets the screen edges.
+  final bool touch;
+
+  /// The smallest a [touch] row may be.
+  static const double touchMinHeight = 48;
+
   const HollowListRow({
     super.key,
     required this.title,
@@ -43,6 +50,7 @@ class HollowListRow extends StatelessWidget {
     this.onLongPress,
     this.selected = false,
     this.semanticLabel,
+    this.touch = false,
   });
 
   @override
@@ -59,45 +67,57 @@ class HollowListRow extends StatelessWidget {
       // Hover colour only. A row must not scale or dim under the pointer: at
       // list density that reads as the whole list twitching.
       subtle: true,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      borderRadius:
+          touch ? BorderRadius.zero : BorderRadius.circular(hollow.radiusMd),
       backgroundColor: selected ? hollow.accentMuted : null,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      child: Row(
-        children: [
-          if (leading != null) ...[
-            leading!,
-            const SizedBox(width: HollowSpacing.md),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  title,
-                  style: HollowTypography.label.copyWith(
-                    color: selected ? hollow.accentText : hollow.textPrimary,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (subtitle != null)
+      padding: touch
+          ? const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm)
+          : const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+            minHeight: touch ? touchMinHeight - 2 * HollowSpacing.sm : 0),
+        child: Row(
+          children: [
+            if (leading != null) ...[
+              leading!,
+              const SizedBox(width: HollowSpacing.md),
+            ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Text(
-                    subtitle!,
-                    style: HollowTypography.bodySmall
-                        .copyWith(color: hollow.textSecondary),
+                    title,
+                    style: (touch
+                            ? HollowTypography.bodyTouch
+                                .copyWith(fontWeight: FontWeight.w500)
+                            : HollowTypography.label)
+                        .copyWith(
+                      color: selected ? hollow.accentText : hollow.textPrimary,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
-              ],
+                  if (subtitle != null)
+                    Text(
+                      subtitle!,
+                      style: (touch
+                              ? HollowTypography.body
+                              : HollowTypography.bodySmall)
+                          .copyWith(color: hollow.textSecondary),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
             ),
-          ),
-          if (trailing != null) ...[
-            const SizedBox(width: HollowSpacing.md),
-            trailing!,
+            if (trailing != null) ...[
+              const SizedBox(width: HollowSpacing.md),
+              trailing!,
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

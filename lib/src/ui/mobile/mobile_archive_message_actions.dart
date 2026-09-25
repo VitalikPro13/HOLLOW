@@ -1,11 +1,56 @@
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+bool _picking = false;
+
+/// Saves an archived file on a phone. The platform save sheet takes the BYTES
+/// (there is no path to copy to), and a WebP image leaves as a PNG.
+Future<void> saveArchivedAttachmentMobile(
+    BuildContext context, FileAttachment attachment) async {
+  if (_picking || attachment.diskPath == null) return;
+  _picking = true;
+  try {
+    final asPng = attachment.isImage && attachment.fileExt == 'webp';
+    final Uint8List bytes = asPng
+        ? await network_api.convertImageFormat(
+            sourcePath: attachment.diskPath!, targetFormat: 'png')
+        : await AtRest.read(attachment.diskPath!);
+    final name = attachment.fileName;
+    final base =
+        name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
+
+    final saved = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save file',
+      fileName: asPng ? '$base.png' : name,
+      bytes: bytes,
+    );
+    if (saved != null && context.mounted) {
+      HollowToast.show(context, 'File saved', type: HollowToastType.success);
+    }
+  } catch (e) {
+    if (context.mounted) {
+      HollowToast.show(context, "Couldn't save the file: $e",
+          type: HollowToastType.error);
+    }
+  } finally {
+    _picking = false;
+  }
+}
+
+/// The long-press sheet on an archived message: who and when, a line of the
+/// text, then what can be done with a read-only message.
 void showMobileArchiveMessageActions({
   required BuildContext context,
   required String messageText,
@@ -49,133 +94,67 @@ class _ArchiveActionsSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    final actions = <Widget>[];
-    if (onCopy != null) {
-      actions.add(_ActionRow(
-        icon: LucideIcons.copy,
-        label: 'Copy text',
-        onTap: () {
-          Navigator.pop(context);
-          onCopy!();
-        },
-      ));
-    }
-    if (onDownload != null) {
-      actions.add(_ActionRow(
-        icon: LucideIcons.download,
-        label: 'Save file',
-        onTap: () {
-          Navigator.pop(context);
-          onDownload!();
-        },
-      ));
-    }
-    if (onInfo != null) {
-      actions.add(_ActionRow(
-        icon: LucideIcons.shieldCheck,
-        label: 'Message proof',
-        onTap: () {
-          Navigator.pop(context);
-          onInfo!();
-        },
-      ));
-    }
+    Widget action(IconData icon, String label, VoidCallback onTap) =>
+        HollowListRow(
+          touch: true,
+          title: label,
+          leading: Icon(icon, size: 20, color: hollow.textSecondary),
+          onTap: () {
+            Navigator.pop(context);
+            onTap();
+          },
+        );
 
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          senderName,
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.accent,
-                            fontWeight: FontWeight.w600,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
+            padding: const EdgeInsets.fromLTRB(HollowSpacing.lg, 0,
+                HollowSpacing.lg, HollowSpacing.sm),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        senderName,
+                        style: HollowTypography.label
+                            .copyWith(color: hollow.textPrimary),
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      Text(
-                        timestamp,
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 10,
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (messageText.isNotEmpty) ...[
-                    const SizedBox(height: 2),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
                     Text(
-                      messageText,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                      timestamp,
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textTertiary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
                     ),
                   ],
-                ],
-              ),
+                ),
+                if (messageText.isNotEmpty)
+                  Text(
+                    messageText,
+                    style: HollowTypography.body
+                        .copyWith(color: hollow.textSecondary),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+              ],
             ),
           ),
-          const SizedBox(height: HollowSpacing.md),
-
-          ...actions,
-
+          if (onCopy != null) action(LucideIcons.copy, 'Copy text', onCopy!),
+          if (onDownload != null)
+            action(LucideIcons.download, 'Save file', onDownload!),
+          if (onInfo != null)
+            action(LucideIcons.shieldCheck, 'Signature details', onInfo!),
           const SizedBox(height: HollowSpacing.sm),
         ],
-      ),
-    );
-  }
-}
-
-class _ActionRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  const _ActionRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg,
-          vertical: HollowSpacing.sm + 2,
-        ),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: hollow.textPrimary),
-            const SizedBox(width: HollowSpacing.md),
-            Text(label,
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textPrimary)),
-          ],
-        ),
       ),
     );
   }

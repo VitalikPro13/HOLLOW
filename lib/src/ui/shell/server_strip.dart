@@ -149,8 +149,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           }
           ref.invalidate(archiveDmListProvider);
           ref.invalidate(archiveChannelListProvider);
-          ref.read(archiveSelectedDmProvider.notifier).state = null;
-          ref.read(archiveSelectedChannelProvider.notifier).state = null;
+          selectArchiveConversation(ref.read);
           setShellTab(ref.read, ShellTab.archive);
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(channelListProvider.notifier).clear();

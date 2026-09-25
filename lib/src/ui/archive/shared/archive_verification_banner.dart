@@ -4,18 +4,33 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Two-row signature status banner for imported archives: the archive-level
-/// signature and the per-message ones. Strings come from
-/// `prepareImportedArchive`, and [dense] is the mobile sizing.
+/// An imported archive's signature verdict as one badge for the viewer's
+/// header. The banner under it spells out who signed it and what checked out.
+Widget archiveVerdictBadge({
+  required bool archiveSigValid,
+  required String archiveSigText,
+  required bool msgSigWarning,
+  required String msgSigText,
+}) {
+  final (label, kind, icon) = !archiveSigValid
+      ? ('Signature invalid', HollowBadgeKind.error, LucideIcons.shieldOff)
+      : msgSigWarning
+          ? ('Partly verified', HollowBadgeKind.warning, LucideIcons.shieldAlert)
+          : ('Verified', HollowBadgeKind.success, LucideIcons.shieldCheck);
+  return HollowBadge(label, kind: kind, icon: icon);
+}
+
+/// The signature verdict spelled out above an imported archive. A problem gets
+/// a warning strip; a clean archive gets one quiet line naming who signed it.
 class ArchiveVerificationBanner extends StatelessWidget {
   final bool archiveSigValid;
   final String archiveSigText;
   final bool msgSigWarning;
   final String msgSigText;
-  final bool dense;
 
   const ArchiveVerificationBanner({
     super.key,
@@ -23,70 +38,39 @@ class ArchiveVerificationBanner extends StatelessWidget {
     required this.archiveSigText,
     required this.msgSigWarning,
     required this.msgSigText,
-    this.dense = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final problem = !archiveSigValid || msgSigWarning;
 
-    final archiveColor = archiveSigValid ? hollow.accent : hollow.error;
-    final archiveIcon =
-        archiveSigValid ? LucideIcons.shieldCheck : LucideIcons.shieldOff;
-    final msgColor = msgSigWarning ? Colors.amber.shade700 : hollow.accent;
-    final msgIcon =
-        msgSigWarning ? LucideIcons.alertTriangle : LucideIcons.shieldCheck;
-    final iconSize = dense ? 13.0 : 14.0;
+    final tone = !archiveSigValid
+        ? hollow.error
+        : (msgSigWarning ? hollow.warning : hollow.success);
+    final icon = !archiveSigValid
+        ? LucideIcons.shieldOff
+        : (msgSigWarning ? LucideIcons.shieldAlert : LucideIcons.shieldCheck);
 
     return Container(
-      padding: dense
-          ? const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md, vertical: 8)
-          : const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.lg, vertical: 10),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
       decoration: BoxDecoration(
-        color: archiveColor.withValues(alpha: 0.08),
-        border: Border(
-            bottom: BorderSide(color: hollow.border.withValues(alpha: 0.3))),
+        color: problem ? hollow.noticeSurface(tone) : null,
+        border: Border(bottom: BorderSide(color: hollow.border)),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(archiveIcon, size: iconSize, color: archiveColor),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  archiveSigText,
-                  style: HollowTypography.caption.copyWith(
-                    color: archiveColor,
-                    fontWeight: FontWeight.w600,
-                    fontSize: dense ? 11 : 12,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          SizedBox(height: dense ? 3 : 4),
-          Row(
-            children: [
-              Icon(msgIcon, size: iconSize, color: msgColor),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  msgSigText,
-                  style: HollowTypography.caption.copyWith(
-                    color: msgColor,
-                    fontSize: dense ? 10 : 11,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+          Icon(icon, size: 16, color: tone),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              '$archiveSigText. $msgSigText.',
+              style: HollowTypography.bodySmall.copyWith(
+                  color: problem ? hollow.textPrimary : hollow.textSecondary),
+            ),
           ),
         ],
       ),
@@ -94,8 +78,8 @@ class ArchiveVerificationBanner extends StatelessWidget {
   }
 }
 
-/// Horizontal chip row for switching channels in a server archive. Callers
-/// reset the filter and search providers in [onChannelSelected].
+/// Switches channels in an imported server archive. Callers reset the filter
+/// and search providers in [onChannelSelected].
 class ArchiveChannelSelector extends StatelessWidget {
   final List<archive_api.ArchiveChannelInfoFfi> channels;
   final String? activeChannelId;
@@ -113,8 +97,8 @@ class ArchiveChannelSelector extends StatelessWidget {
     final hollow = HollowTheme.of(context);
 
     return Container(
-      height: 36,
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
       decoration: BoxDecoration(
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
@@ -123,45 +107,18 @@ class ArchiveChannelSelector extends StatelessWidget {
       // the rest on a wheel mouse.
       child: EdgeScrollRow(
         semanticLabel: 'channels',
-        children: channels.map((ch) {
-          final isActive = ch.channelId == activeChannelId;
-          return Padding(
-            padding: const EdgeInsets.only(right: HollowSpacing.xs),
-            child: Center(
-              child: HollowPressable(
+        fadeColor: hollow.surface,
+        children: [
+          for (final ch in channels)
+            Padding(
+              padding: const EdgeInsets.only(right: HollowSpacing.sm),
+              child: HollowChip(
+                label: '# ${ch.channelName}',
+                selected: ch.channelId == activeChannelId,
                 onTap: () => onChannelSelected(ch.channelId),
-                borderRadius: BorderRadius.circular(hollow.radiusXs),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: isActive
-                        ? hollow.accent.withValues(alpha: 0.15)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(hollow.radiusXs),
-                    border: Border.all(
-                      color: isActive
-                          ? hollow.accent.withValues(alpha: 0.3)
-                          : hollow.border,
-                    ),
-                  ),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  child: Text(
-                    '# ${ch.channelName}',
-                    style: HollowTypography.caption.copyWith(
-                      color:
-                          isActive ? hollow.accent : hollow.textSecondary,
-                      fontWeight:
-                          isActive ? FontWeight.w600 : FontWeight.normal,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
               ),
             ),
-          );
-        }).toList(),
+        ],
       ),
     );
   }
