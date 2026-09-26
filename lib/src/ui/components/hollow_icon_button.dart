@@ -36,6 +36,10 @@ class HollowIconButton extends StatelessWidget {
   /// error wash. Wins over [selected]'s grey.
   final Color? fill;
 
+  /// Over art (a banner, key art): a round dark scrim that brightens on
+  /// hover, a white glyph, so it reads on any picture.
+  final bool onMedia;
+
   const HollowIconButton({
     super.key,
     required this.icon,
@@ -47,6 +51,7 @@ class HollowIconButton extends StatelessWidget {
     this.count,
     this.tooltip,
     this.fill,
+    this.onMedia = false,
   });
 
   @override
@@ -58,17 +63,22 @@ class HollowIconButton extends StatelessWidget {
         onTap: onPressed,
         disabled: onPressed == null,
         semanticLabel: label,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        backgroundColor: fill ?? (selected ? hollow.hover : null),
+        borderRadius: BorderRadius.circular(
+            onMedia ? size / 2 : hollow.radiusMd),
+        backgroundColor: onMedia
+            ? Colors.black.withValues(alpha: 0.55) // design-ignore: scrim over art
+            : fill ?? (selected ? hollow.hover : null),
         child: _content(hollow),
       ),
     );
   }
 
   Widget _content(HollowTheme hollow) {
-    final tint =
-        color ?? (selected ? hollow.textPrimary : hollow.textSecondary);
-    final glyph = Icon(icon, size: size >= 32 ? 20 : 16, color: tint);
+    final tint = onMedia
+        ? Colors.white // design-ignore: glyph on the art's scrim
+        : color ?? (selected ? hollow.textPrimary : hollow.textSecondary);
+    final glyph = Icon(icon,
+        size: size >= 32 && !onMedia ? 20 : 16, color: tint);
     final count = this.count;
     if (count == null) return SizedBox.square(dimension: size, child: glyph);
     return SizedBox(

@@ -32,8 +32,8 @@
 
     { "peer": "a", "op": "right_click", "target": "server:fleet-probe" },
     { "peer": "a", "op": "tap", "target": "menu > text:Invite people" },
-    { "peer": "a", "op": "wait_for", "target": "type:SelectableText", "timeout_ms": 20000 },
-    { "peer": "a", "op": "capture", "target": "type:SelectableText", "as": "INVITE" },
+    { "peer": "a", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" },
     { "peer": "a", "op": "key", "value": "escape" },
 
     { "peer": "b", "op": "tap", "target": "semantics:Create a server" },

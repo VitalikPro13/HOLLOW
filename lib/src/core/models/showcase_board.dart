@@ -413,18 +413,36 @@ class ShowcaseBoard {
   /// Max games in one shelf block.
   static const int maxShelfGames = 8;
 
+  /// A favourite game's "Why this game?" line: about four lines beside the
+  /// cover. A longer review belongs in a text block.
+  static const int maxBlurbLength = 128;
+
   final List<ShowcaseBlock> left;
   final List<ShowcaseBlock> right;
 
-  const ShowcaseBoard({this.left = const [], this.right = const []});
+  /// One artwork spanning both boards, or null. Only an artwork block fits;
+  /// anything else decodes as absent.
+  final ShowcaseBlock? wide;
+
+  /// Where [wide] sits: above the two boards, or below them.
+  final bool wideAtTop;
+
+  const ShowcaseBoard({
+    this.left = const [],
+    this.right = const [],
+    this.wide,
+    this.wideAtTop = true,
+  });
 
   /// All asset hashes referenced by any block on either side.
   Set<String> referencedAssetHashes() => {
         for (final b in left) ...b.referencedAssetHashes,
         for (final b in right) ...b.referencedAssetHashes,
+        if (wide != null) ...wide!.referencedAssetHashes,
       };
 
-  bool get isEmpty => left.isEmpty && right.isEmpty;
+  bool get isEmpty => left.isEmpty && right.isEmpty && wide == null;
+  bool get hasWide => wide != null;
   bool get hasLeft => left.isNotEmpty;
   bool get hasRight => right.isNotEmpty;
 
@@ -444,7 +462,17 @@ class ShowcaseBoard {
             .toList();
       }
 
-      return ShowcaseBoard(left: side('left'), right: side('right'));
+      // Clients before the wide slot ignore the key and keep the two sides.
+      final wideJson = json['wide'];
+      final wide = wideJson is Map<String, dynamic>
+          ? ShowcaseBlock.fromJson(wideJson)
+          : null;
+      return ShowcaseBoard(
+        left: side('left'),
+        right: side('right'),
+        wide: wide?.type == ShowcaseBlockType.artwork ? wide : null,
+        wideAtTop: json['wideTop'] != false,
+      );
     } catch (_) {
       return const ShowcaseBoard();
     }
@@ -456,9 +484,22 @@ class ShowcaseBoard {
       'v': 1,
       if (left.isNotEmpty) 'left': left.map((b) => b.toJson()).toList(),
       if (right.isNotEmpty) 'right': right.map((b) => b.toJson()).toList(),
+      if (wide != null) 'wide': wide!.toJson(),
+      if (wide != null && !wideAtTop) 'wideTop': false,
     });
   }
 
-  ShowcaseBoard copyWith({List<ShowcaseBlock>? left, List<ShowcaseBlock>? right}) =>
-      ShowcaseBoard(left: left ?? this.left, right: right ?? this.right);
+  ShowcaseBoard copyWith({
+    List<ShowcaseBlock>? left,
+    List<ShowcaseBlock>? right,
+    ShowcaseBlock? wide,
+    bool clearWide = false,
+    bool? wideAtTop,
+  }) =>
+      ShowcaseBoard(
+        left: left ?? this.left,
+        right: right ?? this.right,
+        wide: clearWide ? null : (wide ?? this.wide),
+        wideAtTop: wideAtTop ?? this.wideAtTop,
+      );
 }

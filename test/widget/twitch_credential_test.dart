@@ -25,7 +25,7 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/profile_card_body.dart';
+import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/ui/settings/profile_section.dart';
 
@@ -169,7 +169,8 @@ void main() {
         (tester) async {
       await _pump(
         tester,
-        ProfileCardBody(
+        ProfileIdentityColumn(
+          width: kProfileCompactWidth,
           peerId: _peer,
           density: ProfileCardDensity.compact,
           dismissHost: () {},
@@ -187,7 +188,8 @@ void main() {
         (tester) async {
       await _pump(
         tester,
-        ProfileCardBody(
+        ProfileIdentityColumn(
+          width: kProfileCompactWidth,
           peerId: _peer,
           density: ProfileCardDensity.compact,
           dismissHost: () {},

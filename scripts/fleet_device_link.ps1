@@ -26,7 +26,7 @@
 #   G1  a and c are friends, DM both ways, a's server with #general traffic.
 #   G2  a shows a link code (Settings > Devices > Link a device).
 #   G3  b, empty, enters it and reaches "Linking this device".
-#   G4  a confirms, reaches "Data sent"; b reaches "Device linked".
+#   G4  a confirms, reaches "Data sent"; b reaches "Linked".
 #   G5  THE RESTART. b's own relaunch (Rust waiter) is allowed to happen, and
 #       the stash files are read BEFORE it. A fallback Stop+Restart is there for
 #       when the self-relaunch does not come back, and the report says which
@@ -121,7 +121,7 @@ if ($EdgeGates) {
     $script:Gates['G1 a and c are friends, DM both ways, server traffic both ways'] = 'SKIP'
     $script:Gates['G2 a minted a link code']                                        = 'SKIP'
     $script:Gates['G3 b, empty, entered it and is Linking this device']             = 'SKIP'
-    $script:Gates['G4 a reached Data sent and b reached Device linked']             = 'SKIP'
+    $script:Gates['G4 a reached Data sent and b reached Linked']             = 'SKIP'
     $script:Gates['G5 the stash landed and b came back up']                         = 'SKIP'
     $script:Gates['G6a b now holds a MASTER identity']                              = 'SKIP'
     $script:Gates['G6b b inherited the server and its #general history']            = 'SKIP'
@@ -690,9 +690,9 @@ function Get-LinkCode($peer) {
 # which is how E1 gets a peer that cannot reach a relay without the fleet
 # growing a switch of its own.
 function Open-EnterCode($peer, $relayDomain) {
-    Step $peer @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 90000 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
     if ($relayDomain) {
-        Step $peer @{ op = 'tap'; target = 'text:Advanced'; index = 0 }
+        Step $peer @{ op = 'tap'; target = 'semantics:Change the relay'; index = 0 }
         Step $peer @{ op = 'wait_for'; target = 'hint:relay.anonlisten.com'; timeout_ms = 10000 }
         Step $peer @{ op = 'enter_text'; target = 'hint:relay.anonlisten.com'; value = $relayDomain }
         Step $peer @{ op = 'wait_for'; target = "text:$relayDomain"; timeout_ms = 10000 }
@@ -700,7 +700,7 @@ function Open-EnterCode($peer, $relayDomain) {
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     # A throwaway identity is created and the node started before the dialog
     # appears, so this is the slow one.
-    Step $peer @{ op = 'wait_for'; target = 'text:Link this device'; timeout_ms = 180000 }
+    Step $peer @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 }
     Step $peer @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 20000 }
 }
 
@@ -773,17 +773,17 @@ try {
             throw "b reports connection=connected against $DeadRelay, so this gate proves nothing"
         }
         Add-Note "b's connection provider against $DeadRelay reads '$($script:FleetVars['B_CONN'])'"
-        Step b @{ op = 'wait_for'; target = 'contains:Hollow is not connected to the relay yet'; timeout_ms = 30000 }
-        # And it holds at the PRESS, not only in the caption: a disabled button
-        # that silently did nothing would look identical from the outside.
+        Step b @{ op = 'wait_for'; target = 'contains:Connecting to the relay'; timeout_ms = 30000 }
+        # And it holds at the PRESS, not only in the caption: Link waits for the
+        # relay (loading) and never starts a link it cannot finish.
         Step b @{ op = 'enter_text'; target = 'hint:ABC123'; value = 'ABC234' }
         Step b @{ op = 'tap'; target = 'text:Link'; index = 0 }
         Step b @{ op = 'wait'; ms = 6000 }
         Step b @{ op = 'expect_no_text'; value = 'Linking this device' }
-        Step b @{ op = 'expect_text'; value = 'Hollow is not connected to the relay yet' }
+        Step b @{ op = 'expect_text'; value = 'Connecting to the relay' }
         Step b @{ op = 'shot'; name = "link-$runTag-b-offline-after-press" }
         Set-Gate 'E1 offline: the enter-code screen refuses while disconnected' 'PASS'
-        Say 'PASS E1: the enter-code screen says so and the press does nothing' 'Green'
+        Say 'PASS E1: the enter-code screen says so and the press waits for the relay' 'Green'
 
         # ---- E2: the 60s waiting timeout -----------------------------------
         Say '2/2 b enters a real code and a never confirms'
@@ -880,8 +880,8 @@ try {
 
         Step a @{ op = 'right_click'; target = "server:$server" }
         Step a @{ op = 'tap'; target = 'menu > text:Invite people' }
-        Step a @{ op = 'wait_for'; target = 'type:SelectableText'; timeout_ms = 20000 }
-        Step a @{ op = 'capture'; target = 'type:SelectableText'; as = 'INVITE' }
+        Step a @{ op = 'wait_for'; target = 'type:HollowCopyField'; timeout_ms = 20000 }
+        Step a @{ op = 'capture'; target = 'type:HollowCopyField'; as = 'INVITE' }
         Step a @{ op = 'key'; value = 'escape' }
 
         Step c @{ op = 'tap'; target = 'semantics:Create a server' }
@@ -979,10 +979,10 @@ try {
             Backup-PeerArtifacts b 'pre-relaunch'
             Reset-PeerMailbox b
         } else {
-            Step b @{ op = 'wait_for'; target = 'text:Device linked'; timeout_ms = 120000 }
+            Step b @{ op = 'wait_for'; target = 'text:Linked'; timeout_ms = 120000 }
             Step b @{ op = 'shot'; name = "link-$runTag-b-linked" }
         }
-        Set-Gate 'G4 a reached Data sent and b reached Device linked' 'PASS'
+        Set-Gate 'G4 a reached Data sent and b reached Linked' 'PASS'
         Say 'PASS G4: the snapshot crossed' 'Green'
 
         # ---- G5: THE RESTART -----------------------------------------------

@@ -60,7 +60,7 @@ void main() {
     await tester.enterText(find.byType(TextField).first, 'noise');
     await tester.pump();
     expect(find.text('Noise suppression'), findsWidgets);
-    expect(find.text('Audio & Video'), findsWidgets);
+    expect(find.text('Audio & video'), findsWidgets);
   });
 
   testWidgets('Escape clears a search, then closes Settings', (tester) async {

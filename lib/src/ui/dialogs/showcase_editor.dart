@@ -1,1348 +1,792 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
+import 'dart:math' as math;
 
-import 'package:crypto/crypto.dart' show sha256;
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_section_header.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/components/profile_identity_column.dart';
+import 'package:hollow/src/ui/components/showcase_blocks.dart';
+import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
+import 'package:hollow/src/ui/dialogs/showcase_editor_blocks.dart';
+import 'package:hollow/src/ui/dialogs/showcase_editor_draft.dart';
+import 'package:hollow/src/ui/dialogs/showcase_editor_phone.dart';
+import 'package:hollow/src/ui/dialogs/showcase_editor_search.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Opens the showcase board composer for the LOCAL user.
+export 'package:hollow/src/ui/dialogs/showcase_editor_draft.dart'
+    show BakedGame, PickedGame, bakeGame;
+
+/// Opens the showcase editor for the LOCAL user: the profile dialog in edit
+/// mode on desktop, a pushed page on a phone.
 void showShowcaseEditorDialog(BuildContext context, WidgetRef ref) {
-  showHollowDialog(
+  final phone =
+      Platform.isAndroid ||
+      Platform.isIOS ||
+      MediaQuery.sizeOf(context).width < 600;
+  if (phone) {
+    Navigator.of(context).push(
+      hollowMobileRoute<void>(builder: (_) => const ShowcaseEditorPhonePage()),
+    );
+    return;
+  }
+  showHollowDialog<void>(
     context: context,
-    builder: (_) => const _ShowcaseEditorDialog(),
+    builder: (_) => const ShowcaseEditorDialog(),
   );
 }
 
-class _ShowcaseEditorDialog extends ConsumerStatefulWidget {
-  const _ShowcaseEditorDialog();
+/// A fresh draft of the local user's board, its pictures loading.
+ShowcaseDraft openShowcaseDraft(WidgetRef ref) {
+  final peerId = ref.read(identityProvider).peerId ?? '';
+  final profile = ref.read(profileProvider)[peerId];
+  return ShowcaseDraft(
+    peerId: peerId,
+    initial: ShowcaseBoard.decode(profile?.showcaseBoard),
+  )..loadAssets();
+}
+
+/// The block kinds offered by Add block, in menu order.
+const kShowcaseAddable = [
+  ShowcaseBlockType.nowPlaying,
+  ShowcaseBlockType.favoriteGame,
+  ShowcaseBlockType.gameShelf,
+  ShowcaseBlockType.artwork,
+  ShowcaseBlockType.text,
+];
+
+String showcaseBlockLabel(ShowcaseBlockType type) => switch (type) {
+  ShowcaseBlockType.nowPlaying => 'Now playing',
+  ShowcaseBlockType.favoriteGame => 'Favourite game',
+  ShowcaseBlockType.gameShelf => 'Game shelf',
+  ShowcaseBlockType.artwork => 'Artwork',
+  ShowcaseBlockType.text => 'Text',
+  ShowcaseBlockType.unknown => '',
+};
+
+String showcaseBlockHint(ShowcaseBlockType type) => switch (type) {
+  ShowcaseBlockType.nowPlaying => 'The game you are playing right now',
+  ShowcaseBlockType.favoriteGame => 'One game, and why it stays with you',
+  ShowcaseBlockType.gameShelf => 'Up to 8 games, like a backlog',
+  ShowcaseBlockType.artwork => 'An image or GIF, with a caption',
+  ShowcaseBlockType.text => 'A few lines, with bold, links and spoilers',
+  ShowcaseBlockType.unknown => '',
+};
+
+IconData showcaseBlockIcon(ShowcaseBlockType type) => switch (type) {
+  ShowcaseBlockType.nowPlaying => LucideIcons.gamepad2,
+  ShowcaseBlockType.favoriteGame => LucideIcons.heart,
+  ShowcaseBlockType.gameShelf => LucideIcons.libraryBig,
+  ShowcaseBlockType.artwork => LucideIcons.image,
+  ShowcaseBlockType.text => LucideIcons.type,
+  ShowcaseBlockType.unknown => LucideIcons.box,
+};
+
+const kWideArtworkLabel = 'Wide artwork (across both boards)';
+
+/// The label on a block's Edit control.
+String showcaseEditLabel(ShowcaseBlock block) => switch (block.type) {
+  ShowcaseBlockType.nowPlaying => 'Change game',
+  ShowcaseBlockType.favoriteGame => 'Edit favourite game',
+  ShowcaseBlockType.gameShelf => 'Edit shelf',
+  ShowcaseBlockType.artwork => 'Edit caption',
+  _ => 'Edit text',
+};
+
+/// Adds a block of [type] to [side]; games ask [search] first, artwork opens
+/// the file picker. Desktop and phone both add through here.
+Future<void> addShowcaseBlock(
+  BuildContext context,
+  ShowcaseDraft draft,
+  ShowcaseSide side,
+  ShowcaseBlockType type,
+  ShowcaseGameSearch search,
+) async {
+  switch (type) {
+    case ShowcaseBlockType.nowPlaying:
+    case ShowcaseBlockType.favoriteGame:
+      final game = await search(context);
+      if (game == null) return;
+      final placed = gameBlockFor(type, game);
+      draft.add(
+        side,
+        placed.block,
+        edit: type == ShowcaseBlockType.favoriteGame,
+      );
+      // The game is the block; a line under it is optional.
+      draft.editingIsNew = false;
+      draft.trackBake(placed.block, placed.bake);
+    case ShowcaseBlockType.gameShelf:
+      draft.add(
+        side,
+        const ShowcaseBlock(type: ShowcaseBlockType.gameShelf),
+        edit: true,
+      );
+    case ShowcaseBlockType.text:
+      draft.add(
+        side,
+        const ShowcaseBlock(type: ShowcaseBlockType.text),
+        edit: true,
+      );
+    case ShowcaseBlockType.artwork:
+      final block = await _pickArtwork(context, draft, side);
+      if (block == null) return;
+      draft.add(side, block, edit: true);
+      draft.editingIsNew = false;
+    case ShowcaseBlockType.unknown:
+      break;
+  }
+}
+
+/// Adds the one artwork that spans both boards.
+Future<void> addShowcaseWide(BuildContext context, ShowcaseDraft draft) async {
+  final block = await _pickArtwork(context, draft, null);
+  if (block == null) return;
+  draft.setWide(block, edit: true);
+  draft.editingIsNew = false;
+}
+
+Future<ShowcaseBlock?> _pickArtwork(
+  BuildContext context,
+  ShowcaseDraft draft,
+  ShowcaseSide? side,
+) async {
+  try {
+    return await draft.pickArtwork(forSide: side);
+  } catch (e) {
+    if (context.mounted) {
+      HollowToast.show(
+        context,
+        friendlyError(e, fallback: 'That picture could not be used.'),
+        type: HollowToastType.error,
+      );
+    }
+    return null;
+  }
+}
+
+/// Opens [block] for editing in place; Now playing has nothing to edit but
+/// the game, so it goes straight to search.
+Future<void> editShowcaseBlock(
+  BuildContext anchor,
+  ShowcaseDraft draft,
+  ShowcaseBlock block,
+  ShowcaseGameSearch search,
+) async {
+  if (block.type != ShowcaseBlockType.nowPlaying) {
+    draft.beginEdit(block);
+    return;
+  }
+  final game = await search(anchor);
+  if (game == null) return;
+  final placed = gameBlockFor(block.type, game);
+  draft.replace(block, placed.block, keepBakes: false);
+  draft.trackBake(placed.block, placed.bake);
+}
+
+/// Asks before throwing away changes. True when the editor may close.
+Future<bool> confirmDiscardShowcase(BuildContext context) => showHollowConfirm(
+  context: context,
+  title: 'Discard your changes?',
+  message: 'Your showcase stays as it was.',
+  confirmLabel: 'Discard',
+  destructive: true,
+);
+
+/// The editor on desktop: the profile dialog in edit mode. Your identity
+/// column stays as context, both boards are always open, blocks look exactly
+/// as viewers see them, and the only thing ever layered on top is a menu or
+/// game search.
+class ShowcaseEditorDialog extends ConsumerStatefulWidget {
+  const ShowcaseEditorDialog({super.key});
 
   @override
-  ConsumerState<_ShowcaseEditorDialog> createState() =>
+  ConsumerState<ShowcaseEditorDialog> createState() =>
       _ShowcaseEditorDialogState();
 }
 
-class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
-  late ShowcaseBoard _board;
+class _ShowcaseEditorDialogState extends ConsumerState<ShowcaseEditorDialog> {
+  late final ShowcaseDraft _draft = openShowcaseDraft(ref)
+    ..addListener(_changed);
+  bool _leaving = false;
 
-  /// Existing replicated assets plus anything added this session, pruned to
-  /// referenced hashes at save.
-  final Map<String, Uint8List> _assets = {};
-
-  /// In-flight background bakes. A block appears instantly and its bake patches
-  /// it in place, and Save AWAITS these so nothing ships half-baked.
-  final Set<Future<BakedGame>> _pendingBakes = {};
-  bool _busy = false;
+  void _changed() {
+    if (mounted) setState(() {});
+  }
 
   @override
-  void initState() {
-    super.initState();
-    final peerId = ref.read(identityProvider).peerId ?? '';
-    final profile = ref.read(profileProvider)[peerId];
-    _board = ShowcaseBoard.decode(profile?.showcaseBoard);
-    showcase_api.getShowcaseAssets(peerId: peerId).then((assets) {
-      if (!mounted) return;
-      setState(() {
-        for (final a in assets) {
-          _assets.putIfAbsent(a.hash, () => a.bytes);
-        }
-      });
-    }).catchError((_) {});
+  void dispose() {
+    _draft
+      ..removeListener(_changed)
+      ..dispose();
+    super.dispose();
   }
 
   Future<void> _save() async {
-    if (_busy) return;
-    // The Save button spins for the WHOLE save, bakes included: a big asset
-    // bundle takes a moment, and a silent frozen dialog reads as nothing
-    // happening.
-    setState(() => _busy = true);
-
-    // In-flight bakes land first; their patches, registered earlier, fire
-    // before this await resumes, so the board is enriched.
-    if (_pendingBakes.isNotEmpty) {
-      await Future.wait(_pendingBakes.toList());
-      if (!mounted) return;
-    }
-
-    final encoded = _board.encode();
-    if (encoded.length > ShowcaseBoard.maxEncodedLength) {
-      setState(() => _busy = false);
-      HollowToast.show(
-        context,
-        'Showcase is too large. Shorten a text block',
-        type: HollowToastType.error,
-      );
-      return;
-    }
-    // The board is the source of truth, so exactly the assets it references
-    // ship. Company logos are referenced from INSIDE details assets, so the
-    // expansion goes one level down or the prune drops them.
-    final referenced = {..._board.referencedAssetHashes()};
-    for (final h in referenced.toList()) {
-      final bytes = _assets[h];
-      if (bytes != null) {
-        referenced.addAll(GameDetails.logoHashesFromBytes(bytes));
-      }
-    }
-    final assets = [
-      for (final e in _assets.entries)
-        if (referenced.contains(e.key))
-          showcase_api.ShowcaseAsset(hash: e.key, bytes: e.value),
-    ];
-    final totalBytes =
-        assets.fold<int>(0, (sum, a) => sum + a.bytes.length);
-    if (totalBytes > 1_400_000) {
-      setState(() => _busy = false);
-      HollowToast.show(
-        context,
-        'Showcase images too large. Remove an artwork or game',
-        type: HollowToastType.error,
-      );
-      return;
-    }
-    final peerId = ref.read(identityProvider).peerId ?? '';
-    final navigator = Navigator.of(context);
     try {
-      await ref
-          .read(profileProvider.notifier)
-          .updateShowcaseBoard(peerId, encoded, assets: assets);
-    } catch (_) {
+      await _draft.save(ref.read(profileProvider.notifier));
+    } catch (e) {
       if (!mounted) return;
-      setState(() => _busy = false);
-      HollowToast.show(
-        context,
-        'Couldn\'t save the showcase. Try again',
-        type: HollowToastType.error,
+      setState(
+        () => _draft.saveError = friendlyError(
+          e,
+          fallback: 'Your showcase could not be saved. Try again.',
+        ),
       );
       return;
     }
     if (!mounted) return;
-    navigator.pop();
-    HollowToast.show(
-      context,
-      'Showcase updated',
-      type: HollowToastType.success,
+    _leaving = true;
+    Navigator.of(context).pop();
+    HollowToast.show(context, 'Showcase saved', type: HollowToastType.success);
+  }
+
+  Future<void> _askToLeave() async {
+    if (!await confirmDiscardShowcase(context) || !mounted) return;
+    _leaving = true;
+    Navigator.of(context).pop();
+  }
+
+  Future<PickedGame?> _search(BuildContext anchor, {bool alignEnd = false}) {
+    final box = anchor.findRenderObject() as RenderBox?;
+    final height = box?.size.height ?? 0;
+    return showGameSearchPopover(
+      anchor,
+      anchor: overlayAnchorOf(
+        anchor,
+        localOffset: Offset(
+          alignEnd ? math.max(box?.size.width ?? 0, kShowcaseColumnWidth) : 0,
+          height + HollowSpacing.xs,
+        ),
+      ),
+      alignEnd: alignEnd,
     );
-  }
-
-  void _stashAsset(showcase_api.ShowcaseAsset asset) {
-    _assets[asset.hash] = Uint8List.fromList(asset.bytes);
-  }
-
-  /// Registers a background bake for a just-placed game block. The block is
-  /// found by identity, so a reorder keeps it and a deletion drops the patch.
-  void _trackBake(ShowcaseBlock placed, Future<BakedGame> bake) {
-    _pendingBakes.add(bake);
-    bake.then((baked) {
-      _pendingBakes.remove(bake);
-      if (!mounted) return;
-      setState(() {
-        for (final a in baked.allAssets) {
-          _stashAsset(a);
-        }
-        _patchGameBlock(placed, baked);
-      });
-    });
-  }
-
-  void _patchGameBlock(ShowcaseBlock placed, BakedGame baked) {
-    ShowcaseBlock enrich(ShowcaseBlock b) => ShowcaseBlock(type: b.type, data: {
-          ...b.data,
-          if (baked.cover != null) 'cover': baked.cover!.hash,
-          if (baked.art != null) 'art': baked.art!.hash,
-          if (baked.detailsAsset != null) 'details': baked.detailsAsset!.hash,
-        });
-    final li = _board.left.indexOf(placed);
-    if (li >= 0) {
-      final next = [..._board.left];
-      next[li] = enrich(placed);
-      _board = _board.copyWith(left: next);
-      return;
-    }
-    final ri = _board.right.indexOf(placed);
-    if (ri >= 0) {
-      final next = [..._board.right];
-      next[ri] = enrich(placed);
-      _board = _board.copyWith(right: next);
-    }
-    // The block was deleted meanwhile, and its assets are pruned at save.
-  }
-
-  /// The full add-block flow for one side: picker, then a type-specific editor.
-  Future<void> _addBlockTo({required bool left}) async {
-    final type = await _showBlockPicker(context);
-    if (type == null || !mounted) return;
-
-    ShowcaseBlock? block;
-    Future<BakedGame>? pendingBake;
-    switch (type) {
-      case ShowcaseBlockType.text:
-        block = await showTextBlockEditor(context);
-
-      case ShowcaseBlockType.nowPlaying:
-      case ShowcaseBlockType.favoriteGame:
-        final game = await showGamePickerDialog(context);
-        if (game == null || !mounted) break;
-        // Enrichment starts NOW and downloads while the user types the blurb.
-        pendingBake = bakeGame(game);
-        String blurb = '';
-        if (type == ShowcaseBlockType.favoriteGame) {
-          blurb = (await _promptText(
-                context,
-                title: 'Why this game?',
-                hint: 'A short personal blurb (optional)',
-                maxLength: 200,
-              )) ??
-              '';
-          if (!mounted) break;
-        }
-        block = ShowcaseBlock(type: type, data: {
-          'name': game.name,
-          if (game.year != null) 'year': game.year,
-          if (blurb.isNotEmpty) 'blurb': blurb,
-        });
-
-      case ShowcaseBlockType.gameShelf:
-        final shelf = await showShelfEditorDialog(context);
-        if (shelf == null) break;
-        for (final a in shelf.assets) {
-          _stashAsset(a);
-        }
-        block = ShowcaseBlock(type: type, data: {
-          if (shelf.label.isNotEmpty) 'label': shelf.label,
-          'games': shelf.games,
-        });
-
-      case ShowcaseBlockType.artwork:
-        block = await _pickArtwork();
-
-      case ShowcaseBlockType.unknown:
-        break;
-    }
-
-    if (block == null || !mounted) return;
-    setState(() {
-      _board = left
-          ? _board.copyWith(left: [..._board.left, block!])
-          : _board.copyWith(right: [..._board.right, block!]);
-    });
-    if (pendingBake != null) _trackBake(block, pendingBake);
-  }
-
-  Future<ShowcaseBlock?> _pickArtwork() async {
-    final picked = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: true,
-    );
-    if (picked == null || picked.files.isEmpty || !mounted) return null;
-    var bytes = picked.files.single.bytes;
-    final path = picked.files.single.path;
-    if (bytes == null && path != null) {
-      try {
-        bytes = await File(path).readAsBytes();
-      } catch (_) {}
-    }
-    if (bytes == null || !mounted) return null;
-
-    setState(() => _busy = true);
-    showcase_api.ShowcaseAsset asset;
-    try {
-      asset = await showcase_api.processShowcaseArtwork(rawBytes: bytes);
-    } catch (e) {
-      if (mounted) {
-        setState(() => _busy = false);
-        HollowToast.show(context, '$e', type: HollowToastType.error);
-      }
-      return null;
-    }
-    if (!mounted) return null;
-    setState(() => _busy = false);
-
-    final caption = (await _promptText(
-          context,
-          title: 'Caption',
-          hint: 'Optional caption',
-          maxLength: 100,
-        )) ??
-        '';
-    _stashAsset(asset);
-    return ShowcaseBlock(type: ShowcaseBlockType.artwork, data: {
-      'image': asset.hash,
-      if (caption.isNotEmpty) 'caption': caption,
-    });
-  }
-
-  /// Edits any block in place with its own dialog, replacing it on save.
-  Future<void> _editBlock(bool left, int index) async {
-    final side = left ? _board.left : _board.right;
-    final block = side[index];
-
-    ShowcaseBlock? edited;
-    Future<BakedGame>? pendingBake;
-    switch (block.type) {
-      case ShowcaseBlockType.text:
-        edited = await showTextBlockEditor(context, existing: block);
-
-      case ShowcaseBlockType.nowPlaying:
-        final game = await showGamePickerDialog(context);
-        if (game == null) break;
-        pendingBake = bakeGame(game);
-        edited = ShowcaseBlock(type: block.type, data: {
-          'name': game.name,
-          if (game.year != null) 'year': game.year,
-        });
-
-      case ShowcaseBlockType.favoriteGame:
-        final game = await showGamePickerDialog(context);
-        if (game == null || !mounted) break;
-        // Bakes in parallel with the blurb prompt.
-        pendingBake = bakeGame(game);
-        final blurb = (await _promptText(
-              context,
-              title: 'Why this game?',
-              hint: 'A short personal blurb (optional)',
-              maxLength: 200,
-              initial: block.gameBlurb,
-              editing: true,
-            )) ??
-            block.gameBlurb;
-        edited = ShowcaseBlock(type: block.type, data: {
-          'name': game.name,
-          if (game.year != null) 'year': game.year,
-          if (blurb.isNotEmpty) 'blurb': blurb,
-        });
-
-      case ShowcaseBlockType.gameShelf:
-        final shelf = await showShelfEditorDialog(context, existing: block);
-        if (shelf == null) break;
-        for (final a in shelf.assets) {
-          _stashAsset(a);
-        }
-        edited = ShowcaseBlock(type: block.type, data: {
-          if (shelf.label.isNotEmpty) 'label': shelf.label,
-          'games': shelf.games,
-        });
-
-      case ShowcaseBlockType.artwork:
-        // Editing artwork edits the caption; the image is replaced by removing
-        // the block and adding a new one.
-        final caption = await _promptText(
-          context,
-          title: 'Caption',
-          hint: 'Optional caption',
-          maxLength: 100,
-          initial: block.artworkCaption,
-          editing: true,
-        );
-        if (caption == null) break;
-        edited = ShowcaseBlock(type: block.type, data: {
-          'image': block.artworkHash,
-          if (caption.isNotEmpty) 'caption': caption,
-        });
-
-      case ShowcaseBlockType.unknown:
-        break;
-    }
-
-    if (edited == null || !mounted) return;
-    final next = [...side];
-    next[index] = edited;
-    setState(() {
-      _board = left
-          ? _board.copyWith(left: next)
-          : _board.copyWith(right: next);
-    });
-    if (pendingBake != null) _trackBake(edited, pendingBake);
   }
 
   @override
   Widget build(BuildContext context) {
-    return HollowDialog(
-      title: 'Edit showcase',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const HollowDialogText(
-            'Compose blocks on either side of your profile. Only what you '
-            'put here is shown. Fill one side, both, or neither.',
+    final size = MediaQuery.sizeOf(context);
+    final available = size.width - HollowSpacing.xl * 2;
+    final twoColumns =
+        kProfileColumnWidth + 1 + showcasePaneWidth(2) <= available;
+    final withIdentity =
+        kProfileColumnWidth + 1 + showcasePaneWidth(1) <= available;
+    final paneWidth = showcasePaneWidth(twoColumns ? 2 : 1);
+    final width = (withIdentity ? kProfileColumnWidth + 1 : 0) + paneWidth;
+    final height = math.min(820.0, size.height - HollowSpacing.xl * 2);
+
+    return PopScope(
+      canPop: _leaving || !_draft.dirty,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !_draft.saving) _askToLeave();
+      },
+      child: HollowDialogSurface(
+        width: width,
+        maxWidth: width,
+        maxHeight: height,
+        padded: false,
+        child: SizedBox(
+          height: height,
+          child: Column(
+            children: [
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (withIdentity) ...[
+                      SizedBox(
+                        width: kProfileColumnWidth,
+                        // No scrollbar: its gutter would pull the banner off
+                        // the dialog's edge.
+                        child: ScrollConfiguration(
+                          behavior: ScrollConfiguration.of(
+                            context,
+                          ).copyWith(scrollbars: false),
+                          child: SingleChildScrollView(
+                            child: ProfileIdentityColumn(
+                              peerId: _draft.peerId,
+                              density: ProfileCardDensity.full,
+                              width: kProfileColumnWidth,
+                              dismissHost: () {},
+                              showActions: false,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const HollowVerticalDivider(),
+                    ],
+                    SizedBox(
+                      width: paneWidth,
+                      child: _EditorPane(
+                        draft: _draft,
+                        columns: twoColumns ? 2 : 1,
+                        search: _search,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const HollowDivider(),
+              _Footer(
+                draft: _draft,
+                onCancel: () => Navigator.of(context).maybePop(),
+                onSave: _save,
+              ),
+            ],
           ),
-          const SizedBox(height: HollowSpacing.lg),
-          _SideEditor(
-            label: 'Left board',
-            blocks: _board.left,
-            busy: _busy,
-            onChanged: (blocks) =>
-                setState(() => _board = _board.copyWith(left: blocks)),
-            onAddBlock: () => _addBlockTo(left: true),
-            onEditBlock: (i) => _editBlock(true, i),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          _SideEditor(
-            label: 'Right board',
-            blocks: _board.right,
-            busy: _busy,
-            onChanged: (blocks) =>
-                setState(() => _board = _board.copyWith(right: blocks)),
-            onAddBlock: () => _addBlockTo(left: false),
-            onEditBlock: (i) => _editBlock(false, i),
-          ),
-        ],
+        ),
       ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _busy ? null : _save,
-          loading: _busy,
-          child: const Text('Save'),
-        ),
-      ],
     );
   }
 }
 
-/// One side's block list.
-class _SideEditor extends StatelessWidget {
-  final String label;
-  final List<ShowcaseBlock> blocks;
-  final bool busy;
-  final ValueChanged<List<ShowcaseBlock>> onChanged;
-  final VoidCallback onAddBlock;
-  final void Function(int index) onEditBlock;
+typedef _AnchoredSearch =
+    Future<PickedGame?> Function(BuildContext anchor, {bool alignEnd});
 
-  const _SideEditor({
-    required this.label,
-    required this.blocks,
-    required this.busy,
-    required this.onChanged,
-    required this.onAddBlock,
-    required this.onEditBlock,
+class _EditorPane extends StatelessWidget {
+  final ShowcaseDraft draft;
+  final int columns;
+  final _AnchoredSearch search;
+
+  const _EditorPane({
+    required this.draft,
+    required this.columns,
+    required this.search,
   });
 
   @override
   Widget build(BuildContext context) {
+    final board = draft.board;
+    final gutter = scrollGutterOf(context);
+    final Widget boards = columns == 2
+        ? Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: kShowcaseColumnWidth,
+                child: _BoardColumn(
+                  draft: draft,
+                  side: ShowcaseSide.left,
+                  search: search,
+                ),
+              ),
+              const SizedBox(width: kShowcaseGap),
+              SizedBox(
+                width: kShowcaseColumnWidth,
+                child: _BoardColumn(
+                  draft: draft,
+                  side: ShowcaseSide.right,
+                  search: search,
+                  trailing: true,
+                ),
+              ),
+            ],
+          )
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _BoardColumn(
+                draft: draft,
+                side: ShowcaseSide.left,
+                search: search,
+              ),
+              const SizedBox(height: kShowcaseGap),
+              _BoardColumn(
+                draft: draft,
+                side: ShowcaseSide.right,
+                search: search,
+              ),
+            ],
+          );
+    final hasWide = board.hasWide || draft.processingWide;
+    return SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        kShowcasePanePadding,
+        kShowcasePanePadding,
+        kShowcasePanePadding - gutter,
+        kShowcasePanePadding,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (hasWide && board.wideAtTop) ...[
+            _WideSlot(draft: draft, columns: columns),
+            const SizedBox(height: kShowcaseGap),
+          ],
+          boards,
+          if (hasWide && !board.wideAtTop) ...[
+            const SizedBox(height: kShowcaseGap),
+            _WideSlot(draft: draft, columns: columns),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// One board while editing: its name and count, its blocks in order (drag
+/// the handle to reorder), and Add block at its foot.
+class _BoardColumn extends StatelessWidget {
+  final ShowcaseDraft draft;
+  final ShowcaseSide side;
+  final _AnchoredSearch search;
+
+  /// The right-hand column: its popovers hang from its trailing edge.
+  final bool trailing;
+
+  const _BoardColumn({
+    required this.draft,
+    required this.side,
+    required this.search,
+    this.trailing = false,
+  });
+
+  String get _name => side == ShowcaseSide.left ? 'Left board' : 'Right board';
+
+  @override
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final blocks = draft.side(side);
+    final processing = draft.processingSide == side;
+    Future<PickedGame?> find(BuildContext anchor) =>
+        search(anchor, alignEnd: trailing);
+
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        HollowSectionHeader(
-          label,
-          dense: true,
-          count: '${blocks.length}/${ShowcaseBoard.maxBlocksPerSide}',
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                _name,
+                style: HollowTypography.bodySmall.copyWith(
+                  color: hollow.textSecondary,
+                ),
+              ),
+            ),
+            Text(
+              '${blocks.length} of ${ShowcaseBoard.maxBlocksPerSide}',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textTertiary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ],
         ),
-        if (blocks.isEmpty)
+        const SizedBox(height: HollowSpacing.lg),
+        if (blocks.isEmpty && !processing)
+          const HollowEmptyState(
+            dense: true,
+            title: 'Nothing on this side yet',
+            description:
+                'A side with nothing on it stays hidden on your profile',
+          ),
+        // The blocks sit on the column's edge; their hover and edit frames
+        // bleed past it.
+        HollowBleed(
+          horizontal: HollowSpacing.sm,
+          child: ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            buildDefaultDragHandles: false,
+            itemCount: blocks.length,
+            proxyDecorator: (child, _, _) => _DragLift(child: child),
+            onReorderItem: (from, to) => draft.reorder(side, from, to),
+            itemBuilder: (context, i) {
+              final block = blocks[i];
+              return Padding(
+                key: ValueKey(draft.idOf(block)),
+                padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+                child: _blockFor(context, block, i, find),
+              );
+            },
+          ),
+        ),
+        if (processing) ...[
+          const ShowcaseProcessingBlock(),
+          const SizedBox(height: HollowSpacing.lg),
+        ],
+        if (draft.isFull(side))
           Text(
-            'Empty. This side isn\'t shown.',
+            'A side holds ${ShowcaseBoard.maxBlocksPerSide} blocks. Remove one '
+            'to add another.',
             style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary.withValues(alpha: 0.6),
-              fontSize: 11,
-              fontStyle: FontStyle.italic,
+              color: hollow.textTertiary,
             ),
           )
         else
-          ReorderableListView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: blocks.length,
-            buildDefaultDragHandles: false,
-            proxyDecorator: (child, index, animation) {
-              return AnimatedBuilder(
-                animation: animation,
-                builder: (ctx, child) => Material(
-                  color: Colors.transparent,
-                  elevation: 4,
-                  shadowColor: Colors.black26,
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  child: child,
-                ),
-                child: child,
-              );
-            },
-            // onReorderItem already reports newIndex after the removal.
-            onReorderItem: (oldIndex, newIndex) {
-              final next = [...blocks];
-              final moved = next.removeAt(oldIndex);
-              next.insert(newIndex, moved);
-              onChanged(next);
-            },
-            itemBuilder: (context, index) {
-              final block = blocks[index];
-              return Padding(
-                key: ValueKey('$label-$index-${block.hashCode}'),
-                padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-                child: _BlockRow(
-                  block: block,
-                  index: index,
-                  onEdit: block.type != ShowcaseBlockType.unknown
-                      ? () => onEditBlock(index)
-                      : null,
-                  onRemove: () {
-                    final next = [...blocks]..removeAt(index);
-                    onChanged(next);
-                  },
-                ),
-              );
-            },
+          ShowcaseOnTextEdge(
+            child: Builder(
+              builder: (anchor) => HollowButton.ghost(
+                icon: const Icon(LucideIcons.plus),
+                onPressed: processing
+                    ? null
+                    : () => _openAddMenu(context, anchor, find),
+                child: const Text('Add block'),
+              ),
+            ),
           ),
-        const SizedBox(height: HollowSpacing.xs),
-        HollowButton.ghost(
-          onPressed: busy || blocks.length >= ShowcaseBoard.maxBlocksPerSide
-              ? null
-              : onAddBlock,
-          compact: true,
-          loading: busy,
-          icon: const Icon(LucideIcons.plus),
-          child: const Text('Add block'),
+      ],
+    );
+  }
+
+  Widget _blockFor(
+    BuildContext context,
+    ShowcaseBlock block,
+    int index,
+    ShowcaseGameSearch find,
+  ) {
+    if (identical(draft.editing, block)) {
+      final key = ValueKey('edit-${draft.idOf(block)}');
+      return switch (block.type) {
+        ShowcaseBlockType.text => ShowcaseTextEditor(key: key, draft: draft),
+        ShowcaseBlockType.artwork => ShowcaseCaptionEditor(
+          key: key,
+          draft: draft,
+        ),
+        ShowcaseBlockType.favoriteGame => ShowcaseBlurbEditor(
+          key: key,
+          draft: draft,
+          search: find,
+        ),
+        ShowcaseBlockType.gameShelf => ShowcaseShelfEditor(
+          key: key,
+          draft: draft,
+          search: find,
+        ),
+        _ => const SizedBox.shrink(),
+      };
+    }
+    return Builder(
+      builder: (blockContext) => EditableShowcaseBlock(
+        view: ShowcaseBlockView(
+          block: block,
+          assets: draft.assets,
+          ownerPeerId: draft.peerId,
+        ),
+        editLabel: showcaseEditLabel(block),
+        onEdit: () => editShowcaseBlock(blockContext, draft, block, find),
+        onRemove: () => draft.remove(block),
+        handle: ReorderableDragStartListener(
+          index: index,
+          child: Builder(
+            builder: (handleContext) => HollowIconButton(
+              icon: LucideIcons.gripVertical,
+              label: 'Move',
+              onPressed: () => _openMoveMenu(handleContext, block),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openMoveMenu(BuildContext anchor, ShowcaseBlock block) {
+    final other = side == ShowcaseSide.left ? 'right' : 'left';
+    showHollowMenu(
+      context: anchor,
+      anchor: overlayAnchorOf(anchor, localOffset: const Offset(0, 36)),
+      builder: (_, _) => [
+        HollowMenuItem(
+          icon: LucideIcons.arrowUp,
+          label: 'Move up',
+          enabled: draft.canMoveBy(block, -1),
+          onTap: () => draft.moveBy(block, -1),
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.arrowDown,
+          label: 'Move down',
+          enabled: draft.canMoveBy(block, 1),
+          onTap: () => draft.moveBy(block, 1),
+        ),
+        HollowMenuItem(
+          icon: side == ShowcaseSide.left
+              ? LucideIcons.arrowRight
+              : LucideIcons.arrowLeft,
+          label: 'Move to the $other board',
+          trailing: draft.canMoveAcross(block) ? null : 'Full',
+          enabled: draft.canMoveAcross(block),
+          onTap: () => draft.moveAcross(block),
+        ),
+      ],
+    );
+  }
+
+  void _openAddMenu(
+    BuildContext context,
+    BuildContext anchor,
+    ShowcaseGameSearch find,
+  ) {
+    final box = anchor.findRenderObject() as RenderBox?;
+    showHollowMenu(
+      context: anchor,
+      anchor: overlayAnchorOf(
+        anchor,
+        localOffset: Offset(0, (box?.size.height ?? 0) + HollowSpacing.xs),
+      ),
+      builder: (_, _) => [
+        for (final type in kShowcaseAddable)
+          HollowMenuItem(
+            icon: showcaseBlockIcon(type),
+            label: showcaseBlockLabel(type),
+            onTap: () => addShowcaseBlock(anchor, draft, side, type, find),
+          ),
+        const HollowMenuDivider(),
+        HollowMenuItem(
+          icon: LucideIcons.galleryHorizontal,
+          label: kWideArtworkLabel,
+          trailing: draft.board.hasWide ? 'You have one' : null,
+          enabled: !draft.board.hasWide && !draft.processingWide,
+          onTap: () => addShowcaseWide(anchor, draft),
         ),
       ],
     );
   }
 }
 
-IconData _blockIcon(ShowcaseBlockType type) => switch (type) {
-      ShowcaseBlockType.text => LucideIcons.type,
-      ShowcaseBlockType.nowPlaying => LucideIcons.play,
-      ShowcaseBlockType.favoriteGame => LucideIcons.heart,
-      ShowcaseBlockType.gameShelf => LucideIcons.libraryBig,
-      ShowcaseBlockType.artwork => LucideIcons.image,
-      ShowcaseBlockType.unknown => LucideIcons.box,
-    };
+/// The artwork across both boards, where viewers will see it.
+class _WideSlot extends StatelessWidget {
+  final ShowcaseDraft draft;
+  final int columns;
 
-class _BlockRow extends StatelessWidget {
-  final ShowcaseBlock block;
-  final int index;
-  final VoidCallback? onEdit;
-  final VoidCallback onRemove;
-
-  const _BlockRow({
-    required this.block,
-    required this.index,
-    required this.onRemove,
-    this.onEdit,
-  });
+  const _WideSlot({required this.draft, required this.columns});
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final summary = switch (block.type) {
-      ShowcaseBlockType.text => block.textTitle.isNotEmpty
-          ? block.textTitle
-          : (block.textBody.isNotEmpty ? block.textBody : 'Text block'),
-      ShowcaseBlockType.nowPlaying => 'Now Playing: ${block.gameName}',
-      ShowcaseBlockType.favoriteGame => 'Favorite: ${block.gameName}',
-      ShowcaseBlockType.gameShelf => block.shelfLabel.isNotEmpty
-          ? '${block.shelfLabel} (${block.shelfGames.length} games)'
-          : 'Game Shelf (${block.shelfGames.length} games)',
-      ShowcaseBlockType.artwork => block.artworkCaption.isNotEmpty
-          ? 'Artwork: ${block.artworkCaption}'
-          : 'Artwork',
-      ShowcaseBlockType.unknown => 'Block from a newer version',
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm + 2,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-      ),
-      child: Row(
-        children: [
-          ReorderableDragStartListener(
-            index: index,
-            child: Icon(LucideIcons.gripVertical,
-                size: 16, color: hollow.textSecondary),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Icon(_blockIcon(block.type), size: 14, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              summary,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 12,
-              ),
-            ),
-          ),
-          if (onEdit != null)
-            HollowPressable(
-              onTap: onEdit,
-              semanticLabel: 'Edit block',
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(LucideIcons.pencil,
-                  size: 13, color: hollow.textSecondary),
-            ),
-          HollowPressable(
-            onTap: onRemove,
-            semanticLabel: 'Remove block',
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child:
-                Icon(LucideIcons.x, size: 13, color: hollow.textSecondary),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-Future<ShowcaseBlockType?> _showBlockPicker(BuildContext context) {
-  return showHollowDialog<ShowcaseBlockType>(
-    context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Add block',
-      showClose: true,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _pickerOption(ctx, ShowcaseBlockType.nowPlaying, 'Now Playing',
-              'One game, present tense. Set by you, never auto-detected'),
-          _pickerOption(ctx, ShowcaseBlockType.favoriteGame, 'Favorite Game',
-              'A big cover with your personal blurb'),
-          _pickerOption(ctx, ShowcaseBlockType.gameShelf, 'Game Shelf',
-              'A cover grid: backlog, all-time favorites, whatever'),
-          _pickerOption(ctx, ShowcaseBlockType.artwork, 'Artwork / GIF',
-              'An image of your choosing'),
-          _pickerOption(ctx, ShowcaseBlockType.text, 'Text',
-              'Free-form: bold, italic, code, spoilers, links'),
-        ],
-      ),
-    ),
-  );
-}
-
-Widget _pickerOption(BuildContext ctx, ShowcaseBlockType type, String title,
-    String description) {
-  final hollow = HollowTheme.of(ctx);
-  return Padding(
-    padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-    child: HollowPressable(
-      onTap: () => Navigator.of(ctx).pop(type),
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      child: Row(
-        children: [
-          Icon(_blockIcon(type), size: 18, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
-                  ),
-                ),
-                Text(
-                  description,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-/// The instant result of tapping a search row: basics only, so the picker
-/// closes with no latency. Everything heavier is baked in the background by
-/// [bakeGame] and patched into the placed block.
-class PickedGame {
-  final int id;
-  final String name;
-  final int? year;
-  final String? coverUrl;
-
-  const PickedGame({
-    required this.id,
-    required this.name,
-    this.year,
-    this.coverUrl,
-  });
-}
-
-/// Everything fetched for one picked game, baked in the BACKGROUND after the
-/// picker closes. Every stage is best-effort, so the future NEVER throws and a
-/// failed stage leaves its field null.
-class BakedGame {
-  final showcase_api.ShowcaseAsset? cover;
-
-  /// Landscape key art, the card's hero image.
-  final showcase_api.ShowcaseAsset? art;
-
-  /// The details JSON as a content-addressed bundle asset, with the company
-  /// logo URLs inside already rewritten to asset hashes.
-  final showcase_api.ShowcaseAsset? detailsAsset;
-  final List<showcase_api.ShowcaseAsset> logoAssets;
-
-  const BakedGame({
-    this.cover,
-    this.art,
-    this.detailsAsset,
-    this.logoAssets = const [],
-  });
-
-  Iterable<showcase_api.ShowcaseAsset> get allAssets sync* {
-    if (cover != null) yield cover!;
-    if (art != null) yield art!;
-    if (detailsAsset != null) yield detailsAsset!;
-    yield* logoAssets;
-  }
-}
-
-/// Fetches and content-addresses everything a game block replicates, while the
-/// user types their blurb. CDN-only fetches, and it never throws.
-Future<BakedGame> bakeGame(PickedGame game) async {
-  showcase_api.ShowcaseAsset? cover;
-  if (game.coverUrl != null) {
-    try {
-      cover = await showcase_api.showcaseFetchCover(url: game.coverUrl!);
-    } catch (_) {}
-  }
-
-  showcase_api.ShowcaseAsset? art;
-  showcase_api.ShowcaseAsset? detailsAsset;
-  final logoAssets = <showcase_api.ShowcaseAsset>[];
-  try {
-    final card = await showcase_api.showcaseGameDetails(gameId: game.id);
-    if (card != null) {
-      final decoded = jsonDecode(card.detailsJson);
-      if (decoded is Map<String, dynamic>) {
-        final details = decoded;
-
-        // Key art rides the block as its own asset: never bake a remote URL
-        // into replicated data.
-        details.remove('artwork');
-        if (card.artworkUrl != null) {
-          try {
-            art = await showcase_api.showcaseFetchKeyArt(url: card.artworkUrl!);
-          } catch (_) {}
-        }
-
-        // Company logos become content-addressed asset hashes.
-        final companies = details['companies'];
-        if (companies is List) {
-          for (final co in companies) {
-            if (co is! Map) continue;
-            final logoUrl = co['logo'];
-            if (logoUrl is! String || logoUrl.isEmpty) continue;
-            try {
-              final asset = await showcase_api.showcaseFetchCover(url: logoUrl);
-              logoAssets.add(asset);
-              co['logo'] = asset.hash;
-            } catch (_) {
-              co.remove('logo'); // credit still shows name + links
-            }
-          }
-        }
-
-        // The details JSON itself becomes a bundle asset, so the block stores
-        // only its hash and the board stays tiny.
-        final bytes = Uint8List.fromList(utf8.encode(jsonEncode(details)));
-        detailsAsset = showcase_api.ShowcaseAsset(
-          hash: sha256.convert(bytes).toString(),
-          bytes: bytes,
-        );
-      }
-    }
-  } catch (_) {
-    // Enrichment is best-effort: the game stays usable as name and cover.
-  }
-
-  return BakedGame(
-    cover: cover,
-    art: art,
-    detailsAsset: detailsAsset,
-    logoAssets: logoAssets,
-  );
-}
-
-Future<PickedGame?> showGamePickerDialog(BuildContext context) {
-  return showHollowDialog<PickedGame>(
-    context: context,
-    builder: (_) => const _GamePickerDialog(),
-  );
-}
-
-class _GamePickerDialog extends StatefulWidget {
-  const _GamePickerDialog();
-
-  @override
-  State<_GamePickerDialog> createState() => _GamePickerDialogState();
-}
-
-class _GamePickerDialogState extends State<_GamePickerDialog> {
-  final _controller = TextEditingController();
-  Timer? _debounce;
-  List<showcase_api.GameSearchResult> _results = const [];
-  bool _searching = false;
-  String? _error;
-
-  /// The last COMPLETED search, so "no games found" shows only for what the
-  /// user is looking at now and never flashes during the debounce.
-  String _searchedFor = '';
-
-  @override
-  void dispose() {
-    _debounce?.cancel();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _onQueryChanged(String q) {
-    _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 450), () => _search(q));
-  }
-
-  Future<void> _search(String q) async {
-    if (q.trim().isEmpty) {
-      setState(() {
-        _results = const [];
-        _error = null;
-        _searchedFor = '';
-      });
-      return;
-    }
-    setState(() { _searching = true; _error = null; });
-    try {
-      final results = await showcase_api.showcaseGameSearch(query: q);
-      if (!mounted) return;
-      setState(() {
-        _results = results;
-        _searching = false;
-        _searchedFor = q.trim();
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _searching = false;
-        _error = 'Search unavailable. Check your connection and try again';
-      });
-    }
-  }
-
-  bool get _showNoResults =>
-      _results.isEmpty &&
-      _searchedFor.isNotEmpty &&
-      _searchedFor == _controller.text.trim();
-
-  /// Instant: the heavy enrichment runs in the BACKGROUND after the picker
-  /// closes, so there is no spinner between tap and editor.
-  void _pick(showcase_api.GameSearchResult game) {
-    Navigator.of(context).pop(PickedGame(
-      id: game.id,
-      name: game.name,
-      year: game.year,
-      coverUrl: game.coverUrl,
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowDialog(
-      title: 'Find a game',
-      showClose: true,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          HollowTextField(
-            controller: _controller,
-            hintText: 'Search games…',
-            autofocus: true,
-            onChanged: _onQueryChanged,
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          if (_searching)
-            const Padding(
-              padding: EdgeInsets.all(HollowSpacing.lg),
-              child: Center(child: HollowSpinner()),
-            )
-          else if (_error != null)
-            Padding(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              child: Row(
-                children: [
-                  Icon(LucideIcons.wifiOff, size: 14, color: hollow.error),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      _error!,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.error,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            )
-          else if (_showNoResults)
-            HollowEmptyState(
-              glyph: LucideIcons.searchX,
-              title: 'No games found for “$_searchedFor”',
-              description: 'Check the spelling or try a shorter name.',
-            )
-          else
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 320),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: _results.length,
-                itemBuilder: (context, index) {
-                  final game = _results[index];
-                  return HollowPressable(
-                    onTap: () => _pick(game),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.sm,
-                      vertical: HollowSpacing.xs,
-                    ),
-                    child: Row(
-                      children: [
-                        // Authoring-time thumbnail, from OUR CDN only.
-                        ClipRRect(
-                          borderRadius:
-                              BorderRadius.circular(hollow.radiusMd),
-                          child: game.coverUrl != null
-                              ? Image.network(
-                                  game.coverUrl!,
-                                  width: 32,
-                                  height: 43,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, _, _) => _thumbFallback(
-                                      hollow),
-                                )
-                              : _thumbFallback(hollow),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: Text(
-                            game.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.textPrimary,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                        if (game.gameType != null) ...[
-                          const SizedBox(width: HollowSpacing.sm),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 5, vertical: 1),
-                            decoration: BoxDecoration(
-                              color: hollow.textSecondary
-                                  .withValues(alpha: 0.12),
-                              borderRadius:
-                                  BorderRadius.circular(hollow.radiusXs),
-                            ),
-                            child: Text(
-                              game.gameType!,
-                              style: HollowTypography.micro.copyWith(
-                                color: hollow.textSecondary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                        if (game.year != null) ...[
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text(
-                            '${game.year}',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textSecondary,
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            'Game data from IGDB',
-            style: HollowTypography.micro.copyWith(
-              color: hollow.textSecondary.withValues(alpha: 0.5),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _thumbFallback(HollowTheme hollow) => Container(
-        width: 32,
-        height: 43,
-        color: hollow.elevated,
-        child: Icon(
-          LucideIcons.gamepad2,
-          size: 14,
-          color: hollow.textSecondary.withValues(alpha: 0.5),
-        ),
+    final wide = draft.board.wide;
+    final Widget child;
+    if (wide == null) {
+      child = const ShowcaseProcessingBlock(height: 240);
+    } else if (identical(draft.editing, wide)) {
+      child = ShowcaseCaptionEditor(
+        key: ValueKey('edit-${draft.idOf(wide)}'),
+        draft: draft,
+        wide: true,
       );
-}
-
-class ShelfResult {
-  final String label;
-  final List<Map<String, dynamic>> games;
-  final List<showcase_api.ShowcaseAsset> assets;
-
-  const ShelfResult({
-    required this.label,
-    required this.games,
-    required this.assets,
-  });
-}
-
-/// Pass [existing] to edit a shelf in place (label + games prefilled).
-Future<ShelfResult?> showShelfEditorDialog(
-  BuildContext context, {
-  ShowcaseBlock? existing,
-}) {
-  return showHollowDialog<ShelfResult>(
-    context: context,
-    builder: (_) => _ShelfEditorDialog(existing: existing),
-  );
-}
-
-class _ShelfEditorDialog extends StatefulWidget {
-  final ShowcaseBlock? existing;
-
-  const _ShelfEditorDialog({this.existing});
-
-  @override
-  State<_ShelfEditorDialog> createState() => _ShelfEditorDialogState();
-}
-
-class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
-  late final TextEditingController _labelController;
-
-  /// Prefilled from an existing block; new picks append here and their bytes to
-  /// [_newAssets].
-  late final List<Map<String, dynamic>> _games;
-  final List<showcase_api.ShowcaseAsset> _newAssets = [];
-
-  /// In-flight background bakes. Games land instantly and each map is patched
-  /// in place when its bake completes; Save awaits them.
-  final Set<Future<BakedGame>> _pendingBakes = {};
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _labelController =
-        TextEditingController(text: widget.existing?.shelfLabel ?? '');
-    _games = [...(widget.existing?.shelfGames ?? const [])];
-  }
-
-  @override
-  void dispose() {
-    _labelController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _addGame() async {
-    final game = await showGamePickerDialog(context);
-    if (game == null || !mounted) return;
-    // The map keeps its identity through reorders, so the bake can patch it in
-    // place. Shelf entries carry the FULL card payload, so a shelf tap opens
-    // the same card a game block does; the save-time bundle check is the budget
-    // backstop for an art-heavy shelf.
-    final map = <String, dynamic>{
-      'name': game.name,
-      if (game.year != null) 'year': game.year,
-    };
-    setState(() => _games.add(map));
-    final bake = bakeGame(game);
-    _pendingBakes.add(bake);
-    bake.then((baked) {
-      _pendingBakes.remove(bake);
-      if (!mounted) return;
-      setState(() {
-        if (baked.cover != null) {
-          map['cover'] = baked.cover!.hash;
-          _newAssets.add(baked.cover!);
-        }
-        if (baked.art != null) {
-          map['art'] = baked.art!.hash;
-          _newAssets.add(baked.art!);
-        }
-        if (baked.detailsAsset != null) {
-          map['details'] = baked.detailsAsset!.hash;
-          _newAssets.add(baked.detailsAsset!);
-          _newAssets.addAll(baked.logoAssets);
-        }
-      });
-    });
-  }
-
-  Future<void> _save() async {
-    if (_games.isEmpty || _saving) return;
-    // Waits for in-flight bakes so covers and details ship with the shelf: a
-    // fresh pick can still be downloading when the user hits Save.
-    if (_pendingBakes.isNotEmpty) {
-      setState(() => _saving = true);
-      await Future.wait(_pendingBakes.toList());
-      if (!mounted) return;
-    }
-    Navigator.of(context).pop(ShelfResult(
-      label: _labelController.text.trim(),
-      games: _games,
-      assets: _newAssets,
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowDialog(
-      title: 'Game shelf',
-      width: 420,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          HollowTextField(
-            controller: _labelController,
-            hintText: 'Shelf label (e.g. "Backlog", optional)',
-            maxLength: 40,
+    } else {
+      final top = draft.board.wideAtTop;
+      child = EditableShowcaseBlock(
+        view: ShowcaseWideArtwork(block: wide, assets: draft.assets),
+        editLabel: 'Edit caption',
+        onEdit: () => draft.beginEdit(wide),
+        onRemove: () => draft.remove(wide),
+        leadingTools: [
+          HollowChip(
+            label: 'Top',
+            selected: top,
+            onTap: () => draft.setWideAtTop(true),
           ),
-          const SizedBox(height: HollowSpacing.md),
-          for (var i = 0; i < _games.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-              child: Row(
-                children: [
-                  Icon(LucideIcons.gamepad2,
-                      size: 13, color: hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      (_games[i]['name'] as String?) ?? '',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                  HollowPressable(
-                    onTap: () => setState(() => _games.removeAt(i)),
-                    semanticLabel: 'Remove game',
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(LucideIcons.x,
-                        size: 13, color: hollow.textSecondary),
-                  ),
-                ],
-              ),
-            ),
-          HollowButton.ghost(
-            onPressed:
-                _games.length >= ShowcaseBoard.maxShelfGames ? null : _addGame,
-            compact: true,
-            icon: const Icon(LucideIcons.plus),
-            child: Text(
-                'Add game (${_games.length}/${ShowcaseBoard.maxShelfGames})'),
+          HollowChip(
+            label: 'Bottom',
+            selected: !top,
+            onTap: () => draft.setWideAtTop(false),
           ),
         ],
+      );
+    }
+    // The wide piece spans exactly the columns under it, however wide the
+    // scroll view is.
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: SizedBox(
+        width: columns == 2 ? kShowcaseWideWidth : kShowcaseColumnWidth,
+        child: HollowBleed(horizontal: HollowSpacing.sm, child: child),
       ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _games.isEmpty || _saving ? null : _save,
-          loading: _saving,
-          child: const Text('Save'),
-        ),
-      ],
     );
   }
 }
 
-/// One-field prompt, returning the trimmed text or null on cancel.
-///
-/// [editing] makes the secondary action Cancel (null, keep what is there)
-/// rather than Skip (empty): skipping an edit must not erase the caption or
-/// blurb it opened with. Clearing is an emptied field and Save.
-Future<String?> _promptText(
-  BuildContext context, {
-  required String title,
-  required String hint,
-  required int maxLength,
-  String initial = '',
-  bool editing = false,
-}) {
-  final controller = TextEditingController(text: initial);
-  return showHollowDialog<String>(
-    context: context,
-    builder: (ctx) => HollowDialog(
-      title: title,
-      width: 420,
-      content: HollowTextField(
-        controller: controller,
-        hintText: hint,
-        maxLength: maxLength,
-        autofocus: true,
-        onSubmitted: (_) =>
-            Navigator.of(ctx).pop(controller.text.trim()),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(editing ? null : ''),
-          child: Text(editing ? 'Cancel' : 'Skip'),
-        ),
-        HollowButton.filled(
-          onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-          child: const Text('Save'),
-        ),
-      ],
-    ),
-  );
-}
+/// The dragged block, lifted.
+class _DragLift extends StatelessWidget {
+  final Widget child;
 
-/// Modal editor for a Text block. Returns the block, or null on cancel.
-Future<ShowcaseBlock?> showTextBlockEditor(
-  BuildContext context, {
-  ShowcaseBlock? existing,
-}) {
-  return showHollowDialog<ShowcaseBlock>(
-    context: context,
-    builder: (_) => _TextBlockEditorDialog(existing: existing),
-  );
-}
-
-class _TextBlockEditorDialog extends StatefulWidget {
-  final ShowcaseBlock? existing;
-
-  const _TextBlockEditorDialog({this.existing});
-
-  @override
-  State<_TextBlockEditorDialog> createState() =>
-      _TextBlockEditorDialogState();
-}
-
-class _TextBlockEditorDialogState extends State<_TextBlockEditorDialog> {
-  late final TextEditingController _titleController;
-  late final TextEditingController _bodyController;
-
-  @override
-  void initState() {
-    super.initState();
-    _titleController =
-        TextEditingController(text: widget.existing?.textTitle ?? '');
-    _bodyController =
-        TextEditingController(text: widget.existing?.textBody ?? '');
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _bodyController.dispose();
-    super.dispose();
-  }
-
-  void _save() {
-    final body = _bodyController.text.trim();
-    if (body.isEmpty) return;
-    Navigator.of(context).pop(ShowcaseBlock(
-      type: ShowcaseBlockType.text,
-      data: {
-        if (_titleController.text.trim().isNotEmpty)
-          'title': _titleController.text.trim(),
-        'body': body,
-      },
-    ));
-  }
+  const _DragLift({required this.child});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return HollowDialog(
-      title: widget.existing == null ? 'Add text block' : 'Edit text block',
-      width: 420,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return DefaultTextStyle(
+      style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: hollow.hover,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          boxShadow: HollowShadows.float,
+        ),
+        child: child,
+      ),
+    );
+  }
+}
+
+class _Footer extends StatelessWidget {
+  final ShowcaseDraft draft;
+  final VoidCallback onCancel;
+  final VoidCallback onSave;
+
+  const _Footer({
+    required this.draft,
+    required this.onCancel,
+    required this.onSave,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final over = draft.overSizeLimit;
+    final error = over
+        ? 'Your showcase is over its size limit. Shorten a text block to save.'
+        : draft.saveError;
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.xl,
+        vertical: HollowSpacing.md,
+      ),
+      child: Row(
         children: [
-          HollowTextField(
-            controller: _titleController,
-            hintText: 'Title (optional)',
-            maxLength: ShowcaseBoard.maxTextTitleLength,
-            autofocus: widget.existing == null,
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          HollowTextField(
-            controller: _bodyController,
-            hintText: 'Write something…',
-            maxLength: ShowcaseBoard.maxTextBodyLength,
-            maxLines: 6,
-            showCounter: true,
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            'Supports **bold**, *italic*, `code`, ||spoilers|| and links.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary.withValues(alpha: 0.7),
-              fontSize: 10,
+          if (error != null) ...[
+            Icon(LucideIcons.circleAlert, size: 16, color: hollow.error),
+            const SizedBox(width: HollowSpacing.sm),
+          ],
+          Expanded(
+            child: Text(
+              error ?? 'People see your showcase when you save',
+              style: HollowTypography.bodySmall.copyWith(
+                color: error != null ? hollow.error : hollow.textSecondary,
+              ),
             ),
+          ),
+          const SizedBox(width: HollowSpacing.lg),
+          HollowButton.ghost(
+            onPressed: draft.saving ? null : onCancel,
+            child: const Text('Cancel'),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.filled(
+            onPressed: over ? null : onSave,
+            loading: draft.saving,
+            child: const Text('Save'),
           ),
         ],
       ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: _save,
-          child: const Text('Save'),
-        ),
-      ],
     );
   }
 }

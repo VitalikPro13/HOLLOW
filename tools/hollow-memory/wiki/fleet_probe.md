@@ -141,10 +141,14 @@ A JSON object with `peers`, `steps` and `cleanup`; every step carries the `peer`
 (`"all"` fans out sequentially). Ops and targets are the single-peer probe's, unchanged.
 
 ```json
-{ "peer": "a", "op": "capture", "target": "type:SelectableText", "as": "INVITE" }
+{ "peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" }
 { "peer": "b", "op": "enter_text", "target": "hint:Invite link or server ID", "value": "${INVITE}" }
 { "peer": "b", "op": "wait_for", "target": "server:fleet-probe", "timeout_ms": 90000 }
 ```
+
+**The invite link is a `HollowCopyField`** (since the session 24 dialogs pass): wait for and
+capture `type:HollowCopyField`. Every scenario and PowerShell journey read `type:SelectableText`
+until 2026-09-26 and failed at that first step; all 14 scenarios and 9 journeys are fixed.
 
 The orchestrator is a sequential loop: expand `${VAR}`, write the step to that peer's
 `inbox.jsonl`, wait for the matching id in its `outbox.jsonl`, merge anything it captured, move on.
@@ -324,8 +328,8 @@ matters.
    ban and watch a rejoin fail; mute and watch the composer refuse. Not built.
 3. **Three or more, roles and visibility.** Restricted channels, access labels granted and revoked
    live, role badges. Per-channel MLS subgroups have a real UI surface here. Not built.
-4. **Files and vault sharding.** The auto-download gate on the receiving side, storage dashboard
-   numbers, shards distributed across N real peers and a restore. Not built.
+4. **Files and vault sharding.** The auto-download gate on the receiving side, the Files & storage
+   page's numbers, shards distributed across N real peers and a restore. Not built.
 5. **Media.** Joining a VC, participant rows, mute/deafen propagation: fine. **Screenshots cannot
    prove video** — platform views do not appear in them, so a WebRTC surface is black whether it
    works or not. The right signal is stats (`RTCVideoRenderer.videoValue` dimensions, `getStats`
@@ -424,6 +428,21 @@ the harness and the widget test cover it. Memory `project_file_card_honest_state
 ## fleet_friend_readd.ps1 (remove then re-add needs fresh consent, 2026-09-06)
 
 Two peers, fresh identities, both ONLINE throughout, six gates, about 3 min per run. G1 a requests and b accepts on the Incoming tab, both dumps read accepted. G2 a removes b and BOTH friends lists are empty in the dump, not just the empty-state widget: a tombstone row would leak into every consumer. G3 a re-adds, b gets a NEW incoming request, and after a 25 s settle nobody is a friend anywhere (a pending outgoing with a cancellable row, b pending incoming, both Friends tabs "No friends yet"). That is the bug's surface, CI's `readd_while_online_requires_fresh_consent`: a's fresh request used to be flipped to accepted by a parked copy of the FIRST accept. G4 b accepts for real and both converge. G5 a message each way, which is the DM room the accept now routes through. G6 reads both `hollow_debug.log`s from a line mark taken at boot and fails on any `Ignoring stale FriendAccept` in a journey where every accept was legitimate; it WARNs when no accept line is found at all, because a gate that passes on a missing file never ran. Runs 2026-09-06: 3 of 3 on G1 to G4 and G6; G5 failed once on a composer swallow (`enter_text` reported success, the field held `dw` and lost focus, Enter reached nothing), so `Send-Dm` retries three times and screenshots each swallow. The same two-character fragment hit `fleet.ps1`'s own onboarding once (display name saved as `ow`, step 15 timed out) while a Rust suite saturated the CPU and did not recur idle, the third sighting after `nh` and `dw`; load is the amplifier, and the fresh onboarding has no retry yet. Final run on the finished tree 2026-09-06 19:32: six of six gates, 2:51. Traps closed here: `-like "*[HOLLOW-FRIENDS]*"` reads the brackets as a character class and matches every line, so log filtering is `.Contains` and the read is `-Encoding UTF8` (`fleet_file_card_states.ps1`'s `Write-Evidence` still has the `-like` form and filters nothing); the Friends manager is a barriered dialog, so every phase opens and closes it explicitly and tabs are addressed as `type:_TabButton>text:X` (since the 2026-09-25 dialogs pass: `type:HollowChip>text:Friends` / `Requests` / `Add friend`, one Requests tab where Incoming and Outgoing were; its empty line is "No requests waiting", the decline is `semantics:Decline friend request`).
+
+## The five dialog redesigns (2026-09-26)
+
+- `fleet/redesigns_after.json` (Windows, a and b): a creates a server, b joins; the compact card
+  and a `hover` on its "View full profile", the full profile and its More menu, your own profile
+  into the showcase editor (Add block, a Text block, Escape asks to discard), Files & storage as
+  the owner (then `reveal` "How long things are kept" and open the Files menu) and as the member.
+  Welcome needs no journey: `-Onboard -Fresh` drives the new first run ("Create an identity").
+- `fleet/redesigns_after_mobile.json` (Mac mini simulator, peer a): Server settings list, Files &
+  storage top and scrolled, the retention sheet, your own profile sheet from Members, the phone
+  editor with its Add block sheet and discard ask. A profile sheet COVERS the Back button: close
+  it with a `tap_at` on the scrim first.
+- The MAIN Mac mini is always on: use it for every phone check without asking. Commits happen on
+  Windows only; ship uncommitted files to the mini with `tar` over ssh, and never reset its tree
+  afterwards (Vitalik just `git pull`s there).
 
 ## Honest scope
 

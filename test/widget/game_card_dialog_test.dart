@@ -10,10 +10,9 @@ import 'package:hollow/src/ui/dialogs/game_card_dialog.dart';
 ///    shape every existing board carries), and
 ///  - v10 bundles (steam_reviews / ttb / themes / modes / franchise).
 ///
-/// Regression: the reception strip's CrossAxisAlignment.stretch row sat in
-/// the dialog's unbounded-height scroll context, which handed the tiles a
-/// tight INFINITE height — the layout exception silently killed the whole
-/// center panel (only the floating right panel survived).
+/// Regression: a stretch row in the dialog's unbounded-height scroll context
+/// once handed its children an INFINITE height, and the layout exception
+/// silently killed the whole main column.
 void main() {
   /// Old-shape details: what every pre-v10 baked game actually carries.
   final legacyDetails = GameDetails.fromJson({
@@ -54,8 +53,10 @@ void main() {
     WidgetTester tester,
     GameDetails details, {
     Brightness brightness = Brightness.dark,
+    Size size = const Size(1280, 900),
+    String? ownerName,
   }) async {
-    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(() {
       tester.view.resetPhysicalSize();
@@ -80,6 +81,7 @@ void main() {
                   artBytes: null,
                   details: details,
                   assets: const {},
+                  ownerName: ownerName,
                 ),
                 child: const Text('open card'),
               ),
@@ -92,49 +94,89 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('legacy details build a full card (no layout exception)',
-      (tester) async {
+  testWidgets('legacy details build a full card (no layout exception)', (
+    tester,
+  ) async {
     await pumpCard(tester, legacyDetails);
 
-    // Center panel alive: title + About + the Metacritic tile.
+    // Main column alive: title, byline, About and the Metacritic fact.
     expect(find.text('Dark Souls III'), findsOneWidget);
+    expect(find.text('FromSoftware · 11 Apr, 2016'), findsOneWidget);
     expect(find.text('About'), findsOneWidget);
     expect(find.text('Metacritic'), findsOneWidget);
     expect(find.text('89'), findsOneWidget);
-    // Right panel alive too.
-    expect(find.text('Platforms'), findsOneWidget);
-    expect(find.text('Credits'), findsOneWidget);
+    // Details pane alive too.
+    expect(find.text('Details'), findsOneWidget);
+    expect(find.text('Made by'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
-  testWidgets('v10 details render strip, tags, series and reviews',
-      (tester) async {
+  testWidgets('v10 details render facts in words, tags and the series', (
+    tester,
+  ) async {
     await pumpCard(tester, v10Details);
 
     expect(find.text('Steam reviews'), findsOneWidget);
-    expect(find.text('Very Positive'), findsOneWidget);
+    expect(find.text('Very positive'), findsOneWidget);
     expect(find.text('Time to beat'), findsOneWidget);
-    expect(find.text('~32h'), findsOneWidget);
-    expect(find.textContaining('Dark Souls series'), findsOneWidget);
-    // Tag chips: dedup means 'Adventure' appears exactly once.
+    expect(find.text('About 32 hours'), findsOneWidget);
+    expect(find.text('Everything: 90 hours'), findsOneWidget);
+    expect(find.text('Series'), findsOneWidget);
+    // Tags dedup: 'Adventure' appears exactly once.
     expect(find.text('Adventure'), findsOneWidget);
     expect(find.text('Single player'), findsOneWidget);
   });
 
-  testWidgets('system requirements expand on tap (collapsed by default)',
-      (tester) async {
+  testWidgets('system requirements show, with Minimum and Recommended tabs', (
+    tester,
+  ) async {
     await pumpCard(tester, legacyDetails);
 
     expect(find.text('System requirements'), findsOneWidget);
-    expect(find.text('Minimum'), findsNothing);
-    await tester.tap(find.text('System requirements'));
-    await tester.pumpAndSettle();
     expect(find.text('Minimum'), findsOneWidget);
-    expect(find.text('Recommended'), findsOneWidget);
+    expect(find.text('Windows 7'), findsOneWidget);
+    await tester.tap(find.text('Recommended'));
+    await tester.pumpAndSettle();
+    expect(find.text('Windows 10'), findsOneWidget);
+    expect(find.text('Intel Core i7-3770'), findsOneWidget);
+  });
+
+  testWidgets('says whose favourite it is, and store chips leave the app', (
+    tester,
+  ) async {
+    final withStore = GameDetails.fromJson({
+      'metacritic': 89,
+      'stores': {'steam': 'https://store.steampowered.com/app/374320'},
+    })!;
+    await pumpCard(tester, withStore, ownerName: 'Mira');
+
+    expect(find.text('Mira’s favourite'), findsOneWidget);
+    expect(find.text('“The best one.”'), findsOneWidget);
+    expect(find.text('Get it on'), findsOneWidget);
+    expect(find.text('Steam'), findsOneWidget);
+    expect(find.textContaining('saved when Mira pinned it'), findsOneWidget);
+  });
+
+  testWidgets('a phone opens a sheet with facts as rows', (tester) async {
+    await pumpCard(tester, v10Details, size: const Size(390, 844));
+
+    expect(find.text('Dark Souls III'), findsOneWidget);
+    expect(find.text('Very positive'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('light theme builds cleanly too', (tester) async {
     await pumpCard(tester, v10Details, brightness: Brightness.light);
     expect(find.text('Metacritic'), findsOneWidget);
     expect(find.text('About'), findsOneWidget);
+  });
+
+  test('a notice cut mid-word at the old cap ends on a whole word', () {
+    const cut = '©2008 - 2015 Rockstar Games, Inc. Rockstar Games, Rockstar '
+        'North, Grand Theft Auto, the GTA Five, and the Rockstar Games R* '
+        'marks and logos are trademarks and/o';
+    expect(cut.length, 160);
+    expect(tidyCopyright(cut), endsWith('trademarks…'));
+    expect(tidyCopyright('© 2019 Mobius Digital.'), '© 2019 Mobius Digital.');
   });
 }

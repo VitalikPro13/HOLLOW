@@ -2,7 +2,7 @@
 
 One brief per dialog: the renders, what the current layout is, what breaks the design language (HOLLOW_DESIGN_LANGUAGE.md 4.4 and 5.3), and the audit findings from `audit_dialogs_1.md` / `audit_dialogs_2.md` folded in.
 
-**How these were made.** `test/screenshots/redesign_before_screenshot_test.dart` (new, 46 tests, all green; `flutter test test/screenshots/redesign_before_screenshot_test.dart`). All PNGs are in
+**How these were made.** `test/screenshots/redesign_before_screenshot_test.dart` (46 tests; deleted in session 25 once the redesigns replaced these screens, recover it from commit f3ae76de). The after renders come from `test/screenshots/redesign_after_*_screenshot_test.dart` into `build/ui_screenshots/redesign_after/`. All PNGs are in
 `C:\Users\Jabun\Documents\Coding\HOLLOW\build\ui_screenshots\redesign_before\` (below: just the file names). Desktop runs as `TargetPlatform.windows` (desktop scroll behaviour), phone as `android`. Fonts: Onest, Geist Mono, Lucide, SimpleIcons, MaterialIcons. FFI is mocked with `RustLib.initMock`; people are invented (Mira, Juno, Sam).
 
 **Reading the test art.** Every generated image has coloured EDGE BANDS: orange = left edge, lime = right edge, cyan = top edge, pink = bottom edge, plus a red centre crosshair. If a band is missing in a render, that edge of the art was cropped off. The banner is 1200x480 (2.5:1), covers 264x352 (3:4), key art 1280x720 (16:9), the avatar 256 square with the built-in teal frame `b:168`.

@@ -137,8 +137,8 @@ try {
 
     Step a @{ op = 'right_click'; target = "server:$server" }
     Step a @{ op = 'tap'; target = 'menu > text:Invite people' }
-    Step a @{ op = 'wait_for'; target = 'type:SelectableText'; timeout_ms = 20000 }
-    Step a @{ op = 'capture'; target = 'type:SelectableText'; as = 'INVITE' }
+    Step a @{ op = 'wait_for'; target = 'type:HollowCopyField'; timeout_ms = 20000 }
+    Step a @{ op = 'capture'; target = 'type:HollowCopyField'; as = 'INVITE' }
     Step a @{ op = 'key'; value = 'escape' }
 
     Say '2/6 member b joins while the owner is up'

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -10,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/shell/window_chrome_insets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a Hollow-styled dialog: a scale and fade in over the flat [HollowTheme.scrim].
@@ -54,11 +56,51 @@ Future<T?> showHollowDialog<T>({
           removeTop: true,
           removeRight: true,
           removeBottom: true,
-          child: builder(context),
+          // Innermost, and the builder below it: a MediaQuery built above
+          // would restore the whole window as the dialog's screen.
+          child: DialogChromeSlot(child: Builder(builder: builder)),
         ),
       );
     },
   );
+}
+
+/// Keeps a dialog out of the Dock header's band: the route's slot starts below
+/// it, and MediaQuery's size is that slot, so a dialog that sizes or centres
+/// itself from the screen can never reach the pinned friends or the window
+/// controls. The scrim still covers the whole window.
+class DialogChromeSlot extends StatelessWidget {
+  final Widget child;
+
+  const DialogChromeSlot({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    // A dialog pumped without a ProviderScope has no Dock around it.
+    if (context.getElementForInheritedWidgetOfExactType<
+            UncontrolledProviderScope>() ==
+        null) {
+      return child;
+    }
+    return Consumer(
+      builder: (context, ref, child) {
+        final top = windowChromeTop(ref);
+        if (top == 0) return child!;
+        final media = MediaQuery.of(context);
+        final height = media.size.height - top;
+        return Padding(
+          padding: EdgeInsets.only(top: top),
+          child: MediaQuery(
+            data: media.copyWith(
+              size: Size(media.size.width, height < 0 ? 0 : height),
+            ),
+            child: child!,
+          ),
+        );
+      },
+      child: child,
+    );
+  }
 }
 
 /// Asks one yes-or-no question: ghost Cancel beside one filled confirm, or a

@@ -1,22 +1,28 @@
-﻿import 'dart:io';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/storage_provider.dart'
+    show formatBytes;
+import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/core/providers/relay_domain_provider.dart';
-import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+import 'package:hollow/src/ui/dialogs/welcome_frame.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 typedef WelcomeResult = ({String action, String relayDomain});
@@ -29,6 +35,14 @@ Future<WelcomeResult?> showWelcomeDialog(BuildContext context) {
   );
 }
 
+/// A backup picked for restore, described from the file itself.
+class _Backup {
+  final String path;
+  final String name;
+  final String meta;
+  const _Backup(this.path, this.name, this.meta);
+}
+
 class _WelcomeContent extends StatefulWidget {
   const _WelcomeContent();
 
@@ -38,25 +52,35 @@ class _WelcomeContent extends StatefulWidget {
 
 class _WelcomeContentState extends State<_WelcomeContent> {
   final _relayController = TextEditingController(text: kDefaultRelayDomain);
+  final _passController = TextEditingController();
   bool _showAdvanced = false;
+  String? _relayError;
+
+  _Backup? _backup;
+  bool _obscure = true;
   // importBackup decrypts and restores the whole DB, which takes seconds.
   bool _restoring = false;
+  String? _restoreError;
 
   // Profiles (issue #47). Erasing the active profile drops you here, and
   // without this the only way on is a new identity inside the folder you just
   // emptied, with no route back to Default or Portable.
   bool _showProfiles = false;
-  bool _switching = false;
+  String? _switchingPath;
   late final bool _isDesktop =
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
   late final String _currentRoot = _isDesktop ? runningProfileRoot() : '';
-  late final List<ProfileRow> _allProfiles =
-      _isDesktop ? listProfileRows(readProfileRegistrySync()) : const [];
+  late final List<ProfileRow> _allProfiles = _isDesktop
+      ? listProfileRows(readProfileRegistrySync())
+      : const [];
 
   /// The profiles that already hold an identity. A first-ever launch has none.
   late final List<ProfileRow> _otherProfiles = _allProfiles
-      .where((r) =>
-          !sameProfilePath(r.path, _currentRoot) && profileHasIdentity(r.path))
+      .where(
+        (r) =>
+            !sameProfilePath(r.path, _currentRoot) &&
+            profileHasIdentity(r.path),
+      )
       .toList();
 
   /// What to call the profile being set up. An unlisted root falls back to its
@@ -72,8 +96,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   }
 
   Future<void> _switchTo(ProfileRow row) async {
-    if (_switching) return;
-    setState(() => _switching = true);
+    if (_switchingPath != null) return;
+    setState(() => _switchingPath = row.path);
     try {
       final registry = readProfileRegistrySync();
       // Pinned explicitly even for Default: the pin has to beat portable
@@ -82,9 +106,15 @@ class _WelcomeContentState extends State<_WelcomeContent> {
       await relaunchApp();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _switching = false);
-      HollowToast.show(context, 'Failed to switch profile: $e',
-          type: HollowToastType.error);
+      setState(() => _switchingPath = null);
+      HollowToast.show(
+        context,
+        friendlyError(
+          e,
+          fallback: "Hollow couldn't switch to that profile. Try again.",
+        ),
+        type: HollowToastType.error,
+      );
     }
   }
 
@@ -97,488 +127,448 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   bool _relayIsUsable() {
     if (_relayDomain != null) return true;
-    HollowToast.show(
-        context, 'Enter a relay address such as myrelay.duckdns.org',
-        type: HollowToastType.error);
-    setState(() => _showAdvanced = true);
+    setState(() {
+      _backup = null;
+      _showAdvanced = true;
+      _relayError = 'Enter a relay address, such as myrelay.duckdns.org.';
+    });
     return false;
+  }
+
+  void _finish(String action) {
+    if (!_relayIsUsable()) return;
+    Navigator.of(context).pop((action: action, relayDomain: _relayDomain!));
   }
 
   @override
   void dispose() {
     _relayController.dispose();
+    _passController.dispose();
     super.dispose();
   }
 
-  Future<void> _onRestoreFromBackup() async {
+  Future<void> _pickBackup() async {
     if (_restoring) return;
     // Mobile does not recognise the custom `.hollow` extension, so a
     // `FileType.custom` filter hides the backup file.
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final result = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Select backup file',
+      dialogTitle: 'Choose a backup',
       type: isMobile ? FileType.any : FileType.custom,
       allowedExtensions: isMobile ? null : ['hollow'],
     );
     if (result == null || result.files.isEmpty || !mounted) return;
-    final path = result.files.single.path;
+    final picked = result.files.single;
+    final path = picked.path;
     if (path == null) return;
-
-    final controller = TextEditingController();
-    final passphrase = await showHollowDialog<String>(
-      context: context,
-      builder: (ctx) {
-        return HollowDialog(
-          title: 'Enter backup passphrase',
-          width: 420,
-          content: HollowTextField(
-            controller: controller,
-            obscureText: true,
-            autofocus: true,
-            hintText: 'Passphrase',
-            onSubmitted: (val) { if (val.isNotEmpty) Navigator.of(ctx).pop(val); },
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(ctx).pop(null),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: () {
-                final pass = controller.text.trim();
-                if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
-              },
-              child: const Text('Decrypt'),
-            ),
-          ],
-        );
-      },
-    );
-    if (passphrase == null || passphrase.isEmpty || !mounted) return;
-
-    // A large backup takes seconds, and frozen silence on the first-run screen
-    // reads as a hang.
-    if (!_relayIsUsable()) return;
-    setState(() => _restoring = true);
+    var meta = formatBytes(picked.size);
+    // The size alone still says which file this is.
     try {
-      await storage_api.importBackup(backupPath: path, passphrase: passphrase);
+      final stat = File(path).statSync();
+      if (stat.type != FileSystemEntityType.notFound) {
+        meta += ', saved ${calendarDateLabel(stat.modified)}';
+      }
+    } catch (_) {}
+    setState(() {
+      _backup = _Backup(path, picked.name, meta);
+      _restoreError = null;
+    });
+  }
+
+  Future<void> _restore() async {
+    final backup = _backup;
+    // Never trimmed: a passphrase may begin or end with a space.
+    final passphrase = _passController.text;
+    if (_restoring || backup == null || passphrase.isEmpty) return;
+    if (!_relayIsUsable()) return;
+    setState(() {
+      _restoring = true;
+      _restoreError = null;
+    });
+    try {
+      await storage_api.importBackup(
+        backupPath: backup.path,
+        passphrase: passphrase,
+      );
       if (!mounted) return;
-      Navigator.of(context)
-          .pop((action: 'restored_backup', relayDomain: _relayDomain!));
+      Navigator.of(
+        context,
+      ).pop((action: 'restored_backup', relayDomain: _relayDomain!));
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Import failed: $e', type: HollowToastType.error);
-    } finally {
-      if (mounted) setState(() => _restoring = false);
+      setState(() {
+        _restoring = false;
+        _restoreError = '$e'.toLowerCase().contains('wrong passphrase')
+            ? 'That passphrase does not open this backup.'
+            : friendlyError(
+                e,
+                fallback: "Hollow couldn't open this backup. Try again.",
+              );
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowDialogSurface(
-      maxWidth: 480,
-      minWidth: 360,
-      // Scrolls when a short screen squeezes the available height.
-      child: SingleChildScrollView(
-        child: _buildMenu(hollow),
-      ),
-    );
+    return _backup == null ? _firstRun(context) : _restoreStep(context);
   }
 
-  Widget _buildMenu(HollowTheme hollow) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
+  Widget _firstRun(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final phone = WelcomeFrame.isPhone(context);
+    final align = phone ? TextAlign.start : TextAlign.center;
+    final prose = HollowTypography.body.copyWith(color: hollow.textSecondary);
+
+    final hero = Column(
+      crossAxisAlignment: phone
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.center,
       children: [
+        if (phone) const SizedBox(height: HollowSpacing.xxxl),
         ClipRRect(
           borderRadius: BorderRadius.circular(hollow.radiusLg),
           child: Image.asset(
             'assets/hollow_logo_rounded.png',
-            width: 56,
-            height: 56,
+            width: 48,
+            height: 48,
             semanticLabel: 'Hollow',
           ),
         ),
-
         const SizedBox(height: HollowSpacing.lg),
-
         Text(
           'Welcome to Hollow',
-          style: HollowTypography.heading.copyWith(
-            color: hollow.textPrimary,
-          ),
+          textAlign: align,
+          style: HollowTypography.display.copyWith(color: hollow.textPrimary),
         ),
-
-        const SizedBox(height: HollowSpacing.xs),
-
+        const SizedBox(height: HollowSpacing.sm),
         Text(
-          'Choose how to set up your identity',
-          style: HollowTypography.body.copyWith(
+          phone
+              ? 'Your identity is made on this phone and stays with you. '
+                    'There is no account and nobody to sign in to.'
+              : 'Your identity is made on this device and stays with you. '
+                    'There is no account and nobody to sign in to.',
+          textAlign: align,
+          style: prose,
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'Next, Hollow shows your recovery phrase. Write it down and keep it '
+          'somewhere safe.',
+          textAlign: align,
+          style: prose,
+        ),
+      ],
+    );
+
+    final rest = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        HollowButton.filled(
+          expand: true,
+          touch: phone,
+          onPressed: () => _finish('create_new'),
+          child: const Text('Create an identity'),
+        ),
+        SizedBox(height: phone ? HollowSpacing.xl : HollowSpacing.xxl),
+        Text(
+          'Already use Hollow?',
+          style: HollowTypography.bodySmall.copyWith(
             color: hollow.textSecondary,
           ),
         ),
-
-        // Which folder this is setting up, shown only once more than one
-        // profile is in play. It is also the answer to where a restored backup
-        // went: everything on this screen lands in the folder named here.
-        if (_otherProfiles.isNotEmpty) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          Column(
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(LucideIcons.folder, size: 12, color: hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.xs),
-                  Flexible(
-                    child: Text(
-                      'Setting up the "$_currentProfileName" profile',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                _currentRoot,
-                style: HollowTypography.monoSmall.copyWith(
-                  color: hollow.textTertiary,
-                ),
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
-        ],
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        _OptionCard(
-          icon: LucideIcons.userPlus,
-          title: 'Create New Identity',
-          subtitle: 'Generate a new identity with a fresh recovery phrase',
-          hollow: hollow,
-          onTap: () {
-            if (!_relayIsUsable()) return;
-            Navigator.of(context)
-                .pop((action: 'create_new', relayDomain: _relayDomain!));
-          },
-        ),
-
-        const SizedBox(height: HollowSpacing.sm),
-
-        // There is deliberately no "Restore from Recovery Phrase" here: the
+        const SizedBox(height: HollowSpacing.xs),
+        // There is deliberately no "Restore from a recovery phrase" here: the
         // phrase regenerates the master keypair alone, carries NO synced data,
-        // and leaves a stale database on disk. Bringing a device online is
-        // "Link a device" or "Restore from Backup"; the mnemonic FFI stays for
-        // the in-app recovery dialogs.
-
-        _OptionCard(
-          icon: LucideIcons.smartphone,
-          title: 'Link a device',
-          subtitle: 'Sync from your other device with a 6-character code',
-          hollow: hollow,
-          onTap: () {
-            if (!_relayIsUsable()) return;
-            Navigator.of(context)
-                .pop((action: 'link_device', relayDomain: _relayDomain!));
-          },
-        ),
-
-        const SizedBox(height: HollowSpacing.sm),
-
-        _OptionCard(
-          icon: _restoring ? LucideIcons.loader : LucideIcons.folderInput,
-          title: _restoring ? 'Restoring…' : 'Restore from Backup',
-          subtitle: _restoring
-              ? 'Decrypting and importing your backup'
-              : 'Import a .hollow backup file',
-          hollow: hollow,
-          onTap: _onRestoreFromBackup,
-        ),
-
-        if (_otherProfiles.isNotEmpty) ...[
-          const SizedBox(height: HollowSpacing.lg),
-          _buildProfilesSection(hollow),
-        ],
-
-        const SizedBox(height: HollowSpacing.lg),
-
-        // Relay domain, for self-hosters.
-        HollowFocusRing(
-          enabled: true,
-          onActivate: () => setState(() => _showAdvanced = !_showAdvanced),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          child: GestureDetector(
-            onTap: () => setState(() => _showAdvanced = !_showAdvanced),
-            child: Row(
-              children: [
-                Icon(
-                  _showAdvanced ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-                  size: 14,
-                  color: hollow.textSecondary,
-                ),
-                const SizedBox(width: HollowSpacing.xs),
-                Text(
-                  'Advanced',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ),
+        // and leaves a stale database on disk. The mnemonic FFI stays for the
+        // in-app recovery dialogs.
+        HollowListRow(
+          touch: phone,
+          leading: Icon(
+            LucideIcons.smartphone,
+            size: 20,
+            color: hollow.textSecondary,
           ),
+          title: 'Link a device',
+          subtitle: phone
+              ? 'Enter a code from your other device'
+              : 'Enter a 6-character code from your other device',
+          trailing: Icon(
+            LucideIcons.chevronRight,
+            size: 16,
+            color: hollow.textTertiary,
+          ),
+          onTap: () => _finish('link_device'),
         ),
+        HollowListRow(
+          touch: phone,
+          leading: Icon(
+            LucideIcons.archiveRestore,
+            size: 20,
+            color: hollow.textSecondary,
+          ),
+          title: 'Restore from a backup',
+          subtitle: 'Open a .hollow file you saved earlier',
+          trailing: Icon(
+            LucideIcons.chevronRight,
+            size: 16,
+            color: hollow.textTertiary,
+          ),
+          onTap: _pickBackup,
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        const HollowDivider(),
+        const SizedBox(height: HollowSpacing.sm),
+        _footer(hollow, phone),
+        if (_showAdvanced) _relaySection(hollow),
+        if (_showProfiles && _otherProfiles.isNotEmpty)
+          _profilesSection(hollow),
+      ],
+    );
 
-        if (_showAdvanced) ...[
+    if (phone) return WelcomeFrame(body: hero, bottom: rest);
+    return WelcomeFrame(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          hero,
+          const SizedBox(height: HollowSpacing.xl),
+          rest,
+        ],
+      ),
+    );
+  }
+
+  Widget _footer(HollowTheme hollow, bool phone) {
+    final domain = _relayDomain ?? _relayController.text.trim();
+    // The button cannot ellipsize its label, and a domain can be any length.
+    final shown = domain.length > 32 ? '${domain.substring(0, 31)}…' : domain;
+    final relay = HollowButton.ghost(
+      compact: !phone,
+      touch: phone,
+      semanticLabel: 'Change the relay, $domain',
+      icon: const Icon(LucideIcons.server, size: 14),
+      onPressed: () => setState(() => _showAdvanced = !_showAdvanced),
+      child: Text(shown),
+    );
+    // Other profiles are desktop only: mobile data roots are sandboxed and the
+    // iOS push extension opens one fixed App Group path.
+    if (_otherProfiles.isEmpty) {
+      return Align(
+        alignment: phone ? Alignment.center : Alignment.centerRight,
+        child: relay,
+      );
+    }
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      spacing: HollowSpacing.sm,
+      runSpacing: HollowSpacing.xs,
+      children: [
+        HollowButton.ghost(
+          compact: true,
+          icon: const Icon(LucideIcons.folder, size: 14),
+          onPressed: () => setState(() => _showProfiles = !_showProfiles),
+          child: Text('Other profiles (${_otherProfiles.length})'),
+        ),
+        relay,
+      ],
+    );
+  }
+
+  Widget _relaySection(HollowTheme hollow) {
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Relay address',
+            style: HollowTypography.label.copyWith(color: hollow.textSecondary),
+          ),
           const SizedBox(height: HollowSpacing.sm),
           HollowTextField(
             controller: _relayController,
             hintText: kDefaultRelayDomain,
-            prefixIcon: Icon(LucideIcons.server, size: 16, color: hollow.textSecondary),
-            isDense: true,
+            errorText: _relayError,
+            keyboardType: TextInputType.url,
+            onChanged: (_) => setState(() => _relayError = null),
           ),
-          const SizedBox(height: HollowSpacing.xs),
+          const SizedBox(height: HollowSpacing.sm),
           Text(
-            'Self-hosters: enter your relay domain. Leave default for the official network.',
+            'Leave it as it is for the official network. If you run your own '
+            'relay, enter its domain.',
             style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
+              color: hollow.textTertiary,
             ),
           ),
         ],
-      ],
+      ),
     );
   }
 
-  /// The other identities on this computer, collapsed behind one row.
-  ///
-  /// Desktop only: mobile data roots are sandboxed and the iOS push extension
-  /// opens one fixed App Group path.
-  Widget _buildProfilesSection(HollowTheme hollow) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        HollowFocusRing(
-          enabled: true,
-          onActivate: () => setState(() => _showProfiles = !_showProfiles),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          child: GestureDetector(
-            onTap: () => setState(() => _showProfiles = !_showProfiles),
-            child: Row(
-              children: [
-                Icon(
-                  _showProfiles
-                      ? LucideIcons.chevronDown
-                      : LucideIcons.chevronRight,
-                  size: 14,
-                  color: hollow.textSecondary,
-                ),
-                const SizedBox(width: HollowSpacing.xs),
-                Text(
-                  'Use a different profile',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.xs),
-                Text(
-                  '(${_otherProfiles.length})',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textTertiary,
-                    fontSize: 11,
-                  ),
-                ),
-              ],
+  Widget _profilesSection(HollowTheme hollow) {
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Also the answer to where a restored backup went: everything on
+          // this screen lands in the folder named here.
+          Text(
+            'This window is setting up the "$_currentProfileName" profile.',
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
             ),
           ),
-        ),
-        if (_showProfiles) ...[
+          const SizedBox(height: HollowSpacing.xs),
+          for (final row in _otherProfiles)
+            HollowListRow(
+              leading: Icon(
+                row.portable ? LucideIcons.usb : LucideIcons.hardDrive,
+                size: 20,
+                color: hollow.textSecondary,
+              ),
+              title: row.name,
+              subtitle: row.path,
+              trailing: HollowButton.outline(
+                compact: true,
+                loading: _switchingPath == row.path,
+                onPressed: _switchingPath == null ? () => _switchTo(row) : null,
+                child: const Text('Switch'),
+              ),
+            ),
           const SizedBox(height: HollowSpacing.sm),
-          for (final row in _otherProfiles) ...[
-            _buildProfileRow(hollow, row),
-            const SizedBox(height: HollowSpacing.xs),
-          ],
           Text(
             dataDirEnvOverrideActive
                 ? 'HOLLOW_DATA_DIR is set. It overrides the profile selection '
-                    'until Hollow is started without it.'
+                      'until Hollow is started without it.'
                 : 'Switching restarts Hollow. This folder stays as it is.',
             style: HollowTypography.caption.copyWith(
               color: dataDirEnvOverrideActive
                   ? hollow.warning
-                  : hollow.textSecondary,
-              fontSize: 11,
+                  : hollow.textTertiary,
             ),
           ),
         ],
-      ],
+      ),
     );
   }
 
-  Widget _buildProfileRow(HollowTheme hollow, ProfileRow row) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
+  Widget _restoreStep(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final phone = WelcomeFrame.isPhone(context);
+    final backup = _backup!;
+
+    final file = DecoratedBox(
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.4),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
-      child: Row(
-        children: [
-          Icon(
-            row.portable ? LucideIcons.usb : LucideIcons.hardDrive,
-            size: 16,
-            color: hollow.textSecondary,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  row.name,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
+      child: Padding(
+        padding: const EdgeInsets.all(HollowSpacing.md),
+        child: Row(
+          children: [
+            Icon(LucideIcons.file, size: 20, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    backup.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: HollowTypography.label.copyWith(
+                      color: hollow.textPrimary,
+                    ),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  row.path,
-                  style: HollowTypography.monoSmall.copyWith(
-                    color: hollow.textSecondary,
+                  const SizedBox(height: HollowSpacing.xxs),
+                  Text(
+                    backup.meta,
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textTertiary,
+                    ),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          HollowButton.outline(
-            onPressed: _switching ? null : () => _switchTo(row),
-            compact: true,
-            child: const Text('Switch'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Card-style option button for the welcome menu.
-class _OptionCard extends StatefulWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final HollowTheme hollow;
-  final VoidCallback onTap;
-
-  const _OptionCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.hollow,
-    required this.onTap,
-  });
-
-  @override
-  State<_OptionCard> createState() => _OptionCardState();
-}
-
-class _OptionCardState extends State<_OptionCard> {
-  bool _hovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = widget.hollow;
-
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      cursor: SystemMouseCursors.click,
-      child: HollowFocusRing(
-        enabled: true,
-        onActivate: widget.onTap,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        child: GestureDetector(
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: HollowDurations.fast,
-            padding: const EdgeInsets.all(HollowSpacing.md),
-            decoration: BoxDecoration(
-              color: _hovered
-                  ? hollow.surface.withValues(alpha: 0.8)
-                  : hollow.surface.withValues(alpha: 0.4),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(
-                color: _hovered
-                    ? hollow.accent.withValues(alpha: 0.3)
-                    : hollow.border,
+                ],
               ),
             ),
-            child: Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: hollow.accent.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  ),
-                  child: Icon(
-                    widget.icon,
-                    size: 20,
-                    color: hollow.accent,
+            const SizedBox(width: HollowSpacing.sm),
+            HollowButton.ghost(
+              compact: !phone,
+              touch: phone,
+              onPressed: _restoring ? null : _pickBackup,
+              child: const Text('Choose another'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final canRestore = _passController.text.isNotEmpty;
+    return WelcomeFrame(
+      title: 'Restore from a backup',
+      backEnabled: !_restoring,
+      onBack: () => setState(() {
+        _backup = null;
+        _restoreError = null;
+        _passController.clear();
+      }),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          file,
+          const SizedBox(height: HollowSpacing.xl),
+          Text(
+            'Backup passphrase',
+            style: HollowTypography.label.copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          // The same raw text goes in from Enter and from the button.
+          IgnorePointer(
+            ignoring: _restoring,
+            child: ExcludeFocus(
+              excluding: _restoring,
+              child: HollowTextField(
+                controller: _passController,
+                obscureText: _obscure,
+                autofocus: true,
+                errorText: _restoreError,
+                onChanged: (_) => setState(() => _restoreError = null),
+                onSubmitted: (_) => _restore(),
+                trailing: Padding(
+                  padding: const EdgeInsets.only(right: HollowSpacing.xs),
+                  child: HollowIconButton(
+                    icon: _obscure ? LucideIcons.eye : LucideIcons.eyeOff,
+                    label: _obscure ? 'Show passphrase' : 'Hide passphrase',
+                    onPressed: () => setState(() => _obscure = !_obscure),
                   ),
                 ),
-                const SizedBox(width: HollowSpacing.md),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.title,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        widget.subtitle,
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Icon(
-                  LucideIcons.chevronRight,
-                  size: 16,
-                  color: hollow.textSecondary.withValues(alpha: 0.5),
-                ),
-              ],
+              ),
             ),
           ),
-        ),
+          if (_restoreError == null) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            Text(
+              _restoring
+                  ? 'Decrypting and importing. This can take a minute.'
+                  : 'The one you chose when you made the backup.',
+              style: HollowTypography.bodySmall.copyWith(
+                color: hollow.textSecondary,
+              ),
+            ),
+          ],
+        ],
+      ),
+      bottom: WelcomeActions(
+        children: [
+          HollowButton.filled(
+            expand: phone,
+            touch: phone,
+            loading: _restoring,
+            onPressed: canRestore ? _restore : null,
+            child: const Text('Restore'),
+          ),
+        ],
       ),
     );
   }

@@ -35,9 +35,9 @@ void main() {
       'Appearance',
       'Accessibility',
       'Notifications',
-      'Audio & Video',
+      'Audio & video',
       'Network',
-      'Files & Storage',
+      'Files & storage',
       'About',
       'Help',
     ]) {
@@ -98,9 +98,9 @@ void main() {
       'Appearance',
       'Accessibility',
       'Notifications',
-      'Audio & Video',
+      'Audio & video',
       'Network',
-      'Files & Storage',
+      'Files & storage',
       // About is left out: on this desktop host its updater arms a recheck
       // timer that outlives the test.
     ]) {

@@ -299,7 +299,7 @@ function clean_requirements($html): ?string {
 
 /// Steam's `legal_notice` is an HTML-laced paragraph (often several lines of
 /// trademark boilerplate). Keep just the copyright line: strip tags, take the
-/// first line (preferring one that starts with ©), cap it short.
+/// first line (preferring one that starts with ©), cap it at a whole word.
 function clean_legal($html): ?string {
     if (!is_string($html) || $html === '') return null;
     $html = preg_replace('#<\s*br[^>]*>#i', "\n", $html);
@@ -317,7 +317,12 @@ function clean_legal($html): ?string {
             break;
         }
     }
-    return mb_substr($pick, 0, 160);
+    if (mb_strlen($pick) <= 300) return $pick;
+    // A notice cut mid-word reads as a typo ("and/o"), so the cut lands on a space.
+    $cut = mb_substr($pick, 0, 300);
+    $space = mb_strrpos($cut, ' ');
+    if ($space !== false) $cut = mb_substr($cut, 0, $space);
+    return rtrim($cut, " ,;:") . '…';
 }
 
 /// Fetch + normalize Steam appdetails for one appid. Returns a partial detail

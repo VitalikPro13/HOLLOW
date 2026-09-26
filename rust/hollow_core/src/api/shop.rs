@@ -1693,6 +1693,9 @@ pub(crate) fn own_twitch_owner_entry() -> Option<CredentialEntry> {
 /// row from a sibling, which carry no names and no redeem date. Removed items are
 /// left out. The announce cap is NOT applied here: that cap is about what rides a
 /// light profile announce, and a holder of four marks is holding four.
+///
+/// The verified Twitch account is left out too: it is not a mark anyone bought,
+/// and Connections' Disconnect is the one control over it.
 #[frb]
 pub fn list_own_support_creds() -> Result<Vec<OwnSupportCred>, String> {
     let master = super::network::get_local_peer_id();
@@ -1706,15 +1709,24 @@ pub fn list_own_support_creds() -> Result<Vec<OwnSupportCred>, String> {
         return Ok(ms
             .list_own_support_creds()?
             .into_iter()
-            .map(|(item, entry_json, slug, title, artist_name, redeemed_at)| {
+            .filter_map(|(item, entry_json, slug, title, artist_name, redeemed_at)| {
                 let entry: CredentialEntry = serde_json::from_str(&entry_json).unwrap_or_default();
-                OwnSupportCred { item, parts: entry.parts, slug, title, artist_name, redeemed_at, badge }
+                (entry.t != support_creds::T_TWITCH_OWNER).then_some(OwnSupportCred {
+                    item,
+                    parts: entry.parts,
+                    slug,
+                    title,
+                    artist_name,
+                    redeemed_at,
+                    badge,
+                })
             })
             .collect());
     };
     let root = support_creds::root_verifying_key();
     Ok(own_credential_union(ms, &master)?
         .into_iter()
+        .filter(|u| u.entry.t != support_creds::T_TWITCH_OWNER)
         .filter(|u| support_creds::verify_entry(&u.entry, &master, &root).is_ok())
         .map(|u| OwnSupportCred {
             item: u.entry.item,
@@ -2581,6 +2593,26 @@ mod tests {
         support_creds::parse_stored(&published_creds_json(ms, master).expect("json"))
             .into_iter()
             .find(|e| e.t == T_TWITCH_OWNER)
+    }
+
+    #[test]
+    fn the_twitch_account_is_not_listed_as_a_support_mark() {
+        let _lock = with_test_store();
+        let master = "master-peer-twitch-unlisted";
+        let (one, two) = seed_two_creds(master);
+        let account =
+            support_creds::testing::mint_owner_for(master, "12345", "somestreamer", support_creds::now_period());
+        with_store(|ms| {
+            keep_own_cred_row(ms, &account, "", "somestreamer", "twitch").expect("keep");
+        });
+
+        let listed: Vec<String> =
+            list_own_support_creds().expect("list").into_iter().map(|c| c.item).collect();
+        assert!(!listed.contains(&account.item), "Connections owns the account: {listed:?}");
+        assert!(listed.contains(&one.item) && listed.contains(&two.item), "{listed:?}");
+        // Still published: leaving the list is not leaving the profile.
+        let shown = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert!(shown.contains(&account.item), "{shown}");
     }
 
     #[test]

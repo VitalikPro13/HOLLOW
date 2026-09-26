@@ -7,7 +7,7 @@ import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
-import 'package:hollow/src/ui/components/profile_card_body.dart';
+import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 
 export 'package:hollow/src/ui/components/profile_card_body.dart'
@@ -15,7 +15,7 @@ export 'package:hollow/src/ui/components/profile_card_body.dart'
 
 /// Shows a profile card for [peerId].
 ///
-/// The COMPACT density of [ProfileCardBody], anchored next to whatever was
+/// The COMPACT density of [ProfileIdentityColumn], anchored next to whatever was
 /// clicked, unless the user has chosen [ProfileCardStyle.expanded], in which
 /// case one click goes straight to the full profile (issue #54).
 ///
@@ -74,7 +74,7 @@ void showProfileCardPopup({
 }
 
 /// Width of the compact anchored card; call-site anchor offsets derive from it.
-const double kProfileCardPopupWidth = 300.0;
+const double kProfileCardPopupWidth = kProfileCompactWidth;
 
 class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String peerId;
@@ -129,8 +129,10 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       curve: HollowCurves.enter,
       reverseCurve: HollowCurves.exit,
     );
-    _scaleAnim = Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
-        .animate(curve);
+    _scaleAnim = Tween<double>(
+      begin: HollowMotion.popoverScale,
+      end: 1.0,
+    ).animate(curve);
     _fadeAnim = curve;
     _controller.forward();
   }
@@ -235,8 +237,10 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     // How far up the card may be pushed before its TOP leaves the window:
     // without the ceiling a short window paints it behind the title bar
     // (issue #54).
-    final maxBottom =
-        (screenSize.height - estimatedCardHeight - 8).clamp(8.0, double.infinity);
+    final maxBottom = (screenSize.height - estimatedCardHeight - 8).clamp(
+      8.0,
+      double.infinity,
+    );
     if (widget.anchorBottom) {
       bottom = (screenSize.height - _anchor.dy).clamp(8.0, maxBottom);
     } else {
@@ -253,54 +257,56 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     return IgnorePointer(
       ignoring: _dismissing,
       child: Stack(
-      children: [
-        Positioned.fill(
-          child: GestureDetector(
-            onTap: _dismiss,
-            behavior: HitTestBehavior.opaque,
-            child: const SizedBox.expand(),
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: _dismiss,
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox.expand(),
+            ),
           ),
-        ),
 
-        Positioned(
-          left: left,
-          top: top,
-          bottom: bottom,
-          child: FadeTransition(
-            opacity: _fadeAnim,
-            child: ScaleTransition(
-              scale: _scaleAnim,
-              // Grows from the corner at its anchor, which is the top when it
-              // opens downward.
-              alignment:
-                  top != null ? Alignment.topLeft : Alignment.bottomLeft,
-              child: Material(
-                color: Colors.transparent,
-                child: Container(
-                  width: cardWidth,
-                  decoration: BoxDecoration(
-                    color: hollow.overlay,
-                    borderRadius: BorderRadius.circular(hollow.radiusLg),
-                    border: Border.all(color: hollow.border),
-                    boxShadow: HollowShadows.float,
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: ProfileCardBody(
-                    peerId: widget.peerId,
-                    nickname: widget.nickname,
-                    role: widget.role,
-                    labels: widget.labels,
-                    serverId: widget.serverId,
-                    density: ProfileCardDensity.compact,
-                    dismissHost: widget.onDismiss,
-                    onExpand: _expand,
+          Positioned(
+            left: left,
+            top: top,
+            bottom: bottom,
+            child: FadeTransition(
+              opacity: _fadeAnim,
+              child: ScaleTransition(
+                scale: _scaleAnim,
+                // Grows from the corner at its anchor, which is the top when it
+                // opens downward.
+                alignment: top != null
+                    ? Alignment.topLeft
+                    : Alignment.bottomLeft,
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    width: cardWidth,
+                    decoration: BoxDecoration(
+                      color: hollow.overlay,
+                      borderRadius: BorderRadius.circular(hollow.radiusLg),
+                      border: Border.all(color: hollow.border),
+                      boxShadow: HollowShadows.float,
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: ProfileIdentityColumn(
+                      peerId: widget.peerId,
+                      nickname: widget.nickname,
+                      role: widget.role,
+                      labels: widget.labels,
+                      serverId: widget.serverId,
+                      density: ProfileCardDensity.compact,
+                      width: cardWidth,
+                      dismissHost: widget.onDismiss,
+                      onExpand: _expand,
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      ],
+        ],
       ),
     );
   }

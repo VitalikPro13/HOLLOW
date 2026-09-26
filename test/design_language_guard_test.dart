@@ -207,7 +207,7 @@ void main() {
 
 /// Toasts that interpolate `$e`, `${e}`, `$err` or `$error`, the day the rule
 /// landed. May fall, never rise.
-const _rawExceptionToastBaseline = 6;
+const _rawExceptionToastBaseline = 3;
 
 /// The text between the `(` at [open] and its matching `)`.
 String _balancedArgs(String source, int open) {
@@ -266,7 +266,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 159,
+    baseline: 108,
   ),
   _Rule(
     id: 'material-colors',
@@ -274,7 +274,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 84,
+    baseline: 77,
   ),
   _Rule(
     id: 'color-literal',
@@ -283,7 +283,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 88,
+    baseline: 80,
   ),
   _Rule(
     id: 'radius-literal',
@@ -291,7 +291,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 31,
+    baseline: 23,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -410,7 +410,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 69,
+    baseline: 64,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -419,7 +419,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 56,
+    baseline: 39,
   ),
   _Rule(
     id: 'gradient',
@@ -428,7 +428,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'\b(Linear|Radial|Sweep)Gradient\b'),
     excludeDirs: [_theme],
     excludeFiles: ['annotation_overlay.dart'],
-    baseline: 13,
+    baseline: 11,
   ),
   _Rule(
     id: 'big-shadow',
@@ -458,7 +458,7 @@ final _rules = <_Rule>[
         'a documented overlay host is the only exception',
     pattern: RegExp(r'(?<![\w.])Material\('),
     excludeDirs: [_theme, _components],
-    baseline: 17,
+    baseline: 16,
   ),
 ];
 

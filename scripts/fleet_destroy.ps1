@@ -616,11 +616,11 @@ function Get-LinkCode($peer) {
 
 # Walks the welcome dialog to the enter-code screen on an EMPTY peer.
 function Open-EnterCode($peer) {
-    Step $peer @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 90000 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     # A throwaway identity is created and the node started before the dialog
     # appears, so this is the slow one.
-    Step $peer @{ op = 'wait_for'; target = 'text:Link this device'; timeout_ms = 180000 }
+    Step $peer @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 }
     Step $peer @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 20000 }
 }
 
@@ -643,7 +643,7 @@ function Invoke-DeviceLink($peer, $masterA) {
     Step a @{ op = 'wait_for'; target = 'text:Send your data?'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'text:Send data'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
-    Step $peer @{ op = 'wait_for'; target = 'text:Device linked'; timeout_ms = 120000 }
+    Step $peer @{ op = 'wait_for'; target = 'text:Linked'; timeout_ms = 120000 }
     Step $peer @{ op = 'shot'; name = "destroy-$runTag-$peer-linked" }
 
     # The receiver stashes the snapshot and schedules its own relaunch through
@@ -1036,7 +1036,7 @@ try {
     } else {
         Say "d relaunched itself: pid $dPid -> $dBackPid" 'Green'
     }
-    $dWelcome = Invoke-SoftStep d @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 120000 }
+    $dWelcome = Invoke-SoftStep d @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 120000 }
     Invoke-SoftStep d @{ op = 'shot'; name = "destroy-$runTag-d-welcome" } | Out-Null
     $dAfter = @(Get-IdentityRemnants 'd' $true)
     Write-Inventory d 'after the second launch'
@@ -1060,7 +1060,7 @@ try {
         } else {
             Say "$peer relaunched itself: pid $($pair[1]) -> $backPid" 'Green'
         }
-        $welcome = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 120000 }
+        $welcome = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 120000 }
         Invoke-SoftStep $peer @{ op = 'shot'; name = "destroy-$runTag-$peer-welcome" } | Out-Null
         $remnants = @(Get-IdentityRemnants $peer $true)
         Write-Inventory $peer 'after coming back'

@@ -10,6 +10,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/server_settings/pages/access_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/channels_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/emotes_page.dart';
+import 'package:hollow/src/ui/server_settings/pages/files_storage_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/labels_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/members_page.dart';
 import 'package:hollow/src/ui/server_settings/pages/notifications_page.dart';
@@ -26,8 +27,9 @@ extension ServerSettingsPageMeta on ServerSettingsPage {
         ServerSettingsPage.channels => 'Channels',
         ServerSettingsPage.roles => 'Roles',
         ServerSettingsPage.labels => 'Labels',
-        ServerSettingsPage.emotes => 'Emotes and stickers',
+        ServerSettingsPage.emotes => 'Emotes & stickers',
         ServerSettingsPage.members => 'Members',
+        ServerSettingsPage.storage => 'Files & storage',
         ServerSettingsPage.profile => 'Profile',
         ServerSettingsPage.notifications => 'Notifications',
       };
@@ -40,6 +42,7 @@ extension ServerSettingsPageMeta on ServerSettingsPage {
         ServerSettingsPage.labels => LucideIcons.tag,
         ServerSettingsPage.emotes => LucideIcons.smile,
         ServerSettingsPage.members => LucideIcons.users,
+        ServerSettingsPage.storage => LucideIcons.hardDrive,
         ServerSettingsPage.profile => LucideIcons.user,
         ServerSettingsPage.notifications => LucideIcons.bell,
       };
@@ -89,6 +92,7 @@ Widget serverSettingsPageFor(ServerSettingsPage page, String serverId) =>
       ServerSettingsPage.labels => LabelsPage(serverId: serverId),
       ServerSettingsPage.emotes => EmotesPage(serverId: serverId),
       ServerSettingsPage.members => MembersPage(serverId: serverId),
+      ServerSettingsPage.storage => FilesStoragePage(serverId: serverId),
       ServerSettingsPage.profile => ServerProfilePage(serverId: serverId),
       ServerSettingsPage.notifications =>
         ServerNotificationsPage(serverId: serverId),

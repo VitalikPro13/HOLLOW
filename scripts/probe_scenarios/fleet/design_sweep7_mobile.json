@@ -2,7 +2,7 @@
   "_": [
     "Design sweep 7, the mobile half: every settings page with a Material Switch or Slider, which moved onto HollowToggle / HollowSlider.",
     "Shot on the unswept commit first, then with the sweep applied, and stacked. One peer.",
-    "Subpages scroll through their first Scrollable; the root list is scrolled once before Files & Storage and Security.",
+    "Subpages scroll through their first Scrollable; the root list is scrolled once before Files & storage and Security.",
     "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario design_sweep7_mobile -Peers a"
   ],
   "peers": [
@@ -194,7 +194,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "text:Audio & Video",
+      "target": "text:Audio & video",
       "index": 0,
       "soft": true
     },
@@ -281,7 +281,7 @@
     {
       "peer": "a",
       "op": "scroll",
-      "target": "text:Audio & Video",
+      "target": "text:Audio & video",
       "index": 0,
       "dy": -400
     },
@@ -293,7 +293,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "text:Files & Storage",
+      "target": "text:Files & storage",
       "index": 0,
       "soft": true
     },

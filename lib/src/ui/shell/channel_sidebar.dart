@@ -10,6 +10,7 @@ import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/call/speaking_ring.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
@@ -21,7 +22,6 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart';
 import 'package:hollow/src/ui/shell/channel_context_menus.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -390,17 +390,20 @@ class ChannelSidebar extends StatelessWidget {
               ),
             ),
             HollowTooltip(
-              message: 'Storage',
-              child: HollowPressable(
-                semanticLabel: 'Storage',
-                onTap: () => showStorageDashboardDialog(
-                    context, selectedServer!.serverId),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  LucideIcons.hardDrive,
-                  size: 16,
-                  color: hollow.textSecondary,
+              message: 'Files & storage',
+              child: Consumer(
+                builder: (context, ref, _) => HollowPressable(
+                  semanticLabel: 'Files & storage',
+                  onTap: () => openServerSettings(
+                      ref.read, selectedServer!.serverId,
+                      page: ServerSettingsPage.storage),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(
+                    LucideIcons.hardDrive,
+                    size: 16,
+                    color: hollow.textSecondary,
+                  ),
                 ),
               ),
             ),

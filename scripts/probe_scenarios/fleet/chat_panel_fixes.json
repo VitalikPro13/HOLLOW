@@ -257,13 +257,13 @@
     {
       "peer": "a",
       "op": "wait_for",
-      "target": "type:SelectableText",
+      "target": "type:HollowCopyField",
       "timeout_ms": 20000
     },
     {
       "peer": "a",
       "op": "capture",
-      "target": "type:SelectableText",
+      "target": "type:HollowCopyField",
       "as": "INVITE"
     },
     {

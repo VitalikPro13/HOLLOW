@@ -887,8 +887,8 @@ function Invoke-SeedPhase {
 
         Step a @{ op = 'right_click'; target = "server:$server" }
         Step a @{ op = 'tap'; target = 'menu > text:Invite people' }
-        Step a @{ op = 'wait_for'; target = 'type:SelectableText'; timeout_ms = 20000 }
-        Step a @{ op = 'capture'; target = 'type:SelectableText'; as = 'INVITE' }
+        Step a @{ op = 'wait_for'; target = 'type:HollowCopyField'; timeout_ms = 20000 }
+        Step a @{ op = 'capture'; target = 'type:HollowCopyField'; as = 'INVITE' }
         Step a @{ op = 'key'; value = 'escape' }
 
         Step b @{ op = 'tap'; target = 'semantics:Create a server' }
@@ -1238,18 +1238,18 @@ function Invoke-UpgradePhase {
         # evidence rather than instead of it: the files are the fact, the line
         # is what a user is told about them.
         Step b @{ op = 'tap'; target = 'semantics:Settings'; index = 0 }
-        Step b @{ op = 'tap'; target = 'text:Files & Storage'; index = 0 }
+        Step b @{ op = 'tap'; target = 'text:Files & storage'; index = 0 }
         $protected = Invoke-SoftStep b @{ op = 'wait_for'; target = 'text:Protected'; timeout_ms = 60000 }
         Step b @{ op = 'shot'; name = "atrest-$runTag-b-storage" }
         Step b @{ op = 'key'; value = 'escape' }
-        $settingsGone = Invoke-SoftStep b @{ op = 'wait_for'; gone = 'text:Files & Storage'; timeout_ms = 10000 }
+        $settingsGone = Invoke-SoftStep b @{ op = 'wait_for'; gone = 'text:Files & storage'; timeout_ms = 10000 }
         if (-not $settingsGone.ok) {
             # Escape reaches nothing once focus has left the dialog, and the
             # barrier then covers everything the next gate wants to tap. The
             # scope matters: a bare semantics:Close is the window title bar's
             # button, and that tap ends the process.
             Invoke-SoftStep b @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 } | Out-Null
-            Step b @{ op = 'wait_for'; gone = 'text:Files & Storage'; timeout_ms = 15000 }
+            Step b @{ op = 'wait_for'; gone = 'text:Files & storage'; timeout_ms = 15000 }
         }
 
         if ($pending.Count -gt 0 -or $leaks.Count -gt 0) {

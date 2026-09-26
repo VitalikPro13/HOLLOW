@@ -389,9 +389,9 @@ try {
 
     Step a @{ op = 'right_click'; target = "server:$server" }
     Step a @{ op = 'tap'; target = 'menu > text:Invite people' }
-    Step a @{ op = 'wait_for'; target = 'type:SelectableText'; timeout_ms = 20000 }
+    Step a @{ op = 'wait_for'; target = 'type:HollowCopyField'; timeout_ms = 20000 }
     # The capture crosses instances: b pastes it as ${INVITE} below.
-    Step a @{ op = 'capture'; target = 'type:SelectableText'; as = 'INVITE' }
+    Step a @{ op = 'capture'; target = 'type:HollowCopyField'; as = 'INVITE' }
     Step a @{ op = 'key'; value = 'escape' }
     Set-Gate 'G1 a created pj-RUN, #general is there, invite captured' 'PASS'
 

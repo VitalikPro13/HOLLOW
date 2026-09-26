@@ -62,7 +62,7 @@ Inside either shape is a `Row` containing:
 
 2. **Server-only action icons** (conditionally rendered when `selectedServer != null`):
    - **Invite people** -- `LucideIcons.userPlus` (16px). Tapping constructs the web-form invite `webServerInviteLink(serverId)` (`https://hollow.anonlisten.com/join#server={id}` — clickable anywhere, renders as a Join card in-app) and calls `showInviteDialog(context, link, serverId)`.
-   - **Storage** -- `LucideIcons.hardDrive` (16px). Tapping calls `showStorageDashboardDialog(context, serverId)`.
+   - **Files & storage** -- `LucideIcons.hardDrive` (16px). Tapping opens Server settings on its Files & storage page (`openServerSettings(read, serverId, page: ServerSettingsPage.storage)`); the storage dashboard dialog is gone (2026-09-26).
    - **Server settings** -- `LucideIcons.settings` (16px). Tapping calls `onOpenSettings`.
 
 Each icon is wrapped in `HollowTooltip` > `HollowPressable` with `borderRadius: hollow.radiusMd` and `padding: HollowSpacing.xs`. Icon color is `hollow.textSecondary`.

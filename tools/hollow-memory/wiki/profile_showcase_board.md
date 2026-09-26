@@ -2,7 +2,7 @@
 
 ## Concept and Privacy Model
 
-Self-curated blocks flanking the profile card (Steam-showcase model, NOT
+Self-curated blocks in a pane beside the profile (Steam-showcase model, NOT
 Discord's auto-tracked activity feed). Everything on a board was PUT there
 by the user — no process detection, ever. Display is pure P2P off replicated
 profile data: viewers never contact IGDB, the website, or any third party.
@@ -12,15 +12,22 @@ report: `reports/shipped/profile-and-assets/PROFILE_SHOWCASE_BOARD.md`.
 
 ## Data Model (lib/src/core/models/showcase_board.dart)
 
-`ShowcaseBoard { left, right }` serializes to one JSON string in the
-profile's `showcase_board` field. Block types (stable wire ids): `text`
+`ShowcaseBoard { left, right, wide?, wideAtTop }` serializes to one JSON
+string in the profile's `showcase_board` field. `wide` (2026-09-26) is ONE
+artwork block spanning both board columns, `"wide": {...}` plus `"wideTop":
+false` only when it sits below the boards; anything but an artwork there
+decodes as absent, and clients from before the slot simply ignore the key
+(Rust only size-checks the blob, so nothing else had to change).
+`isEmpty` counts the wide slot and `referencedAssetHashes()` includes it. Block types (stable wire ids): `text`
 (title?, body), `now_playing` (name, cover?, year?, details?),
 `favorite_game` (+blurb?), `game_shelf` (label?, games[{name, cover?,
 year?}], max 8), `artwork` (image, caption?). UNKNOWN types round-trip
 untouched so an old client editing its board can't destroy newer blocks.
 Caps: 4 blocks/side, encoded ≤14KB (`maxEncodedLength` — kept under Rust's
 16KB `sanitize_incoming_showcase` absent-threshold so a valid board is never
-dropped in transit), text body ≤1000. `referencedAssetHashes()` drives
+dropped in transit), text body ≤1000, a favourite's "Why this game?" blurb
+≤128 (`maxBlurbLength`: about four lines beside the 96x128 cover; a longer
+review belongs in a text block; viewers clamp older, longer blurbs by lines). `referencedAssetHashes()` drives
 save-time asset pruning. `cover`/`image` values are asset HASHES.
 
 **Game details (baked, zero-fetch at display) — BUNDLE-REF since v7.**
@@ -101,17 +108,23 @@ return NOTHING — `game.category` → `game_type.type`, `external_games.categor
 `company_website.category` → `websites.type` (Website Type ref; broke all
 credit links). Resolution helpers `is_steam_external()` / `website_kind()`
 match the new expanded refs ({id, name/type}) with legacy-category fallback.
-Bump `SEARCH_VER` when the response schema grows (currently 10). Historical
+Bump `SEARCH_VER` when the response schema grows (currently 11: images are
+a READ-THROUGH cache, `cached_image` only registers the id in the `images`
+table and returns the URL; `fetch.php` pulls the bytes from the IGDB CDN on the
+first request and refuses any id `search.php` never handed out, and warm files
+under `covers/` are served by Apache with no PHP, per `.htaccess`). Historical
 note: the app used to send `v` as a GET query param because **Hostinger's
 hCDN edge-cached old responses (`x-hcdn-cache-status: HIT`, forced
 max-age=31536000)**; since 2026-07-10 the endpoint is **POST-ONLY** (GET →
 405) — POST is never edge-cached, and body params keep search text out of
 access logs. Also hardened: `display_errors` off, nosniff/no-referrer/
 noindex headers. `config.php` (real credentials) is gitignored; `.htaccess`
-denies config/token/db and hard-caches covers (.jpg AND .png). Manual upload
-only (Hostinger file manager, no shell). The canonical source lives at
-`HOLLOW/igdb/`; the `!hollow-website/igdb/` copy is a synced mirror — sync
-it after edits.
+denies config/token/db and hard-caches covers (.jpg AND .png). The published
+source lives at `HOLLOW/igdb/` and the website repo keeps a copy at
+`anonlisten-sites/hollow/igdb/`; deploys go over SSH into the docroot's
+`hollow/igdb/`. DIFF THE LIVE FILE FIRST: on 2026-09-26 the live proxy was a
+whole version ahead of `anonlisten-sites` (v11 plus `fetch.php`), and uploading
+the repo copy would have rolled the image cache back.
 
 **TWO MODES (SEARCH_VER 10).** `q=` = FAST search: ONE IGDB query returning
 EXACTLY what the picker renders — {id, name, year, type, cover} and nothing
@@ -122,7 +135,9 @@ again). Live-measured 0.4-1.1s. `id=` = card details for ONE game
 (external_games + involved_companies + websites + artworks expanded) + one
 Steam appdetails (no API key; ~200 req/5min per IP → hence the cache) →
 description / req_min+req_rec / metacritic / release_date / achievements /
-`legal` (©-line via `clean_legal`) / platforms / companies
+`legal` (the ©-line via `clean_legal`: up to 300 characters, cut at a whole
+word with an ellipsis; before 2026-09-26 it cut at exactly 160 mid-word, and
+the app's `tidyCopyright()` repairs notices already baked into profiles) / platforms / companies
 (`extract_companies` — DEDUPED by name, dev+pub merges to role `devpub`;
 logos PNG; links deduped by URL) / key art / stores. **Stores matched by
 SOURCE NAME** (`store_slug` — steam/playstation/xbox|microsoft/
@@ -150,81 +165,69 @@ live DS3 full payload + cache-hit path + Zelda TOTK no-Steam degrade.
 
 ## Dart UI
 
-- Renderers: `ui/components/showcase_blocks.dart` — `ShowcaseBoardColumn
-  (peerId, blocks)` watches `showcaseAssetsProvider(peerId)` (family
-  FutureProvider hash→bytes, invalidated on ProfileUpdated in
-  event_provider). Text renders via chat's `buildMessageText` (links open
-  only on tap; no fetches). Covers/artwork via Image.memory /
-  AnimatedGifImage; gamepad/image placeholders while assets replicate.
-- Composer: `ui/dialogs/showcase_editor.dart` — per-side block list
-  (headed `HollowSectionHeader('Left board' / 'Right board', dense: true,
-  count: 'n/max')`) with drag reorder (`onReorderItem` pattern), block picker, game search dialog
-  (450ms debounce, type tag chip + year, "Game data from IGDB" attribution),
-  shelf editor (prefillable), artwork via FilePicker → Rust processing.
-  **Picker feedback states (2026-07-10)**: spinner / wifi-off error row /
-  "No games found for 'q'" empty state — the empty state is gated on the
-  last COMPLETED query matching the current field text, so it never flashes
-  while the debounce is pending. **Save spinners**: both Save buttons
-  (editor + shelf) show `HollowButton(loading: _saving)` and disable
-  while awaiting `_pendingBakes` AND the profile write; the size-check
-  early-returns and a failed `updateShowcaseBoard` reset `_busy` (toast) —
-  previously wedge paths.
-  **Game picks are NON-BLOCKING**: the picker pops instantly with basics
-  (`PickedGame{id,name,year,coverUrl}`); `bakeGame()` fetches cover/key
-  art/details/logos in the BACKGROUND (starts before the blurb prompt, so
-  it downloads while the user types) and `_trackBake` patches the placed
-  block IN PLACE by instance identity (reorder-safe; deleted block → patch
-  dropped, assets pruned at save). BOTH saves (board + shelf) await
-  `_pendingBakes` first so nothing ships half-baked. bakeGame never throws.
-  EVERY block type edits in place (artwork edit = caption only). On game pick,
-  `_bakeDetails` parses `details_json`, fetches each company logo via
-  `showcase_fetch_cover`, and REWRITES `companies[].logo` URL→asset-hash (bytes
-  stashed in the bundle) so the stored block references replicated assets. Save
-  prunes the asset bundle to board-referenced hashes (incl. logo hashes) and
-  ships board + assets via `profileProvider.updateShowcaseBoard` (optimistic
-  cache patch).
-- Game card dialog: `ui/dialogs/game_card_dialog.dart` — tap ANY game
-  surface (now_playing / favorite_game via `_tappableGame`, game-shelf tiles
-  directly) → `showGameCardDialog`, the SAME dialog everywhere. REDESIGNED
-  2026-07-10 (v10 "reception strip" pass). 2026-07-17: outer padding +
-  maxHeight now include `MediaQuery.paddingOf` (status bar/notch + home
-  indicator) — `showHollowDialog` deliberately adds no SafeArea, and on
-  phones the corner-chip X landed under the notch; desktop unchanged
-  (insets 0). Center+right panel ensemble
-  (profile surface recipe, 0.62× scale-then-stack; side-by-side panels are
-  TOP-ALIGNED and size independently — the old IntrinsicHeight+stretch
-  coupling left dead surface under About). Center = key-art hero (235px,
-  gradient; blurred-cover fallback) with the CORNER-CHIP dismiss (fixed
-  26×26 black circle, NO HollowPressable padding) + overlapping portrait
-  cover + title / date "· X series" (franchise) row + **_StatStrip** (up to
-  3 equal tiles via IntrinsicHeight+stretch: Metacritic score
-  contrast-corrected through `Contrast.ensureContrast` vs hollow.elevated —
-  NEVER raw band hues, they vanish in dark mode; Steam verdict "Very
-  Positive / 94% of 512k"; time-to-beat "~51h / 100%: ~106h") + centered
-  pull-quote blurb + About + **tag-chip footer** (genres+themes+modes,
-  case-insensitive dedup, cap 8). Right panel (only when it has content) =
-  Platforms as CLICKABLE chips, Info (achievements — genres moved to the
-  chips), Credits, **System Requirements demoted to a closed-by-default
-  `_SysReqSection` expander** (store-page utility, not showcase material),
-  copyright + "Game data from IGDB & Steam". PURE display, zero fetch.
-  Section titles (About, Platforms, Info, Credits) are
-  `HollowSectionHeader(label, dense: true)` as written; the expander reads
-  "System requirements" in the `label` style.
-  **Accent theming**: `components/showcase_image_stats.dart`
-  `showcaseImageStats(bytes)` — RENDER-time pixel probe (40px decode,
-  FNV-keyed cache): extracts the cover's dominant-vibrant color (hue
-  buckets, lightness clamped) → tints stat tiles / tag chips / panel
-  borders (theme accent fallback; old boards get it free, no wire change).
-  **Logo visibility**: same probe on credits logos — `hasTransparency`
-  (≥5% transparent pixels) gates treatment: transparent MONOCHROME marks
-  re-tint to textPrimary via ColorFiltered(srcIn); transparent colorful
-  marks get a neutral plate only when luminance sits in the panel's band;
-  OPAQUE logos draw untouched (srcIn on opaque = solid slab). Guard test:
-  `test/widget/game_card_dialog_test.dart` (legacy + v10 shapes, expander,
-  light theme — catches the stretch-in-unbounded-height layout crash that
-  invisibly killed the center panel). Brand glyphs in
-  `core/brand_icons.dart` (SimpleIcons.ttf); Windows/Xbox/Nintendo were
-  PURGED from Simple Icons → custom CustomPaint glyphs in
-  `ui/components/platform_icons.dart` (`PlatformIcon`, `platformLabel`).
-- Layout host: see wiki `ui_profile_card` (flanking panels, proportional
-  scaling).
+- Renderers: `ui/components/showcase_blocks.dart`: `ShowcaseBoardView(peerId,
+  board, columns)` is THE pane content (two 340 columns 24 apart, or one column
+  holding left then right; the wide artwork pinned to exactly 704 = both
+  columns, above or below per `wideAtTop`), built from `ShowcaseBoardColumn`,
+  `ShowcaseBlockView(block, assets, ownerPeerId)` (headers via
+  `ShowcaseBlockView.headerOf`), `ShowcaseWideArtwork`, `ShowcaseArtwork`,
+  `ShowcaseCover`, `ShowcaseGameRow`; constants `kShowcaseColumnWidth` 340,
+  `kShowcaseGap` 24, `kShowcasePanePadding` 24, `kShowcaseWideWidth` 704. Blocks
+  sit directly on the surface (no cards). Assets from
+  `showcaseAssetsProvider(peerId)` (family FutureProvider hash to bytes,
+  invalidated on ProfileUpdated in event_provider). Text renders via chat's
+  `buildMessageText` (links open only on tap; no fetches). Tapping a game opens
+  the game card with its owner (`ownerName`, `ownerPeerId`, `source`,
+  `shelfLabel`).
+- Editor (rebuilt 2026-09-26): `ui/dialogs/showcase_editor.dart`
+  `showShowcaseEditorDialog(context, ref)` picks the surface itself. Desktop =
+  `ShowcaseEditorDialog`, the PROFILE DIALOG IN EDIT MODE: your
+  `ProfileIdentityColumn(showActions: false)` as context, both board columns
+  always open ("Left board" / "Right board" + "2 of 4"), blocks drawn exactly as
+  viewers see them with a hover/focus toolbar (a drag handle that also opens
+  Move up / Move down / Move to the other board, Edit, Remove), "Add block" at
+  each column's foot as a `showHollowMenu` (Now playing, Favourite game, Game
+  shelf, Artwork, Text, and Wide artwork, greyed once used), and a footer
+  across the dialog ("People see your showcase when you save", ghost Cancel +
+  filled Save). The ONLY layer ever on top is a menu or game search. Phone =
+  `showcase_editor_phone.dart`, a pushed page with the boards as sections, a 44
+  More per block opening a sheet, and Save pinned at the bottom.
+  `showcase_editor_draft.dart` (`ShowcaseDraft`, shared by both: stable block
+  ids for keys, background game bakes that follow a block across edits, empty
+  text blocks and shelves dropped, asset pruning incl. the wide artwork, save
+  errors as `FriendlyException`), `showcase_editor_blocks.dart` (the editable
+  block and the in-place editors: text title 0/64 + body 0/1000, a caption where
+  Enter keeps and Escape restores, "Why this game?" with "Optional · 0/128",
+  shelves up to 8), `showcase_editor_search.dart` (game search as one popover on
+  `showHollowMenu`, a sheet on phones; DLC as a `HollowBadge`, "Game data from
+  IGDB"). A full side reads "A side holds 4 blocks. Remove one to add
+  another."; over `maxEncodedLength` the footer turns error and Save goes
+  neutral-disabled. Cancel, Escape or click-outside with changes asks "Discard
+  your changes?". Game picks stay NON-BLOCKING (`bakeGame()` fetches cover, key
+  art, details and logos in the background; save awaits them).
+- Game card: `ui/dialogs/game_card_dialog.dart` `showGameCardDialog(...,
+  ownerName, ownerPeerId, source: GameCardSource.{favourite, nowPlaying,
+  shelf}, shelfLabel)`, the SAME card from every game surface (rebuilt
+  2026-09-26 to the approved mockup). Desktop: a 600 main column and a 360
+  details pane (the one sanctioned wide dialog; the pane stacks under the main
+  column when they do not fit). Key art at a TRUE 16:9 edge to edge, never
+  cropped, NO scrim, NO blurred fallback (no art = no hero); the 96x128 cover
+  overlaps it; title and "developer · date" on the surface. Then the reason
+  line (a frameless 24 px avatar with "Mira's favourite" or "On Mira's shelf",
+  the blurb as a quote below), facts as plain label/value (Metacritic, Steam
+  reviews, Time to beat; no tiles, no tint), About, genre `HollowBadge`s. Pane:
+  "Get it on" store `HollowChip`s with an arrow (they leave the app), Details
+  rows, Made by (logo, name, role, a labelled website `HollowIconButton`),
+  System requirements with Minimum / Recommended `HollowChipTabs`, then the
+  publisher's copyright and, as its own paragraph, "Game details from IGDB and
+  Steam, saved when Mira pinned it." Phone: a `showHollowSheet`, facts as ROWS
+  so nothing shrinks. `showcase_image_stats.dart` keeps ONLY the logo
+  legibility probe (tint a transparent monochrome mark, plate a low-contrast
+  one); the pixel-probed accent tint is gone. Tests:
+  `test/widget/game_card_dialog_test.dart` (incl. `tidyCopyright`), renders
+  `test/screenshots/redesign_after_gamecard_screenshot_test.dart`. Brand glyphs
+  in `core/brand_icons.dart` (SimpleIcons.ttf); Windows/Xbox/Nintendo are custom
+  CustomPaint glyphs in `ui/components/platform_icons.dart` (`PlatformIcon`,
+  `platformLabel`).
+- Layout host: see wiki `ui_profile_card` (the profile column beside the
+  showcase pane, the narrow-window fallbacks, the phone sheet).

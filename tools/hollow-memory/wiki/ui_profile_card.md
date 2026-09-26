@@ -1,53 +1,59 @@
 # Profile Card, Popup and Full Profile Dialog
 
-## Architecture Overview (redesigned 2026-07-07)
+## Architecture Overview (rebuilt 2026-09-26, dialogs session 25)
 
-ONE shared widget renders profile card content at two densities:
-`ProfileCardBody` in `lib/src/ui/components/profile_card_body.dart` with
-`ProfileCardDensity.compact` (anchored hover popup) and `.full` (the wide
-profile dialog). Both render the same sections from the same data so the two
-surfaces cannot drift. The HOST owns the outer container and passes
-`dismissHost` (closes popup/dialog before opening another dialog) and, for
-compact, `onExpand` (opens the full dialog).
+ONE widget renders who someone is on every surface:
+`ProfileIdentityColumn` in `lib/src/ui/components/profile_identity_column.dart`,
+at three densities (`ProfileCardDensity.compact` = the anchored popup, 300 wide,
+`kProfileCompactWidth`; `.full` = the profile dialog's column, 400 wide,
+`kProfileColumnWidth`; `.touch` = the phone sheet). The host owns the frame and
+passes `dismissHost` (closes it before another surface opens), and optionally
+`onClose` / `onExpand` (a button over the banner), `onMessage` /
+`onEditProfile` / `onEditShowcase` (hosts that navigate differently) and
+`showActions: false` (the showcase editor owns its own actions).
+`profile_card_body.dart` is down to `ProfileFriendAction` (filled Add friend /
+Accept request, ghost Request sent, busy + error toast), `profileRoleColor` and
+`showLocalNicknameDialog`; `ProfileCardBody`, the peer-id footer, the local
+`_ProfileChip` and the gradient no-banner fallback are gone.
 
-Sections in order: banner Stack (avatar breaking its bottom edge at left,
-corner chip top-right: compact = maximize2 expand, full = minimize2 CLOSE
-via `dismissHost` — same fixed 26×26 scrimmed circle, borderRadius 13, NO
-HollowPressable padding so hover paint stays inside; the game card's X
-reuses this structure) → corner band (Twitch/integration chip
-ALONE, right-aligned under the banner, both densities) → identity block
-(name, secondary name, presence StatusDot row via `identityIsOnline` + green
-"Verified" and "Friends" indicators, italic custom status) → ONE merged chip
-row (role incl. Member + cosmetic labels) → divider → ABOUT ME → actions →
-peer-id copy footer. Compact shows a "View showcase" hint (sparkles,
-accentText) when the person has a board.
+Sections in order: banner at a TRUE 2.5:1 of the column width (edge to edge; a
+missing banner is a flat `elevated` block) → avatar (96 full / 64 compact / 80
+touch, overlapping the banner, zero-layout-cost frame per #54) with the badge
+row at its right (`SupportMarksChip`, then the Twitch chip) → name (local
+nickname > server nickname > display name) → "Online · Friend" / "Verified"
+line → custom status → role + label `LabelBadge`s → hairline → "About me" →
+actions. Compact adds a ghost "View showcase" when the person has a board.
 
-**Actions (redesigned 2026-08-04, issue #48 follow-up).** For someone else's
-card, BOTH densities render `_memberActions`: ONE primary button — filled
-Message for accepted friends (`_openDm` → `openDmConversation`, providers
-written BEFORE `dismissHost` because dismissing disposes this widget's ref),
-otherwise `ProfileFriendAction` (Add Friend / Accept Request / Request Sent)
-— over a utility strip of equal-width square icon buttons via
-`_cardIconAction` (nickname, verify, Manage Member when `_canManageMember()`,
-block, report). Neutral borders on every square; intent rides the icon tint
-(error for block/report, success shieldCheck once verified); every icon has
-a HollowTooltip AND a semanticLabel. NEVER go back to stacked full-width
-text buttons — Vitalik: "more of a stack of buttons than a profile popup
-card". The accepted-friends state lives in the presence row (userCheck +
-"Friends"), not the action area. Self: full = Edit Showcase + Edit Profile
-(`_buildSelfActions` Wrap), compact = Edit Profile only.
+**Buttons over the banner** go through one helper: `MediaScrimIconButton`
+(= `HollowIconButton(onMedia: true)`, a round dark scrim that lifts on hover,
+16 px white glyph) ONLY when a banner image is actually showing; over the flat
+fallback it is a plain `HollowIconButton`, since a scrim on a flat surface reads
+as a hole.
+
+**Actions.** Someone else: ONE filled Message (accepted friend; providers are
+written before `dismissHost`) or `ProfileFriendAction`, then grey
+`HollowIconButton`s: Set a nickname / Edit nickname, Manage member (when
+`_canManageMember()`), More. Desktop More = `showHollowMenu`: Verify contact /
+View safety number, Copy user ID, then Block / Unblock and Report in red. On
+the phone the row is Message + nickname + More, and More is a `showHollowSheet`
+(Manage member, Verify contact, Copy user ID, then Block and Report in red).
+Destructive actions never rest in the row. Self: filled Edit profile + ghost
+Edit showcase (compact: Edit profile only).
+
+`SupportMarksChip` (`components/support_glyph.dart`) is the icon alone on every
+density, plus "×N" past one piece; the tooltip lists every piece
+("VitalikPro13: Headphones").
 
 `_canManageMember()` gates on `serverId != null` plus (role ladder via
 shared `core/role_hierarchy.dart` `canManageRole`/`assignableRoles`) OR
-`Permission.manageRoles` OR `Permission.manageChannels` — advisory only;
+`Permission.manageRoles` OR `Permission.manageChannels`: advisory only;
 the dialog and Rust `op_allowed` re-check. Opens
 `ui/settings/manage_member_dialog.dart` (host-dismiss pattern, passes the
 MASTER id).
 
-Density metrics: compact banner 104 / avatar 64 / width 300
-(`kProfileCardPopupWidth`); full banner 220 / avatar 110 / card width 560
-(`kProfileDialogCenterWidth`), name 22px. Screenshot harness:
-`test/screenshots/profile_card_screenshot_test.dart`.
+Renders: `test/screenshots/redesign_after_profile_screenshot_test.dart` (19
+states into `build/ui_screenshots/redesign_after/`); widget tests
+`test/widget/profile_redesign_test.dart`, `test/widget/support_marks_chip_test.dart`.
 
 ## showProfileCardPopup() — Compact Popup (desktop)
 
@@ -58,11 +64,11 @@ the bottom, horizontal clamp) and the shared popover motion (scale from
 growing from the anchor corner: `topLeft` when it opens downward, else
 `bottomLeft`; plain `hollow.border` hairline, `HollowShadows.float`). The
 barrier stops taking clicks as the exit starts. The card
-interior is `ProfileCardBody(compact)`. Member panel anchors derive from
-`kProfileCardPopupWidth`. `showLocalNicknameDialog` moved to
+interior is `ProfileIdentityColumn(density: compact)`. Member panel anchors derive from
+`kProfileCardPopupWidth`. `showLocalNicknameDialog` lives in
 profile_card_body.dart and is RE-EXPORTED here (chat_pane imports it).
-Expand affordance: scrimmed circle button on the banner (a11y label "View
-full profile") → removes overlay instantly → `showProfileDialog`.
+Expand affordance: "View full profile" over the banner (`onExpand`) → removes
+the overlay instantly → `showProfileDialog`.
 
 **Anchoring is a FUNCTION, not a point (issue #54).** The parameter is
 `anchorOf: Offset Function()`, re-read after any viewport change: a point
@@ -90,24 +96,35 @@ lands on the full profile with the showcase board.
 
 `serverId` (nullable, added issue #48) threads the whole chain:
 `_ServerMemberTile` (member_panel) and `showChatProfile` pass it →
-`showProfileCardPopup` → `_ProfileCardOverlay` → `ProfileCardBody`, and
+`showProfileCardPopup` → `_ProfileCardOverlay` → `ProfileIdentityColumn`, and
 `_expand` forwards it to `showProfileDialog` → `ProfileDialog`. Null in
 DM/self contexts (user_bar, bottom_bar, DM `_MemberTile`, DM bubbles) —
 no server context, no Manage Member.
 
 ## showProfileDialog() — Full Profile (dialogs/profile_dialog.dart)
 
-Desktop: `showHollowDialog` hosting the center card FLANKED by separate
-showcase board panels (see wiki `profile_showcase_board`). The card is
-self-contained; panels (`kShowcasePanelWidth` 340) are their own surfaces
-(same elevated/border/shadow treatment) stretched to the card's height via
-IntrinsicHeight (ConstrainedBox minHeight 560). Adaptive: no boards → card
-only; when the window can't fit the ensemble, columns SCALE proportionally
-(`scale = (available − gaps) / columnsWidth`, side-by-side down to 0.62×)
-and only below that stack vertically. Watches
-`profileProvider.select(showcaseBoard)` so composer saves update live.
-Mobile: routes to `showMobileProfileSheet` (parity surface; boards stacked,
-sheet is scrollable, self gets Edit Showcase).
+Desktop (option B, approved 2026-09-25): one `HollowDialogSurface(padded:
+false)` holding the 400 identity column, a hairline, and the showcase pane (see
+wiki `profile_showcase_board`): `ShowcaseBoardView` with the two 340 board
+columns 24 apart, blocks directly on the surface, the close X in the pane's
+corner (scrimmed only while a wide artwork sits under it). The dialog is only as
+wide as the board needs (`showcasePaneWidth(columns)`,
+`ShowcaseBoardView.columnsFor`: two when both sides hold something or a wide
+artwork spans them). No board = the profile column alone with the close X over
+the banner. Narrow windows never squeeze: two board columns drop to ONE (left,
+then right), and a window too narrow for any pane stacks the showcase under the
+profile in one 400 scroll. The identity column's scroll view draws no scrollbar
+(`_WithoutScrollbar`), so the app-wide scroll gutter can never pull the banner
+off the dialog's rounded edge. Watches `profileProvider.select(showcaseBoard)`
+so an editor save updates it live.
+
+Phone: `showMobileProfileSheet(context, peerId:, role:, labels:, serverId:)`
+(`mobile/mobile_profile_sheet.dart`), `showHollowSheet` at 0.9 height with the
+handle drawn over the banner: the touch column (Message right under the
+identity, before About and the showcase, so it is reachable without scrolling),
+then the boards stacked (and the wide artwork). Callers from chat
+(`showChatProfile`), the member panel and Server settings > Members pass
+`serverId`, which is what shows Manage member.
 
 ## Chat popups + role enrichment
 

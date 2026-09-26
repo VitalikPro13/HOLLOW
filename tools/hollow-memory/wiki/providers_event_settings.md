@@ -668,7 +668,7 @@ Provider: `autoDownloadThresholdProvider` -- `AsyncNotifierProvider<AutoDownload
 ### Auto-Download Overrides (issue #41)
 Provider: `autoDownloadOverridesProvider` -- `AsyncNotifierProvider<AutoDownloadOverridesNotifier, Map<String, bool>>`
 - Key: `'auto_download_overrides'` (one JSON object). Keys `dm:{master}` / `server:{server_id}`; `false` = never auto there, `true` = auto even when global is 0 (falls back to 169), absent = follow global.
-- `setOverride(contextKey, bool?)` -- null removes; re-pushes config to Rust. UI: per-conversation menu on Files & Storage rows (`_AutoDownloadOverrideButton`, server-level for channel rows).
+- `setOverride(contextKey, bool?)` -- null removes; re-pushes config to Rust. UI: per-conversation menu on Files & storage rows (`_AutoDownloadOverrideButton`, server-level for channel rows).
 - Helpers `effectiveAutoDownloadMb(WidgetRef, key)` / `effectiveAutoDownloadMbRead(Ref, key)` mirror Rust's `effective_auto_download_mb` — keep in sync.
 - `pushAutoDownloadConfig(thresholdMb:, overrides:)` → `set_auto_download_config` FFI; pushed explicitly in `_bootstrap` next to `setRelayUrl` (never rely on lazy provider builds reaching Rust) and on every change.
 

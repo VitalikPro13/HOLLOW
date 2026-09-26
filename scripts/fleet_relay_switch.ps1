@@ -337,17 +337,16 @@ function New-FleetServer($peer, $name) {
 function Get-ServerInvite($peer, $name, $as) {
     Step $peer @{ op = 'right_click'; target = "server:$name" }
     Step $peer @{ op = 'tap'; target = 'menu > text:Invite people' }
-    # The panel's only SelectableText is the link itself; the server id next to
-    # it is a plain Text.
-    Step $peer @{ op = 'wait_for'; target = 'type:SelectableText'; timeout_ms = 20000 }
-    Step $peer @{ op = 'capture'; target = 'type:SelectableText'; as = $as }
+    # The panel's only copy field is the link itself.
+    Step $peer @{ op = 'wait_for'; target = 'type:HollowCopyField'; timeout_ms = 20000 }
+    Step $peer @{ op = 'capture'; target = 'type:HollowCopyField'; as = $as }
     # By its own button, not Escape: the link holds focus and a key press from
     # there has reached nothing before.
     Invoke-SoftStep $peer @{ op = 'tap'; target = 'dialog > semantics:Close'; index = 0 } | Out-Null
-    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:SelectableText'; timeout_ms = 5000 }
+    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:HollowCopyField'; timeout_ms = 5000 }
     if (-not $gone.ok) {
         Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
-        Step $peer @{ op = 'wait_for'; gone = 'type:SelectableText'; timeout_ms = 10000 }
+        Step $peer @{ op = 'wait_for'; gone = 'type:HollowCopyField'; timeout_ms = 10000 }
     }
     return "$($script:FleetVars[$as])"
 }

@@ -208,7 +208,13 @@ void main() {
         (tester) async {
       await _pumpPlace(tester, perms: _member, role: 'member');
       expect(_railLabels(tester),
-          ['Emotes and stickers', 'Members', 'Profile', 'Notifications']);
+          [
+            'Emotes & stickers',
+            'Members',
+            'Files & storage',
+            'Profile',
+            'Notifications',
+          ]);
       expect(_selectedRail(tester), 'Profile');
       expect(find.text('You'), findsOneWidget);
     });
@@ -222,8 +228,9 @@ void main() {
         'Channels',
         'Roles',
         'Labels',
-        'Emotes and stickers',
+        'Emotes & stickers',
         'Members',
+        'Files & storage',
         'Profile',
         'Notifications',
       ]);
@@ -429,11 +436,11 @@ void main() {
       await tester.pump();
       await tester.pump();
       for (final title in [
-        'Emotes and stickers',
+        'Emotes & stickers',
         'Members',
+        'Files & storage',
         'Profile',
         'Notifications',
-        'Storage on this phone',
       ]) {
         expect(find.text(title), findsOneWidget, reason: title);
       }

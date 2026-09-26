@@ -47,6 +47,7 @@ void showChatProfile(
       peerId: peerId,
       role: role,
       labels: labels,
+      serverId: serverId,
     );
     return;
   }

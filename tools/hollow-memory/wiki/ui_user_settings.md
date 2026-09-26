@@ -27,8 +27,9 @@ centre PLACE on desktop and the same page widgets pushed as sub-routes on the ph
 - Rail 240 (`kSettingsRailWidth`) on `surface`: "Settings" title on the rail's box edge
   (12, where the search box and item fills start), the search field, then the groups from
   `settings_catalog.dart` (Account: Profile, Security, Devices / App: Appearance,
-  Accessibility, Notifications, Audio & Video, Shortcuts / Connection and data: Network,
-  Files & Storage), a divider, About. `SettingsRailItem`: grey 16 icon, `label` text, 32
+  Accessibility, Notifications, Audio & video, Shortcuts / Connection and data: Network,
+  Files & storage), a divider, About. Labels that join two words use "&" in sentence
+  case, on this rail and Server settings' alike (since 2026-09-26). `SettingsRailItem`: grey 16 icon, `label` text, 32
   tall so all eleven fit a 768 px laptop; the active one is an `elevated` fill + textPrimary.
 - Page column: `kSettingsPageMaxWidth` 720, padding 32 left / 48 right, one
   `SingleChildScrollView` owned by the host. The X (`Close settings (Esc)`) sits top right.
@@ -66,7 +67,8 @@ One row for every page, desktop and phone:
   preview card (`ProfilePreviewCard`, above the rows on touch); Presence (Appear invisible);
   Connections (Twitch); Your art (`OwnedArtPanel`: Wear / Worn, More > Remove from Your art
   with a confirm, Rust `remove_owned_art` local only); Support marks
-  (`SupportMarksSection`: two toggles, marks, codes waiting). The last two are absent on
+  (`SupportMarksSection`: two toggles, marks, codes waiting; the verified Twitch account is
+  NOT listed there, Connections' Disconnect is its one control). The last two are absent on
   store builds. All edits live in `profileDraftProvider` (text controllers, staged
   images with pick generations, frame), which survives leaving the page.
 - **Security**: App lock (desktop password or phone PIN/biometric), Recovery (phrase, backup
@@ -74,10 +76,10 @@ One row for every page, desktop and phone:
   blocked as expand rows), Advanced (check a message proof, a dialog), Danger zone.
 - **Devices**: device rows (`titleTrailing` "This device" badge; others in a More menu),
   Link another device (the page's filled), Advanced (sync check, reset the device list).
-- **Appearance**, **Accessibility**, **Notifications**, **Audio & Video** (call quality
+- **Appearance**, **Accessibility**, **Notifications**, **Audio & video** (call quality
   spells out the bitrate), **Shortcuts** (desktop only), **Network** (relay row with Change,
   Relay health expand, offline delivery, GIFs and previews, Advanced keys/proxies),
-  **Files & Storage** (usage, downloads, image quality, data folder + profiles, Advanced
+  **Files & storage** (usage, downloads, image quality, data folder + profiles, Advanced
   caches), **About** (header, Updates incl. What's new and Earlier versions, contact with
   hollow.anonlisten.com, legal).
 

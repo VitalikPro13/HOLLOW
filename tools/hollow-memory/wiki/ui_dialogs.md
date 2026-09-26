@@ -2,6 +2,8 @@
 
 Every modal dialog in the project. Most live under `lib/src/ui/dialogs/`; the shared layer (confirm, name prompt, duration, copy field, one-wording helpers) is the next section. Every modal opens with `showHollowDialog()` from `lib/src/ui/components/hollow_dialog.dart`: a scale 0.96->1.0 + fade entrance over the flat `HollowTheme.scrim` (65% black dark, 32% light; NO backdrop blur since design sweep 8, 2026-09-19). The frame is always `HollowDialogSurface` (overlay, hairline, 12 px shadow, radiusLg desktop / radiusXl + full width on a phone); a standard dialog is `HollowDialog` (title in `heading`, sentence case; `showClose`, `leadingActions`, `width`, `busy`, `error`, `scrollable`); a yes-or-no question is `showHollowConfirm()`, a one-field name `promptForName()`, and an action runs INSIDE the dialog. Raw `showDialog`/`showGeneralDialog` and hand-drawn frames are CI-guarded (`design_language_guard_test.dart`). Rules: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 4.4.
 
+**Dialogs never enter the Dock header (2026-09-26).** `showHollowDialog` builds every dialog inside `DialogChromeSlot` (`hollow_dialog.dart`): while the Dock owns the window chrome (`windowChromeTop(ref)` = `kDockHeaderHeight`, 44 px, 0 in fullscreen, annotation and Classic) the dialog is padded down by the header and `MediaQuery.size` is shrunk to the slot below it, so a dialog that centres, sizes or scrolls from "the screen" can never reach the pinned friends or the window controls. The scrim still covers the whole window. Two traps it guards: the builder runs INSIDE the slot (`Builder(builder: builder)`; called with the route's outer context it measured the whole window), and the slot sits INNERMOST, below `MediaQuery.removeViewInsets` (which rebuilds MediaQuery from the outer context and would restore the full size). Pinned by `test/widget/dialog_chrome_slot_test.dart`; the media viewer pads itself by the same `windowChromeTop()`.
+
 ---
 
 ## The shared dialog layer (2026-09-25)
@@ -14,12 +16,13 @@ Built by design language session 24 (the dialogs pass); rules in `HOLLOW_DESIGN_
 - **`HollowDialogAction`** mixin (`hollow_dialog.dart`): `runDialogAction(action, fallback:)` → true on success; sets `actionRunning` / `actionError` (a `friendlyError` sentence). Running stays on after success so the confirm keeps its spinner through the exit; a dialog that moves to a second step resets it itself. Pair with **`HollowDialog(busy:, error:)`**: `busy` wraps the dialog in `PopScope(canPop: false)`; `error` is one live-region line above the actions (a failure that belongs to one field goes on that field's `errorText` instead). **`HollowDialog(scrollable: false)`** for content that scrolls itself (a nested scroll view in the default one never scrolls).
 - **`HollowButtonTouchScope`** (`hollow_button.dart`): an InheritedWidget that turns on `HollowButton.touch` below it. `HollowDialog` wraps its action row in it on a compact screen, and `HollowDialogCloseButton` goes 44, so phone dialogs get touch-size actions without a call site passing `touch:`. Custom-layout dialogs (screen share, image crop) wrap their own action row the same way.
 - **Disabled buttons are neutral at full opacity**: label `textTertiary`, a faint `textPrimary` 8% fill for filled/danger, a `textTertiary` 40% hairline for outline, never a faded accent (a 40% fade of a 40% outline vanished on light). Loading is not disabled: same colours, a spinner.
-- **`friendlyError(e, {fallback})` + `FriendlyException`** (`lib/src/core/friendly_error.dart`): the sentence a person sees. First-match rules map locked identity, node not running, disk full, rate limit, timeout, relay/network, access denied, permission, not found, already exists, too large, invalid to one plain line with a next step; a Rust (`String`/`AnyhowException`) message that already reads as a sentence passes through; else `fallback` or `kGenericErrorSentence` ("Something went wrong. Try again."). The raw text goes to `hollow_debug.log` via `logFromDart`. Throw `FriendlyException('...')` for a specific sentence (it is shown verbatim). **Guard:** `design_language_guard_test.dart` "toasts do not show a raw exception" counts `$e`-style interpolations in toasts, ratcheted by `_rawExceptionToastBaseline` (6).
+- **`friendlyError(e, {fallback})` + `FriendlyException`** (`lib/src/core/friendly_error.dart`): the sentence a person sees. First-match rules map locked identity, node not running, disk full, rate limit, timeout, relay/network, access denied, permission, not found, already exists, too large, invalid to one plain line with a next step; a Rust (`String`/`AnyhowException`) message that already reads as a sentence passes through; else `fallback` or `kGenericErrorSentence` ("Something went wrong. Try again."). The raw text goes to `hollow_debug.log` via `logFromDart`. Throw `FriendlyException('...')` for a specific sentence (it is shown verbatim). **Guard:** `design_language_guard_test.dart` "toasts do not show a raw exception" counts `$e`-style interpolations in toasts, ratcheted by `_rawExceptionToastBaseline` (3 since 2026-09-26).
 - **`HollowCopyField`** (`hollow_copy_field.dart`): a value to copy (link, code, id): the value in `textPrimary` on `elevated`, mono unless `mono: false`, a labelled copy button ("Copy <label/name>") that toasts "Copied"; `label` puts a `SettingsFieldLabel` above; `wrap: false` keeps one line with an ellipsis (links); `copyValue` when the clipboard differs from the display. The one legitimate well: never a card, never accent text.
 - **`HollowChipTabs<T>`** (`hollow_chip_tabs.dart`, `HollowChipTab(value, label, hint, count, icon)`): EVERY tab row (dialog, page, place header) is a `HollowChip` row, 8 apart, one selected; `hint` a quiet total, `count` a `HollowCountBadge` for something waiting on the person (`HollowChip` gained `count:` and `focusNode:`); Left/Right/Home/End move and select; `expand: true` equal widths on a phone, else it wraps. No underline tabs, no local `_Tab`. Users: Friends Manager, screen share, Share, Archive, `place_header.dart`.
 - **`HollowDurationPicker`** + **`showHollowDurationDialog(title, message, confirmLabel, onConfirm(Duration?))`** (`hollow_duration_picker.dart`): the ONE "for how long" choice, a chip row of `kHollowDurationPresets` (10 min, 15 min, 1 h, 24 h, 7 days, null). Null = "Until I remove it", a choice like any other, never a red "Permanent". `hollowDurationLabel` words it for toasts ("until I remove it"). The dialog runs `onConfirm` inside. Users: mute (`moderation_dialogs.dart`), `channel_grants_dialog.dart`, `manage_member_dialog.dart`.
 - **`LabelChip` / `LabelBadge` / `LabelSwatch`** (`label_visuals.dart`): a label that toggles is `LabelChip` (a `HollowChip` led by the label's colour; `locked` dims it and swaps the swatch for a lock but still fires `onTap` so the caller can say why); a label someone wears is `LabelBadge` (a `HollowBadge`, never clickable). `LabelTypeChip` = the Cosmetic/Access selector. No private label chips.
 - **`HollowListRow` flush + `HollowBleed`** (`hollow_list_row.dart`): `flush` (null follows the nearest `HollowFlushRows`, which a PADDED `HollowDialogSurface` provides) puts the row's content on the surrounding text edge and bleeds its hover fill out by `insetOf(touch:)` (12, 16 touch). `HollowBleed(horizontal:)` is the negative margin Flutter lacks: `HollowDialog` widens its scroll view with it so the hover is not clipped at the text edge; a custom list in a dialog (New message, message proof's `MessageRow`, the Friends Manager drag lift) does the same.
+- **`HollowIconButton(onMedia: true)`** (`hollow_icon_button.dart`): an icon button over art (a banner, key art, a wide artwork): a round dark scrim that lifts on hover within its own circle, a 16 px white glyph. Only over a real picture; over a flat surface use the plain button (`MediaScrimIconButton` in `profile_identity_column.dart` picks).
 - **`HollowSheetTitle(title, subtitle:)`** (`hollow_sheet.dart`): the name at the top of a phone action sheet (the person, server, channel or message the rows act on): start-aligned `subheading`, one line, full width so a centred sheet column still starts it on the rows' edge.
 
 ### One-wording helpers (every surface, desktop and phone, calls the same one)
@@ -39,60 +42,51 @@ Built by design language session 24 (the dialogs pass); rules in `HOLLOW_DESIGN_
 ### Removed
 - `dialogs/browse_public_dialog.dart` (`showBrowsePublicDialog`, dead: guest browsing is the Browse Public Channels tab, `ShellTab.guest`).
 - The phone Chats tab's "New" dialog (`NewConversationDialog` / `showNewConversationDialog` in `mobile_chats_tab.dart`); its add-server entry now opens `showCreateServerDialog`.
-- Per-site confirm/rename/nickname/pledge/retention dialogs that the helpers above replaced (e.g. the storage dashboard's and phone storage route's own pledge and retention dialogs).
+- Per-site confirm/rename/nickname/pledge/retention dialogs that the helpers above replaced.
+- `dialogs/storage_dashboard_dialog.dart` and `mobile/mobile_storage_route.dart` (2026-09-26): the storage dashboard became Server settings > Files & storage, a page (wiki `ui_server_settings`). The pledge is a slider and retention a chip menu there, so `editStoragePledge` / `editRetentionPolicy` went with them.
 
 ---
 
 ## WelcomeDialog -- First-launch Onboarding
 
 **File:** `lib/src/ui/dialogs/welcome_dialog.dart`
-**Held back:** one of the big five redesigns (session 24 fixed bugs only; a mockup comes first).
+**Rebuilt 2026-09-26** to the approved mockup (canvas "Hollow profile, game card and the dialog redesigns").
 **Trigger:** Called by the bootstrap flow when no identity exists on disk. That is first launch AND the state you land on after erasing the running profile (see `project_profile_switcher_issue47`).
 **Entry point:** `showWelcomeDialog(BuildContext context)` -- returns `Future<WelcomeResult?>`, a record `({String action, String relayDomain})`.
 **Barrier:** Non-dismissible (`barrierDismissible: false`).
 
 ### Return values
-- `'create_new'` -- Create New Identity
+- `'create_new'` -- "Create an identity"
 - `'link_device'` -- Link a device (creates a THROWAWAY identity just to connect; hollow_shell handles the rest)
 - `'restored_backup'` -- identity imported from a .hollow backup file
 - `null` -- dismissed without selection (should not happen)
 
-`relayDomain` rides alongside every action: the Advanced section lets a self-hoster set the relay before the identity exists, and hollow_shell applies it via `relayDomainProvider` + `savedRelayListProvider` when it differs from `kDefaultRelayDomain`.
+`relayDomain` rides alongside every action: the relay field lets a self-hoster set the relay before the identity exists, and hollow_shell applies it via `relayDomainProvider` + `savedRelayListProvider` when it differs from `kDefaultRelayDomain`.
 
-**Restore from Recovery Phrase was REMOVED** (Step 9C/C6). A 24-word phrase alone regenerates the master keypair but carries NO synced data, and a stale messages.db on disk caused a "Loading… forever" mismatch. Use Link a device or Restore from Backup. The mnemonic-restore FFI still serves the in-app recovery dialogs.
+**Restore from Recovery Phrase stays OFF Welcome** (Step 9C/C6, confirmed again 2026-09-26). A 24-word phrase alone regenerates the master keypair but carries NO synced data, and a stale messages.db on disk caused a "Loading… forever" mismatch. Use Link a device or Restore from a backup. The mnemonic-restore FFI still serves the in-app recovery dialogs.
 
-### Widget: `_WelcomeContent` (StatefulWidget)
+### The frame: `WelcomeFrame` (`dialogs/welcome_frame.dart`)
+The ONE surface Welcome and the first-run link steps share, so moving between them reads as one flow: a fixed-width (~440) `HollowDialogSurface` on desktop, the whole screen on a phone with the actions (`bottom`) in the thumb zone. An optional header (back arrow + title) for every step after the first. `WelcomeActions` lays the buttons out trailing and 8 apart on desktop, full width and stacked on a phone, primary last. `WelcomeFrame.isPhone(context)`.
 
-**State fields:**
-- `_relayController` -- relay domain, defaults to `kDefaultRelayDomain`
-- `_showAdvanced` -- relay-domain section expanded
-- `_restoring` -- true while `importBackup` decrypts + restores (seconds on a large backup; frozen silence here reads as a hang)
-- `_showProfiles` / `_switching` -- the profile switcher below
-
-**Layout:** shield icon, "Welcome to Hollow", "Choose how to set up your identity", the profile line (below), three `_OptionCard`s (Create New Identity / Link a device "Sync from your other device with a 6-character code" (the link code is 6 characters, not digits) / Restore from Backup), the profile switcher, then Advanced. The whole menu sits in a `SingleChildScrollView` inside a 480px-max `ConstrainedBox` so a short screen scrolls rather than overflows.
+### Steps, all IN PLACE in one frame (never a stacked dialog)
+- **First run:** logo mark, "Welcome to Hollow" (`display`), two short paragraphs ("Your identity is made on this device and stays with you. There is no account and nobody to sign in to." / "Next, Hollow shows your recovery phrase. Write it down and keep it somewhere safe."), ONE filled full-width "Create an identity", then "Already use Hollow?" and two grey `HollowListRow`s: "Link a device" ("Enter a 6-character code from your other device") and "Restore from a backup" ("Open a .hollow file you saved earlier"). Footer ghost controls (32 px, 44 on a phone): "Other profiles (N)" (desktop only, when N > 0) and the relay domain button (semantics "Change the relay").
+- **Relay:** the relay button opens the field in place ("Relay address", a help line); an invalid address is an error line at the field, never a toast.
+- **Restore:** `FilePicker` filtered to `.hollow` (`FileType.any` on iOS/Android, where the custom extension would HIDE the file), then a file row (name, size, saved date), "Choose another file", a labelled passphrase field with show/hide, and filled "Restore". The passphrase is NEVER trimmed (Enter and the button pass the same raw string). While `importBackup` runs: Restore loading, the field disabled, one line ("This can take a minute"); a wrong passphrase is `friendlyError` at the field. Pops `'restored_backup'` on success.
 
 ### Profile switcher (issue #47 follow-up, 2026-08-21)
 
-Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; the iOS NSE opens one fixed App Group DB path). Before this the screen had ZERO profile awareness, so erasing your active profile left the only way on being a new identity inside the folder you had just emptied.
+Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; the iOS NSE opens one fixed App Group DB path).
 
 - `_allProfiles` = `listProfileRows(readProfileRegistrySync())` -- the SAME shared list Settings renders.
-- `_otherProfiles` = rows that are not `runningProfileRoot()` and where `profileHasIdentity(path)` is true. **Both the folder line and the switcher are gated on this being non-empty**, so a genuine first-ever launch sees the dialog exactly as before.
-- **Folder line** under the subtitle: `Setting up the "X" profile` + the data root in mono. `_currentProfileName` matches the running root against the row list and falls back to the last path segment (an env override or a folder added on another machine is not in the list, and must not claim to be "Default"). This line is also the answer to "where did my restored backup go": `import_backup` writes to the ACTIVE `identity::data_dir()`, and now the screen names it before you pick anything.
-- **`Use a different profile (N)`** -- a collapsible row in the Advanced style, listing each other profile with name, path and a **Switch** button. Switch = pin in `profiles.json` (explicitly, even for Default -- the pin has to beat portable auto-detection) then `relaunchApp()`. No confirm dialog: nothing is in progress on this screen and it is reversible from the same place. When `dataDirEnvOverrideActive` the footer warns in `hollow.warning` that `HOLLOW_DATA_DIR` overrides the selection.
-
-### Method: `_onRestoreFromBackup()`
-- `FilePicker` filtered to `.hollow`, except on iOS/Android where the custom extension is not a known UTI/MIME and the filter would HIDE the file (`FileType.any` there).
-- Nested passphrase `HollowDialog` "Enter backup passphrase" (obscured, autofocus).
-- `storage_api.importBackup(backupPath:, passphrase:)` under `_restoring`; pops `'restored_backup'` on success, error toast on failure.
-
-### Widget: `_OptionCard` (StatefulWidget)
-- Tracks `_hovered`; `MouseRegion` + `GestureDetector` around an `AnimatedContainer` (150ms)
-- Props: `icon`, `title`, `subtitle`, `hollow`, `onTap`
-- Hover: surface alpha 0.4 -> 0.8, border `hollow.border` -> accent alpha 0.3
-- Layout: 40px icon box | title + subtitle column | chevron-right
+- `_otherProfiles` = rows that are not `runningProfileRoot()` and where `profileHasIdentity(path)` is true. The profile line and the switcher are gated on this being non-empty, so a genuine first-ever launch sees none of it.
+- **Profile line:** which profile is being set up; `_currentProfileName` matches the running root against the row list and falls back to the last path segment (an env override or a folder added on another machine is not in the list, and must not claim to be "Default"). This line is also the answer to "where did my restored backup go": `import_backup` writes to the ACTIVE `identity::data_dir()`.
+- **"Other profiles (N)"** opens the list in place: each other profile with name, mono path and a compact outline **Switch**. Switch = pin in `profiles.json` (explicitly, even for Default: the pin has to beat portable auto-detection) then `relaunchApp()`. "Switching restarts Hollow. This folder stays as it is." When `dataDirEnvOverrideActive` the footer warns that `HOLLOW_DATA_DIR` overrides the selection.
 
 ### FFI calls
 - `storage_api.importBackup(backupPath:, passphrase:)`
+
+### The receiving side of Link a device (`dialogs/device_link_dialog.dart`)
+After Welcome pops `'link_device'` the node starts (the "Connecting" placeholder, `_ConnectingContent`), then `DeviceLinkMode.enterCode` runs. Every phase draws in `WelcomeFrame` so it reads as the same card; the mechanism is unchanged (the dialog pops `true` to go back to Welcome, the import runs pre-node-start after a restart, `relaunchApp()` does the restart, never an in-place import). Code entry = `LinkCodeField`: six mono slots over one invisible `TextField` (paste works, letters and digits only, case-insensitive, Enter submits, the `hint:ABC123` probe target still resolves); Link is neutral-disabled until 6. Offline: a spinner line "Connecting to the relay. You can type the code meanwhile." and Link goes loading when pressed, submitting once the relay connects. Then waiting (spinner, approve on the other device), receiving (`HollowProgressBar` + a tabular "41 of 66 MB" line), importing (spinner), failed (the reason, ghost Back + filled Try again), Linked (counts down from 3, then restarts; filled Restart now). The SENDING side keeps its own dialogs (session 24 polish). Tests: `test/widget/device_link_dialog_test.dart`, `test/widget/welcome_link_code_copy_test.dart`; renders `test/screenshots/redesign_after_welcome_screenshot_test.dart`.
 
 ---
 
@@ -364,82 +358,9 @@ Uses `SingleTickerProviderStateMixin` for animation.
 
 ---
 
-## StorageDashboardDialog -- Storage Usage Visualization
+## StorageDashboardDialog -- RETIRED (2026-09-26)
 
-**File:** `lib/src/ui/dialogs/storage_dashboard_dialog.dart`
-**Trigger:** Storage in the channel sidebar's server menu (`channel_sidebar.dart`). The phone's `MobileStorageRoute` (from mobile server settings) shares its editors and bar.
-**Held back:** one of the big five redesigns (session 24 fixed its bugs only; a mockup comes first).
-**Entry point:** `showStorageDashboardDialog(BuildContext context, String serverId)`
-
-### Widget: `_StorageDashboardContent` (ConsumerStatefulWidget)
-
-**Static caches (survive dialog open/close for instant reopen):**
-- `_statsCache` -- `Map<String, crdt_api.StorageStatsFfi>`
-- `_retentionFilesCache` -- `Map<String, String>`
-- `_retentionMessagesCache` -- `Map<String, String>`
-- `_diskFreeBytesCache` -- int
-
-**State fields:**
-- `_stats` -- `crdt_api.StorageStatsFfi?`
-- `_retentionFiles` -- string (default `'365d'`)
-- `_retentionMessages` -- string (default `'permanent'` since 2026-09-05)
-- `_diskFreeBytes` -- int
-
-**`_loadData()`:** Parallel `Future.wait` of:
-- `crdt_api.getStorageStats(serverId:)`
-- `crdt_api.getServerSetting(serverId:, key: 'retention_files')`
-- `crdt_api.getServerSetting(serverId:, key: 'retention_messages')`
-- `_getDiskFreeBytes()` -- `freeBytesAt(hollowDataDir)` (`core/services/disk_space.dart`): the volume that holds the DATA ROOT (a profile or portable mode can put it anywhere), never a fixed `C:` or `/`. Windows = `GetDiskFreeSpaceExW` via FFI (the per-user free, quotas included); Linux/macOS/Android = `df -Pk <dir>` parsed by `parseDfAvailableBytes` (read leftwards from the capacity column, since names can hold spaces); null on iOS. The phone draws its full-replication bar from the same reading (none when null).
-
-**Layout:** `HollowDialog(title: 'Storage dashboard', showClose: true, width: 600)`.
-
-Every section box ("Server Storage", "Your Storage", "Retention Policy", "Vault Health", "Member Pledges") is titled with `HollowSectionHeader(title, dense: true)`, no section icon.
-
-**Adaptive sections based on member count:**
-
-**< 6 members (Full Replication):**
-- Single "Server Storage" section (full width)
-  - Mode label: "Full Replication"
-  - Storage bar: server data / total disk capacity
-  - Bytes used + disk free (with warning icon if < 1GB)
-  - Member count
-
-**6+ members (Erasure Coding):**
-- Side-by-side: "Server Storage" | "Your Storage" (IntrinsicHeight for equal height)
-- Server Storage: mode label (e.g. "Erasure Coding (k=5/m=3)"), storage bar = used / effective capacity (total pledged / redundancy factor), overhead display
-- Your Storage: pledge amount (clickable to edit), storage bar = used / pledge, disk free
-
-**Bottom row (always):**
-- Side-by-side: "Retention Policy" | "Vault Health"
-- Retention Policy: two rows — Messages (top) and Files (bottom), both editable by owner/admin via `_editRetention()` -> `editRetentionPolicy` (below). Both are forward-only: changing the setting writes a `{key}_since` companion CRDT setting with the current timestamp. Label: "Changes affect new content only."
-- Vault Health:
-  - < 6 members: green StatusDot + "Full replication" + explainer
-  - 6+ members: colored StatusDot (green/yellow/red) + status text based on active transfers and failures + shard count
-
-**Member Pledges (6+ only):** Full-width section showing count + average pledge.
-
-**Helper methods:**
-- `_vaultModeLabel(memberCount)` -- returns human-readable label based on k/m tiers
-- `_vaultParams(memberCount)` -- returns `(k, m)` tuple for erasure coding tiers
-- `_formatBytes(BigInt)`, `_formatBytesInt(int)` -- human-readable byte formatting
-- `_formatRetention(policy)` -- "365 days", "Permanent", etc.
-- `_storageBar(...)` -- `StorageUsageBar(fraction:, color:)` (public, shared with the phone): animated, warning over 70%, error over 90%
-- `_editPledge` / `_editRetention` -- thin wrappers over the two public editors below, then a toast ("Pledge saved" / "Retention saved") and `_loadData()`
-
-**Shared editors (desktop and phone both ask through these, the work inside the dialog):**
-- `editStoragePledge(context, serverId, currentBytes)` → bool: `promptForName` "Set storage pledge" ("The space, in MB, this device keeps for this server's files.", hint "At least 512"); `validator` says "Enter a number of MB, like 1024." / "Pledge at least 512 MB." (`kMinPledgeMb`) on the field; `onSubmit` = `crdt_api.setStoragePledge`. Before, a bad number silently did nothing and a failure only reached debugPrint.
-- `editRetentionPolicy(context, serverId, key, currentValue)` → bool: `_RetentionPicker` (`HollowDialogAction`), title "File retention" / "Message retention" / "Voice retention", `showClose`, a `HollowChip` row (Permanent, 30/90/180/365 days); tapping one saves it (the tapped chip shows selected while saving), writes `{key}_since` = now (forward-only), closes on success, shows the reason in the dialog on failure. Tapping the current value just closes.
-
-### Providers read
-- `serverMembersProvider(serverId)` -- member count
-- `vaultStatusProvider.select((s) => s[serverId])` -- `VaultServerStatus?`
-- `myRoleProvider(serverId)` -- determines if retention is editable
-
-### FFI calls
-- `crdt_api.getStorageStats(serverId:)`
-- `crdt_api.getServerSetting(serverId:, key:)`
-- `crdt_api.setStoragePledge(serverId:, pledgeBytes:)`
-- `crdt_api.updateServerSetting(serverId:, key:, value:)`
+Replaced by the Server settings page Files & storage (`server_settings/pages/files_storage_page.dart`, wiki `ui_server_settings`), which every member can open. `freeBytesAt(hollowDataDir)` (`core/services/disk_space.dart`: the volume holding the DATA ROOT, never a fixed `C:` or `/`; Windows `GetDiskFreeSpaceExW`, Linux/macOS/Android `df -Pk` via `parseDfAvailableBytes`, null on iOS) moved there with it.
 
 ---
 
@@ -570,11 +491,11 @@ goes to the root overlay captured up front (the removal usually unmounts the ask
 
 **File:** `lib/src/ui/dialogs/verify_contact_dialog.dart`
 **Entry point:** `showVerifyContactDialog(context, peerId:)` (device or master id; it resolves to the MASTER, verification is of a person) -- desktop opens `HollowDialog(title: 'Verify contact', showClose: true)`, mobile pushes `MobileVerifyContactRoute` (a `MobileSettingsSubPage`) via `hollowMobileRoute()`. Both wrap the same `VerifyContactBody`, so the flow can never drift between platforms.
-**Reached from:** `ProfileCardBody` (both densities -- hover popup and profile dialog), the DM left-hand profile panel (`_DmProfilePanel._buildDmActions` in chat_pane.dart), `MobileProfileSheet`, the "Verify" button on `SecurityAlertBanner`, and the "View" action in Settings > Security > Verified Contacts.
+**Reached from:** the More menu of `ProfileIdentityColumn` (popup and profile dialog) and its More sheet on the phone, the DM left-hand profile panel (`_DmProfilePanel._buildDmActions` in chat_pane.dart), the "Verify" button on `SecurityAlertBanner`, and the "View" action in Settings > Security > Verified Contacts.
 
-**Every floating host dismisses itself first.** `ProfileCardBody._openVerifyDialog` and `MobileProfileSheet._openVerify` both capture the ROOT navigator context, then close the host, then push -- the same pattern as nickname/block/report. Capturing first is load-bearing: dismissing disposes the host's own context. The DM panel is persistent, not floating, so it opens the screen directly.
+**Every floating host dismisses itself first.** The profile column's verify action captures the ROOT navigator context, then closes the host (`dismissHost`), then pushes -- the same pattern as nickname/block/report. Capturing first is load-bearing: dismissing disposes the host's own context. The DM panel is persistent, not floating, so it opens the screen directly.
 
-The entry label doubles as the state readout ("Verify contact" vs "Verified: view safety number" on the profile card, "Verified, view safety number" on the phone sheet, "Safety number" in the user menu), so every surface shows verification status without a separate badge.
+The entry label doubles as the state readout ("Verify contact" vs "View safety number" in the profile's More menu and sheet, "Safety number" in the user menu), so every surface shows verification status without a separate badge.
 
 ### What the user is doing
 
@@ -597,3 +518,9 @@ There is deliberately no "yours / theirs" split: a single shared number removes 
 ### No camera scanning
 
 `mobile_scanner` has no Windows or Linux support, so a scan flow could never be the primary path on the platform Hollow is developed and tested on. Paste-compare works identically on all six platforms. Revisit only if the mobile story demands it.
+
+---
+
+## The profile, game card and showcase editor dialogs
+
+Rebuilt 2026-09-26 (design language session 25). The full profile (`dialogs/profile_dialog.dart`) and its compact popup and phone sheet: wiki `ui_profile_card`. The game card (`dialogs/game_card_dialog.dart`, a sheet on phones) and the showcase editor (`dialogs/showcase_editor*.dart`, the profile dialog in edit mode, a pushed page on phones): wiki `profile_showcase_board`.

@@ -20,16 +20,8 @@
     "value": "Welcome to Hollow"
   },
   {
-    "op": "log",
-    "message": "the screen now says WHICH folder it is setting up - the answer to 'where did my restored backup go'"
-  },
-  {
     "op": "expect_text",
-    "value": "Setting up the \"hollow_ui_probe_empty\" profile"
-  },
-  {
-    "op": "expect_text",
-    "value": "Use a different profile"
+    "value": "Other profiles"
   },
   {
     "op": "log",
@@ -37,7 +29,15 @@
   },
   {
     "op": "tap",
-    "target": "text:Use a different profile"
+    "target": "contains:Other profiles"
+  },
+  {
+    "op": "log",
+    "message": "the open list says WHICH folder this window is setting up - the answer to 'where did my restored backup go'"
+  },
+  {
+    "op": "expect_text",
+    "value": "This window is setting up the \"hollow_ui_probe_empty\" profile."
   },
   {
     "op": "wait",
@@ -69,7 +69,7 @@
   },
   {
     "op": "tap",
-    "target": "text:Use a different profile"
+    "target": "contains:Other profiles"
   },
   {
     "op": "wait",

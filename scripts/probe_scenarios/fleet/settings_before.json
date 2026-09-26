@@ -262,7 +262,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Files & Storage",
+   "target": "text:Files & storage",
    "index": 0,
    "soft": true
   },
@@ -279,7 +279,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Audio & Video",
+   "target": "text:Audio & video",
    "index": 0,
    "soft": true
   },
@@ -426,7 +426,7 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Audio & Video",
+   "target": "text:Audio & video",
    "index": 0
   },
   {

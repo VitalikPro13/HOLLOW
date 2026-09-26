@@ -244,6 +244,7 @@ class _MemberTile extends ConsumerWidget {
           peerId: member.peerId,
           role: member.role,
           labels: member.labels.isNotEmpty ? member.labels : null,
+          serverId: serverId,
         ),
         subtle: true,
         padding: const EdgeInsets.symmetric(

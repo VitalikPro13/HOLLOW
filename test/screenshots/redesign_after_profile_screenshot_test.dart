@@ -1,0 +1,919 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/avatar_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart'
+    show OnlineIdentitiesNotifier, onlineIdentitiesProvider;
+import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/rust/frb_generated.dart';
+import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/profile_card_popup.dart';
+import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+
+import '../helpers/test_app.dart';
+
+/// "After" renders of the redesigned profile: the dialog (the profile column
+/// beside its showcase pane), the wide artwork across both boards, the
+/// narrow-window fallbacks, the compact card and the phone sheet. Fixtures
+/// match the before renders in build/ui_screenshots/redesign_before/, so pairs
+/// compare like for like.
+///
+/// Output: $HOLLOW_SHOT_DIR/redesign_after, else
+/// build/ui_screenshots/redesign_after.
+final _desktop = TargetPlatformVariant.only(TargetPlatform.windows);
+final _phone = TargetPlatformVariant.only(TargetPlatform.android);
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  const shotKey = Key('screenshot-boundary');
+
+  final outDir =
+      '${Platform.environment['HOLLOW_SHOT_DIR'] ?? '${Directory.current.path}${Platform.pathSeparator}build${Platform.pathSeparator}ui_screenshots'}'
+      '${Platform.pathSeparator}redesign_after';
+
+  final api = _Api();
+
+  setUpAll(() async {
+    RustLib.initMock(api: api);
+
+    final lucide = await rootBundle.load(
+      'packages/lucide_icons_flutter/assets/lucide.ttf',
+    );
+    await (FontLoader(
+      'packages/lucide_icons_flutter/Lucide',
+    )..addFont(Future.value(lucide))).load();
+    try {
+      final material = rootBundle.load('fonts/MaterialIcons-Regular.otf');
+      await (FontLoader('MaterialIcons')..addFont(material)).load();
+    } catch (_) {
+      /* Material glyphs fall back to boxes */
+    }
+    final families = <String, List<ByteData>>{};
+    for (final face in Directory('assets/fonts').listSync()) {
+      final name = face.uri.pathSegments.last;
+      if (!name.endsWith('.ttf')) continue;
+      final family = name.startsWith('Onest')
+          ? 'Onest'
+          : name.startsWith('GeistMono')
+          ? 'GeistMono'
+          : name.startsWith('SimpleIcons')
+          ? 'SimpleIcons'
+          : null;
+      if (family == null) continue;
+      final bytes = File(face.path).readAsBytesSync();
+      families.putIfAbsent(family, () => []).add(ByteData.view(bytes.buffer));
+    }
+    for (final e in families.entries) {
+      final loader = FontLoader(e.key);
+      for (final b in e.value) {
+        loader.addFont(Future.value(b));
+      }
+      await loader.load();
+    }
+
+    await _Art.build();
+    api.assets = _Art.assetList();
+  });
+
+  // ---------------------------------------------------------------- helpers
+
+  Future<void> capture(WidgetTester tester, String name) async {
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byKey(shotKey),
+    );
+    await tester.runAsync(() async {
+      try {
+        final image = await boundary.toImage();
+        final data = await image.toByteData(format: ui.ImageByteFormat.png);
+        image.dispose();
+        if (data == null) return;
+        final file = File('$outDir${Platform.pathSeparator}$name.png');
+        file.parent.createSync(recursive: true);
+        file.writeAsBytesSync(data.buffer.asUint8List());
+        debugPrint('[screenshot] wrote ${file.path}');
+      } catch (e) {
+        debugPrint('[screenshot] skipped $name: $e');
+      }
+    });
+  }
+
+  /// Lets real image decodes land, then paints them. Fixed pumps, never
+  /// pumpAndSettle: spinners and indeterminate bars never settle.
+  Future<void> settle(WidgetTester tester, {int rounds = 6}) async {
+    for (var i = 0; i < rounds; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 120)),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+  }
+
+  late BuildContext hostContext;
+  late WidgetRef hostRef;
+
+  /// An empty app shell; the dialog under test is opened from [hostContext].
+  Future<void> pumpHost(
+    WidgetTester tester, {
+    required Size size,
+    bool light = false,
+    List<Override> extra = const [],
+    Widget? home,
+  }) async {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        key: UniqueKey(),
+        overrides: hollowTestOverrides(extra: [..._baseOverrides(), ...extra]),
+        child: RepaintBoundary(
+          key: shotKey,
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: light ? HollowThemeData.light() : HollowThemeData.dark(),
+            home:
+                home ??
+                Scaffold(
+                  body: Consumer(
+                    builder: (context, ref, _) {
+                      hostContext = context;
+                      hostRef = ref;
+                      return const SizedBox.expand();
+                    },
+                  ),
+                ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+  }
+
+  Future<void> shootProfile(
+    WidgetTester tester,
+    String name, {
+    required String peer,
+    Size size = const Size(1440, 900),
+    bool light = false,
+  }) async {
+    await pumpHost(tester, size: size, light: light);
+    unawaited(
+      showProfileDialog(
+        hostContext,
+        peerId: peer,
+        role: peer == _juno ? 'member' : 'admin',
+        labels: peer == _juno ? const [] : const [_vip, _gamer],
+        serverId: _srvSmall,
+      ),
+    );
+    await tester.pump();
+    await settle(tester, rounds: 8);
+    await capture(tester, name);
+  }
+
+  testWidgets('profile: no board', (t) async {
+    await shootProfile(t, 'profile_noboard_dark', peer: _miraNone);
+  }, variant: _desktop);
+  testWidgets('profile: no board, light', (t) async {
+    await shootProfile(
+      t,
+      'profile_noboard_light',
+      peer: _miraNone,
+      light: true,
+    );
+  }, variant: _desktop);
+  testWidgets('profile: one board', (t) async {
+    await shootProfile(t, 'profile_left_dark', peer: _miraLeft);
+  }, variant: _desktop);
+  testWidgets('profile: both boards', (t) async {
+    await shootProfile(t, 'profile_both_dark', peer: _miraBoth);
+  }, variant: _desktop);
+  testWidgets('profile: both boards, tall window', (t) async {
+    await shootProfile(
+      t,
+      'profile_both_tall_dark',
+      peer: _miraBoth,
+      size: const Size(1440, 1400),
+    );
+  }, variant: _desktop);
+  testWidgets('profile: both boards, light', (t) async {
+    await shootProfile(t, 'profile_both_light', peer: _miraBoth, light: true);
+  }, variant: _desktop);
+  testWidgets('profile: wide artwork across both boards', (t) async {
+    await shootProfile(
+      t,
+      'profile_wide_dark',
+      peer: _miraWide,
+      size: const Size(1440, 1400),
+    );
+  }, variant: _desktop);
+  testWidgets('profile: 1100 window drops to one board column', (t) async {
+    await shootProfile(
+      t,
+      'profile_both_1100_dark',
+      peer: _miraBoth,
+      size: const Size(1100, 900),
+    );
+  }, variant: _desktop);
+  testWidgets('profile: 800 window stacks the showcase', (t) async {
+    await shootProfile(
+      t,
+      'profile_both_800_dark',
+      peer: _miraBoth,
+      size: const Size(800, 900),
+    );
+  }, variant: _desktop);
+  testWidgets('profile: stranger, no banner', (t) async {
+    await shootProfile(t, 'profile_stranger_dark', peer: _juno);
+  }, variant: _desktop);
+  testWidgets('profile: yourself', (t) async {
+    await shootProfile(t, 'profile_self_dark', peer: _me);
+  }, variant: _desktop);
+  testWidgets('profile: More menu', (t) async {
+    await shootProfile(t, 'profile_more_dark', peer: _miraNone);
+    await t.tap(find.bySemanticsLabel('More').last, warnIfMissed: false);
+    await t.pump();
+    await settle(t, rounds: 3);
+    await capture(t, 'profile_more_dark');
+  }, variant: _desktop);
+
+  Future<void> shootCompact(
+    WidgetTester tester,
+    String name, {
+    required String peer,
+    bool light = false,
+  }) async {
+    await pumpHost(tester, size: const Size(640, 680), light: light);
+    showProfileCardPopup(
+      context: hostContext,
+      ref: hostRef,
+      peerId: peer,
+      role: peer == _juno ? 'member' : 'admin',
+      labels: peer == _juno ? const [] : const [_vip, _gamer],
+      serverId: _srvSmall,
+      anchorOf: () => const Offset(170, 40),
+    );
+    await tester.pump();
+    await settle(tester, rounds: 8);
+    await capture(tester, name);
+  }
+
+  testWidgets('compact card: friend with board', (t) async {
+    await shootCompact(t, 'compact_friend_dark', peer: _miraBoth);
+  }, variant: _desktop);
+  testWidgets('compact card: light', (t) async {
+    await shootCompact(t, 'compact_friend_light', peer: _miraBoth, light: true);
+  }, variant: _desktop);
+  testWidgets('compact card: stranger', (t) async {
+    await shootCompact(t, 'compact_stranger_dark', peer: _juno);
+  }, variant: _desktop);
+
+  Future<void> shootSheet(
+    WidgetTester t,
+    String prefix, {
+    String peer = _miraBoth,
+    bool light = false,
+  }) async {
+    await pumpHost(t, size: const Size(390, 844), light: light);
+    showMobileProfileSheet(
+      hostContext,
+      peerId: peer,
+      role: 'admin',
+      labels: const [_vip, _gamer],
+    );
+    await t.pump();
+    await settle(t, rounds: 8);
+    await capture(t, '${prefix}_top');
+  }
+
+  testWidgets('phone sheet: top, showcase, More', (t) async {
+    await shootSheet(t, 'phone_sheet');
+    await t.drag(
+      find.byType(SingleChildScrollView).last,
+      const Offset(0, -560),
+    );
+    await t.pump();
+    await settle(t, rounds: 4);
+    await capture(t, 'phone_sheet_boards');
+    await t.drag(find.byType(SingleChildScrollView).last, const Offset(0, 560));
+    await t.pump();
+    await settle(t, rounds: 2);
+    await t.tap(find.bySemanticsLabel('More').last, warnIfMissed: false);
+    await t.pump();
+    await settle(t, rounds: 4);
+    await capture(t, 'phone_sheet_more');
+  }, variant: _phone);
+  testWidgets('phone sheet: light', (t) async {
+    await shootSheet(t, 'phone_sheet_light', light: true);
+  }, variant: _phone);
+  testWidgets('phone sheet: yourself', (t) async {
+    await shootSheet(t, 'phone_sheet_self', peer: _me);
+  }, variant: _phone);
+  testWidgets('phone sheet: wide artwork', (t) async {
+    await shootSheet(t, 'phone_sheet_wide', peer: _miraWide);
+    await t.drag(
+      find.byType(SingleChildScrollView).last,
+      const Offset(0, -560),
+    );
+    await t.pump();
+    await settle(t, rounds: 4);
+    await capture(t, 'phone_sheet_wide_boards');
+  }, variant: _phone);
+}
+
+const _me = 'me_peer_aaaaaaaaaaaaaaaa';
+const _miraBoth = 'peer_mira_both_000000001';
+const _miraLeft = 'peer_mira_left_000000002';
+const _miraNone = 'peer_mira_none_000000003';
+const _juno = 'peer_juno_plain_00000004';
+const _miraWide = 'peer_mira_wide_000000005';
+const _srvSmall = 'srv-small';
+const _srvBig = 'srv-big';
+
+const _vip = crdt_api.LabelFfi(
+  labelId: 'vip',
+  name: 'VIP',
+  color: '#8B5CF6',
+  access: true,
+);
+const _gamer = crdt_api.LabelFfi(
+  labelId: 'fun',
+  name: 'Gamer',
+  color: '#22C55E',
+  access: false,
+);
+
+String _h(String c) => List.filled(64, c).join();
+final _hBanner = _h('0');
+final _hAvatar = _h('1');
+final _hCoverA = _h('2');
+final _hCoverB = _h('3');
+final _hCoverC = _h('4');
+final _hCoverD = _h('5');
+final _hCoverE = _h('6');
+final _hCoverF = _h('7');
+final _hArtA = _h('8');
+final _hArtB = _h('9');
+final _hArtwork = _h('a');
+final _hLogo1 = _h('b');
+final _hLogo2 = _h('c');
+final _hDetA = _h('d');
+final _hDetB = _h('e');
+
+Map<String, dynamic> _nowPlaying() => {
+  't': 'now_playing',
+  'd': {
+    'name': 'Hollow Knight: Silksong',
+    'year': 2025,
+    'cover': _hCoverA,
+    'art': _hArtA,
+    'details': _hDetA,
+  },
+};
+
+Map<String, dynamic> _text() => {
+  't': 'text',
+  'd': {
+    'title': 'Currently',
+    'body':
+        'Painting avatar frames for the **Shop**. Ask me about '
+        '*pixel art* or `lossless WebP`. ||The tea is cold again.||',
+  },
+};
+
+Map<String, dynamic> _favorite() => {
+  't': 'favorite_game',
+  'd': {
+    'name': 'Outer Wilds',
+    'year': 2019,
+    'cover': _hCoverB,
+    'art': _hArtB,
+    'details': _hDetB,
+    'blurb': 'Twenty-two minutes I will never forget.',
+  },
+};
+
+Map<String, dynamic> _shelf() => {
+  't': 'game_shelf',
+  'd': {
+    'label': 'Backlog',
+    'games': [
+      {'name': 'Tunic', 'cover': _hCoverC},
+      {'name': 'Celeste', 'cover': _hCoverD},
+      {'name': 'Hades II', 'cover': _hCoverE},
+      {'name': 'Disco Elysium', 'cover': _hCoverF},
+    ],
+  },
+};
+
+Map<String, dynamic> _artwork() => {
+  't': 'artwork',
+  'd': {'image': _hArtwork, 'caption': 'Frame sketch, night shift'},
+};
+
+String get _boardFull => jsonEncode({
+  'v': 1,
+  'left': [_nowPlaying(), _text()],
+  'right': [_favorite(), _shelf(), _artwork()],
+});
+
+String get _boardWide => jsonEncode({
+  'v': 1,
+  'wide': {
+    't': 'artwork',
+    'd': {'image': _hArtwork, 'caption': 'The whole night shift, one piece'},
+  },
+  'left': [_nowPlaying(), _text()],
+  'right': [_favorite(), _shelf()],
+});
+
+String get _boardLeft => jsonEncode({
+  'v': 1,
+  'left': [_nowPlaying(), _text(), _artwork()],
+});
+
+final _detailsB = {
+  'description':
+      'Outer Wilds is an open world mystery about a solar system trapped in '
+      'an endless time loop. Explore a hand-crafted system at your own '
+      'pace, and piece together what happened before the sun goes out.',
+  'metacritic': 85,
+  'achievements': 31,
+  'genres': ['Adventure', 'Puzzle', 'Simulator'],
+  'themes': ['Science fiction', 'Open world'],
+  'modes': ['Single player'],
+  'franchise': '',
+  'steam_reviews': {
+    'label': 'Overwhelmingly Positive',
+    'pos': 98120,
+    'total': 102740,
+  },
+  'ttb': {'normally': 79200, 'completely': 108000},
+  'platforms': ['pc', 'playstation', 'xbox', 'nintendo'],
+  'release_date': '28 May, 2019',
+  'req_min':
+      'OS: Windows 7\nProcessor: Intel Core i5-2300\nMemory: 6 GB RAM\n'
+      'Graphics: GeForce GTX 660\nStorage: 8 GB available space',
+  'req_rec':
+      'OS: Windows 10\nProcessor: Intel Core i5-8400\nMemory: 8 GB RAM\n'
+      'Graphics: GeForce GTX 1060\nStorage: 8 GB available space',
+  'legal': 'Outer Wilds © Mobius Digital. Published by Annapurna Interactive.',
+  'stores': {'steam': 'https://store.steampowered.com/app/753640'},
+  'companies': [
+    {
+      'name': 'Mobius Digital',
+      'role': 'dev',
+      'logo': _hLogo1,
+      'links': [
+        {'kind': 'official', 'url': 'https://www.mobiusdigitalgames.com'},
+        {'kind': 'twitter', 'url': 'https://twitter.com/mobiusdigital'},
+      ],
+    },
+    {
+      'name': 'Annapurna Interactive',
+      'role': 'pub',
+      'logo': _hLogo2,
+      'links': [
+        {'kind': 'official', 'url': 'https://annapurnainteractive.com'},
+      ],
+    },
+  ],
+};
+
+final _detailsA = {
+  'description':
+      'Discover a vast haunted kingdom in the sequel to the '
+      'award-winning action-adventure.',
+  'metacritic': 91,
+  'genres': ['Platform', 'Adventure'],
+  'platforms': ['pc', 'playstation', 'xbox', 'nintendo'],
+  'release_date': '4 Sep, 2025',
+  'req_min': 'OS: Windows 10\nMemory: 4 GB RAM',
+  'companies': [
+    {'name': 'Team Cherry', 'role': 'devpub', 'logo': _hLogo1},
+  ],
+};
+
+storage_api.UserProfile _profile(
+  String peer,
+  String name, {
+  String status = '',
+  String about = '',
+  String board = '',
+  String frame = '',
+}) => storage_api.UserProfile(
+  peerId: peer,
+  displayName: name,
+  status: status,
+  aboutMe: about,
+  updatedAt: 0,
+  twitchUsername: '',
+  showcaseBoard: board,
+  avatarFrame: frame,
+  avatarAnim: '',
+  bannerAnim: '',
+  supportCreds: '',
+);
+
+const _miraStatus = 'Painting frames tonight';
+const _miraAbout =
+    'I draw avatar frames and banners for the Shop. Mostly night shifts, '
+    'lots of tea. Ask me about pixel art, lossless WebP or why every '
+    'banner is 2.5 to 1.';
+
+List<Override> _baseOverrides() => [
+  identityProvider.overrideWith(_Identity.new),
+  profileProvider.overrideWith(_Profiles.new),
+  avatarProvider.overrideWith(_Avatars.new),
+  friendsProvider.overrideWith(_Friends.new),
+  onlineIdentitiesProvider.overrideWith(_Online.new),
+  for (final sid in [_srvSmall, _srvBig]) ...[
+    myRoleProvider(sid).overrideWith((ref) async => 'owner'),
+    myPermissionsProvider(sid).overrideWith((ref) async => Permission.all),
+    serverMembersProvider(sid).overrideWith(
+      (ref) async => [
+        for (var i = 0; i < (sid == _srvBig ? 12 : 3); i++)
+          crdt_api.MemberFfi(
+            peerId: 'peer_member_${sid}_$i',
+            displayName: 'Member $i',
+            role: i == 0 ? 'owner' : 'member',
+            nickname: '',
+            twitchUsername: '',
+            labels: const [],
+          ),
+      ],
+    ),
+  ],
+];
+
+class _Identity extends IdentityNotifier {
+  @override
+  IdentityState build() => const IdentityState(peerId: _me, isLoaded: true);
+}
+
+class _Profiles extends ProfileNotifier {
+  static String? meBoard;
+
+  @override
+  Map<String, storage_api.UserProfile> build() => {
+    _me: _profile(
+      _me,
+      'Sam',
+      status: 'Hosting the relay this week',
+      about: 'Runs the book club server.',
+      board: meBoard ?? _boardFull,
+      frame: 'b:250',
+    ),
+    _miraBoth: _profile(
+      _miraBoth,
+      'Mira',
+      status: _miraStatus,
+      about: _miraAbout,
+      board: _boardFull,
+      frame: 'b:168',
+    ),
+    _miraLeft: _profile(
+      _miraLeft,
+      'Mira',
+      status: _miraStatus,
+      about: _miraAbout,
+      board: _boardLeft,
+      frame: 'b:168',
+    ),
+    _miraNone: _profile(
+      _miraNone,
+      'Mira',
+      status: _miraStatus,
+      about: _miraAbout,
+      frame: 'b:168',
+    ),
+    _miraWide: _profile(
+      _miraWide,
+      'Mira',
+      status: _miraStatus,
+      about: _miraAbout,
+      board: _boardWide,
+      frame: 'b:168',
+    ),
+    _juno: _profile(_juno, 'Juno'),
+  };
+}
+
+class _Avatars extends AvatarNotifier {
+  @override
+  Map<String, Uint8List> build() => {
+    for (final p in [_me, _miraBoth, _miraLeft, _miraNone, _miraWide])
+      p: _Art.bytes[_hAvatar]!,
+  };
+
+  @override
+  Future<void> loadAvatar(String peerId) async {}
+}
+
+class _Friends extends FriendsNotifier {
+  @override
+  Map<String, FriendInfo> build() => {
+    for (final p in [_miraBoth, _miraLeft, _miraNone, _miraWide])
+      p: FriendInfo(
+        peerId: p,
+        status: 'accepted',
+        direction: '',
+        requestedAt: 0,
+        updatedAt: 0,
+      ),
+  };
+}
+
+class _Online extends OnlineIdentitiesNotifier {
+  @override
+  Set<String> build() => {_miraBoth, _miraLeft, _miraNone, _miraWide};
+}
+
+// ====================================================================== FFI
+
+class _Api implements RustLibApi {
+  List<showcase_api.ShowcaseAsset> assets = const [];
+
+  @override
+  Future<Uint8List?> crateApiStorageGetBanner({required String peerId}) async =>
+      peerId == _juno ? null : _Art.bytes[_hBanner];
+
+  @override
+  Future<Uint8List?> crateApiStorageGetAvatar({required String peerId}) async =>
+      peerId == _juno ? null : _Art.bytes[_hAvatar];
+
+  @override
+  Future<List<showcase_api.ShowcaseAsset>> crateApiShowcaseGetShowcaseAssets({
+    required String peerId,
+  }) async => assets;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+// ======================================================================= art
+
+/// Test art drawn in-process. Every piece carries coloured EDGE BANDS (orange
+/// left, lime right, cyan top, pink bottom) and a centre crosshair, so any
+/// crop, stretch or offset shows at a glance.
+class _Art {
+  static final Map<String, Uint8List> bytes = {};
+
+  static List<showcase_api.ShowcaseAsset> assetList() => [
+    for (final e in bytes.entries)
+      if (e.key != _hBanner && e.key != _hAvatar)
+        showcase_api.ShowcaseAsset(hash: e.key, bytes: e.value),
+  ];
+
+  static Future<void> build() async {
+    bytes[_hBanner] = await _png(1200, 480, (c, s) {
+      _gradient(c, s, const Color(0xFF1B3B5A), const Color(0xFF6B2D5C));
+      _stripes(c, s);
+      _grid(c, s, 100);
+      // A sun and a ridge, so the top/bottom crop is legible too.
+      c.drawCircle(
+        Offset(s.width * 0.72, s.height * 0.34),
+        70,
+        Paint()..color = const Color(0xFFFFC857),
+      );
+      final ridge = Path()
+        ..moveTo(0, s.height * 0.78)
+        ..lineTo(s.width * 0.18, s.height * 0.55)
+        ..lineTo(s.width * 0.36, s.height * 0.72)
+        ..lineTo(s.width * 0.55, s.height * 0.48)
+        ..lineTo(s.width * 0.8, s.height * 0.7)
+        ..lineTo(s.width, s.height * 0.58)
+        ..lineTo(s.width, s.height)
+        ..lineTo(0, s.height)
+        ..close();
+      c.drawPath(ridge, Paint()..color = const Color(0xFF10202E));
+      _crosshair(c, s);
+      _edges(c, s, 28);
+      // Quarter markers along the top.
+      for (final f in [0.25, 0.5, 0.75]) {
+        c.drawCircle(
+          Offset(s.width * f, 44),
+          14,
+          Paint()..color = const Color(0xFFFFFFFF),
+        );
+      }
+    });
+
+    bytes[_hAvatar] = await _png(256, 256, (c, s) {
+      _gradient(c, s, const Color(0xFF3A7BD5), const Color(0xFF00D2FF));
+      c.drawCircle(
+        Offset(s.width / 2, s.height * 0.44),
+        62,
+        Paint()..color = const Color(0xFFF2D0A9),
+      );
+      c.drawCircle(
+        Offset(s.width / 2, s.height * 1.02),
+        110,
+        Paint()..color = const Color(0xFF2B2D42),
+      );
+      c.drawCircle(
+        Offset(s.width * 0.42, s.height * 0.42),
+        7,
+        Paint()..color = const Color(0xFF2B2D42),
+      );
+      c.drawCircle(
+        Offset(s.width * 0.58, s.height * 0.42),
+        7,
+        Paint()..color = const Color(0xFF2B2D42),
+      );
+      _edges(c, s, 10);
+    });
+
+    Future<Uint8List> cover(double hue) => _png(264, 352, (c, s) {
+      final a = HSLColor.fromAHSL(1, hue, 0.55, 0.38).toColor();
+      final b = HSLColor.fromAHSL(1, (hue + 40) % 360, 0.6, 0.18).toColor();
+      _gradient(c, s, a, b);
+      _stripes(c, s);
+      c.drawRect(
+        Rect.fromLTWH(0, 22, s.width, 56),
+        Paint()..color = const Color(0xCC000000),
+      );
+      c.drawRect(
+        Rect.fromLTWH(24, 40, s.width * 0.6, 18),
+        Paint()..color = const Color(0xFFFFFFFF),
+      );
+      c.drawCircle(
+        Offset(s.width / 2, s.height * 0.62),
+        64,
+        Paint()
+          ..color = HSLColor.fromAHSL(1, (hue + 180) % 360, 0.7, 0.6).toColor(),
+      );
+      _crosshair(c, s);
+      _edges(c, s, 10);
+    });
+
+    bytes[_hCoverA] = await cover(12);
+    bytes[_hCoverB] = await cover(28);
+    bytes[_hCoverC] = await cover(160);
+    bytes[_hCoverD] = await cover(330);
+    bytes[_hCoverE] = await cover(0);
+    bytes[_hCoverF] = await cover(210);
+
+    Future<Uint8List> keyArt(double hue) => _png(1280, 720, (c, s) {
+      final a = HSLColor.fromAHSL(1, hue, 0.5, 0.3).toColor();
+      final b = HSLColor.fromAHSL(1, (hue + 60) % 360, 0.55, 0.12).toColor();
+      _gradient(c, s, a, b);
+      _grid(c, s, 160);
+      c.drawCircle(
+        Offset(s.width * 0.3, s.height * 0.4),
+        150,
+        Paint()
+          ..color = HSLColor.fromAHSL(1, (hue + 20) % 360, 0.8, 0.6).toColor(),
+      );
+      c.drawCircle(
+        Offset(s.width * 0.3, s.height * 0.4),
+        150,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 18
+          ..color = const Color(0x88FFFFFF),
+      );
+      _crosshair(c, s);
+      _edges(c, s, 24);
+    });
+    bytes[_hArtA] = await keyArt(200);
+    bytes[_hArtB] = await keyArt(25);
+
+    bytes[_hArtwork] = await _png(800, 500, (c, s) {
+      _gradient(c, s, const Color(0xFF2E1F47), const Color(0xFF7A3E65));
+      for (var i = 0; i < 7; i++) {
+        c.drawCircle(
+          Offset(80.0 + i * 110, 250 + 90 * math.sin(i.toDouble())),
+          40 + i * 6,
+          Paint()
+            ..color = HSLColor.fromAHSL(0.85, i * 45.0, 0.7, 0.6).toColor(),
+        );
+      }
+      _crosshair(c, s);
+      _edges(c, s, 16);
+    });
+
+    Future<Uint8List> logo(Color color) => _png(200, 80, (c, s) {
+      c.drawRRect(
+        RRect.fromRectAndRadius(Offset.zero & s, const Radius.circular(12)),
+        Paint()..color = color,
+      );
+      c.drawCircle(
+        const Offset(40, 40),
+        22,
+        Paint()..color = const Color(0xFFFFFFFF),
+      );
+      c.drawRect(
+        const Rect.fromLTWH(76, 30, 104, 20),
+        Paint()..color = const Color(0xFFFFFFFF),
+      );
+    });
+    bytes[_hLogo1] = await logo(const Color(0xFF14532D));
+    bytes[_hLogo2] = await logo(const Color(0xFF7F1D1D));
+
+    bytes[_hDetA] = Uint8List.fromList(utf8.encode(jsonEncode(_detailsA)));
+    bytes[_hDetB] = Uint8List.fromList(utf8.encode(jsonEncode(_detailsB)));
+  }
+
+  static Future<Uint8List> _png(
+    int w,
+    int h,
+    void Function(Canvas c, Size s) paint,
+  ) async {
+    final rec = ui.PictureRecorder();
+    final canvas = Canvas(rec);
+    paint(canvas, Size(w.toDouble(), h.toDouble()));
+    final picture = rec.endRecording();
+    final image = await picture.toImage(w, h);
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    picture.dispose();
+    return data!.buffer.asUint8List();
+  }
+
+  static void _gradient(Canvas c, Size s, Color a, Color b) {
+    c.drawRect(
+      Offset.zero & s,
+      Paint()
+        ..shader = ui.Gradient.linear(Offset.zero, Offset(s.width, s.height), [
+          a,
+          b,
+        ]),
+    );
+  }
+
+  static void _stripes(Canvas c, Size s) {
+    final p = Paint()
+      ..color = const Color(0x14FFFFFF)
+      ..strokeWidth = 18;
+    for (var x = -s.height; x < s.width; x += 70) {
+      c.drawLine(Offset(x, s.height), Offset(x + s.height, 0), p);
+    }
+  }
+
+  static void _grid(Canvas c, Size s, double step) {
+    final p = Paint()
+      ..color = const Color(0x40FFFFFF)
+      ..strokeWidth = 1;
+    for (var x = step; x < s.width; x += step) {
+      c.drawLine(Offset(x, 0), Offset(x, s.height), p);
+    }
+    for (var y = step; y < s.height; y += step) {
+      c.drawLine(Offset(0, y), Offset(s.width, y), p);
+    }
+  }
+
+  static void _crosshair(Canvas c, Size s) {
+    final p = Paint()
+      ..color = const Color(0xFFFF3B30)
+      ..strokeWidth = 3;
+    c.drawLine(
+      Offset(s.width / 2, s.height / 2 - 30),
+      Offset(s.width / 2, s.height / 2 + 30),
+      p,
+    );
+    c.drawLine(
+      Offset(s.width / 2 - 30, s.height / 2),
+      Offset(s.width / 2 + 30, s.height / 2),
+      p,
+    );
+  }
+
+  static void _edges(Canvas c, Size s, double band) {
+    c.drawRect(
+      Rect.fromLTWH(0, 0, band, s.height),
+      Paint()..color = const Color(0xFFFF7A1A),
+    );
+    c.drawRect(
+      Rect.fromLTWH(s.width - band, 0, band, s.height),
+      Paint()..color = const Color(0xFF9BE15D),
+    );
+    c.drawRect(
+      Rect.fromLTWH(0, 0, s.width, band / 2),
+      Paint()..color = const Color(0xFF22D3EE),
+    );
+    c.drawRect(
+      Rect.fromLTWH(0, s.height - band / 2, s.width, band / 2),
+      Paint()..color = const Color(0xFFFF4FA3),
+    );
+  }
+}

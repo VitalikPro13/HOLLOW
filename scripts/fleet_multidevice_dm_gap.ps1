@@ -529,9 +529,9 @@ try {
     Say "a is showing link code $code" 'Green'
 
     Start-EmptyPeer b
-    Step b @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 90000 }
+    Step b @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 90000 }
     Step b @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
-    Step b @{ op = 'wait_for'; target = 'text:Link this device'; timeout_ms = 180000 }
+    Step b @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 180000 }
     Step b @{ op = 'wait_for'; target = 'hint:ABC123'; timeout_ms = 20000 }
     Wait-ForConnected b
     Step b @{ op = 'enter_text'; target = 'hint:ABC123'; value = $code }
@@ -541,7 +541,7 @@ try {
     Step a @{ op = 'wait_for'; target = 'text:Send your data?'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'text:Send data'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
-    Step b @{ op = 'wait_for'; target = 'text:Device linked'; timeout_ms = 120000 }
+    Step b @{ op = 'wait_for'; target = 'text:Linked'; timeout_ms = 120000 }
 
     # b relaunches ITSELF 1.5 s after the done view (Rust waiter), so the
     # mailbox is handed over now, before the replacement reads it from line 0.

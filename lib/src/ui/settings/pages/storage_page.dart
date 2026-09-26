@@ -17,7 +17,7 @@ class StorageSettingsPage extends StatelessWidget {
     // sandboxed and fixed.
     final desktop = !Platform.isAndroid && !Platform.isIOS;
     return SettingsPage(
-      title: 'Files & Storage',
+      title: 'Files & storage',
       children: [
         const StorageBreakdownView(),
         const StorageDownloadsSection(),

@@ -44,8 +44,8 @@
     { "peer": "a", "op": "long_press", "target": "text:home-m", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 1000 },
     { "peer": "a", "op": "tap", "target": "text:Invite", "index": 0 },
-    { "peer": "a", "op": "wait_for", "target": "type:SelectableText", "timeout_ms": 20000 },
-    { "peer": "a", "op": "capture", "target": "type:SelectableText", "as": "INVITE" },
+    { "peer": "a", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" },
     { "peer": "a", "op": "tap", "target": "dialog > semantics:Close", "index": 0 },
 
     { "peer": "b", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true },

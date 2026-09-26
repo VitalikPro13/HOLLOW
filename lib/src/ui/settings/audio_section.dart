@@ -649,7 +649,7 @@ class _AudioVideoSettingsViewState
         releaseMs != kPttReleaseDefaultMs;
 
     return SettingsPage(
-      title: 'Audio & Video',
+      title: 'Audio & video',
       children: [
         if (_isDesktop)
           SettingsSection(

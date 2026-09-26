@@ -161,7 +161,7 @@ class EmotesPage extends ConsumerWidget {
             0;
 
     return SettingsPage(
-      title: 'Emotes and stickers',
+      title: 'Emotes & stickers',
       children: [
         SettingsSection(
           title: 'Emotes',

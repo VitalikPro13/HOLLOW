@@ -13,8 +13,6 @@ import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
@@ -27,7 +25,6 @@ import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
-import 'package:hollow/src/ui/mobile/mobile_storage_route.dart';
 
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
@@ -302,42 +299,6 @@ void main() {
       }
       await done(t);
     });
-
-    // ------------------------------------------------ Storage (phone route)
-    testWidgets('storage $label', (t) async {
-      for (final members in [3, 7]) {
-        await pumpHost(t, size,
-            extra: [
-              vaultStatusProvider.overrideWith(_Vault.new),
-              myRoleProvider(_sid).overrideWith((ref) async => 'owner'),
-              serverMembersProvider(_sid).overrideWith((ref) async => [
-                    for (var i = 0; i < members; i++)
-                      crdt_api.MemberFfi(
-                        peerId: 'peer_$i',
-                        displayName: 'Member $i',
-                        role: i == 0 ? 'owner' : 'member',
-                        nickname: '',
-                        twitchUsername: '',
-                        labels: const [],
-                      ),
-                  ]),
-            ],
-            home: const MobileStorageRoute(serverId: _sid));
-        await t.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 300)));
-        await settle(t);
-        await capture(t, 'storage_route_${members}members_$label');
-        if (members == 7) {
-          await t.tap(find.textContaining('Pledge:'));
-          await settle(t);
-          await t.enterText(find.byType(TextField).last, '100');
-          await t.tap(find.text('Save'));
-          await settle(t);
-          await capture(t, 'storage_pledge_too_small_$label');
-        }
-        await done(t);
-      }
-    });
   }
 }
 
@@ -370,11 +331,6 @@ class _Profiles extends ProfileNotifier {
 class _Favourites extends FavouriteFriendsNotifier {
   @override
   List<String> build() => [kFriendPeerId2];
-}
-
-class _Vault extends VaultStatusNotifier {
-  @override
-  Map<String, VaultServerStatus> build() => const {};
 }
 
 class _Link extends DeviceLinkSyncNotifier {

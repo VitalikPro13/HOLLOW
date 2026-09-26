@@ -12,13 +12,11 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
-import 'package:hollow/src/ui/mobile/mobile_storage_route.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_place.dart'
     show ForeignServerSettingsScope, saveServerDraft;
 import 'package:hollow/src/ui/settings/settings_kit.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Pages whose text fields ride the draft, so their bar carries Reset and Save.
 const _draftPages = {
@@ -149,12 +147,6 @@ class MobileServerSettingsRoute extends ConsumerWidget {
           const MobileSettingsGroupCaption('You'),
           for (final p in pages)
             if (p.isYou) row(p),
-          MobileSettingsNavRow(
-            icon: LucideIcons.hardDrive,
-            title: 'Storage on this phone',
-            onTap: () => Navigator.of(context).push(hollowMobileRoute(
-                builder: (_) => MobileStorageRoute(serverId: serverId))),
-          ),
         ],
       );
     }

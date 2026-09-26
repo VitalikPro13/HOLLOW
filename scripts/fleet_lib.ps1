@@ -183,7 +183,7 @@ function Expand-FleetVars($value) {
 function Get-RelayWelcomeSteps($relayDomain) {
     if (-not $relayDomain) { return @() }
     return @(
-        @{ op = 'tap'; target = 'text:Advanced'; index = 0 },
+        @{ op = 'tap'; target = 'semantics:Change the relay'; index = 0 },
         @{ op = 'wait_for'; target = 'hint:relay.anonlisten.com'; timeout_ms = 10000 },
         @{ op = 'enter_text'; target = 'hint:relay.anonlisten.com'; value = $relayDomain },
         @{ op = 'wait_for'; target = "text:$relayDomain"; timeout_ms = 10000 }

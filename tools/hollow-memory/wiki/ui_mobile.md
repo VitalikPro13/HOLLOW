@@ -347,7 +347,7 @@ A voice channel tap in the Chats tab pushes TWO routes: `MobileChatRoute` (the c
 
 ## Audio, ringtone and About on the phone
 
-The Audio & Video and About pages are the shared `settings/audio_section.dart` and `settings/about_section.dart` at touch density (wiki `ui_user_settings`); the phone-only `_MicGainSlider`, `_VoiceEnhanceToggle`, `_InfoRow`, `_MobileBrandIcon` and friends are gone. Provider semantics (mic gain, Voice Enhancement, ringtone keys): wiki `providers_event_settings`. The ringtone row's Trim opens `showRingtoneClipEditor()`, whose waveform is REAL since 2026-09-25: `loadRingtoneWaveform` asks Rust `audio_waveform(path, buckets)` (`api/waveform.rs` over `audio_peaks.rs`, symphonia) for the decoded duration and per-bucket min/max + RMS, drawn by `RingtoneWaveformPainter`; a format symphonia lacks (Opus in Ogg) falls back to the player's duration with no waveform, so it still trims by time. Legal documents open in `_showLegalSheet` (`about_section.dart`).
+The Audio & video and About pages are the shared `settings/audio_section.dart` and `settings/about_section.dart` at touch density (wiki `ui_user_settings`); the phone-only `_MicGainSlider`, `_VoiceEnhanceToggle`, `_InfoRow`, `_MobileBrandIcon` and friends are gone. Provider semantics (mic gain, Voice Enhancement, ringtone keys): wiki `providers_event_settings`. The ringtone row's Trim opens `showRingtoneClipEditor()`, whose waveform is REAL since 2026-09-25: `loadRingtoneWaveform` asks Rust `audio_waveform(path, buckets)` (`api/waveform.rs` over `audio_peaks.rs`, symphonia) for the decoded duration and per-bucket min/max + RMS, drawn by `RingtoneWaveformPainter`; a format symphonia lacks (Opus in Ogg) falls back to the player's duration with no waveform, so it still trims by time. Legal documents open in `_showLegalSheet` (`about_section.dart`).
 
 ---
 
@@ -386,28 +386,9 @@ Manual `_scale`, `_offsetX`, `_offsetY` state (no `InteractiveViewer`). On every
 
 ---
 
-## MobileStorageRoute
+## MobileStorageRoute: RETIRED (2026-09-26)
 
-**File:** `lib/src/ui/mobile/mobile_storage_route.dart`
-**Purpose:** Full-screen server storage dashboard, pushed from the phone server settings list ("Storage on this phone").
-
-### Data Loading
-- `crdt_api.getStorageStats(serverId:)` → `StorageStatsFfi`
-- `crdt_api.getServerSetting(serverId:, key: 'retention_files'/'retention_messages')`
-
-### Sections
-Each section box is titled `HollowSectionHeader(title, dense: true)`, no section icon.
-
-1. **Server Storage**: vault mode label, member count. Full replication (<6): the server's data against THIS phone's free space (`freeBytesAt(hollowDataDir)`, `core/services/disk_space.dart`), "X used · Y free", and no bar at all until a free-space reading exists (the old bar sat at 0%). Erasure coding (6+) with redundancy factor.
-2. **Your Storage** (6+ members): pledge amount with edit button, usage bar.
-3. **Retention Policy**: messages + files retention display. Admin can tap to edit. Records `_since` timestamp for forward-only pruning.
-
-Pledge and retention edits are the DESKTOP storage dashboard's own flows (`editStoragePledge`: a `promptForName` in MB with a validator, at least 512; `editRetentionPolicy`: `_RetentionPicker`), both writing inside their dialog; the phone only toasts "Pledge saved" / "Retention saved" and reloads. `StorageUsageBar` is shared too.
-4. **Vault Health** — StatusDot + status text + shard count. Pulse animation on active transfers.
-5. **Member Pledges** (6+ members) — member count + average pledge.
-
-### Navigation
-The "Storage on this phone" row of `MobileServerSettingsRoute`, visible to all members.
+The phone's storage dashboard is gone with the desktop dialog. Server settings on the phone lists Files & storage like any other page (`server_settings/pages/files_storage_page.dart` at touch density, every choice through one picker sheet); see wiki `ui_server_settings`.
 
 ---
 
@@ -614,7 +595,7 @@ One-pass fixes from the production-readiness audit:
 ### Accessibility — Reduce Motion + Larger Text (2026-06-25)
 
 - **ALL mobile page pushes go through `hollowMobileRoute()`** (`lib/src/ui/mobile/mobile_page_route.dart`), NOT raw `MaterialPageRoute`/`PageRouteBuilder`. (Docs elsewhere in this file that still say "pushed as `PageRouteBuilder`" / `MaterialPageRoute(...)` are describing the pre-2026-06-25 code — the transition mechanism is now `hollowMobileRoute()` everywhere; the destination widgets are unchanged.) `hollowMobileRoute({builder, transition: slideRight|slideUp|fade, duration (default HollowDurations.normal), settings})` builds its own `_HollowPageRoute` and gates the transition duration on `ReduceMotionController.instance.isReduced` (`Duration.zero` when reduced). See "Pushed pages: iOS swipe back" below. **Why it matters:** a raw `MaterialPageRoute`'s transition is governed ONLY by Flutter's built-in `MediaQuery.disableAnimations` (OS reduce-motion flag) — the in-app tri-state control couldn't stop it (On) nor force it back on (Off, when OS was on). Routing through `hollowMobileRoute()` makes `ReduceMotionController` the single authority: **On = instant, Off = animates even with OS reduce-motion on, Auto = follows OS.** Default `slideRight`; voice-channel/call routes use `slideUp`.
-- **Noticeable one-shot animations (300ms+)** that hardcode their own durations also gate on `isReduced`: nav-bar glow `AnimatedPositioned` (`mobile_nav_bar.dart`), storage usage-bar `TweenAnimationBuilder` (`mobile_storage_route.dart`), scroll-to-message `scrollTo` (`mobile_chat_route.dart` + both archive viewers), (the archive viewers' content swaps are instant now). `Future.delayed` LOGIC timers are NOT animations — left alone. Sub-200ms micro-fades intentionally left. Implicit `Animated*` using `HollowDurations.fast/normal/slow` already snap to zero via the controller.
+- **Noticeable one-shot animations (300ms+)** that hardcode their own durations also gate on `isReduced`: nav-bar glow `AnimatedPositioned` (`mobile_nav_bar.dart`), scroll-to-message `scrollTo` (`mobile_chat_route.dart` + both archive viewers), (the archive viewers' content swaps are instant now). `Future.delayed` LOGIC timers are NOT animations — left alone. Sub-200ms micro-fades intentionally left. Implicit `Animated*` using `HollowDurations.fast/normal/slow` already snap to zero via the controller.
 - **Interface scale + chat text size (issue #20, 2026-07-26):** in-app display scaling on top of the OS setting. `UiScale` wraps the mobile Stack in `app.dart` (INSIDE `withClampedTextScaling`, so the text clamp still applies), capped at 1.5x on mobile — a 360dp phone lays out at 240dp there and the shell is verified to fit (`text_scale_overflow_test.dart` "Interface scale" group). `ChatTextScale` wraps the message list (via `reversedChatList`) and `_MobileInputBar`. Mobile has no title bar, so there is no `ZoomIndicator` escape hatch — the ceiling and the un-clippable Settings list are what keep it recoverable.
 - **Larger Text (P3 stage 1):** mobile text-scale cap raised to **2.0×** (`app.dart` `withClampedTextScaling(0.8, 2.0)`). Mobile chrome bars stay fixed-height but **cap their labels** with `MediaQuery.withClampedTextScaling(maxScaleFactor: 1.3, child: Text(...))` (tab-bar norm): `mobile_nav.dart` + `mobile_nav_bar.dart` nav captions. Mobile chat header (`mobile_chat_route.dart`) uses `Container(constraints: BoxConstraints(minHeight: 52))` to GROW. **NEVER wrap a full-width bar in a bare `ConstrainedBox(minHeight:)`** — it unbounds width and collapses the layout; put `constraints:` on the Container or cap the label. CI: `test/widget/text_scale_overflow_test.dart` pumps the mobile shell at 1.0×/1.5×/2.0× asserting no RenderFlex overflow.
 

@@ -71,7 +71,7 @@
  },
  {
   "op": "tap",
-  "target": "text:Audio & Video",
+  "target": "text:Audio & video",
   "soft": true
  },
  {
@@ -116,7 +116,7 @@
  },
  {
   "op": "tap",
-  "target": "text:Files & Storage",
+  "target": "text:Files & storage",
   "soft": true
  },
  {

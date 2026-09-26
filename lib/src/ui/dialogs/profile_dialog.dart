@@ -8,15 +8,14 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
-import 'package:hollow/src/ui/components/profile_card_body.dart';
+import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
+import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/components/showcase_blocks.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Opens the FULL profile view for [peerId].
-///
-/// On desktop the centre card is flanked by SEPARATE showcase panels, one per
-/// filled side, so the card stays a self-contained column. Mobile routes to the
-/// bottom sheet.
+/// Opens the FULL profile view for [peerId]: on desktop the profile column
+/// beside its showcase pane, on a phone the bottom sheet.
 Future<void> showProfileDialog(
   BuildContext context, {
   required String peerId,
@@ -31,6 +30,7 @@ Future<void> showProfileDialog(
       peerId: peerId,
       role: role,
       labels: labels,
+      serverId: serverId,
     );
     return Future.value();
   }
@@ -46,21 +46,16 @@ Future<void> showProfileDialog(
   );
 }
 
-/// Width of the center profile card.
-const double kProfileDialogCenterWidth = 560.0;
+/// Width of the showcase pane holding [columns] board columns.
+double showcasePaneWidth(int columns) =>
+    kShowcasePanePadding * 2 +
+    (columns == 2 ? kShowcaseWideWidth : kShowcaseColumnWidth);
 
-/// Width of one flanking showcase panel, sized for game covers and artwork
-/// rather than text scraps.
-const double kShowcasePanelWidth = 340.0;
-
-/// Minimum height of the ensemble, so a sparse board still reads as a full
-/// profile page rather than a floating scrap.
-const double _kEnsembleMinHeight = 560.0;
-
-/// Room reserved per wing when scaling; the hairline takes 1 of it and the
-/// card the rest.
-const double _kPanelGap = HollowSpacing.md;
-
+/// The profile in its own column with the showcase as a pane beside it, a
+/// hairline between. The dialog is only as wide as what the person put on
+/// their boards; a window too narrow for two board columns gets one, and one
+/// too narrow for the pane stacks it under the profile. Widths never squeeze,
+/// so the banner keeps its 2.5:1.
 class ProfileDialog extends ConsumerWidget {
   final String peerId;
   final String? nickname;
@@ -77,106 +72,151 @@ class ProfileDialog extends ConsumerWidget {
     this.serverId,
   });
 
-  Widget _boardPanel(List<ShowcaseBlock> blocks, {double? width}) {
-    return SizedBox(
-      width: width,
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.md),
-        child: ShowcaseBoardColumn(peerId: peerId, blocks: blocks),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final screenSize = MediaQuery.sizeOf(context);
-
-    // Watched so a save from the composer updates this view live.
+    // Watched so a save from the editor updates this view live.
     final encoded = ref.watch(
-        profileProvider.select((p) => p[peerId]?.showcaseBoard));
-    final board = ShowcaseBoard.decode(encoded);
-
-    // Each filled side adds one panel. A window too small for the full-size
-    // ensemble SCALES the columns down proportionally, so the shape survives a
-    // resize; only a genuinely tiny window stacks them below the card.
-    final sides = (board.hasLeft ? 1 : 0) + (board.hasRight ? 1 : 0);
-    final columnsWidth =
-        kProfileDialogCenterWidth + kShowcasePanelWidth * sides;
-    final gaps = _kPanelGap * sides;
-    final available = screenSize.width - HollowSpacing.xl * 2;
-    final scale = sides == 0
-        ? 1.0
-        : ((available - gaps) / columnsWidth).clamp(0.0, 1.0);
-    final stacked = sides > 0 && scale < 0.62;
-    final centerWidth = stacked || sides == 0
-        ? kProfileDialogCenterWidth.clamp(0.0, available)
-        : kProfileDialogCenterWidth * scale;
-    final panelWidth = kShowcasePanelWidth * scale;
-    final width = stacked
-        ? centerWidth
-        : centerWidth + (panelWidth + _kPanelGap) * sides;
-
-    final centerCard = ProfileCardBody(
-      peerId: peerId,
-      nickname: nickname,
-      role: role,
-      labels: labels,
-      serverId: serverId,
-      density: ProfileCardDensity.full,
-      dismissHost: () => Navigator.of(context).pop(),
+      profileProvider.select((p) => p[peerId]?.showcaseBoard),
     );
+    final board = ShowcaseBoard.decode(encoded);
+    final available = MediaQuery.sizeOf(context).width - HollowSpacing.xl * 2;
+    void close() => Navigator.of(context).pop();
 
-    final Widget content;
-    if (board.isEmpty) {
-      content = centerCard;
-    } else if (stacked) {
-      content = Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          centerCard,
-          if (board.hasLeft) ...[
-            const HollowDivider(),
-            _boardPanel(board.left),
-          ],
-          if (board.hasRight) ...[
-            const HollowDivider(),
-            _boardPanel(board.right),
-          ],
-        ],
-      );
-    } else {
-      // Panels stretch to the card's height so they read as its wings, and a
-      // panel with more content grows the row instead.
-      content = IntrinsicHeight(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: _kEnsembleMinHeight),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (board.hasLeft) ...[
-                _boardPanel(board.left, width: panelWidth),
-                const HollowVerticalDivider(),
+    ProfileIdentityColumn identity(double width, {VoidCallback? onClose}) =>
+        ProfileIdentityColumn(
+          peerId: peerId,
+          nickname: nickname,
+          role: role,
+          labels: labels,
+          serverId: serverId,
+          density: ProfileCardDensity.full,
+          width: width,
+          dismissHost: close,
+          onClose: onClose,
+        );
+
+    final wanted = ShowcaseBoardView.columnsFor(board);
+    int? columns;
+    if (!board.isEmpty) {
+      for (final c in wanted == 2 ? const [2, 1] : const [1]) {
+        if (kProfileColumnWidth + 1 + showcasePaneWidth(c) <= available) {
+          columns = c;
+          break;
+        }
+      }
+    }
+
+    if (columns == null) {
+      // No board, or no room beside the profile: one column, one scroll.
+      final width = kProfileColumnWidth.clamp(0.0, available);
+      return HollowDialogSurface(
+        width: width,
+        maxWidth: width,
+        padded: false,
+        child: _WithoutScrollbar(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                identity(width, onClose: close),
+                if (!board.isEmpty) ...[
+                  const HollowDivider(),
+                  Padding(
+                    padding: const EdgeInsets.all(kShowcasePanePadding),
+                    child: ShowcaseBoardView(
+                      peerId: peerId,
+                      board: board,
+                      columns: 1,
+                    ),
+                  ),
+                ],
               ],
-              Expanded(child: centerCard),
-              if (board.hasRight) ...[
-                const HollowVerticalDivider(),
-                _boardPanel(board.right, width: panelWidth),
-              ],
-            ],
+            ),
           ),
         ),
       );
     }
 
-    // One frame for the whole ensemble; the showcase wings are panes of it.
+    final paneWidth = showcasePaneWidth(columns);
+    final total = kProfileColumnWidth + 1 + paneWidth;
+    // The pane's scrollbar takes its gutter from the right padding, so the
+    // boards keep their width and the edges stay even.
+    final gutter = scrollGutterOf(context);
     return HollowDialogSurface(
-      width: width,
-      maxWidth: width,
+      width: total,
+      maxWidth: total,
       padded: false,
-      child: SingleChildScrollView(
-        child: content,
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              width: kProfileColumnWidth,
+              // No scrollbar here: its gutter would pull the banner off the
+              // dialog's edge.
+              child: _WithoutScrollbar(
+                child: SingleChildScrollView(
+                  child: identity(kProfileColumnWidth),
+                ),
+              ),
+            ),
+            const HollowVerticalDivider(),
+            SizedBox(
+              width: paneWidth,
+              child: Stack(
+                children: [
+                  SingleChildScrollView(
+                    padding: EdgeInsets.fromLTRB(
+                      kShowcasePanePadding,
+                      kShowcasePanePadding,
+                      kShowcasePanePadding - gutter,
+                      kShowcasePanePadding,
+                    ),
+                    child: ShowcaseBoardView(
+                      peerId: peerId,
+                      board: board,
+                      columns: columns,
+                    ),
+                  ),
+                  // Over a wide artwork at the top, the close button sits on
+                  // the art, so it takes the art's scrim.
+                  if (board.hasWide && board.wideAtTop)
+                    Positioned(
+                      top: kShowcasePanePadding + HollowSpacing.xs,
+                      right: kShowcasePanePadding + HollowSpacing.xs,
+                      child: MediaScrimIconButton(
+                        icon: LucideIcons.x,
+                        label: 'Close',
+                        size: 32,
+                        onPressed: close,
+                      ),
+                    )
+                  else
+                    Positioned(
+                      top: HollowSpacing.md,
+                      right: HollowSpacing.md,
+                      child: HollowDialogCloseButton(onPressed: close),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
+}
+
+/// A scroll view that draws no scrollbar, so nothing reserves a gutter beside
+/// content that must reach the dialog's edge.
+class _WithoutScrollbar extends StatelessWidget {
+  final Widget child;
+
+  const _WithoutScrollbar({required this.child});
+
+  @override
+  Widget build(BuildContext context) => ScrollConfiguration(
+    behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+    child: child,
+  );
 }

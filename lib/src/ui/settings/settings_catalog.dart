@@ -21,10 +21,10 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.appearance => 'Appearance',
         SettingsCategory.accessibility => 'Accessibility',
         SettingsCategory.notifications => 'Notifications',
-        SettingsCategory.audio => 'Audio & Video',
+        SettingsCategory.audio => 'Audio & video',
         SettingsCategory.shortcuts => 'Shortcuts',
         SettingsCategory.network => 'Network',
-        SettingsCategory.storage => 'Files & Storage',
+        SettingsCategory.storage => 'Files & storage',
         SettingsCategory.about => 'About',
       };
 

@@ -4,7 +4,7 @@
   {"op": "tap", "target": "semantics:Settings"},
   {"op": "wait", "ms": 1500},
 
-  {"op": "tap", "target": "text:Audio & Video", "soft": true},
+  {"op": "tap", "target": "text:Audio & video", "soft": true},
   {"op": "wait", "ms": 1200},
   {"op": "shot", "name": "s3-01-audio"},
   {"op": "scroll", "target": "text:Input mode", "dy": -200, "soft": true},
@@ -23,7 +23,7 @@
   {"op": "wait", "ms": 1500},
   {"op": "shot", "name": "s3-05-devices"},
 
-  {"op": "tap", "target": "text:Files & Storage", "soft": true},
+  {"op": "tap", "target": "text:Files & storage", "soft": true},
   {"op": "wait", "ms": 1500},
   {"op": "shot", "name": "s3-06-storage"},
 

@@ -17,7 +17,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
-import 'package:hollow/src/ui/components/profile_card_body.dart';
+import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 
 /// Screenshot harness for the profile card popup redesign (issue #48
@@ -174,7 +174,8 @@ void main() {
                       ),
                     ),
                     clipBehavior: Clip.antiAlias,
-                    child: ProfileCardBody(
+                    child: ProfileIdentityColumn(
+                      width: kProfileCompactWidth,
                       peerId: broPeerId,
                       role: 'member',
                       labels: const [vipLabel],
@@ -202,7 +203,7 @@ void main() {
       cardServerId: serverId,
     );
     expect(find.text('Message'), findsOneWidget);
-    expect(find.text('Friends'), findsOneWidget);
+    expect(find.text('Friend'), findsOneWidget);
     // No stacked text buttons anymore.
     expect(find.text('Edit Nickname'), findsNothing);
     expect(find.text('Block'), findsNothing);
@@ -216,7 +217,7 @@ void main() {
       overrides: baseOverrides(friends: false),
       cardServerId: null,
     );
-    expect(find.text('Add Friend'), findsOneWidget);
+    expect(find.text('Add friend'), findsOneWidget);
     expect(find.text('Message'), findsNothing);
     await capture(tester, 'profile_card_stranger');
   });

@@ -45,7 +45,7 @@
   {"op": "theme", "value": "light", "frames": 30},
   {"op": "shot", "name": "sf-06-settings-appearance-light"},
   {"op": "theme", "value": "dark", "frames": 30},
-  {"op": "tap", "target": "text:Audio & Video", "soft": true},
+  {"op": "tap", "target": "text:Audio & video", "soft": true},
   {"op": "wait", "ms": 1200},
   {"op": "theme", "value": "dark", "frames": 30},
   {"op": "shot", "name": "sf-07-settings-audio-dark"},

@@ -65,7 +65,7 @@
   {"op": "log", "message": "storage: image quality chips, the cleanup menu"},
   {"op": "tap", "target": "semantics:Settings"},
   {"op": "wait", "ms": 1500},
-  {"op": "tap", "target": "text:Files & Storage", "soft": true},
+  {"op": "tap", "target": "text:Files & storage", "soft": true},
   {"op": "wait", "ms": 1500},
   {"op": "tap", "target": "text:Clean up", "index": 0, "soft": true},
   {"op": "wait", "ms": 800},

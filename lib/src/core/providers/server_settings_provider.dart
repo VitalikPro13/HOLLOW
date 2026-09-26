@@ -17,6 +17,7 @@ enum ServerSettingsPage {
   labels,
   emotes,
   members,
+  storage,
   profile,
   notifications,
 }

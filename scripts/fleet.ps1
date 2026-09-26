@@ -611,8 +611,8 @@ function Invoke-Steps($steps, $label, $alwaysSoft = $false) {
 # the Profile page's top bar, above the software keyboard. Back is a button,
 # not Escape.
 $onboardStepsMobile = @(
-    @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
-    @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
+    @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 60000 },
+    @{ op = 'tap'; target = 'text:Create an identity'; frames = 60 },
     @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 },
     @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
     @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
@@ -632,8 +632,8 @@ $onboardStepsMobile = @(
 )
 
 $onboardSteps = @(
-    @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
-    @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
+    @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 60000 },
+    @{ op = 'tap'; target = 'text:Create an identity'; frames = 60 },
     # The recovery-phrase dialog is the app confirming the identity exists.
     @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 },
     @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
