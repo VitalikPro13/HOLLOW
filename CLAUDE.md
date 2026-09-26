@@ -7,7 +7,7 @@ Distributed, encrypted Discord alternative: no central servers, members host it.
 - **UI:** Flutter (Dart), 6 platforms
 - **Backend:** Rust via `flutter_rust_bridge` v2.11.1
 - **Networking:** WSS relay (signaling, text/CRDT/MLS) + WebRTC data channels (files) + WebRTC media.
-- **E2EE:** vodozemac (Olm) DMs, OpenMLS 0.8 servers, SFrame (AES-128-GCM) media
+- **E2EE:** vodozemac (Olm) DMs, OpenMLS 0.9 servers, SFrame (AES-128-GCM) media
 - **Local DB:** SQLCipher
 - **Identity:** Ed25519 via BIP-39 mnemonic
 - **Org ID:** com.anonlisten · **Project:** hollow

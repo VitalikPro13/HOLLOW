@@ -1,0 +1,12 @@
+# Accepted risks
+
+What we knowingly do not defend against, why, and when we look again. An
+entry here is a decision, not an oversight: each has an owner and a reason
+that survives a professional auditor reading it.
+
+| ID | Risk | Decision | Reason | Owner | Review |
+|---|---|---|---|---|---|
+| AR-01 | The relay has no per-message rate limits, although ASVS 17.3.1 wants signalling to survive floods and RFC 9420 16.8 says KeyPackage requests SHOULD be rate-limited. | Accepted (2026-09-26) | Message and binary rate limits were tried and broke the core: a reconnect burst (sync requests, channel probes, profiles, signalling) exceeds any limit, and dropped frames wedge CRDT sync. The protections that stay: per-IP connection caps (34 per IP, 10 new per minute, IPv6 /64), guest mode with its own limits and room cap, CAKE per-host fair share on the NIC, coturn locked to the relay's own peers, the 64 MB payload ceiling and hard backpressure. Memory: `feedback_relay_rules`, `project_relay_ip_limits`, `project_relay_fairshare_turn_lock`. | Vitalik | When flood tests exist (phase F, WP4): measure what a single authenticated peer can make the relay or other clients do. |
+| AR-02 | Every device holds the master key, so a stolen usable device can revoke its owner's real devices (they wipe themselves), issue destroy orders, and keep the identity. | **Not accepted: fixed by design ID-1** (2026-09-26) | The recovery phrase, never stored on any device, becomes the root of authority. See the plan's section "Identity authority design". Until ID-1 ships the whitepaper's "Stolen/lost device" row must not promise more than this. | Vitalik | When ID-1 ships (target 0.12). |
+| AR-03 | Inside a group call, any participant can forge media frames that appear to come from another participant (RFC 9605 7.2, shared SFrame keys). | Accepted (2026-09-26) | As far as we know, no mainstream E2EE call system (Signal, WhatsApp, Meet, Zoom) signs individual frames; all share symmetric frame keys among participants. The forger must be an admitted participant running a modified client. Per-frame signatures cost CPU on every phone. Outsider protection (nonce uniqueness, lead L-01) is NOT covered by this entry and must be verified. | Vitalik | If a mainstream system ships per-frame sender authentication. |
+| AR-04 | Traffic analysis, relay availability, post-quantum, trust on first use, a compromised unlocked running device. | Accepted | Listed in WP 23.2 and claims.md "What we do not promise". | Vitalik | At each whitepaper revision. |
