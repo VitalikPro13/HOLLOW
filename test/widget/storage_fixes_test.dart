@@ -141,6 +141,9 @@ Future<void> _pump(
         extra: [
           vaultStatusProvider.overrideWith(_Vault.new),
           myRoleProvider(_sid).overrideWith((ref) async => role),
+          // The real read runs df on the data root, which a CI runner may not
+          // have; the free-space group below tests the read itself.
+          dataDriveFreeProvider.overrideWith((ref) async => 120 * 1024 * 1024 * 1024),
         ],
       ),
       child: MaterialApp(

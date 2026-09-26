@@ -65,7 +65,7 @@ final serverStorageStatsProvider = FutureProvider.autoDispose
 
 /// Free space on the drive holding the data root; null where it cannot be
 /// read (iOS).
-final _dataDriveFreeProvider = FutureProvider.autoDispose<int?>(
+final dataDriveFreeProvider = FutureProvider.autoDispose<int?>(
   (ref) => freeBytesAt(hollowDataDir),
 );
 
@@ -121,7 +121,7 @@ class _OnThisDevice extends ConsumerWidget {
     final where = touch ? 'this phone' : 'this computer';
     final stats = ref.watch(serverStorageStatsProvider(serverId));
     final breakdown = ref.watch(storageBreakdownProvider);
-    final free = ref.watch(_dataDriveFreeProvider).valueOrNull;
+    final free = ref.watch(dataDriveFreeProvider).valueOrNull;
 
     final downloads = breakdown.valueOrNull?.contexts
         .where(
