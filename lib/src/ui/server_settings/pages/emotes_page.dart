@@ -146,14 +146,21 @@ class EmotesPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final emotes = overAssetWrites<emotes_api.ServerEmote>(
-        ref.watch(serverEmotesProvider(serverId)).valueOrNull ?? const [],
-        ref.watch(serverEmoteWritesProvider(serverId)),
-        (e) => e.name);
-    final stickers = overAssetWrites<stickers_api.ServerSticker>(
-        ref.watch(serverStickersProvider(serverId)).valueOrNull ?? const [],
-        ref.watch(serverStickerWritesProvider(serverId)),
-        (s) => s.hash);
+    // Null while loading or failed: neither may read as "none yet" or "0 of".
+    final emotesAsync = ref.watch(serverEmotesProvider(serverId));
+    final storedEmotes = emotesAsync.valueOrNull;
+    final emoteWrites = ref.watch(serverEmoteWritesProvider(serverId));
+    final emotes = storedEmotes == null
+        ? null
+        : overAssetWrites<emotes_api.ServerEmote>(
+            storedEmotes, emoteWrites, (e) => e.name);
+    final stickersAsync = ref.watch(serverStickersProvider(serverId));
+    final storedStickers = stickersAsync.valueOrNull;
+    final stickerWrites = ref.watch(serverStickerWritesProvider(serverId));
+    final stickers = storedStickers == null
+        ? null
+        : overAssetWrites<stickers_api.ServerSticker>(
+            storedStickers, stickerWrites, (s) => s.hash);
     final maxStickers = ref.watch(stickerLimitsProvider).perServer;
     final canManage =
         (ref.watch(myPermissionsProvider(serverId)).valueOrNull ?? 0) &
@@ -165,21 +172,28 @@ class EmotesPage extends ConsumerWidget {
       children: [
         SettingsSection(
           title: 'Emotes',
-          count: '${emotes.length} of $_kMaxEmotes',
+          count: emotes == null ? null : '${emotes.length} of $_kMaxEmotes',
           subtitle: 'Everyone here can use them in messages and reactions as '
               ':name:',
           action: canManage
               ? HollowButton.ghost(
                   compact: true,
                   icon: const Icon(LucideIcons.plus),
-                  onPressed: emotes.length >= _kMaxEmotes
+                  onPressed: emotes == null || emotes.length >= _kMaxEmotes
                       ? null
                       : () => _addEmote(context, ref),
                   child: const Text('Add emote'),
                 )
               : null,
           children: [
-            if (emotes.isEmpty)
+            if (emotes == null && emotesAsync.hasError)
+              SettingsLoadFailed(
+                title: "The emotes didn't load",
+                onRetry: () => ref.invalidate(serverEmotesProvider(serverId)),
+              )
+            else if (emotes == null)
+              const SizedBox.shrink()
+            else if (emotes.isEmpty)
               HollowEmptyState(
                 dense: true,
                 title: 'No emotes yet',
@@ -222,21 +236,30 @@ class EmotesPage extends ConsumerWidget {
         ),
         SettingsSection(
           title: 'Stickers',
-          count: '${stickers.length} of $maxStickers',
+          count:
+              stickers == null ? null : '${stickers.length} of $maxStickers',
           subtitle: 'Picked from the sticker panel. Several in a row tile edge '
               'to edge, so a pack can draw one big picture.',
           action: canManage
               ? HollowButton.ghost(
                   compact: true,
                   icon: const Icon(LucideIcons.plus),
-                  onPressed: stickers.length >= maxStickers
+                  onPressed: stickers == null || stickers.length >= maxStickers
                       ? null
                       : () => _addSticker(context, ref),
                   child: const Text('Add sticker'),
                 )
               : null,
           children: [
-            if (stickers.isEmpty)
+            if (stickers == null && stickersAsync.hasError)
+              SettingsLoadFailed(
+                title: "The stickers didn't load",
+                onRetry: () =>
+                    ref.invalidate(serverStickersProvider(serverId)),
+              )
+            else if (stickers == null)
+              const SizedBox.shrink()
+            else if (stickers.isEmpty)
               HollowEmptyState(
                 dense: true,
                 title: 'No stickers yet',

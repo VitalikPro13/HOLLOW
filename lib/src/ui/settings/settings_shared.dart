@@ -461,7 +461,7 @@ class AccentHueSliderRow extends StatelessWidget {
             enabledThumbRadius: thumbRadius,
             elevation: 2,
           ),
-          thumbColor: Colors.white,
+          thumbColor: Colors.white, // design-ignore: the hue picker's thumb, white over its own rainbow track
           overlayShape: SliderComponentShape.noOverlay,
           trackShape: RainbowSliderTrackShape(),
           activeTrackColor: Colors.transparent,

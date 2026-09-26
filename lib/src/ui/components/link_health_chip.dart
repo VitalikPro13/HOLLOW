@@ -74,7 +74,6 @@ class LinkHealthChip extends StatelessWidget {
                   label,
                   style: HollowTypography.caption.copyWith(
                     color: color,
-                    fontSize: 11,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -150,7 +149,6 @@ class LinkHealthBanner extends StatelessWidget {
                       detail,
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textTertiary,
-                        fontSize: 11,
                       ),
                     ),
                 ],
@@ -228,7 +226,6 @@ class LinkHealthHeader extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: HollowTypography.caption.copyWith(
                     color: hollow.textTertiary,
-                    fontSize: 11,
                   ),
                 ),
               ),

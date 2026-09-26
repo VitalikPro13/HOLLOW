@@ -186,8 +186,31 @@ class _HomeMainState extends ConsumerState<_HomeMain> {
   }
 }
 
-/// No friend and no server yet.
+/// Friends and servers have both been read from this device, so an empty one
+/// really is empty.
+bool homeListsLoaded(WidgetRef ref) =>
+    ref.watch(friendsLoadStateProvider).loaded &&
+    ref.watch(serverListLoadStateProvider).loaded;
+
+/// Why friends or servers failed to read, while one of them never has.
+Object? homeListsError(WidgetRef ref) =>
+    ref.watch(friendsLoadStateProvider).error ??
+    ref.watch(serverListLoadStateProvider).error;
+
+/// Reads again whichever of friends and servers failed.
+void homeRetryLists(WidgetRef ref) {
+  if (ref.read(friendsLoadStateProvider).error != null) {
+    ref.read(friendsProvider.notifier).loadAll();
+  }
+  if (ref.read(serverListLoadStateProvider).error != null) {
+    ref.read(serverListProvider.notifier).loadFromDb();
+  }
+}
+
+/// No friend and no server yet. False until both lists are read, so an
+/// existing user is never greeted as new.
 bool homeIsFirstRun(WidgetRef ref) =>
+    homeListsLoaded(ref) &&
     ref.watch(sortedFriendsProvider).isEmpty &&
     ref.watch(serverListProvider).isEmpty;
 
@@ -196,6 +219,7 @@ bool homeShowsSetup(WidgetRef ref) {
   final setup = ref.watch(homeSetupProvider);
   return setup.loaded &&
       !setup.hidden &&
+      homeListsLoaded(ref) &&
       (ref.watch(sortedFriendsProvider).isEmpty ||
           ref.watch(serverListProvider).isEmpty);
 }

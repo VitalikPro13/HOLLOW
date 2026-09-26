@@ -33,15 +33,13 @@ import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+/// The desktop member search box's fixed width beside the filter chips.
+const double _kSearchWidth = 240;
+
 /// Peer ids banned from a server. Invalidated after an unban.
 final bannedMembersProvider = FutureProvider.autoDispose
-    .family<List<String>, String>((ref, serverId) async {
-  try {
-    return await crdt_api.getBannedMembers(serverId: serverId);
-  } catch (_) {
-    return const [];
-  }
-});
+    .family<List<String>, String>(
+        (ref, serverId) => crdt_api.getBannedMembers(serverId: serverId));
 
 /// The role filter over the member list.
 enum MemberFilter { all, admins, moderators, members }
@@ -124,11 +122,13 @@ class _MembersPageState extends ConsumerState<MembersPage> {
     var shown = const <crdt_api.MemberFfi>[];
     if (members == null) {
       everyone = membersAsync.hasError
-          ? Text('Could not load the members',
-              style: HollowTypography.body.copyWith(color: hollow.error))
+          ? SettingsLoadFailed(
+              title: "The members didn't load",
+              onRetry: () => ref.invalidate(serverMembersProvider(_sid)),
+            )
           : const Padding(
               padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-              child: Center(child: HollowSpinner.medium()),
+              child: Center(child: HollowSpinner.medium(delayed: true)),
             );
     } else {
       final sorted = [...members]..sort((a, b) {
@@ -179,7 +179,7 @@ class _MembersPageState extends ConsumerState<MembersPage> {
           ] else
             Row(
               children: [
-                SizedBox(width: 240, child: search),
+                SizedBox(width: _kSearchWidth, child: search),
                 const SizedBox(width: HollowSpacing.lg),
                 Expanded(child: chips),
               ],
@@ -454,10 +454,10 @@ class _ModerationSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final muted =
-        ref.watch(mutedMembersProvider(serverId)).valueOrNull ?? const [];
-    final banned =
-        ref.watch(bannedMembersProvider(serverId)).valueOrNull ?? const [];
+    final mutedAsync = ref.watch(mutedMembersProvider(serverId));
+    final bannedAsync = ref.watch(bannedMembersProvider(serverId));
+    final muted = mutedAsync.valueOrNull;
+    final banned = bannedAsync.valueOrNull;
     final members =
         ref.watch(serverMembersProvider(serverId)).valueOrNull ?? const [];
     final profiles = ref.watch(profileProvider);
@@ -471,7 +471,16 @@ class _ModerationSection extends ConsumerWidget {
     return SettingsSection(
       title: 'Moderation',
       children: [
-        if (muted.isEmpty)
+        // Loading shows nothing: "Nobody is muted" before the read lands
+        // would be a claim we can't make yet.
+        if (muted == null && mutedAsync.hasError)
+          SettingsLoadFailed(
+            title: "The muted list didn't load",
+            onRetry: () => ref.invalidate(mutedMembersProvider(serverId)),
+          )
+        else if (muted == null)
+          const SizedBox.shrink()
+        else if (muted.isEmpty)
           const SettingsRow(title: 'Muted', subtitle: 'Nobody is muted')
         else
           SettingsExpandRow(
@@ -496,7 +505,14 @@ class _ModerationSection extends ConsumerWidget {
                 ),
             ],
           ),
-        if (banned.isEmpty)
+        if (banned == null && bannedAsync.hasError)
+          SettingsLoadFailed(
+            title: "The banned list didn't load",
+            onRetry: () => ref.invalidate(bannedMembersProvider(serverId)),
+          )
+        else if (banned == null)
+          const SizedBox.shrink()
+        else if (banned.isEmpty)
           const SettingsRow(title: 'Banned', subtitle: 'Nobody is banned')
         else
           SettingsExpandRow(

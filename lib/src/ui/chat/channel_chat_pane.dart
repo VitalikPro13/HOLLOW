@@ -41,6 +41,7 @@ import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -140,7 +141,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   Timer? _slowModeTimer;
   int? _highlightIndex;
   final _searchController = TextEditingController();
-  List<dynamic> _searchResults = [];
+  final _search = ChatSearchResults<storage_api.StoredChannelMessage>();
   final _searchFocusNode = FocusNode();
   bool _showScrollPill = false;
   /// Picked but not yet sent.
@@ -269,6 +270,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   bool _loadingHistory = false;
 
+  /// Whether the last history read found messages: an empty cache after an
+  /// empty read is an empty channel, not one sync cleared.
+  bool _historyHadMessages = false;
+
   Future<void> _loadHistory() async {
     if (_loadingHistory || _historyLoaded) return;
     // Always load from DB on first open: the in-memory cache can hold nothing
@@ -288,6 +293,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // build, so a list grown by loadHistory needs an explicit jump.
     _jumpToBottom();
     final msgs = ref.read(channelChatProvider)['${widget.serverId}:${widget.channelId}'];
+    _historyHadMessages = msgs != null && msgs.isNotEmpty;
     final latestId = msgs != null && msgs.isNotEmpty
         ? msgs.last.messageId
         : null;
@@ -429,21 +435,18 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     );
   }
 
-  Future<void> _onSearch(String query) async {
-    if (query.trim().isEmpty) {
-      setState(() => _searchResults = []);
-      return;
-    }
-    try {
-      final results = await storage_api.searchChannelMessages(
-        serverId: widget.serverId,
-        channelId: widget.channelId,
-        query: query.trim(),
-        limit: 20,
+  Future<void> _onSearch(String query) => _search.run(
+        query,
+        (q) => storage_api.searchChannelMessages(
+          serverId: widget.serverId,
+          channelId: widget.channelId,
+          query: q,
+          limit: 20,
+        ),
+        (apply) {
+          if (mounted) setState(apply);
+        },
       );
-      if (mounted) setState(() => _searchResults = results);
-    } catch (_) {}
-  }
 
   void _onTextChanged(String text) {
     _urlDebounce?.cancel();
@@ -599,27 +602,21 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         targetAnchor: Alignment.topLeft,
         followerAnchor: Alignment.bottomLeft,
         offset: const Offset(0, -4),
-        child: Material(
-          color: Colors.transparent,
+        child: DefaultTextStyle(
+          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
           child: Container(
             constraints: const BoxConstraints(maxHeight: 220),
             decoration: BoxDecoration(
               color: hollow.overlay,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.3),
-                  blurRadius: 12,
-                  offset: const Offset(0, -4),
-                ),
-              ],
+              boxShadow: HollowShadows.float,
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(hollow.radiusMd),
               child: ListView.builder(
                 shrinkWrap: true,
-                padding: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
                 itemCount: _mentionCandidates.length,
                 itemBuilder: (ctx, i) {
                   final c = _mentionCandidates[i];
@@ -877,6 +874,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
+    final replyText = _replyToText;
+    final replySender = _replyToSenderName;
+    final replyImage = _replyToImagePath;
     // Capture the staged preview BEFORE clearing state; with the fetch still in
     // flight there is nothing to capture, so the URL is remembered and the card
     // attaches when it lands (issue #45).
@@ -911,11 +911,25 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         // Nothing is in flight when the debounce never fired.
         if (!wasLoading) _fetchPreview(pendingUrl);
       }
-    } catch (_) {
-      // The provider adds the bubble only AFTER the network send, so a failure
-      // here would vanish silently: composer cleared, no bubble.
+    } catch (e) {
+      // The provider adds the bubble only AFTER the network send, so the text
+      // goes back where it came from or it is simply gone.
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to send message',
+      if (restoreFailedDraft(_controller, text)) {
+        if (_replyToMessageId == null) {
+          setState(() {
+            _replyToMessageId = replyMid;
+            _replyToText = replyText;
+            _replyToSenderName = replySender;
+            _replyToImagePath = replyImage;
+          });
+        }
+        _urlDebounce?.cancel();
+        _detectUrl();
+      }
+      // Mute, slow mode and missing permission each carry their own sentence.
+      HollowToast.show(
+          context, friendlyError(e, fallback: kSendFailedFallback),
           type: HollowToastType.error);
       return;
     }
@@ -1019,7 +1033,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final caption = _controller.expandedText().trim();
     _controller.clear();
     final members = ref.read(serverMembersProvider(widget.serverId)).valueOrNull;
-    final failed = await sendStagedAttachments(
+    final outcome = await sendStagedAttachments(
       items: items,
       caption: caption,
       addOptimistic: (item, messageId, text, albumId) {
@@ -1056,10 +1070,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       },
     );
     _recomputeSlowMode();
-    if (failed > 0 && mounted) {
-      HollowToast.show(
-          context,
-          failed == 1 ? 'A file failed to send' : '$failed files failed to send',
+    if (outcome.failed > 0 && mounted) {
+      HollowToast.show(context,
+          stagedSendFailureMessage(outcome.failed, outcome.firstError),
           type: HollowToastType.error);
     }
   }
@@ -1337,6 +1350,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // leaves nothing to render until the DB is read again.
     if (allMessages.isEmpty &&
         _historyLoaded &&
+        _historyHadMessages &&
         !_historyFailed &&
         !_loadingHistory) {
       _historyLoaded = false;
@@ -1471,7 +1485,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
     if (!next && (prev ?? false)) {
       _searchController.clear();
-      setState(() => _searchResults = []);
+      setState(_search.clear);
     }
   }
 
@@ -1589,22 +1603,18 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             prefixIcon: const Icon(LucideIcons.search, size: 16),
             onChanged: _onSearch,
           ),
-          if (_searchResults.isNotEmpty)
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 200),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: _searchResults.length,
-                itemBuilder: (_, index) =>
-                    _buildSearchResultTile(hollow, _searchResults[index]),
-              ),
-            ),
+          ChatSearchResultsView<storage_api.StoredChannelMessage>(
+            results: _search,
+            itemBuilder: (hit) => _buildSearchResultTile(hollow, hit),
+            onRetry: () => _onSearch(_searchController.text),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildSearchResultTile(HollowTheme hollow, dynamic msg) {
+  Widget _buildSearchResultTile(
+      HollowTheme hollow, storage_api.StoredChannelMessage msg) {
     // Collapse device to master so a result shows the person, not a raw device
     // id.
     final links = ref.watch(deviceLinkProvider);
@@ -1631,15 +1641,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   /// Closes search and scrolls to the tapped result. The index is against the
   /// DISPLAY list, possibly frozen, which is what [_scrollToMessage] takes.
-  void _jumpToSearchResult(dynamic msg) {
+  void _jumpToSearchResult(storage_api.StoredChannelMessage msg) {
     final messages =
         _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
     final idx = messages.indexWhere((m) => m.messageId == msg.messageId);
     ref.read(chatSearchOpenProvider.notifier).state = false;
-    setState(() {
-      _searchController.clear();
-      _searchResults = [];
-    });
+    _searchController.clear();
+    setState(_search.clear);
     if (idx != -1) _scrollToMessage(idx);
   }
 
@@ -1677,32 +1685,19 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         builder: (scopeContext) => Container(
             color: hollow.background,
             child: messages.isEmpty
-                ? (_historyFailed
-                    ? HollowEmptyState(
-                        glyph: LucideIcons.circleAlert,
-                        title: "These messages didn't load",
-                        action: HollowButton.ghost(
-                          onPressed: () {
-                            setState(() {
-                              _historyLoaded = false;
-                              _historyFailed = false;
-                            });
-                            _loadHistory();
-                          },
-                          child: const Text('Try again'),
-                        ),
-                      )
-                    : _historyLoaded
-                    ? HollowEmptyState(
-                        glyph: widget.isVoice
-                            ? LucideIcons.volume2
-                            : LucideIcons.hash,
-                        title: widget.isVoice
-                            ? 'Welcome to ${widget.channelName}'
-                            : 'Welcome to #${widget.channelName}',
-                        description: 'This is the beginning of the channel.',
-                      )
-                    : const SizedBox.shrink())
+                ? chatHistoryPlaceholder(
+                    loaded: _historyLoaded,
+                    failed: _historyFailed,
+                    onRetry: () {
+                      setState(() {
+                        _historyLoaded = false;
+                        _historyFailed = false;
+                      });
+                      _loadHistory();
+                    },
+                    start: () => channelConversationStart(widget.channelName,
+                        isVoice: widget.isVoice),
+                  )
                 : _buildMessageList(hollow, messages),
           ),
       ),
@@ -2019,9 +2014,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     try {
       await ref.read(channelChatProvider.notifier).deleteMessage(
           widget.serverId, widget.channelId, messageId);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to delete message',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Couldn't delete the message. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2030,9 +2026,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     try {
       await ref.read(channelChatProvider.notifier).editMessage(
           widget.serverId, widget.channelId, messageId, newText);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to save changes',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your edit didn't save. Try again."),
           type: HollowToastType.error);
       return;
     }
@@ -2109,9 +2106,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         await notifier.addReaction(
             widget.serverId, widget.channelId, msg.messageId!, emoji);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to update reaction',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your reaction didn't go through. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2153,11 +2151,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           messageId: messageId,
         );
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       HollowToast.show(
           context,
-          isPinned ? 'Failed to unpin message' : 'Failed to pin message',
+          friendlyError(e,
+              fallback: isPinned
+                  ? "Couldn't unpin the message. Try again."
+                  : "Couldn't pin the message. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2550,12 +2551,10 @@ class _ChannelConnectionStatus extends ConsumerWidget {
           ],
         );
       },
-      // Members not loaded yet, so report our own link, which we do know.
-      loading: () => ConnectionProgress(
-        key: ValueKey('conn-$serverId'),
-        stage: stageFor(false),
-      ),
-      error: (_, _) => const SizedBox.shrink(),
+      // Without the member list only our own link is known: "Only you" would
+      // be a guess about everyone else.
+      loading: () => ownLinkOfflineStatus(ref) ?? const SizedBox.shrink(),
+      error: (_, _) => ownLinkOfflineStatus(ref) ?? const SizedBox.shrink(),
     );
   }
 }

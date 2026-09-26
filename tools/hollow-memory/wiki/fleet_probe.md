@@ -171,6 +171,9 @@ alive is worse than a noisy log.
   real diagnosis (it has the provider state and the layout outline) but most of the time the only
   question is "what do I click next", and answering that by writing a file and then reading and
   grepping it costs a whole extra round trip. Batch it after whatever changed the screen.
+* **`hit`** (2026-09-26) — every widget a tap at `target`'s centre passes through, deepest first.
+  For a tap that lands and does nothing: an identical path before and after means the recognizer,
+  not a cover, is the problem.
 * **`capture`** — `as` plus one of `target` (the widget's text), `from: "provider"` + `key` (the
   dump's provider snapshot, e.g. `peerId`), or `from: "clipboard"`. Optional `regex` narrows it.
   The value comes back in the answer, and the orchestrator substitutes it into later steps on OTHER
@@ -268,6 +271,13 @@ so the scenario closes it by tapping a message, not the space above it.
   (a synthetic Enter key never fires `onSubmitted`).
 
 ## Traps, each of which cost a run
+
+0. **The probe binding used to swallow the Navigator's pointer cancel** (fixed 2026-09-26).
+   A route pushed mid-gesture (a long press opening a sheet) cancels the active pointers, and
+   `LiveTestWidgetsFlutterBinding` counted that cancel as a DEVICE event and dropped it, so the
+   row's recognizers stayed stuck and every later tap and long press on it did nothing. A real
+   phone never had it. `ui_probe_test.dart`'s `_ForwardCancels` passes PointerCancelEvents on;
+   keep it. Memory `feedback_probe_binding_drops_pointer_cancel`.
 
 1. **An instance that dies takes its reason with it.** An unhandled app exception ends the test
    body, the body IS the app, so the process exits — and in a fleet that looks like one instance

@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -236,13 +237,7 @@ class _NotificationCardWidgetState
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.2),
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 16,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
+                boxShadow: HollowShadows.float,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -265,10 +260,9 @@ class _NotificationCardWidgetState
                         Expanded(
                           child: Text(
                             card.title,
-                            style: HollowTypography.body.copyWith(
+                            style: HollowTypography.bodySmall.copyWith(
                               color: hollow.textPrimary,
                               fontWeight: FontWeight.w600,
-                              fontSize: 12,
                             ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
@@ -344,9 +338,8 @@ class _MessageRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final textStyle = HollowTypography.body.copyWith(
+    final textStyle = HollowTypography.bodySmall.copyWith(
       color: hollow.textSecondary,
-      fontSize: 12,
     );
 
     // A DM's header already names the sender; a channel needs it per row.
@@ -367,10 +360,9 @@ class _MessageRow extends StatelessWidget {
       children: [
         Text(
           '${message.senderName}: ',
-          style: HollowTypography.body.copyWith(
+          style: HollowTypography.bodySmall.copyWith(
             color: hollow.textPrimary,
             fontWeight: FontWeight.w600,
-            fontSize: 12,
           ),
         ),
         Expanded(

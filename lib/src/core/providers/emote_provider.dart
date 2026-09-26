@@ -21,26 +21,16 @@ final emoteBytesProvider =
 });
 
 /// A server's custom emote set (CRDT-replicated metadata).
-/// Invalidated on `ServerUpdated`.
+/// Invalidated on `ServerUpdated`. A failed read is an error, so the settings
+/// page can tell it from an empty set; pickers read `valueOrNull ?? []`.
 final serverEmotesProvider =
     FutureProvider.family<List<emotes_api.ServerEmote>, String>(
-        (ref, serverId) async {
-  try {
-    return await emotes_api.getServerEmotes(serverId: serverId);
-  } catch (_) {
-    return const [];
-  }
-});
+        (ref, serverId) => emotes_api.getServerEmotes(serverId: serverId));
 
 /// The user's personal (global) emote set — usable in every DM and server.
 final personalEmotesProvider =
-    FutureProvider<List<emotes_api.PersonalEmote>>((ref) async {
-  try {
-    return await emotes_api.listPersonalEmotes();
-  } catch (_) {
-    return const [];
-  }
-});
+    FutureProvider<List<emotes_api.PersonalEmote>>(
+        (ref) => emotes_api.listPersonalEmotes());
 
 /// Hashes already requested this session: every rendered unknown token would
 /// otherwise cross the FFI on each rebuild.

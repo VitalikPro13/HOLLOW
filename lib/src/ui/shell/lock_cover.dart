@@ -31,34 +31,38 @@ class LockCoverScreen extends ConsumerWidget {
     return PopScope(
       // Only the password lifts this. Escape and the back gesture do nothing.
       canPop: false,
-      child: Material(
-        color: hollow.background,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.lock, size: 32, color: hollow.accent),
-              const SizedBox(height: HollowSpacing.lg),
-              Text(
-                'Hollow is locked',
-                style: HollowTypography.heading
-                    .copyWith(color: hollow.textPrimary, fontSize: 16),
-              ),
-              const SizedBox(height: HollowSpacing.xs),
-              // The password prompt sits on top of this and says what to type,
-              // so the cover only carries what the prompt does not.
-              Text(
-                unlocking
-                    ? 'Unlocking…'
-                    : 'Messages and calls still reach you while it is locked.',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary, fontSize: 12),
-              ),
-              if (unlocking) ...[
+      // Opaque on purpose: nothing of the app may show through the lock.
+      child: ColoredBox(
+        color: hollow.opaqueBackground,
+        child: DefaultTextStyle(
+          style: HollowTypography.body,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(LucideIcons.lock, size: 32, color: hollow.accent),
                 const SizedBox(height: HollowSpacing.lg),
-                const HollowSpinner.medium(),
+                Text(
+                  'Hollow is locked',
+                  style: HollowTypography.subheading
+                      .copyWith(color: hollow.textPrimary),
+                ),
+                const SizedBox(height: HollowSpacing.xs),
+                // The password prompt sits on top of this and says what to type,
+                // so the cover only carries what the prompt does not.
+                Text(
+                  unlocking
+                      ? 'Unlocking…'
+                      : 'Messages and calls still reach you while it is locked.',
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+                if (unlocking) ...[
+                  const SizedBox(height: HollowSpacing.lg),
+                  const HollowSpinner.medium(),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),

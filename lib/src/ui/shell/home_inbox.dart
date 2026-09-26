@@ -29,6 +29,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
@@ -43,7 +44,12 @@ import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart'
-    show homeShowsSetup, kHomeRowInset;
+    show
+        homeListsError,
+        homeListsLoaded,
+        homeRetryLists,
+        homeShowsSetup,
+        kHomeRowInset;
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -950,6 +956,8 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
         ? ref.watch(deviceLinkProvider).identityOf(call.peerId!)
         : null;
     final callStartedAt = call.startedAt;
+    final listsLoaded = homeListsLoaded(ref);
+    final listsError = homeListsError(ref);
 
     return SliverMainAxisGroup(
       slivers: [
@@ -969,7 +977,28 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
             ),
           ),
         ),
-        if (shown.isEmpty && !showSaved)
+        if (shown.isEmpty && !showSaved && all.isEmpty && !listsLoaded)
+          SliverToBoxAdapter(
+            // Still reading friends and servers: nothing, never "none yet".
+            child: listsError == null
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: kHomeRowInset,
+                        vertical: HollowSpacing.md),
+                    child: HollowEmptyState(
+                      dense: true,
+                      title: "Your conversations didn't load",
+                      description: friendlyError(listsError),
+                      action: HollowButton.ghost(
+                        compact: true,
+                        onPressed: () => homeRetryLists(ref),
+                        child: const Text('Try again'),
+                      ),
+                    ),
+                  ),
+          )
+        else if (shown.isEmpty && !showSaved)
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xl),

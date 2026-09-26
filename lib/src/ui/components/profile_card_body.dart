@@ -120,7 +120,7 @@ class _ProfileFriendActionState extends ConsumerState<ProfileFriendAction> {
 Color profileRoleColor(String role, HollowTheme hollow) {
   return switch (role) {
     'owner' => hollow.warning,
-    'admin' => const Color(0xFFA78BFA),
+    'admin' => const Color(0xFFA78BFA), // design-ignore: role mark colour
     'moderator' =>
       Color.lerp(hollow.warning, hollow.error, 0.5) ?? hollow.warning,
     _ => hollow.textSecondary,

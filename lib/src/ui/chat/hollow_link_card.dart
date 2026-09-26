@@ -105,7 +105,7 @@ class _ShareLinkCard extends ConsumerWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 if (existing != null)
                   Text(
                     '${ShareCard.formatSize(existing.totalSize)}  ·  ${existing.chunksTotal} chunks',
@@ -179,7 +179,7 @@ class _ServerInviteCard extends ConsumerWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 if (alreadyJoined)
                   Text(
                     '${serverInfo.memberCount} ${serverInfo.memberCount == 1 ? 'member' : 'members'}  ·  ${serverInfo.channelCount} ${serverInfo.channelCount == 1 ? 'channel' : 'channels'}',
@@ -190,10 +190,7 @@ class _ServerInviteCard extends ConsumerWidget {
                 else
                   Text(
                     link.id,
-                    style: HollowTypography.mono.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
-                    ),
+                    style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -251,13 +248,10 @@ class _RoomInviteCard extends ConsumerWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 Text(
                   link.id,
-                  style: HollowTypography.mono.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
+                  style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -312,7 +306,7 @@ class _RedeemCodeCard extends ConsumerWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 Text(
                   'Tap to keep it in Hollow',
                   style: HollowTypography.caption.copyWith(
@@ -357,13 +351,10 @@ class _ConferenceInviteCard extends ConsumerWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 Text(
                   link.id,
-                  style: HollowTypography.mono.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
+                  style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -427,13 +418,10 @@ class _RecoveryLinkCard extends ConsumerWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 Text(
                   link.id,
-                  style: HollowTypography.mono.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
+                  style: HollowTypography.monoSmall.copyWith(color: hollow.textSecondary),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -469,7 +457,7 @@ class _RelayHint extends ConsumerWidget {
     }
     final hollow = HollowTheme.of(context);
     return Padding(
-      padding: const EdgeInsets.only(top: 2),
+      padding: const EdgeInsets.only(top: HollowSpacing.xxs),
       child: Text(
         'On $target',
         style: HollowTypography.caption.copyWith(color: hollow.textTertiary),

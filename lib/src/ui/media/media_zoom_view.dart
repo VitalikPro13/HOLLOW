@@ -5,10 +5,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 
 /// Largest edge a decoded still may have. Past this the GPU refuses the
@@ -64,7 +62,7 @@ class MediaZoomView extends StatefulWidget {
 class _MediaZoomViewState extends State<MediaZoomView> {
   Size? _imageSize;
   Size? _viewport;
-  bool _missing = false;
+  _MediaFailure? _failure;
 
   @override
   void initState() {
@@ -77,7 +75,7 @@ class _MediaZoomViewState extends State<MediaZoomView> {
     super.didUpdateWidget(old);
     if (old.item.fileId != widget.item.fileId) {
       _imageSize = null;
-      _missing = false;
+      _failure = null;
       _resolveSize();
     } else if (!old.isCurrent && widget.isCurrent) {
       // The route only tracks the current page's geometry, and it forgot ours
@@ -93,7 +91,7 @@ class _MediaZoomViewState extends State<MediaZoomView> {
   void _resolveSize() {
     final path = widget.item.diskPath;
     if (path == null || !File(path).existsSync()) {
-      _missing = true;
+      _failure = _MediaFailure.missing;
       return;
     }
     final declared = widget.item.pixelSize;
@@ -113,7 +111,7 @@ class _MediaZoomViewState extends State<MediaZoomView> {
       _publish();
     }, onError: (_, _) {
       stream.removeListener(listener);
-      if (mounted) setState(() => _missing = true);
+      if (mounted) setState(() => _failure = _MediaFailure.undecodable);
     });
     stream.addListener(listener);
   }
@@ -142,7 +140,9 @@ class _MediaZoomViewState extends State<MediaZoomView> {
   @override
   Widget build(BuildContext context) {
     final path = widget.item.diskPath;
-    if (path == null || _missing) return const _MediaMissing();
+    if (path == null) return const _MediaUnavailable(_MediaFailure.missing);
+    final failure = _failure;
+    if (failure != null) return _MediaUnavailable(failure);
 
     Widget image;
     if (widget.item.kind == MediaKind.gif) {
@@ -150,14 +150,15 @@ class _MediaZoomViewState extends State<MediaZoomView> {
         path: path,
         animated: true,
         fit: BoxFit.contain,
-        errorWidget: const _MediaMissing(),
+        errorWidget: const _MediaUnavailable(_MediaFailure.undecodable),
       );
     } else {
       image = Image(
         image: _provider(path),
         fit: BoxFit.contain,
         filterQuality: widget.filterQuality,
-        errorBuilder: (_, _, _) => const _MediaMissing(),
+        errorBuilder: (_, _, _) =>
+            const _MediaUnavailable(_MediaFailure.undecodable),
       );
     }
 
@@ -387,29 +388,25 @@ class _ZoomSurfaceState extends State<ZoomSurface> {
   }
 }
 
-/// The honest end state for a file that is no longer on this device: the
-/// viewer says so instead of painting a black rectangle.
-class _MediaMissing extends StatelessWidget {
-  const _MediaMissing();
+enum _MediaFailure { missing, undecodable }
+
+/// The honest end state for a file the viewer cannot show, instead of a black
+/// rectangle: gone from this device, or there but not decodable.
+class _MediaUnavailable extends StatelessWidget {
+  final _MediaFailure failure;
+  const _MediaUnavailable(this.failure);
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.imageOff, size: 32, color: hollow.textSecondary),
-          const SizedBox(height: HollowSpacing.md),
-          Text(
-            'This file is no longer on this device',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 13,
-              decoration: TextDecoration.none,
-            ),
-          ),
-        ],
+    // A raw route over the media backdrop has no Material to reset the text
+    // decoration.
+    return DefaultTextStyle.merge(
+      style: const TextStyle(decoration: TextDecoration.none),
+      child: HollowEmptyState(
+        glyph: LucideIcons.imageOff,
+        title: failure == _MediaFailure.missing
+            ? 'This file is no longer on this device'
+            : "This image couldn't be opened",
       ),
     );
   }

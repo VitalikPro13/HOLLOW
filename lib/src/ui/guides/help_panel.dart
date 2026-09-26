@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -94,6 +95,41 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
     ];
   }
 
+  Widget _header(HollowTheme hollow) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HollowSpacing.lg,
+        HollowSpacing.lg,
+        HollowSpacing.sm,
+        HollowSpacing.md,
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.circleHelp,
+              size: 18, color: hollow.accent),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              'Help',
+              style: HollowTypography.subheading
+                  .copyWith(color: hollow.textPrimary),
+            ),
+          ),
+          if (widget.onClose != null)
+            HollowPressable(
+              onTap: widget.onClose,
+              semanticLabel: 'Close',
+              borderRadius:
+                  BorderRadius.circular(hollow.radiusMd),
+              padding: const EdgeInsets.all(HollowSpacing.xs),
+              child: Icon(LucideIcons.x,
+                  size: 18, color: hollow.textSecondary),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -101,8 +137,22 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
 
     return SafeArea(
       child: manifestAsync.when(
-        loading: () => const Center(child: HollowSpinner.large()),
-        error: (_, _) => _HelpError(onClose: widget.onClose),
+        loading: () => const Center(child: HollowSpinner.large(delayed: true)),
+        error: (_, _) => Column(
+          children: [
+            _header(hollow),
+            Expanded(
+              child: HollowEmptyState(
+                title: "Help didn't load",
+                action: HollowButton.ghost(
+                  onPressed: () => ref.invalidate(helpManifestProvider),
+                  loading: manifestAsync.isLoading,
+                  child: const Text('Try again'),
+                ),
+              ),
+            ),
+          ],
+        ),
         data: (manifest) {
           // Expand the first module by default, once.
           if (!_seededExpansion && manifest.modules.isNotEmpty) {
@@ -123,38 +173,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  HollowSpacing.lg,
-                  HollowSpacing.lg,
-                  HollowSpacing.sm,
-                  HollowSpacing.md,
-                ),
-                child: Row(
-                  children: [
-                    Icon(LucideIcons.circleHelp,
-                        size: 18, color: hollow.accent),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Expanded(
-                      child: Text(
-                        'Help',
-                        style: HollowTypography.subheading
-                            .copyWith(color: hollow.textPrimary),
-                      ),
-                    ),
-                    if (widget.onClose != null)
-                      HollowPressable(
-                        onTap: widget.onClose,
-                        semanticLabel: 'Close',
-                        borderRadius:
-                            BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child: Icon(LucideIcons.x,
-                            size: 18, color: hollow.textSecondary),
-                      ),
-                  ],
-                ),
-              ),
+              _header(hollow),
 
               Padding(
                 padding: const EdgeInsets.fromLTRB(
@@ -203,48 +222,6 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
             ],
           );
         },
-      ),
-    );
-  }
-}
-
-/// Error state, with a retry.
-class _HelpError extends ConsumerWidget {
-  final VoidCallback? onClose;
-  const _HelpError({this.onClose});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.circleAlert,
-                size: 32, color: hollow.textSecondary.withValues(alpha: 0.5)),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              "Couldn't load the help content.",
-              textAlign: TextAlign.center,
-              style:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            HollowPressable(
-              onTap: () => ref.invalidate(helpManifestProvider),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
-                vertical: HollowSpacing.xs,
-              ),
-              child: Text('Try again',
-                  style:
-                      HollowTypography.label.copyWith(color: hollow.accent)),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -310,13 +287,11 @@ class _CategorySection extends StatelessWidget {
                           .copyWith(color: hollow.textPrimary),
                     ),
                     if (module.subtitle != null) ...[
-                      const SizedBox(height: 2),
+                      const SizedBox(height: HollowSpacing.xxs),
                       Text(
                         module.subtitle!,
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                        ),
+                        style: HollowTypography.caption
+                            .copyWith(color: hollow.textSecondary),
                       ),
                     ],
                   ],
@@ -370,8 +345,8 @@ class _LessonRow extends StatelessWidget {
             width: 30,
             child: Text(
               lesson.id,
-              style: HollowTypography.mono
-                  .copyWith(color: hollow.accent, fontSize: 11),
+              style: HollowTypography.monoSmall
+                  .copyWith(color: hollow.accentText),
             ),
           ),
           const SizedBox(width: HollowSpacing.xs),
@@ -535,8 +510,7 @@ class HelpMarkdown extends StatelessWidget {
           fontWeight: FontWeight.w700,
         ),
         code: HollowTypography.mono.copyWith(
-          color: hollow.accent,
-          fontSize: 12,
+          color: hollow.accentText,
           backgroundColor: hollow.background,
         ),
         a: HollowTypography.body.copyWith(

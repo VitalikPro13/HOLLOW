@@ -2,14 +2,19 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/mobile/mobile_share_fullscreen.dart';
@@ -27,11 +32,16 @@ class MobileVoiceChannelRoute extends ConsumerStatefulWidget {
   final String channelId;
   final String channelName;
 
+  /// The join this route was opened for, where the opener started one. A
+  /// failed join closes the route; the opener says why.
+  final Future<void>? join;
+
   const MobileVoiceChannelRoute({
     super.key,
     required this.serverId,
     required this.channelId,
     required this.channelName,
+    this.join,
   });
 
   @override
@@ -43,11 +53,68 @@ class _MobileVoiceChannelRouteState
     extends ConsumerState<MobileVoiceChannelRoute> {
   bool _wakelockOn = false;
 
+  /// Set once we are in the room; until then the route shows the join.
+  bool _joined = false;
+
+  /// Nothing about the join shows for its first second.
+  bool _slow = false;
+  Timer? _slowTimer;
+  Timer? _joinDeadline;
+
+  static const _joinTimeout = Duration(seconds: 20);
+
+  /// How long the join event may trail a join call that returned without one.
+  static const _joinGrace = Duration(seconds: 8);
+
   late final VcCallStageSource _source = VcCallStageSource(
       serverId: widget.serverId, channelId: widget.channelId);
 
   @override
+  void initState() {
+    super.initState();
+    _joined = _isHere(ref.read(voiceChannelProvider));
+    if (_joined) return;
+    _slowTimer = Timer(HollowSpinner.revealAfter, () {
+      if (mounted) setState(() => _slow = true);
+    });
+    _armJoinDeadline(_joinTimeout);
+    widget.join?.then((_) {
+      // A join that returned without entering (no TURN, a call) toasts why.
+      if (mounted && !_joined) _armJoinDeadline(_joinGrace);
+    }, onError: (Object _) {
+      if (mounted && !_joined) _close();
+    });
+  }
+
+  void _armJoinDeadline(Duration after) {
+    _joinDeadline?.cancel();
+    _joinDeadline = Timer(after, _giveUpJoin);
+  }
+
+  /// Closes a join that never arrived. Offline, the route stays and says so,
+  /// and the deadline starts over once the link is back.
+  void _giveUpJoin() {
+    if (!mounted || _joined) return;
+    if (_isOffline(ref.read(overallConnectionProvider))) return;
+    HollowToast.show(context, "Couldn't join the room",
+        type: HollowToastType.error);
+    _close();
+  }
+
+  static bool _isOffline(OverallConnection link) =>
+      link == OverallConnection.offline ||
+      link == OverallConnection.reconnecting ||
+      link == OverallConnection.error;
+
+  Future<void> _leaveBeforeJoined() async {
+    await leaveVoiceRoom(context, ref);
+    if (mounted) _close();
+  }
+
+  @override
   void dispose() {
+    _slowTimer?.cancel();
+    _joinDeadline?.cancel();
     if (_wakelockOn) {
       unawaited(WakelockPlus.disable().catchError((_) {}));
     }
@@ -84,9 +151,18 @@ class _MobileVoiceChannelRouteState
     ref.listen<VoiceChannelState>(voiceChannelProvider, (prev, next) {
       if (prev != null && _isHere(prev) && !_isHere(next) && mounted) _close();
     });
+    ref.listen<OverallConnection>(overallConnectionProvider, (prev, next) {
+      if (!_joined && prev != null && _isOffline(prev) && !_isOffline(next)) {
+        _armJoinDeadline(_joinTimeout);
+      }
+    });
 
     final data = _source.watchData(context, ref);
-    if (data == null) return Scaffold(backgroundColor: hollow.background);
+    if (data == null) return _joining(hollow);
+    if (!_joined) {
+      _joined = true;
+      _joinDeadline?.cancel();
+    }
     final vc = ref.watch(voiceChannelProvider);
     final watched = watchedShareOf(data);
     _syncWakelock(
@@ -147,6 +223,53 @@ class _MobileVoiceChannelRouteState
     );
   }
 
+  /// Before the join lands: the header, the wait (or why it is stuck), and
+  /// Leave, so the screen is never blank or a dead end.
+  Widget _joining(HollowTheme hollow) {
+    final offline = _isOffline(ref.watch(overallConnectionProvider));
+    final conference = _source.isConference;
+    final Widget status;
+    if (offline) {
+      status = const HollowEmptyState(title: "You're offline");
+    } else if (!_slow) {
+      status = const SizedBox.shrink();
+    } else {
+      status = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const HollowSpinner.large(),
+          const SizedBox(height: HollowSpacing.md),
+          Text(
+            conference ? 'Joining the meeting' : 'Joining the room',
+            style: HollowTypography.bodyTouch
+                .copyWith(color: hollow.textSecondary),
+          ),
+        ],
+      );
+    }
+    return Scaffold(
+      backgroundColor: hollow.background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            MobileCallTopBar(
+              title: widget.channelName,
+              onMinimise: () => Navigator.of(context).maybePop(),
+            ),
+            Expanded(child: Center(child: status)),
+            MobileCallControlRow(controls: [
+              leaveControl(
+                word: 'Leave',
+                purpose: conference ? 'Leave the meeting' : 'Leave the room',
+                onTap: _leaveBeforeJoined,
+              ),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _room(CallStageData data) {
     return ListView(
       padding: const EdgeInsets.fromLTRB(HollowSpacing.lg, HollowSpacing.sm,
@@ -187,7 +310,7 @@ class _MobileVoiceChannelRouteState
         ),
       cameraControl(
         on: vc.isCameraOn,
-        onTap: () => notifier.toggleCamera().catchError((Object _) {}),
+        onTap: () => toggleCallCamera(context, dm: false),
       ),
       if (isPhoneCallPlatform || callCanShareScreen)
         shareControl(

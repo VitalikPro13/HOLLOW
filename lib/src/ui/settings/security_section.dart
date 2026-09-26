@@ -3,9 +3,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -312,15 +315,42 @@ class AlwaysRelayCallsToggle extends ConsumerWidget {
           'little. Applies after a restart.',
       value: ref.watch(alwaysRelayCallsProvider),
       onChanged: (val) async {
+        final notifier = ref.read(alwaysRelayCallsProvider.notifier);
         try {
-          await ref.read(alwaysRelayCallsProvider.notifier).setEnabled(val);
+          await notifier.setEnabled(val);
         } catch (e) {
           if (context.mounted) {
             HollowToast.show(context, friendlyError(e),
                 type: HollowToastType.error);
           }
+          return;
+        }
+        if (notifier.needsRestart && context.mounted) {
+          await _offerRestart(context, ref);
         }
       },
+    );
+  }
+
+  /// The policy is read when the node starts, so the change waits for a
+  /// restart. A phone cannot relaunch itself: it closes and is reopened.
+  static Future<void> _offerRestart(BuildContext context, WidgetRef ref) {
+    final phone = Platform.isAndroid || Platform.isIOS;
+    final inCall = ref.read(callProvider).status != CallStatus.idle ||
+        ref.read(voiceChannelProvider).currentChannelId != null;
+    return showHollowConfirm(
+      context: context,
+      title: phone ? 'Close Hollow now?' : 'Restart Hollow now?',
+      message: [
+        phone
+            ? 'Always relay calls starts working the next time you open '
+                'Hollow.'
+            : 'Always relay calls starts working after Hollow restarts.',
+        if (inCall) 'Your call ends when Hollow closes.',
+      ].join(' '),
+      confirmLabel: phone ? 'Close Hollow' : 'Restart now',
+      cancelLabel: 'Later',
+      onConfirm: () => relaunchApp(),
     );
   }
 }
@@ -369,6 +399,10 @@ class _SecurityAppLockSectionState
   bool _hasLaunchSecret = false;
   bool _protectionLoading = true;
 
+  /// The status read failed: the controls stay hidden, since defaults would
+  /// offer a password holder "Set password".
+  bool _protectionFailed = false;
+
   // A phone's lock is a PIN or a password, optionally opened by a biometric
   // that stores the secret behind the OS prompt.
   static bool get _phone => Platform.isAndroid || Platform.isIOS;
@@ -410,12 +444,35 @@ class _SecurityAppLockSectionState
         _hasOsKeychain = status.hasOsKeychain;
         _hasLaunchSecret = launchSecret;
         _protectionLoading = false;
+        _protectionFailed = false;
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _protectionLoading = false);
+      setState(() {
+        _protectionLoading = false;
+        _protectionFailed = true;
+      });
     }
   }
+
+  void _retryProtectionStatus() {
+    setState(() {
+      _protectionLoading = true;
+      _protectionFailed = false;
+    });
+    _loadProtectionStatus();
+  }
+
+  Widget _protectionFailedRow(String title) => SettingsRow(
+        title: title,
+        subtitle: "Couldn't read your lock settings",
+        trailing: HollowButton.ghost(
+          compact: true,
+          touch: _phone,
+          onPressed: _retryProtectionStatus,
+          child: const Text('Try again'),
+        ),
+      );
 
   Future<void> _enablePassword() async {
     final passphrase = await askSecretDialog(
@@ -702,7 +759,10 @@ class _SecurityAppLockSectionState
         title: 'App lock',
         children: [
           if (_protectionLoading)
-            const SettingsRow(title: 'App lock', trailing: HollowSpinner())
+            const SettingsRow(
+                title: 'App lock', trailing: HollowSpinner(delayed: true))
+          else if (_protectionFailed)
+            _protectionFailedRow('App lock')
           else ...[
             ..._phoneLockRows(),
             if (_hasPassword) ..._launchRows(),
@@ -718,7 +778,10 @@ class _SecurityAppLockSectionState
       title: 'App lock',
       children: [
         if (_protectionLoading)
-          const SettingsRow(title: 'Password', trailing: HollowSpinner())
+          const SettingsRow(
+              title: 'Password', trailing: HollowSpinner(delayed: true))
+        else if (_protectionFailed)
+          _protectionFailedRow('Password')
         else if (!_hasPassword)
           SettingsRow(
             title: 'Password',

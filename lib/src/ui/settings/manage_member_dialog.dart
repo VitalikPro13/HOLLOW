@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
+import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Member management from the profile card (issue #48): role, labels and
@@ -285,15 +286,22 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog>
   }
 
   Widget _buildLabelsSection() {
-    final labels =
-        ref.watch(serverLabelsProvider(widget.serverId)).valueOrNull ??
-            const <crdt_api.LabelFfi>[];
+    final labelsAsync = ref.watch(serverLabelsProvider(widget.serverId));
+    final labels = labelsAsync.valueOrNull;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const HollowSectionHeader('Labels', dense: true),
-        if (labels.isEmpty)
+        if (labels == null && labelsAsync.hasError)
+          SettingsLoadFailed(
+            title: "The labels didn't load",
+            onRetry: () =>
+                ref.invalidate(serverLabelsProvider(widget.serverId)),
+          )
+        else if (labels == null)
+          const SizedBox.shrink()
+        else if (labels.isEmpty)
           const HollowEmptyState(
               dense: true, title: 'This server has no labels yet')
         else
@@ -353,9 +361,9 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog>
   }
 
   Widget _buildGrantsSection(HollowTheme hollow) {
+    final channelsAsync = ref.watch(serverChannelsProvider(widget.serverId));
     final channels =
-        ref.watch(serverChannelsProvider(widget.serverId)).valueOrNull ??
-            const <String, ChannelInfo>{};
+        channelsAsync.valueOrNull ?? const <String, ChannelInfo>{};
     // Only label-gated channels can need a grant; everything else follows the
     // tier ladder. A redundant grant is harmless, and computing per-member
     // visibility here would re-implement the Rust predicate.
@@ -368,7 +376,15 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const HollowSectionHeader('Temporary channel access', dense: true),
-        if (gated.isEmpty)
+        if (!channelsAsync.hasValue && channelsAsync.hasError)
+          SettingsLoadFailed(
+            title: "The channels didn't load",
+            onRetry: () =>
+                ref.invalidate(serverChannelsProvider(widget.serverId)),
+          )
+        else if (!channelsAsync.hasValue)
+          const SizedBox.shrink()
+        else if (gated.isEmpty)
           const HollowEmptyState(
               dense: true, title: 'No channel here needs a label to see it')
         else

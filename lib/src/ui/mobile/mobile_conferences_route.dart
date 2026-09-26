@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -19,6 +21,8 @@ import 'package:hollow/src/ui/shell/conference_actions.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart'
     show
         conferenceDenyMessage,
+        conferenceLinkDown,
+        conferenceLobbyCopy,
         promptConferenceAccessCode,
         showConferenceRoomFormDialog,
         showJoinConferenceDialog;
@@ -160,6 +164,21 @@ class _MobileConferencesRouteState
   }
 
   Widget _buildRoomList(HollowTheme hollow, ConferenceState conf) {
+    if (!conf.roomsLoaded) {
+      final error = conf.roomsError;
+      if (error == null) {
+        return const Center(child: HollowSpinner.large(delayed: true));
+      }
+      return HollowEmptyState(
+        title: "Your rooms didn't load",
+        description: friendlyError(error),
+        action: HollowButton.ghost(
+          touch: true,
+          onPressed: () => ref.read(conferenceProvider.notifier).loadRooms(),
+          child: const Text('Try again'),
+        ),
+      );
+    }
     if (conf.rooms.isEmpty) {
       return const HollowEmptyState(
         glyph: LucideIcons.video,
@@ -180,6 +199,13 @@ class _MobileConferencesRouteState
   Widget _buildLobby(HollowTheme hollow, ConferenceState conf) {
     final hostName = conf.hostName;
     final hostKnown = hostName != null && hostName.isNotEmpty;
+    final joining = conf.lobbyStatus == ConferenceLobbyStatus.admitted;
+    final offline =
+        !joining && conferenceLinkDown(ref.watch(overallConnectionProvider));
+    final (title, note) = conferenceLobbyCopy(
+        hostName: hostKnown ? hostName : null,
+        joining: joining,
+        offline: offline);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.xl),
@@ -199,31 +225,30 @@ class _MobileConferencesRouteState
               const SizedBox(height: HollowSpacing.lg),
             ],
             Text(
-              hostKnown
-                  ? "You're in the waiting room for $hostName's meeting"
-                  : 'Waiting for the host to start the meeting',
+              title,
               style: HollowTypography.subheading
                   .copyWith(color: hollow.textPrimary),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: HollowSpacing.xs),
             Text(
-              // LobbyInfo is the host's reply to our knock, so until it arrives
-              // the meeting has not started.
-              hostKnown
-                  ? 'The host will let you in.'
-                  : "You'll join automatically once it begins.",
+              note,
               style: HollowTypography.body
                   .copyWith(color: hollow.textSecondary),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: HollowSpacing.lg),
-            const HollowSpinner.medium(),
-            const SizedBox(height: HollowSpacing.lg),
+            // Offline, nothing is on its way, so nothing spins.
+            if (!offline) ...[
+              HollowSpinner.medium(delayed: joining),
+              const SizedBox(height: HollowSpacing.lg),
+            ],
             HollowButton.ghost(
               touch: true,
-              onPressed: () => leaveConferenceMeeting(context, ref),
-              child: const Text('Cancel'),
+              onPressed: () => joining
+                  ? endOrLeaveConferenceMeeting(context, ref)
+                  : leaveConferenceMeeting(context, ref),
+              child: Text(joining ? 'Leave' : 'Cancel'),
             ),
           ],
         ),
@@ -313,9 +338,29 @@ class _MobileConferencesRouteState
 
 /// One room at touch size: its name, what it asks of a joiner, Start meeting,
 /// and More (also on a long press) with the rest.
-class _MobileRoomRow extends ConsumerWidget {
+class _MobileRoomRow extends ConsumerStatefulWidget {
   final ConferenceRoom room;
   const _MobileRoomRow({super.key, required this.room});
+
+  @override
+  ConsumerState<_MobileRoomRow> createState() => _MobileRoomRowState();
+}
+
+class _MobileRoomRowState extends ConsumerState<_MobileRoomRow> {
+  bool _starting = false;
+
+  ConferenceRoom get room => widget.room;
+
+  /// Busy while the meeting starts, so a second tap cannot start it twice.
+  Future<void> _start() async {
+    if (_starting) return;
+    setState(() => _starting = true);
+    try {
+      await ref.read(conferenceProvider.notifier).startMeeting(room);
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
+  }
 
   void _openMenu(BuildContext context, WidgetRef ref, Offset anchor) {
     showConferenceRoomMenu(
@@ -330,7 +375,7 @@ class _MobileRoomRow extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -371,8 +416,8 @@ class _MobileRoomRow extends ConsumerWidget {
             HollowButton.outline(
               compact: true,
               touch: true,
-              onPressed: () =>
-                  ref.read(conferenceProvider.notifier).startMeeting(room),
+              loading: _starting,
+              onPressed: _start,
               child: const Text('Start meeting'),
             ),
             const SizedBox(width: HollowSpacing.xs),

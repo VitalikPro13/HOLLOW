@@ -214,7 +214,9 @@ class _FriendStrip extends StatelessWidget {
       final friend =
           friends[divider >= 0 && index > divider ? index - 1 : index];
       return Padding(
-        padding: EdgeInsets.only(left: index == 0 ? 0 : HollowSpacing.xs),
+        padding: index == 0
+            ? EdgeInsets.zero
+            : const EdgeInsets.only(left: HollowSpacing.xs),
         child: _FriendChip(key: ValueKey(friend.peerId), peerId: friend.peerId),
       );
     }

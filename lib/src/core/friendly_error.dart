@@ -53,7 +53,13 @@ String _rawMessage(Object error) {
   return error.toString();
 }
 
+/// Raw texts already logged: a failed row shows its sentence from `build`, and
+/// every rebuild would log the same failure again.
+final _logged = <String>{};
+
 void _log(Object error, String raw) {
+  if (!_logged.add(raw)) return;
+  if (_logged.length > 256) _logged.remove(_logged.first);
   try {
     network_api
         .logFromDart(message: '[friendlyError] ${error.runtimeType}: $raw')

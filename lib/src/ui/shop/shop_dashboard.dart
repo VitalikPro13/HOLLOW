@@ -1,6 +1,7 @@
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
@@ -113,11 +114,16 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
         HollowMenuItem(
           icon: LucideIcons.refreshCw,
           label: 'Refresh',
-          onTap: () {
+          onTap: () async {
             ref.invalidate(shop.shopCatalogProvider);
             // The catalog is fetched fresh every time, so the toast is the
             // only sign the tap did anything when nothing on the wall changed.
-            HollowToast.show(context, 'Shop refreshed');
+            try {
+              await ref.read(shop.shopCatalogProvider.future);
+            } catch (_) {
+              return; // The page shows the failure itself.
+            }
+            if (mounted) HollowToast.show(context, 'Shop refreshed');
           },
         ),
         // The phone's Profile is one tap back in Settings; the desktop's is a
@@ -171,7 +177,7 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
       _buildFilters(pad, touch),
       ...catalog.when(
         loading: () => _skeletonShelves(pad, gridPad, squareCols, wideCols),
-        error: (error, _) => [_buildError(error)],
+        error: (error, _) => [_buildError(error, retrying: catalog.isLoading)],
         data: (data) =>
             _buildShelves(hollow, data, pad, gridPad, squareCols, wideCols),
       ),
@@ -416,14 +422,15 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
     return out;
   }
 
-  Widget _buildError(Object error) {
-    final message = error.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
+  Widget _buildError(Object error, {required bool retrying}) {
     return HollowEmptyState(
       glyph: LucideIcons.wifiOff,
       title: 'The shop could not be reached',
-      description: message,
-      action: HollowButton.outline(
+      description: friendlyError(error,
+          fallback: 'Check your connection and try again.'),
+      action: HollowButton.ghost(
         onPressed: () => ref.invalidate(shop.shopCatalogProvider),
+        loading: retrying,
         child: const Text('Try again'),
       ),
     );

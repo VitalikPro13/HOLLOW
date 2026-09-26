@@ -20,6 +20,7 @@ import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -519,7 +520,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
             _posterLayer(thumbPath),
             if (blocked)
               Container(
-                color: Colors.black.withValues(alpha: 0.65),
+                color: HollowColors.mediaBlack.withValues(alpha: 0.65),
                 child: Center(
                   child: Padding(
                     padding:
@@ -536,7 +537,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                         Text(widget.status.caption!,
                           textAlign: TextAlign.center,
                           style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary, fontSize: 11)),
+                            color: hollow.textSecondary)),
                       ],
                     ),
                   ),
@@ -549,7 +550,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 child: _CenterCircle(
                   child: HollowSpinner.large(
                     value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
-                    color: Colors.white, // design-ignore: over video
+                    color: HollowColors.onMedia,
                   ),
                 ),
               )
@@ -558,7 +559,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 child: _CenterCircle(
                   child: Icon(
                     canPlay ? LucideIcons.play : LucideIcons.download,
-                    color: Colors.white,
+                    color: HollowColors.onMedia,
                     size: 28,
                   ),
                 ),
@@ -572,7 +573,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                   value: progress > 0 ? progress : null,
                   minHeight: 3,
                   color: hollow.accent,
-                  backgroundColor: Colors.white.withValues(alpha: 0.1),
+                  backgroundColor: HollowColors.onMedia.withValues(alpha: 0.1),
                 ),
               ),
             if (isDownloading)
@@ -640,16 +641,16 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       fit: StackFit.expand,
       children: [
         _posterLayer(thumbPath),
-        Container(color: Colors.black.withValues(alpha: 0.5)),
+        Container(color: HollowColors.mediaBlack.withValues(alpha: 0.5)),
         Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const HollowSpinner.large(color: Colors.white), // design-ignore: over video
+            const HollowSpinner.large(color: HollowColors.onMedia),
             const SizedBox(height: HollowSpacing.md),
             Text(
               phase,
-              style: HollowTypography.caption
-                  .copyWith(color: Colors.white, fontSize: 12),
+              style: HollowTypography.bodySmall
+                  .copyWith(color: HollowColors.onMedia),
               textAlign: TextAlign.center,
             ),
           ],
@@ -669,7 +670,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
         fit: StackFit.expand,
         children: [
           _posterLayer(_resolveThumbnailImagePath()),
-          Container(color: Colors.black.withValues(alpha: 0.55)),
+          Container(color: HollowColors.mediaBlack.withValues(alpha: 0.55)),
         ],
       );
     }
@@ -821,7 +822,7 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
           fit: StackFit.expand,
           children: [
             Container(
-              color: Colors.black,
+              color: HollowColors.mediaBlack,
               child: Center(
                 child: AspectRatio(
                   aspectRatio: c.value.aspectRatio,
@@ -885,12 +886,12 @@ class _ControlBar extends StatelessWidget {
 
     return Container(
       decoration: BoxDecoration(
-        gradient: LinearGradient(
+        gradient: LinearGradient( // design-ignore: legibility scrim under the controls, fading to the video
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
             Colors.transparent,
-            Colors.black.withValues(alpha: 0.75),
+            HollowColors.mediaBlack.withValues(alpha: 0.75),
           ],
         ),
       ),
@@ -915,8 +916,7 @@ class _ControlBar extends StatelessWidget {
                   '${formatMediaDuration(value.position)} / '
                   '${formatMediaDuration(value.duration)}',
                   style: HollowTypography.caption.copyWith(
-                    color: Colors.white,
-                    fontSize: 11,
+                    color: HollowColors.onMedia,
                     fontFeatures: const [FontFeature.tabularFigures()],
                     decoration: TextDecoration.none,
                   ),
@@ -939,7 +939,7 @@ class _ControlBar extends StatelessWidget {
               VerticalVolumePopover(
                 controller: controller,
                 iconSize: 16,
-                padding: const EdgeInsets.all(6),
+                padding: const EdgeInsets.all(HollowSpacing.sm),
               ),
               if (onFullscreen != null) ...[
                 const SizedBox(width: HollowSpacing.xs),
@@ -981,9 +981,9 @@ class _IconBtn extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       semanticLabel: label,
-      borderRadius: BorderRadius.circular(4),
-      padding: const EdgeInsets.all(6),
-      child: Icon(icon, color: Colors.white, size: 16),
+      borderRadius: BorderRadius.circular(HollowTheme.of(context).radiusXs),
+      padding: const EdgeInsets.all(HollowSpacing.sm),
+      child: Icon(icon, color: HollowColors.onMedia, size: 16),
     );
   }
 }
@@ -1059,24 +1059,24 @@ class _KeepAndSeedButtonState extends ConsumerState<_KeepAndSeedButton> {
         decoration: BoxDecoration(
           color: seeding
               ? widget.hollow.accent.withValues(alpha: 0.8)
-              : Colors.black.withValues(alpha: 0.65),
+              : HollowColors.mediaBlack.withValues(alpha: 0.65),
           borderRadius: BorderRadius.circular(widget.hollow.radiusXs),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (_loading)
-              const HollowSpinner(color: Colors.white) // design-ignore: over video
+              const HollowSpinner(color: HollowColors.onMedia)
             else
               Icon(
                 seeding ? LucideIcons.check : (kept ? LucideIcons.pause : LucideIcons.hardDrive),
-                color: Colors.white, size: 12,
+                color: HollowColors.onMedia, size: 12,
               ),
-            const SizedBox(width: 4),
+            const SizedBox(width: HollowSpacing.xs),
             Text(
               seeding ? 'Seeding' : (kept ? 'Paused' : 'Keep & Seed'),
-              style: HollowTypography.caption.copyWith(
-                color: Colors.white, fontSize: 10),
+              style: HollowTypography.micro.copyWith(
+                color: HollowColors.onMedia),
             ),
           ],
         ),
@@ -1098,10 +1098,10 @@ class _CenterCircle extends StatelessWidget {
       width: 64,
       height: 64,
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
+        color: HollowColors.mediaBlack.withValues(alpha: 0.55),
         shape: BoxShape.circle,
         border: Border.all(
-          color: Colors.white.withValues(alpha: 0.85),
+          color: HollowColors.onMedia.withValues(alpha: 0.85),
           width: 2,
         ),
       ),
@@ -1117,15 +1117,7 @@ class _VideoBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF23252B), Color(0xFF101114)],
-        ),
-      ),
-    );
+    return const ColoredBox(color: HollowColors.mediaBlack);
   }
 }
 
@@ -1143,14 +1135,13 @@ class _Badge extends StatelessWidget { // design-ignore: a scrim label over vide
         vertical: HollowSpacing.xxs,
       ),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.65),
+        color: HollowColors.mediaBlack.withValues(alpha: 0.65),
         borderRadius: BorderRadius.circular(hollow.radiusXs),
       ),
       child: Text(
         text,
         style: HollowTypography.caption.copyWith(
-          color: Colors.white,
-          fontSize: 11,
+          color: HollowColors.onMedia,
           fontWeight: FontWeight.w500,
         ),
       ),

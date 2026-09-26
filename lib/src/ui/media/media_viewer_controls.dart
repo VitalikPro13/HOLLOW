@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -55,10 +56,10 @@ class MediaControlButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final color = spec.onTap == null
-        ? Colors.white.withValues(alpha: 0.35)
+        ? HollowColors.onMedia.withValues(alpha: 0.35)
         : spec.active
             ? hollow.accentText
-            : Colors.white;
+            : HollowColors.onMedia;
     return HollowPressable(
       onTap: spec.busy ? null : spec.onTap,
       disabled: spec.onTap == null,
@@ -91,9 +92,9 @@ class MediaControlBar extends StatelessWidget {
         vertical: HollowSpacing.xxs,
       ),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
+        color: HollowColors.mediaBlack.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: HollowColors.onMedia.withValues(alpha: 0.08)),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: children),
     );
@@ -116,9 +117,8 @@ class MediaCounterLabel extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
         child: Text(
           text,
-          style: HollowTypography.caption.copyWith(
-            color: Colors.white,
-            fontSize: 12,
+          style: HollowTypography.bodySmall.copyWith(
+            color: HollowColors.onMedia,
             decoration: TextDecoration.none,
             fontFeatures: const [FontFeature.tabularFigures()],
           ),
@@ -151,9 +151,8 @@ class MediaZoomReadout extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
           child: Text(
             '$percent%',
-            style: HollowTypography.caption.copyWith(
-              color: Colors.white,
-              fontSize: 12,
+            style: HollowTypography.bodySmall.copyWith(
+              color: HollowColors.onMedia,
               decoration: TextDecoration.none,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
@@ -173,13 +172,13 @@ class MediaChevron extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (onTap == null) return const SizedBox(width: 40);
+    if (onTap == null) return const SizedBox(width: _kChevronSlot);
     final hollow = HollowTheme.of(context);
     return HollowPressable(
       onTap: onTap,
       semanticLabel: forward ? 'Next item' : 'Previous item',
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      backgroundColor: Colors.black.withValues(alpha: 0.45),
+      backgroundColor: HollowColors.mediaBlack.withValues(alpha: 0.45),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.xs,
         vertical: HollowSpacing.md,
@@ -187,7 +186,7 @@ class MediaChevron extends StatelessWidget {
       child: Icon(
         forward ? LucideIcons.chevronRight : LucideIcons.chevronLeft,
         size: 22,
-        color: Colors.white,
+        color: HollowColors.onMedia,
       ),
     );
   }
@@ -289,9 +288,9 @@ class _MediaVideoControlsState extends State<MediaVideoControls> {
         vertical: HollowSpacing.xxs,
       ),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
+        color: HollowColors.mediaBlack.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: HollowColors.onMedia.withValues(alpha: 0.08)),
       ),
       child: Row(
         children: [
@@ -307,8 +306,7 @@ class _MediaVideoControlsState extends State<MediaVideoControls> {
             '${formatMediaDuration(value.position)} / '
             '${formatMediaDuration(value.duration)}',
             style: HollowTypography.caption.copyWith(
-              color: Colors.white,
-              fontSize: 11,
+              color: HollowColors.onMedia,
               decoration: TextDecoration.none,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
@@ -329,8 +327,7 @@ class _MediaVideoControlsState extends State<MediaVideoControls> {
                   ? '${speed.toStringAsFixed(0)}x'
                   : '${speed}x',
               style: HollowTypography.caption.copyWith(
-                color: Colors.white,
-                fontSize: 11,
+                color: HollowColors.onMedia,
                 decoration: TextDecoration.none,
               ),
             ),
@@ -402,9 +399,8 @@ class _MediaVideoControlsState extends State<MediaVideoControls> {
                   top: -18,
                   child: Text(
                     formatMediaDuration(_hoverTime!),
-                    style: HollowTypography.caption.copyWith(
-                      color: Colors.white,
-                      fontSize: 10,
+                    style: HollowTypography.micro.copyWith(
+                      color: HollowColors.onMedia,
                       decoration: TextDecoration.none,
                       fontFeatures: const [FontFeature.tabularFigures()],
                     ),
@@ -535,13 +531,14 @@ class _VerticalVolumePopoverState extends State<VerticalVolumePopover> {
       },
       child: Listener(
         onPointerSignal: _onSignal,
-        child: Material(
+        child: Material( // design-ignore: overlay host, the Material ancestor the slider needs
           color: Colors.transparent,
           child: Container(
             decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.85),
+              color: HollowColors.mediaBlack.withValues(alpha: 0.85),
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+              border: Border.all(
+                  color: HollowColors.onMedia.withValues(alpha: 0.12)),
             ),
             child: ValueListenableBuilder<VideoPlayerValue>(
               valueListenable: widget.controller,
@@ -583,14 +580,15 @@ class _VerticalVolumePopoverState extends State<VerticalVolumePopover> {
         child: HollowPressable(
           onTap: _toggleMute,
           semanticLabel: muted ? 'Unmute video' : 'Mute video',
-          borderRadius: BorderRadius.circular(4),
+          borderRadius:
+              BorderRadius.circular(HollowTheme.of(context).radiusXs),
           padding: widget.padding,
           child: Icon(
             muted
                 ? LucideIcons.volumeX
                 : (volume < 0.5 ? LucideIcons.volume1 : LucideIcons.volume2),
             size: widget.iconSize,
-            color: Colors.white,
+            color: HollowColors.onMedia,
           ),
         ),
       ),
@@ -599,3 +597,6 @@ class _VerticalVolumePopoverState extends State<VerticalVolumePopover> {
 }
 
 const double _controlIconSize = 18;
+
+/// The width an absent chevron still holds, so the media does not shift.
+const double _kChevronSlot = 40;

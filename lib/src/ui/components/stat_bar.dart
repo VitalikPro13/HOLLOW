@@ -73,7 +73,7 @@ class StatBar extends StatelessWidget {
             ],
           );
         }),
-        const SizedBox(height: 4),
+        const SizedBox(height: HollowSpacing.xs),
         _ThresholdBar(hollow: hollow, progress: progress, color: barColor),
       ],
     );
@@ -95,7 +95,7 @@ class _ThresholdBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(2),
+      borderRadius: BorderRadius.circular(hollow.radiusXs),
       child: SizedBox(
         height: 4,
         width: double.infinity,
@@ -112,7 +112,7 @@ class _ThresholdBar extends StatelessWidget {
                 child: Container(
                   decoration: BoxDecoration(
                     color: color,
-                    borderRadius: BorderRadius.circular(2),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                 ),
               ),

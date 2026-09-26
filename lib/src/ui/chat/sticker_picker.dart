@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path_provider/path_provider.dart' as path_provider;
 
+import '../../core/friendly_error.dart';
 import '../../core/providers/gif_provider.dart';
 import '../../core/providers/member_panel_provider.dart';
 import '../../core/providers/server_provider.dart';
@@ -15,6 +16,8 @@ import '../../core/services/gif_thumb_cache.dart';
 import '../../core/services/image_pick.dart';
 import '../../rust/api/gifs.dart' as gifs_api;
 import '../../rust/api/stickers.dart' as stickers_api;
+import '../../theme/hollow_colors.dart';
+import '../../theme/hollow_shadows.dart';
 import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
@@ -57,7 +60,10 @@ Future<stickers_api.ProcessedSticker?> pickAndProcessSticker(
     return await stickers_api.processAndStoreSticker(rawBytes: bytes);
   } catch (e) {
     if (context.mounted) {
-      HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't use that image as a sticker. Try another one."),
           type: HollowToastType.error);
     }
     return null;
@@ -195,7 +201,7 @@ class _StickerPickerOverlay extends StatelessWidget {
             rise: true,
             alignment:
                 flippedBelow ? Alignment.topRight : Alignment.bottomRight,
-            child: Material(
+            child: Material( // design-ignore: overlay host, a raw OverlayEntry has no Material above it for the search field
               color: Colors.transparent,
               child: Container(
                 width: pickerWidth,
@@ -204,13 +210,7 @@ class _StickerPickerOverlay extends StatelessWidget {
                   color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.25),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
+                  boxShadow: HollowShadows.float,
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
@@ -414,11 +414,12 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
         _remote = p.items;
         _loading = false;
       });
-    }).catchError((_) {
+    }).catchError((Object e) {
       if (!mounted || seq != _querySeq) return;
       setState(() {
         _loading = false;
-        _error = 'Search failed. Check your connection';
+        _error = friendlyError(e,
+            fallback: 'Check your connection and try again.');
       });
     });
   }
@@ -441,7 +442,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     } catch (e) {
       if (mounted) {
         HollowToast.show(
-            context, e.toString().replaceFirst('Exception: ', ''),
+            context,
+            friendlyError(e,
+                fallback: "Couldn't get that sticker. Try again."),
             type: HollowToastType.error);
       }
     } finally {
@@ -485,7 +488,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     } catch (e) {
       if (mounted) {
         HollowToast.show(
-            context, e.toString().replaceFirst('Exception: ', ''),
+            context,
+            friendlyError(e,
+                fallback: "Couldn't save the sticker. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -514,7 +519,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     } catch (e) {
       if (mounted) {
         HollowToast.show(
-            context, e.toString().replaceFirst('Exception: ', ''),
+            context,
+            friendlyError(e,
+                fallback: "Couldn't add the sticker. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -558,7 +565,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   }
 
   Widget _poweredBy(HollowTheme hollow) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
         child: Text(
           'Powered by KLIPY',
           style: HollowTypography.micro.copyWith(color: hollow.textTertiary),
@@ -595,9 +602,28 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       label.toLowerCase().contains(_search) ||
       pack.toLowerCase().contains(_search);
 
+  /// A list that has not arrived renders nothing, and one that failed says so:
+  /// neither may read as "you have none".
+  Widget? _notLoaded(
+      AsyncValue<Object?> async, String failedTitle, VoidCallback retry) {
+    if (async.hasValue) return null;
+    if (!async.hasError) return const SizedBox.shrink();
+    return HollowEmptyState(
+      title: failedTitle,
+      action: HollowButton.ghost(
+        onPressed: retry,
+        child: const Text('Try again'),
+      ),
+    );
+  }
+
   Widget _serverTab(HollowTheme hollow) {
-    final all = ref.watch(serverStickersProvider(widget.serverId!)).valueOrNull ??
-        const <stickers_api.ServerSticker>[];
+    final provider = serverStickersProvider(widget.serverId!);
+    final async = ref.watch(provider);
+    final notLoaded = _notLoaded(async, "Server stickers didn't load",
+        () => ref.invalidate(provider));
+    if (notLoaded != null) return notLoaded;
+    final all = async.value ?? const <stickers_api.ServerSticker>[];
     final cells = [
       for (final s in all)
         if (_matches(s.name, s.pack))
@@ -631,8 +657,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   }
 
   Widget _mineTab(HollowTheme hollow) {
-    final all = ref.watch(personalStickersProvider).valueOrNull ??
-        const <stickers_api.PersonalSticker>[];
+    final async = ref.watch(personalStickersProvider);
+    final notLoaded = _notLoaded(async, "Your stickers didn't load",
+        () => ref.invalidate(personalStickersProvider));
+    final all = async.valueOrNull ?? const <stickers_api.PersonalSticker>[];
     final packs = _visiblePacks(all);
     // A pack that was emptied or renamed away must not stay selected.
     final filter = packs.contains(_packFilter) ? _packFilter : null;
@@ -676,7 +704,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
             ),
           ),
         Expanded(
-          child: cells.isEmpty
+          child: notLoaded ?? (cells.isEmpty
               ? all.isEmpty
                   ? const HollowEmptyState(
                       title: 'Your stickers work in every chat',
@@ -690,7 +718,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
                               'sticker to add it here.',
                         )
                       : const HollowEmptyState(title: 'No matches')
-              : _grid(hollow, cells, removable: true),
+              : _grid(hollow, cells, removable: true)),
         ),
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -824,7 +852,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       } catch (e) {
         if (mounted) {
           HollowToast.show(
-              context, e.toString().replaceFirst('Exception: ', ''),
+              context,
+              friendlyError(e,
+                  fallback: "Couldn't rename the pack. Try again."),
               type: HollowToastType.error);
         }
       }
@@ -846,19 +876,19 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
               onSubmitted: (_) => submit(),
             ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             onTap: submit,
             semanticLabel: 'Save pack name',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(4),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.check, size: 15, color: hollow.accentText),
           ),
           HollowPressable(
             onTap: () => setState(() => _renamingPack = null),
             semanticLabel: 'Cancel rename',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(4),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.x, size: 15, color: hollow.textSecondary),
           ),
         ],
@@ -932,7 +962,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       await share(path, fileName);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't share the pack. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -987,7 +1020,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't save the pack. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -1016,7 +1052,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
               : HollowToastType.info);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't add that pack. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -1035,22 +1074,16 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
 
   Widget _klipyTab(HollowTheme hollow) {
     if (_loading) {
-      return const Center(child: HollowSpinner.medium());
+      return const Center(child: HollowSpinner.medium(delayed: true));
     }
     final err = _error;
     if (err != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(err,
-                textAlign: TextAlign.center,
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textTertiary)),
-            const SizedBox(height: HollowSpacing.sm),
-            HollowButton.ghost(
-                onPressed: _runQuery, child: const Text('Retry')),
-          ],
+      return HollowEmptyState(
+        title: "Stickers didn't load",
+        description: err,
+        action: HollowButton.ghost(
+          onPressed: _runQuery,
+          child: const Text('Try again'),
         ),
       );
     }
@@ -1220,7 +1253,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't add it to the pack. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -1348,7 +1384,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
           onTap: widget.enabled ? widget.onTap : null,
           semanticLabel: semantic,
           borderRadius: BorderRadius.circular(hollow.radiusMd),
-          padding: const EdgeInsets.all(2),
+          padding: const EdgeInsets.all(HollowSpacing.xxs),
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -1363,9 +1399,9 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
                 ),
               if (widget.picking)
                 Container(
-                  color: Colors.black.withValues(alpha: 0.45),
+                  color: HollowColors.mediaBlack.withValues(alpha: 0.45),
                   child: const Center(
-                    child: HollowSpinner(color: Colors.white), // design-ignore: over a scrim
+                    child: HollowSpinner(color: HollowColors.onMedia),
                   ),
                 ),
             ],
@@ -1383,10 +1419,11 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
       onTap: widget.onSave,
       semanticLabel: 'Save this sticker to my stickers',
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(3),
+      padding: const EdgeInsets.all(HollowSpacing.xs),
       // Never animates from transparent (feedback_hover_state_patterns).
-      backgroundColor: Colors.black.withValues(alpha: 0.55),
-      child: const Icon(LucideIcons.bookmarkPlus, size: 12, color: Colors.white),
+      backgroundColor: HollowColors.mediaScrim,
+      child: const Icon(LucideIcons.bookmarkPlus,
+          size: 12, color: HollowColors.onMedia),
     );
   }
 

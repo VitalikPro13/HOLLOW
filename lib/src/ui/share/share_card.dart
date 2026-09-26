@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/services/reveal_in_folder.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
@@ -79,7 +80,10 @@ class ShareRow extends ConsumerWidget {
           ],
         ),
       'failed' => Text(
-          item.error ?? "The transfer didn't finish",
+          item.error == null
+              ? "The transfer didn't finish"
+              : friendlyError(item.error!,
+                  fallback: 'This download stopped. Try again.'),
           style: metaStyle.copyWith(color: hollow.error),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,

@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -16,6 +17,8 @@ import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 enum _DialogState { input, loading, confirm }
+
+const _kOfflineText = "You're offline. Reconnect to fetch this file.";
 
 class PasteLinkDialog extends ConsumerStatefulWidget {
   final String? initialLink;
@@ -87,7 +90,10 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
               _cleanup();
               setState(() {
                 _state = _DialogState.input;
-                _errorText = 'Nobody sharing this file is online. Try again later.';
+                // Only blame the people sharing it when our own link is up.
+                _errorText = ref.read(overallConnectionProvider).isOnline
+                    ? 'Nobody sharing this file is online. Try again later.'
+                    : _kOfflineText;
               });
             }
           });
@@ -256,6 +262,13 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
       setState(() {
         _decoding = false;
         _errorText = 'You already have this file';
+      });
+      return;
+    }
+    if (!ref.read(overallConnectionProvider).isOnline) {
+      setState(() {
+        _decoding = false;
+        _errorText = _kOfflineText;
       });
       return;
     }

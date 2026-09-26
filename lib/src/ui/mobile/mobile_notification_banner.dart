@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -274,19 +275,17 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     final msgs = card.messages.length > 3
         ? card.messages.sublist(card.messages.length - 3)
         : card.messages;
-    final msgStyle = HollowTypography.body.copyWith(
-      color: hollow.textSecondary,
-      fontSize: 12,
-    );
+    final msgStyle =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
 
     return Positioned(
       top: widget.topOffset,
       left: HollowSpacing.sm,
       right: HollowSpacing.sm,
-      // A Material ancestor, or the Text widgets get the yellow debug
+      // A text style of its own, or the Text widgets get the yellow debug
       // double-underline: nothing else sits between this Stack child and them.
-      child: Material(
-        type: MaterialType.transparency,
+      child: DefaultTextStyle(
+        style: HollowTypography.body,
         child: SlideTransition(
           position: _slide,
           child: FadeTransition(
@@ -306,13 +305,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border:
                       Border.all(color: hollow.accent.withValues(alpha: 0.25)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.28),
-                      blurRadius: 14,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
+                  boxShadow: HollowShadows.float,
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
@@ -331,18 +324,18 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                         children: [
                           Text(
                             card.title,
-                            style: HollowTypography.body.copyWith(
+                            style: HollowTypography.label.copyWith(
                               color: hollow.textPrimary,
                               fontWeight: FontWeight.w600,
-                              fontSize: 12.5,
                             ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          const SizedBox(height: 2),
+                          const SizedBox(height: HollowSpacing.xxs),
                           for (final m in msgs)
                             Padding(
-                              padding: const EdgeInsets.only(top: 1),
+                              padding: const EdgeInsets.only(
+                                  top: HollowSpacing.xxs),
                               // Or emote tokens render as their raw
                               // [e:name:hash] form.
                               child: Text.rich(
@@ -428,7 +421,6 @@ class _CountdownRing extends StatelessWidget {
                 '$left',
                 style: HollowTypography.caption.copyWith(
                   color: textColor,
-                  fontSize: 11,
                   fontWeight: FontWeight.w600,
                 ),
               ),

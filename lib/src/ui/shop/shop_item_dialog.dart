@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
@@ -120,8 +121,11 @@ class _ShopItemViewState extends ConsumerState<_ShopItemView> {
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
-      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
-      HollowToast.show(context, message, type: HollowToastType.error);
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't put this on your profile. Try again."),
+          type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

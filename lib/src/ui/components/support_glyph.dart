@@ -27,7 +27,7 @@ class SupportNameGlyph extends ConsumerWidget {
     if (!lit) return const SizedBox.shrink();
     final hollow = HollowTheme.of(context);
     return Padding(
-      padding: const EdgeInsets.only(left: 4),
+      padding: const EdgeInsets.only(left: HollowSpacing.xs),
       child: HollowTooltip(
         message: 'Supports independent artists',
         child: SizedBox(
@@ -121,7 +121,7 @@ class SupportMarksChip extends ConsumerWidget {
             children: [
               Icon(LucideIcons.sparkles, size: 12, color: color),
               if (n > 1) ...[
-                const SizedBox(width: 4),
+                const SizedBox(width: HollowSpacing.xs),
                 Text(
                   '×$n',
                   style: HollowTypography.micro.copyWith(

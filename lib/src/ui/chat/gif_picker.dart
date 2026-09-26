@@ -12,6 +12,8 @@ import '../../core/providers/server_provider.dart';
 import '../../core/services/gif_thumb_cache.dart';
 import '../../rust/api/gifs.dart' as gifs_api;
 import '../../rust/api/network.dart' as network_api;
+import '../../theme/hollow_colors.dart';
+import '../../theme/hollow_shadows.dart';
 import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
@@ -132,7 +134,7 @@ class _GifPickerOverlay extends StatelessWidget {
             rise: true,
             alignment:
                 flippedBelow ? Alignment.topRight : Alignment.bottomRight,
-            child: Material(
+            child: Material( // design-ignore: overlay host, a raw OverlayEntry has no Material above it for the search field
               color: Colors.transparent,
               child: Container(
                 width: pickerWidth,
@@ -141,13 +143,7 @@ class _GifPickerOverlay extends StatelessWidget {
                   color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.25),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
+                  boxShadow: HollowShadows.float,
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
@@ -356,7 +352,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       if (!mounted || seq != _querySeq) return;
       setState(() {
         _loading = false;
-        _error = 'Search failed. Check your connection';
+        _error = "GIFs didn't load. Check your connection.";
       });
     });
   }
@@ -458,11 +454,10 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         const HollowDivider(),
         Expanded(child: _content(hollow)),
         Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
           child: Text(
             'Powered by KLIPY',
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textTertiary, fontSize: 10),
+            style: HollowTypography.micro.copyWith(color: hollow.textTertiary),
           ),
         ),
       ],
@@ -503,27 +498,14 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
           : _recentView(hollow);
     }
     if (_loading) {
-      return const Center(child: HollowSpinner.medium());
+      return const Center(child: HollowSpinner.medium(delayed: true));
     }
     if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              _error!,
-              textAlign: TextAlign.center,
-              style:
-                  HollowTypography.caption.copyWith(color: hollow.textTertiary),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            HollowButton.ghost(
-              compact: true,
-              icon: const Icon(LucideIcons.rotateCcw, size: 14),
-              onPressed: _runQuery,
-              child: const Text('Retry'),
-            ),
-          ],
+      return HollowEmptyState(
+        title: _error!,
+        action: HollowButton.ghost(
+          onPressed: _runQuery,
+          child: const Text('Try again'),
         ),
       );
     }
@@ -628,8 +610,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          HollowSpacing.sm, 4, HollowSpacing.sm, 4),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
       child: Row(
         children: [
           Expanded(
@@ -642,19 +624,19 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
               onSubmitted: (_) => commit(),
             ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             onTap: commit,
             semanticLabel: creating ? 'Create list' : 'Rename list',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(6),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.check, size: 14, color: hollow.accentText),
           ),
           HollowPressable(
             onTap: () => setState(() => _listEditId = null),
             semanticLabel: 'Cancel',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(6),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.x, size: 14, color: hollow.textSecondary),
           ),
         ],
@@ -697,7 +679,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final base = ref.watch(gifProxyUrlProvider);
     if (recents.isEmpty) {
       return const HollowEmptyState(
-        title: 'Nothing here yet',
+        title: 'No recent GIFs',
         description: 'GIFs you send show up here.',
       );
     }
@@ -935,26 +917,23 @@ void showGifMenu(
         Positioned(
           left: left,
           top: top,
-          child: Material(
-            color: Colors.transparent,
+          child: DefaultTextStyle(
+            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
             child: Container(
               width: menuWidth,
               decoration: BoxDecoration(
                 color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.3),
-                      blurRadius: 12),
-                ],
+                boxShadow: HollowShadows.float,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+                    padding: const EdgeInsets.fromLTRB(HollowSpacing.md,
+                        HollowSpacing.sm, HollowSpacing.md, HollowSpacing.xs),
                     child: Text(
                       header,
                       maxLines: 1,
@@ -965,7 +944,7 @@ void showGifMenu(
                   ),
                   const HollowDivider(),
                   Padding(
-                    padding: const EdgeInsets.all(4),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -981,7 +960,8 @@ void showGifMenu(
                             borderRadius:
                                 BorderRadius.circular(hollow.radiusMd),
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 6),
+                                horizontal: HollowSpacing.sm,
+                                vertical: HollowSpacing.sm),
                             child: Row(
                               children: [
                                 Icon(item.icon,
@@ -989,7 +969,7 @@ void showGifMenu(
                                     color: item.danger
                                         ? hollow.error
                                         : hollow.textSecondary),
-                                const SizedBox(width: 8),
+                                const SizedBox(width: HollowSpacing.sm),
                                 Expanded(
                                   child: Text(
                                     item.label,
@@ -1164,15 +1144,15 @@ class _GifCellState extends ConsumerState<_GifCell> {
                   // glance what is saved.
                   if (isFavorite || _hovering || _isMobile)
                     Positioned(
-                      top: 2,
-                      right: 2,
+                      top: HollowSpacing.xxs,
+                      right: HollowSpacing.xxs,
                       child: _star(hollow, isFavorite),
                     ),
                   if (widget.picking)
                     Container(
-                      color: Colors.black.withValues(alpha: 0.45),
+                      color: HollowColors.mediaBlack.withValues(alpha: 0.45),
                       child: const Center(
-                        child: HollowSpinner(color: Colors.white), // design-ignore: over a scrim
+                        child: HollowSpinner(color: HollowColors.onMedia),
                       ),
                     ),
                 ],
@@ -1193,19 +1173,19 @@ class _GifCellState extends ConsumerState<_GifCell> {
           .toggleFavorite(widget.item),
       semanticLabel:
           isFavorite ? 'Remove GIF from favourites' : 'Add GIF to favourites',
-      borderRadius: BorderRadius.circular(999),
+      borderRadius: BorderRadius.circular(HollowRadius.pill),
       padding: EdgeInsets.zero,
       child: Container(
         width: 24,
         height: 24,
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.45),
+          color: HollowColors.mediaBlack.withValues(alpha: 0.45),
           shape: BoxShape.circle,
         ),
         child: Icon(
           isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
           size: 16,
-          color: isFavorite ? hollow.accent : Colors.white,
+          color: isFavorite ? hollow.accent : HollowColors.onMedia,
         ),
       ),
     );

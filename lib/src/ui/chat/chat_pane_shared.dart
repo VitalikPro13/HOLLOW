@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_tokens.dart'
+    show assetTokenRegex, emoteTokenRegex;
 import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -14,14 +18,18 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/message_row.dart'
-    show CallRecordRow, kMessageIndent;
+    show CallRecordRow, kMessageAvatarSize, kMessageIndent;
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
+import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_skeleton.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
@@ -156,6 +164,139 @@ const String kAssetLimitMessage = 'One sticker or GIF per message';
             next: nextIsSticker && groupedWithNext,
           )
         : (prev: false, next: false);
+
+/// Puts a message that failed to send back into [composer], unless a new
+/// draft was started while the send ran. [wireText] is the EXPANDED send text,
+/// so its emote and asset tokens go back in as placeholders. False when a new
+/// draft was kept, so the caller leaves that draft's reply target alone too.
+bool restoreFailedDraft(EmoteComposerController composer, String wireText) {
+  if (composer.text.isNotEmpty) return false;
+  final display = wireText.replaceAllMapped(
+      _draftTokenRegex, (m) => composer.displayTextFor(m.group(0)!));
+  composer.value = TextEditingValue(
+    text: display,
+    selection: TextSelection.collapsed(offset: display.length),
+  );
+  return true;
+}
+
+final _draftTokenRegex =
+    RegExp('${emoteTokenRegex.pattern}|${assetTokenRegex.pattern}');
+
+/// What every send failure in a chat says when the cause has no sentence of
+/// its own.
+const String kSendFailedFallback = "Your message didn't send. Try again.";
+
+/// In-conversation search, shared by every chat surface: the newest query
+/// wins, and a search that failed never reads as "nothing matched".
+class ChatSearchResults<T> {
+  List<T> hits = const [];
+
+  /// The query [hits] answer; empty when nothing has been searched.
+  String query = '';
+  bool failed = false;
+  int _querySeq = 0;
+
+  /// Forgets the results, and any search still in flight.
+  void clear() {
+    _querySeq++;
+    hits = const [];
+    query = '';
+    failed = false;
+  }
+
+  /// Runs [search] for [raw]; [update] applies the outcome (a mounted-guarded
+  /// setState).
+  Future<void> run(
+    String raw,
+    Future<List<T>> Function(String query) search,
+    void Function(VoidCallback apply) update,
+  ) async {
+    final q = raw.trim();
+    final seq = ++_querySeq;
+    if (q.isEmpty) {
+      update(clear);
+      return;
+    }
+    try {
+      final found = await search(q);
+      if (seq != _querySeq) return;
+      update(() {
+        hits = found;
+        query = q;
+        failed = false;
+      });
+    } catch (e) {
+      if (seq != _querySeq) return;
+      debugPrint('[HOLLOW] In-chat search failed: $e');
+      update(() {
+        hits = const [];
+        query = q;
+        failed = true;
+      });
+    }
+  }
+}
+
+/// Under a chat's search field: the hits, "no match", or a failed search with
+/// a retry. Nothing before the first query lands.
+class ChatSearchResultsView<T> extends StatelessWidget {
+  final ChatSearchResults<T> results;
+  final Widget Function(T hit) itemBuilder;
+  final VoidCallback onRetry;
+  final double maxHeight;
+
+  const ChatSearchResultsView({
+    super.key,
+    required this.results,
+    required this.itemBuilder,
+    required this.onRetry,
+    this.maxHeight = 200,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (results.failed) {
+      return Padding(
+        padding: const EdgeInsets.only(top: HollowSpacing.sm),
+        child: HollowEmptyState(
+          dense: true,
+          title: "Search didn't run",
+          action: HollowButton.ghost(
+            touch: _isTouchForm,
+            onPressed: onRetry,
+            child: const Text('Try again'),
+          ),
+        ),
+      );
+    }
+    if (results.hits.isEmpty) {
+      if (results.query.isEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.only(top: HollowSpacing.sm),
+        child: HollowEmptyState(
+          dense: true,
+          title: 'No messages match "${results.query}"',
+        ),
+      );
+    }
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      child: ListView.builder(
+        shrinkWrap: true,
+        itemCount: results.hits.length,
+        itemBuilder: (_, index) => itemBuilder(results.hits[index]),
+      ),
+    );
+  }
+}
+
+/// The "Offline" header status when OUR link is down, else null: read only
+/// from [overallConnectionProvider], never from who else is online.
+Widget? ownLinkOfflineStatus(WidgetRef ref) =>
+    ref.watch(overallConnectionProvider).isOnline
+        ? null
+        : const ConnectionProgress(stage: ConnectionStage.offline);
 
 /// Whether a date separator should be shown between two timestamps.
 bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
@@ -744,7 +885,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
                       decoration: BoxDecoration(
                         color: hollow.textSecondary
                             .withValues(alpha: active ? 0.55 : 0.28),
-                        borderRadius: BorderRadius.circular(3),
+                        borderRadius: BorderRadius.circular(HollowRadius.pill),
                       ),
                     ),
                   ),
@@ -974,6 +1115,135 @@ class CallRecordsOnly extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: lines,
+      ),
+    );
+  }
+}
+
+/// What an EMPTY message list shows: skeleton rows while the first read runs
+/// (after a second, so a quick read shows nothing), a retry when it failed,
+/// and [start] only once the read proved the conversation empty. A function,
+/// not a widget, so [start] may watch providers in the caller's build.
+Widget chatHistoryPlaceholder({
+  required bool loaded,
+  required bool failed,
+  required VoidCallback onRetry,
+  required Widget Function() start,
+}) {
+  if (failed) {
+    return HollowEmptyState(
+      glyph: LucideIcons.circleAlert,
+      title: "These messages didn't load",
+      action: HollowButton.ghost(
+        touch: _isTouchForm,
+        onPressed: onRetry,
+        child: const Text('Try again'),
+      ),
+    );
+  }
+  if (!loaded) return const _ChatHistorySkeleton();
+  return start();
+}
+
+/// The start of a DM with no messages: its calls alone when there are any.
+Widget dmConversationStart({
+  required List<DmCallRecord> calls,
+  required bool isSavedMessages,
+  required String name,
+}) {
+  if (calls.isNotEmpty) return CallRecordsOnly(records: calls);
+  if (isSavedMessages) {
+    return const HollowEmptyState(
+      glyph: LucideIcons.bookmark,
+      title: 'Nothing saved yet',
+      description: 'Notes and messages you keep for yourself land here.',
+    );
+  }
+  return HollowEmptyState(
+    glyph: LucideIcons.messageCircle,
+    title: 'This is the start of your conversation with $name',
+  );
+}
+
+/// The start of a channel with no messages.
+Widget channelConversationStart(String channelName, {bool isVoice = false}) =>
+    HollowEmptyState(
+      glyph: isVoice ? LucideIcons.volume2 : LucideIcons.hash,
+      title: isVoice ? 'Welcome to $channelName' : 'Welcome to #$channelName',
+      description: 'This is the beginning of the channel.',
+    );
+
+/// Message rows at their final geometry, bottom-pinned like the list they
+/// stand in for. Empty for the first second: a Timer, never a Ticker.
+class _ChatHistorySkeleton extends StatefulWidget {
+  const _ChatHistorySkeleton();
+
+  @override
+  State<_ChatHistorySkeleton> createState() => _ChatHistorySkeletonState();
+}
+
+class _ChatHistorySkeletonState extends State<_ChatHistorySkeleton> {
+  Timer? _delay;
+  bool _shown = false;
+
+  static const _lineFractions = [0.55, 0.8, 0.4];
+
+  @override
+  void initState() {
+    super.initState();
+    _delay = Timer(const Duration(seconds: 1), () {
+      if (mounted) setState(() => _shown = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _delay?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_shown) return const SizedBox.shrink();
+    return Align(
+      alignment: Alignment.bottomLeft,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.lg,
+          vertical: HollowSpacing.sm,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final fraction in _lineFractions)
+              Padding(
+                padding: const EdgeInsets.only(top: HollowSpacing.lg),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const HollowSkeleton.circle(kMessageAvatarSize),
+                    const SizedBox(width: HollowSpacing.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const HollowSkeleton(
+                              height: HollowSpacing.md,
+                              width: HollowSpacing.xxxl * 2),
+                          const SizedBox(height: HollowSpacing.sm),
+                          FractionallySizedBox(
+                            widthFactor: fraction,
+                            child: const HollowSkeleton(
+                                height: HollowSpacing.md),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1458,7 +1728,7 @@ class UnreadJumpPill extends StatelessWidget { // design-ignore: the unread jump
     final label = count == 1 ? '1 new message' : '$count new messages';
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(HollowRadius.pill),
       backgroundColor: hollow.accent,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -1471,10 +1741,9 @@ class UnreadJumpPill extends StatelessWidget { // design-ignore: the unread jump
           const SizedBox(width: HollowSpacing.xs),
           Text(
             label,
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.bodySmall.copyWith(
               color: hollow.textOnAccent,
               fontWeight: FontWeight.w600,
-              fontSize: 12,
             ),
           ),
         ],
@@ -1687,6 +1956,7 @@ class TypingDots extends StatelessWidget {
       builder: (context, value, _) {
         return Row(
           mainAxisSize: MainAxisSize.min,
+          spacing: HollowSpacing.xxs,
           children: List.generate(3, (i) {
             final delay = i * 0.2;
             final t = (value - delay).clamp(0.0, 1.0);
@@ -1694,7 +1964,6 @@ class TypingDots extends StatelessWidget {
                 ? (t * 2)
                 : (1 - (t - 0.5) * 2);
             return Container(
-              margin: const EdgeInsets.symmetric(horizontal: 1),
               width: 4,
               height: 4,
               decoration: BoxDecoration(

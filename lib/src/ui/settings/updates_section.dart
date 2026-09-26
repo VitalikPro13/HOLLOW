@@ -157,7 +157,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
         final latest = hasUpdate ? _latestEntry(state) : null;
 
         final String title;
-        if (failed && !state.error!.startsWith('Failed to check')) {
+        if (failed && state.failure != UpdateFailure.check) {
           title = 'The update did not install';
         } else if (failed) {
           title = 'Could not check for updates';

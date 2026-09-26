@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -147,9 +148,10 @@ class DataFolderRow extends StatelessWidget {
       } else {
         await launchUrl(Uri.file(dir));
       }
-    } catch (_) {
+    } catch (e) {
       if (!context.mounted) return;
-      HollowToast.show(context, 'Could not open folder',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'Could not open folder'),
           type: HollowToastType.error);
     }
   }

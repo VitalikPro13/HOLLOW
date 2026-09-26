@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../theme/hollow_shadows.dart';
+import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
 import '../components/hollow_pressable.dart';
@@ -356,25 +358,19 @@ class EmoteAutocomplete {
         targetAnchor: Alignment.topLeft,
         followerAnchor: Alignment.bottomLeft,
         offset: const Offset(0, -4),
-        child: Material(
-          color: Colors.transparent,
+        child: DefaultTextStyle(
+          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
           child: Container(
             decoration: BoxDecoration(
               color: hollow.overlay,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
-                ),
-              ],
+              boxShadow: HollowShadows.float,
             ),
             constraints: const BoxConstraints(maxHeight: 240),
             child: ListView.builder(
               shrinkWrap: true,
-              padding: const EdgeInsets.all(4),
+              padding: const EdgeInsets.all(HollowSpacing.xs),
               itemCount: _candidates.length,
               itemBuilder: (ctx, i) {
                 final c = _candidates[i];
@@ -386,7 +382,7 @@ class EmoteAutocomplete {
                       ? hollow.accent.withValues(alpha: 0.12)
                       : null,
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 5),
+                      horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
                   child: Row(
                     children: [
                       SizedBox(
@@ -397,10 +393,10 @@ class EmoteAutocomplete {
                               ? EmoteImage(
                                   name: c.name, hash: c.hash!, size: 20)
                               : Text(c.char!,
-                                  style: const TextStyle(fontSize: 17)),
+                                  style: const TextStyle(fontSize: 17)), // design-ignore: emoji glyph at its cell size
                         ),
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: HollowSpacing.sm),
                       Expanded(
                         child: Text(
                           c.hash != null ? ':${c.name}:' : c.name,

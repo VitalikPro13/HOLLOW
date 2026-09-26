@@ -69,8 +69,8 @@ class MediaInfoPanel extends ConsumerWidget {
                 Expanded(
                   child: Text(
                     'Details',
-                    style: HollowTypography.subheading
-                        .copyWith(color: hollow.textPrimary, fontSize: 14),
+                    style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary, fontWeight: FontWeight.w600),
                   ),
                 ),
                 HollowPressable(
@@ -142,14 +142,14 @@ class _Row extends StatelessWidget {
         children: [
           Text(
             label,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textTertiary, fontSize: 10),
+            style: HollowTypography.micro
+                .copyWith(color: hollow.textTertiary),
           ),
-          const SizedBox(height: 2),
+          const SizedBox(height: HollowSpacing.xxs),
           SelectableText(
             value,
-            style: HollowTypography.body
-                .copyWith(color: hollow.textPrimary, fontSize: 12),
+            style: HollowTypography.bodySmall
+                .copyWith(color: hollow.textPrimary),
           ),
         ],
       ),
@@ -172,10 +172,10 @@ class _HashRow extends StatelessWidget {
         children: [
           Text(
             'Content hash',
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textTertiary, fontSize: 10),
+            style: HollowTypography.micro
+                .copyWith(color: hollow.textTertiary),
           ),
-          const SizedBox(height: 2),
+          const SizedBox(height: HollowSpacing.xxs),
           Row(
             children: [
               Expanded(
@@ -183,8 +183,8 @@ class _HashRow extends StatelessWidget {
                   hash,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: HollowTypography.mono
-                      .copyWith(color: hollow.textSecondary, fontSize: 10),
+                  style: HollowTypography.monoSmall
+                      .copyWith(color: hollow.textSecondary),
                 ),
               ),
               HollowTooltip(

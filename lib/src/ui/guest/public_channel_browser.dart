@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/guest/guest_server_sidebar.dart';
 import 'package:hollow/src/ui/guest/guest_chat_pane.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
@@ -53,18 +54,15 @@ class PublicChannelBrowser extends ConsumerWidget {
                   serverName != null && serverName.isNotEmpty
                       ? 'Viewing $serverName as guest'
                       : 'Public Channel Browser',
-                  style: TextStyle(
-                    color: hollow.accentText,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: HollowTypography.label
+                      .copyWith(color: hollow.accentText),
                 ),
               ),
               if (serverMode != null)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: HollowSpacing.sm,
-                    vertical: 2,
+                    vertical: HollowSpacing.xxs,
                   ),
                   decoration: BoxDecoration(
                     color: hollow.accent.withValues(alpha: 0.18),
@@ -72,9 +70,8 @@ class PublicChannelBrowser extends ConsumerWidget {
                   ),
                   child: Text(
                     serverMode.label,
-                    style: TextStyle(
+                    style: HollowTypography.caption.copyWith(
                       color: hollow.accentText,
-                      fontSize: 11,
                       fontWeight: FontWeight.w500,
                     ),
                   ),

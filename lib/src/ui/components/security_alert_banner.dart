@@ -75,9 +75,8 @@ class SecurityAlertBanner extends ConsumerWidget {
           Expanded(
             child: Text(
               _message(hasReappeared, hasNewDevice, name, alerts.length),
-              style: HollowTypography.body.copyWith(
+              style: HollowTypography.bodySmall.copyWith(
                 color: hollow.textPrimary,
-                fontSize: 12,
               ),
               // Bounded so a large text scale cannot grow the banner into the
               // message area; the Verify screen repeats the full wording.

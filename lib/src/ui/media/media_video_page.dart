@@ -8,14 +8,20 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_playback_session.dart';
+
+/// The poster's play button: its icon plus its padding on both sides, so the
+/// spinner that stands in for it keeps the same footprint.
+const double _kPlayButtonSize = 28 + HollowSpacing.md * 2;
 
 /// One video page of the media viewer.
 ///
@@ -97,7 +103,8 @@ class _MediaVideoPageState extends State<MediaVideoPage> {
   Future<void> _open() async {
     final path = _videoPath();
     if (path == null || _opening) return;
-    _opening = true;
+    // The at-rest decrypt can take a moment on a large file.
+    setState(() => _opening = true);
     try {
       final session = await MediaPlaybackSession.open(path);
       if (!mounted) {
@@ -116,7 +123,7 @@ class _MediaVideoPageState extends State<MediaVideoPage> {
     } catch (e) {
       if (mounted) setState(() => _error = 'This video could not be opened');
     } finally {
-      _opening = false;
+      if (mounted) setState(() => _opening = false);
     }
   }
 
@@ -171,7 +178,7 @@ class _MediaVideoPageState extends State<MediaVideoPage> {
     // The texture alone: the transport lives in the viewer's bottom chrome,
     // above the strip, because the strip is drawn over this page.
     final video = ColoredBox(
-      color: Colors.black,
+      color: HollowColors.mediaBlack,
       child: Center(
         child: AspectRatio(
           aspectRatio: session.controller.value.aspectRatio,
@@ -203,16 +210,24 @@ class _MediaVideoPageState extends State<MediaVideoPage> {
           AttachmentImage(path: path, fit: BoxFit.contain)
         else if (bytes != null)
           Image.memory(bytes, fit: BoxFit.contain, gaplessPlayback: true),
-        Container(color: Colors.black.withValues(alpha: 0.35)),
+        Container(color: HollowColors.mediaBlack.withValues(alpha: 0.35)),
         Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (playable)
+              if (playable && _opening)
+                const SizedBox.square(
+                  dimension: _kPlayButtonSize,
+                  child: Center(
+                    child: HollowSpinner.large(
+                        delayed: true, color: HollowColors.onMedia),
+                  ),
+                )
+              else if (playable)
                 HollowPressable(
                   onTap: () => unawaited(_open()),
                   semanticLabel: 'Play video',
-                  borderRadius: BorderRadius.circular(32),
+                  borderRadius: BorderRadius.circular(HollowRadius.pill),
                   backgroundColor: hollow.overlay.withValues(alpha: 0.85),
                   padding: const EdgeInsets.all(HollowSpacing.md),
                   child: Icon(LucideIcons.play,
@@ -226,8 +241,7 @@ class _MediaVideoPageState extends State<MediaVideoPage> {
                 Text(
                   caption,
                   style: HollowTypography.body.copyWith(
-                    color: Colors.white,
-                    fontSize: 13,
+                    color: HollowColors.onMedia,
                     decoration: TextDecoration.none,
                   ),
                 ),

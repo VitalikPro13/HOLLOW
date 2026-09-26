@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
@@ -152,10 +153,12 @@ class _MediaThumb extends StatelessWidget {
         height: _kThumbSize,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.4),
+          color: HollowColors.mediaBlack.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(
-            color: selected ? hollow.accent : Colors.white.withValues(alpha: 0.1),
+            color: selected
+                ? hollow.accent
+                : HollowColors.onMedia.withValues(alpha: 0.1),
             width: selected ? 2 : 1,
           ),
         ),
@@ -167,8 +170,9 @@ class _MediaThumb extends StatelessWidget {
               const Align(
                 alignment: Alignment.bottomRight,
                 child: Padding(
-                  padding: EdgeInsets.all(2),
-                  child: Icon(LucideIcons.play, size: 12, color: Colors.white),
+                  padding: EdgeInsets.all(HollowSpacing.xxs),
+                  child: Icon(LucideIcons.play,
+                      size: 12, color: HollowColors.onMedia),
                 ),
               ),
           ],

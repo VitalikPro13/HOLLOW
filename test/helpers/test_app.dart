@@ -61,6 +61,11 @@ List<Override> hollowTestOverrides({
 
       // --- Server & channel state ---
       serverListProvider.overrideWith(() => _MockServerListNotifier()),
+      // The mocks stand for lists already read from the device.
+      serverListLoadStateProvider
+          .overrideWith((_) => (loaded: true, error: null)),
+      friendsLoadStateProvider
+          .overrideWith((_) => (loaded: true, error: null)),
       channelListProvider.overrideWith(() => _MockChannelListNotifier()),
 
       // --- Friends ---

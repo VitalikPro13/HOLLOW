@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +19,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart'
@@ -65,9 +68,43 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   Timer? _viewportDebounce;
   bool _isPicking = false;
 
+  /// How long an unanswered sync may take before the pane stops waiting.
+  static const _syncTimeout = Duration(seconds: 12);
+  Timer? _syncTimer;
+  bool _syncTimedOut = false;
+
+  String get _key => '${widget.serverId}:${widget.channelId}';
+
+  /// A sync response writes its has-more flag, even for an empty channel.
+  bool get _syncAnswered =>
+      ref.read(guestHasMoreProvider).containsKey(_key) ||
+      (ref.read(channelChatProvider)[_key]?.isNotEmpty ?? false);
+
+  /// Waits on the sync the sidebar sent when this channel opened; [ask] sends
+  /// it again, for Try again.
+  void _awaitSync({bool ask = false}) {
+    _syncTimer?.cancel();
+    _syncTimedOut = false;
+    _syncTimer = Timer(_syncTimeout, _giveUpOnSync);
+    if (ask) {
+      crdt_api
+          .requestPublicChannelSync(
+            serverId: widget.serverId,
+            channelId: widget.channelId,
+          )
+          .catchError((_) => _giveUpOnSync());
+    }
+  }
+
+  void _giveUpOnSync() {
+    _syncTimer?.cancel();
+    if (mounted && !_syncTimedOut) setState(() => _syncTimedOut = true);
+  }
+
   @override
   void initState() {
     super.initState();
+    if (!_syncAnswered) _awaitSync();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _jumpToBottom();
     });
@@ -78,6 +115,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
 
   @override
   void dispose() {
+    _syncTimer?.cancel();
     _viewportDebounce?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_onViewportChanged);
     _searchController.dispose();
@@ -161,7 +199,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
       );
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'File request failed: $e',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't ask for the file. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -185,7 +226,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
       }
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Save failed: $e',
+        HollowToast.show(
+            context, friendlyError(e, fallback: "Couldn't save the file."),
             type: HollowToastType.error);
       }
     } finally {
@@ -211,6 +253,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
         ref.watch(channelChatProvider.select((s) => s[key])) ?? [];
     final hasMore = ref.watch(
         guestHasMoreProvider.select((m) => m[key] ?? false));
+    final answered = ref.watch(guestHasMoreProvider
+            .select((m) => m.containsKey(key))) ||
+        messages.isNotEmpty;
+    if (answered) _syncTimer?.cancel();
 
     final currentCount = messages.where((m) => m.hiddenAt == null).length;
     if (currentCount > _prevMessageCount && _prevMessageCount > 0) {
@@ -252,11 +298,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
               Expanded(
                 child: Text(
                   channelName,
-                  style: TextStyle(
-                    color: hollow.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: HollowTypography.subheading
+                      .copyWith(color: hollow.textPrimary),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
@@ -271,11 +314,11 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                 },
                 semanticLabel: 'Retry',
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(4),
+                padding: const EdgeInsets.all(HollowSpacing.xs),
                 child:
                     Icon(LucideIcons.refreshCw, size: 15, color: hollow.textSecondary),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: HollowSpacing.xs),
               HollowPressable(
                 onTap: () => setState(() {
                   _showSearch = !_showSearch;
@@ -286,7 +329,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                 }),
                 semanticLabel: 'Search messages',
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(4),
+                padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
                   LucideIcons.search,
                   size: 15,
@@ -319,11 +362,26 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
 
         Expanded(
           child: filtered.isEmpty
-              ? HollowEmptyState(
-                  title: _searchQuery.isNotEmpty
-                      ? 'No matching messages'
-                      : 'No messages yet',
-                )
+              ? (!answered && _searchQuery.isEmpty
+                  ? (_syncTimedOut
+                      ? HollowEmptyState(
+                          title: "Couldn't reach anyone who holds this "
+                              'channel',
+                          description: 'Members may be offline.',
+                          action: HollowButton.ghost(
+                            compact: true,
+                            onPressed: () =>
+                                setState(() => _awaitSync(ask: true)),
+                            child: const Text('Try again'),
+                          ),
+                        )
+                      : const Center(
+                          child: HollowSpinner.large(delayed: true)))
+                  : HollowEmptyState(
+                      title: _searchQuery.isNotEmpty
+                          ? 'No matching messages'
+                          : 'No messages yet',
+                    ))
               : MessageActionBarScope(
                   child: Builder(
                     builder: (scopeContext) => chatListWithRail(
@@ -468,10 +526,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
               const SizedBox(width: HollowSpacing.sm),
               Text(
                 'Join this server to send messages',
-                style: TextStyle(
-                  color: hollow.textSecondary,
-                  fontSize: 13,
-                ),
+                style: HollowTypography.body
+                    .copyWith(color: hollow.textSecondary),
               ),
             ],
           ),

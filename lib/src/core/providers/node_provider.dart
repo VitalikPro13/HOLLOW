@@ -13,11 +13,13 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 /// Node state: status + last error.
 class NodeState {
   final NodeStatus status;
-  final String? error;
+
+  /// What failed the last start, kept whole for `friendlyError`.
+  final Object? error;
 
   const NodeState({this.status = NodeStatus.loading, this.error});
 
-  NodeState copyWith({NodeStatus? status, String? error}) {
+  NodeState copyWith({NodeStatus? status, Object? error}) {
     return NodeState(
       status: status ?? this.status,
       error: error,
@@ -72,7 +74,7 @@ class NodeNotifier extends Notifier<NodeState> {
       }
     } catch (e) {
       debugPrint('[HOLLOW] Node start error: $e');
-      state = state.copyWith(status: NodeStatus.error, error: e.toString());
+      state = state.copyWith(status: NodeStatus.error, error: e);
     }
   }
 

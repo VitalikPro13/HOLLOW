@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Results [UnlockDialog] pops besides the typed secret.
@@ -16,7 +22,10 @@ const kUnlockBiometric = '__biometric__';
 ///
 /// Errors sit on the field, never in a toast: the lock cover is up while this
 /// shows and silences toasts.
-class UnlockDialog extends StatefulWidget {
+///
+/// A call keeps running under the lock, so while one does the prompt offers to
+/// end it without unlocking, the way a phone's lock screen does.
+class UnlockDialog extends ConsumerStatefulWidget {
   final bool isPin;
   final bool hasBiometric;
   final bool wrong;
@@ -29,12 +38,27 @@ class UnlockDialog extends StatefulWidget {
   });
 
   @override
-  State<UnlockDialog> createState() => _UnlockDialogState();
+  ConsumerState<UnlockDialog> createState() => _UnlockDialogState();
 }
 
-class _UnlockDialogState extends State<UnlockDialog> {
+class _UnlockDialogState extends ConsumerState<UnlockDialog> {
   final _controller = TextEditingController();
   late bool _wrong = widget.wrong;
+  bool _ending = false;
+
+  Future<void> _endCall() async {
+    setState(() => _ending = true);
+    final dm = ref.read(callProvider).status != CallStatus.idle;
+    try {
+      if (dm) {
+        await leaveDmCall(context, ref);
+      } else {
+        await leaveVoiceRoom(context, ref);
+      }
+    } finally {
+      if (mounted) setState(() => _ending = false);
+    }
+  }
 
   @override
   void dispose() {
@@ -58,6 +82,10 @@ class _UnlockDialogState extends State<UnlockDialog> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           HollowDialogText('Enter your app $label to unlock your identity.'),
+          if (watchHasQuickControls(ref)) ...[
+            const SizedBox(height: HollowSpacing.md),
+            _CallStillGoing(ending: _ending, onEnd: _endCall),
+          ],
           const SizedBox(height: HollowSpacing.lg),
           HollowTextField(
             controller: _controller,
@@ -90,6 +118,41 @@ class _UnlockDialogState extends State<UnlockDialog> {
         HollowButton.filled(
           onPressed: _submit,
           child: const Text('Unlock'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The call running under the lock, and the one way to end it from here.
+class _CallStillGoing extends StatelessWidget {
+  final bool ending;
+  final VoidCallback onEnd;
+
+  const _CallStillGoing({required this.ending, required this.onEnd});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      children: [
+        Icon(LucideIcons.phone, size: 16, color: hollow.success),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Text(
+            'Your call is still going',
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowButton.outline(
+          danger: true,
+          compact: !HollowDialogSurface.isCompact(context),
+          touch: HollowDialogSurface.isCompact(context),
+          loading: ending,
+          icon: const Icon(LucideIcons.phoneOff),
+          onPressed: onEnd,
+          child: const Text('End call'),
         ),
       ],
     );

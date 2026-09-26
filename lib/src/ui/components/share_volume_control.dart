@@ -203,9 +203,8 @@ class _ShareVolumePanelState extends ConsumerState<ShareVolumePanel> {
               width: 34,
               child: Text(
                 '${volume.round()}%',
-                style: HollowTypography.caption.copyWith(
+                style: HollowTypography.micro.copyWith(
                   color: hollow.textSecondary,
-                  fontSize: 10,
                 ),
                 textAlign: TextAlign.right,
               ),
@@ -218,9 +217,8 @@ class _ShareVolumePanelState extends ConsumerState<ShareVolumePanel> {
             Expanded(
               child: Text(
                 'Quieter when people talk',
-                style: HollowTypography.body.copyWith(
+                style: HollowTypography.label.copyWith(
                   color: hollow.textPrimary,
-                  fontSize: 13,
                 ),
               ),
             ),

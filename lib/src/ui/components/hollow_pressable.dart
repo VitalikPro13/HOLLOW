@@ -122,7 +122,7 @@ class _HollowPressableState extends State<HollowPressable>
   /// dark fill, toward black on a light one, where white would be invisible.
   static Color _hoverLift(Color base) {
     final toward =
-        base.computeLuminance() > 0.5 ? Colors.black : Colors.white;
+        base.computeLuminance() > 0.5 ? Colors.black : Colors.white; // design-ignore: luminance step for an explicit background colour
     return Color.lerp(base, toward, base.computeLuminance() > 0.5 ? 0.08 : 0.15)!;
   }
 

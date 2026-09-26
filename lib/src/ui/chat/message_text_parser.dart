@@ -1,6 +1,7 @@
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
@@ -449,10 +450,10 @@ List<InlineSpan> _tokensToSpans(
           child: Semantics(
             label: '@${tok.text}',
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
               decoration: BoxDecoration(
                 color: hollow.accent.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(3),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
               child: Text(
                 '@${tok.text}',
@@ -543,18 +544,15 @@ List<InlineSpan> _tokensToSpans(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
             decoration: BoxDecoration(
               color: hollow.background,
-              borderRadius: BorderRadius.circular(3),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
               border: Border.all(color: hollow.border),
             ),
             child: Text(
               tok.text,
-              style: HollowTypography.mono.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 13,
-              ),
+              style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
             ),
           ),
         ));
@@ -712,8 +710,8 @@ class MessageText extends StatelessWidget {
   Widget _codeBlockContainer(String code, HollowTheme hollow) {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(8),
+      margin: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+      padding: const EdgeInsets.all(HollowSpacing.sm),
       decoration: BoxDecoration(
         color: hollow.background,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
@@ -721,10 +719,7 @@ class MessageText extends StatelessWidget {
       ),
       child: Text(
         code.endsWith('\n') ? code.substring(0, code.length - 1) : code,
-        style: HollowTypography.mono.copyWith(
-          color: hollow.textPrimary,
-          fontSize: 13,
-        ),
+        style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
       ),
     );
   }
@@ -817,12 +812,12 @@ class _SpoilerTextState extends State<_SpoilerText> {
         onTap: () => setState(() => _revealed = !_revealed),
         child: AnimatedContainer(
           duration: HollowDurations.fast,
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
           decoration: BoxDecoration(
             color: _revealed
                 ? widget.hollow.elevated
                 : widget.hollow.textSecondary,
-            borderRadius: BorderRadius.circular(3),
+            borderRadius: BorderRadius.circular(widget.hollow.radiusXs),
           ),
           child: Text(
             widget.text,

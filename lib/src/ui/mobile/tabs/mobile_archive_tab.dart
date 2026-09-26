@@ -273,9 +273,13 @@ class _MobileMessagesViewState extends ConsumerState<_MobileMessagesView> {
     );
 
     Widget body;
-    if (dmsAsync.isLoading || channelsAsync.isLoading) {
-      body = const Center(child: HollowSpinner.medium());
-    } else if (dmsAsync.hasError || channelsAsync.hasError) {
+    // The lists are refreshed on every visit: a refresh keeps the list on
+    // screen, and only a first read waits or fails.
+    bool firstRead(AsyncValue<Object> v) => !v.hasValue && v.isLoading;
+    bool failed(AsyncValue<Object> v) => !v.hasValue && v.hasError;
+    if (firstRead(dmsAsync) || firstRead(channelsAsync)) {
+      body = const Center(child: HollowSpinner.medium(delayed: true));
+    } else if (failed(dmsAsync) || failed(channelsAsync)) {
       body = HollowEmptyState(
         title: "Your conversations didn't load",
         action: HollowButton.ghost(
@@ -288,7 +292,8 @@ class _MobileMessagesViewState extends ConsumerState<_MobileMessagesView> {
         ),
       );
     } else {
-      body = _list(hollow, dmsAsync.value!, channelsAsync.value!, search);
+      body = _list(hollow, dmsAsync.value ?? const [],
+          channelsAsync.value ?? const [], search);
     }
 
     return Column(children: [field, Expanded(child: body)]);

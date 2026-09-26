@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
@@ -84,7 +85,8 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
     } on RecorderFfmpegMissingException {
       _failStart('Voice encoder unavailable');
     } catch (e) {
-      _failStart('Failed to start recording: $e');
+      _failStart(
+          friendlyError(e, fallback: "Recording didn't start. Try again."));
     }
   }
 
@@ -211,7 +213,6 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
                     _formatElapsed(_elapsed),
                     style: HollowTypography.mono.copyWith(
                       color: hollow.textPrimary,
-                      fontSize: 13,
                     ),
                   ),
                 ),

@@ -33,9 +33,9 @@ abstract final class BrandIcons {
 }
 
 abstract final class BrandIconColors {
-  static const Color twitch = Color(0xFF9146FF);
-  static const Color youtube = Color(0xFFFF0000);
-  static const Color kick = Color(0xFF53FC19);
-  static const Color kofi = Color(0xFFFF6433);
-  static const Color patreon = Color(0xFF000000);
+  static const Color twitch = Color(0xFF9146FF); // design-ignore: brand colour
+  static const Color youtube = Color(0xFFFF0000); // design-ignore: brand colour
+  static const Color kick = Color(0xFF53FC19); // design-ignore: brand colour
+  static const Color kofi = Color(0xFFFF6433); // design-ignore: brand colour
+  static const Color patreon = Color(0xFF000000); // design-ignore: brand colour
 }

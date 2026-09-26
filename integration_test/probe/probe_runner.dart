@@ -545,6 +545,9 @@ class ProbeRunner {
       case 'look':
         return _look(step);
 
+      case 'hit':
+        return _hitPath(_finder(step));
+
       case 'wait_for':
         return _waitFor(step);
 
@@ -1601,6 +1604,28 @@ class ProbeRunner {
     }
     blockers.add('(target sits in: ${chain.join(" < ")})');
     return blockers;
+  }
+
+  /// Every widget a tap at [finder]'s centre passes through, deepest first:
+  /// for a tap that lands but does nothing.
+  String _hitPath(Finder finder) {
+    final point = tester.getCenter(finder);
+    final result = tester.hitTestOnBinding(point);
+    final names = <String>[];
+    for (final entry in result.path) {
+      final hit = entry.target;
+      if (hit is! RenderObject) {
+        names.add(hit.runtimeType.toString());
+        continue;
+      }
+      for (final element in tester.allElements) {
+        if (!identical(element.renderObject, hit)) continue;
+        names.add(_describeElement(element) ?? hit.runtimeType.toString());
+        break;
+      }
+      if (names.length >= 40) break;
+    }
+    return 'at (${point.dx.round()},${point.dy.round()}): ${names.join(" < ")}';
   }
 
   /// A short human name for a widget, for the blocker list above.

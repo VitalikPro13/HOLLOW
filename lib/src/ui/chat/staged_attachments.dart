@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:hollow/src/core/album_grouping.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -116,8 +117,9 @@ List<StagedAttachment> reorderStaged(
 /// Every optimistic row lands first, so the bubble groups at once. The sends
 /// then run ONE AT A TIME: the send stamp and relay arrival follow the strip's
 /// order only if each file waits for the one before it. The caption rides the
-/// first item. Returns how many items failed; the rest still went out.
-Future<int> sendStagedAttachments({
+/// first item. Returns how many items failed, with the first failure's cause;
+/// the rest still went out.
+Future<({int failed, Object? firstError})> sendStagedAttachments({
   required List<StagedAttachment> items,
   required String caption,
   required void Function(
@@ -127,22 +129,33 @@ Future<int> sendStagedAttachments({
           StagedAttachment item, String messageId, String text, String? albumId)
       send,
 }) async {
-  if (items.isEmpty) return 0;
+  if (items.isEmpty) return (failed: 0, firstError: null);
   final albumId = items.length >= 2 ? generateAlbumId() : null;
   final ids = [for (final _ in items) generateMessageId()];
   for (var i = 0; i < items.length; i++) {
     addOptimistic(items[i], ids[i], i == 0 ? caption : '', albumId);
   }
   var failed = 0;
+  Object? firstError;
   for (var i = 0; i < items.length; i++) {
     try {
       await send(items[i], ids[i], i == 0 ? caption : '', albumId);
     } catch (e) {
       failed++;
+      firstError ??= e;
       debugPrint('[HOLLOW] Album item ${i + 1}/${items.length} failed: $e');
     }
   }
-  return failed;
+  return (failed: failed, firstError: firstError);
+}
+
+/// The toast for [failed] files that did not send, naming the cause when
+/// [error] has one worth reading.
+String stagedSendFailureMessage(int failed, Object? error) {
+  final fallback = failed == 1
+      ? "A file didn't send. Try again."
+      : "$failed files didn't send. Try again.";
+  return error == null ? fallback : friendlyError(error, fallback: fallback);
 }
 
 /// The staged files above a composer: one row for a single file, a
@@ -160,6 +173,9 @@ class StagedAttachmentStrip extends StatelessWidget {
   });
 
   static bool get _touch => Platform.isAndroid || Platform.isIOS;
+
+  /// The platforms' minimum touch target.
+  static const double _kTouchTarget = 44;
 
   @override
   Widget build(BuildContext context) {
@@ -192,8 +208,14 @@ class StagedAttachmentStrip extends StatelessWidget {
         HollowPressable(
           semanticLabel: 'Remove attachment',
           onTap: () => onRemove(0),
-          padding: const EdgeInsets.all(HollowSpacing.xs),
-          child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
+          padding: _touch ? null : const EdgeInsets.all(HollowSpacing.xs),
+          child: _touch
+              ? SizedBox.square(
+                  dimension: _kTouchTarget,
+                  child: Icon(LucideIcons.x,
+                      size: 16, color: hollow.textSecondary),
+                )
+              : Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
         ),
       ],
     );
@@ -227,19 +249,44 @@ class StagedAttachmentStrip extends StatelessWidget {
                   child: Stack(
                     children: [
                       _thumb(hollow, item, cell),
-                      Positioned(
-                        top: 2,
-                        right: 2,
-                        child: HollowPressable(
-                          semanticLabel: 'Remove ${item.name}',
-                          onTap: () => onRemove(i),
-                          backgroundColor: hollow.overlay.withValues(alpha: 0.8),
-                          borderRadius: BorderRadius.circular(hollow.radiusMd),
-                          padding: const EdgeInsets.all(HollowSpacing.xxs),
-                          child: Icon(LucideIcons.x,
-                              size: 14, color: hollow.textPrimary),
-                        ),
-                      ),
+                      _touch
+                          ? Positioned(
+                              top: 0,
+                              right: 0,
+                              // The whole corner takes the tap; a long press
+                              // there still loses to the tap and reorders.
+                              child: HollowPressable(
+                                semanticLabel: 'Remove ${item.name}',
+                                onTap: () => onRemove(i),
+                                child: SizedBox.square(
+                                  dimension: _kTouchTarget,
+                                  child: Align(
+                                    alignment: Alignment.topRight,
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(
+                                          HollowSpacing.xxs),
+                                      child: _removeMark(hollow),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : Positioned(
+                              top: HollowSpacing.xxs,
+                              right: HollowSpacing.xxs,
+                              child: HollowPressable(
+                                semanticLabel: 'Remove ${item.name}',
+                                onTap: () => onRemove(i),
+                                backgroundColor:
+                                    hollow.overlay.withValues(alpha: 0.8),
+                                borderRadius:
+                                    BorderRadius.circular(hollow.radiusMd),
+                                padding:
+                                    const EdgeInsets.all(HollowSpacing.xxs),
+                                child: Icon(LucideIcons.x,
+                                    size: 14, color: hollow.textPrimary),
+                              ),
+                            ),
                     ],
                   ),
                 ),
@@ -256,6 +303,17 @@ class StagedAttachmentStrip extends StatelessWidget {
       ],
     );
   }
+
+  /// The touch strip's remove glyph, drawn at the desktop control's size inside
+  /// a larger hit area.
+  Widget _removeMark(HollowTheme hollow) => Container(
+        padding: const EdgeInsets.all(HollowSpacing.xxs),
+        decoration: BoxDecoration(
+          color: hollow.overlay.withValues(alpha: 0.8),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+        ),
+        child: Icon(LucideIcons.x, size: 14, color: hollow.textPrimary),
+      );
 
   Widget _thumb(HollowTheme hollow, StagedAttachment item, double size) {
     if (item.isImage) {

@@ -35,6 +35,8 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -174,8 +176,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   String get _channelKey => '${widget.serverId}:${widget.channelId}';
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
-  List<storage_api.StoredChannelMessage> _searchResults = [];
+  final _search = ChatSearchResults<storage_api.StoredChannelMessage>();
   int? _highlightIndex;
+
+  /// The first history read: until it lands the list shows no empty state, and
+  /// a failed read offers a retry instead of "nothing here".
+  bool _historyLoaded = false;
+  bool _historyFailed = false;
 
   /// True between deactivate() and activate() or unmount. A popped route's
   /// callbacks still fire during the pop frame, and `mounted` stays true on a
@@ -220,13 +227,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (!mounted) return;
       ref.read(systemNotificationProvider.notifier).dismissDm(widget.peerId!);
     });
-    ref.read(chatProvider.notifier).loadHistory(widget.peerId!).then((_) {
-      if (mounted) {
-        setState(() {});
-        _jumpToBottom();
-        _markSeen();
-      }
-    });
+    _loadDmHistory();
     // Re-request files whose bytes never arrived, from the friend or an online
     // sibling.
     ref.read(eventStreamProvider.notifier)
@@ -262,22 +263,46 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       ref.invalidate(myRoleProvider(widget.serverId!));
       ref.invalidate(myPermissionsProvider(widget.serverId!));
     });
-    ref.read(channelChatProvider.notifier).loadHistory(
+    _loadChannelHistory();
+  }
+
+  Future<void> _loadDmHistory() async {
+    final ok = await ref.read(chatProvider.notifier).loadHistory(widget.peerId!);
+    if (!mounted || _routeDeactivated) return;
+    setState(() {
+      _historyLoaded = true;
+      _historyFailed = !ok;
+    });
+    _jumpToBottom();
+    _markSeen();
+  }
+
+  Future<void> _loadChannelHistory() async {
+    final ok = await ref.read(channelChatProvider.notifier).loadHistory(
           widget.serverId!,
           widget.channelId!,
-        ).then((_) {
-      if (mounted) {
-        ref
-            .read(pinnedProvider.notifier)
-            .loadPins(widget.serverId!, widget.channelId!);
-        setState(() {});
-        _jumpToBottom();
-        _markSeen();
-        // The route remounts per open, so the pill state is gone while the
-        // history the cooldown derives from is not.
-        _recomputeSlowMode();
-      }
+        );
+    if (!mounted || _routeDeactivated) return;
+    ref
+        .read(pinnedProvider.notifier)
+        .loadPins(widget.serverId!, widget.channelId!);
+    setState(() {
+      _historyLoaded = true;
+      _historyFailed = !ok;
     });
+    _jumpToBottom();
+    _markSeen();
+    // The route remounts per open, so the pill state is gone while the history
+    // the cooldown derives from is not.
+    _recomputeSlowMode();
+  }
+
+  void _retryHistory() {
+    setState(() {
+      _historyLoaded = false;
+      _historyFailed = false;
+    });
+    widget.isDm ? _loadDmHistory() : _loadChannelHistory();
   }
 
   @override
@@ -430,21 +455,18 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               const <ChannelChatMessage>[])
           .length;
 
-  Future<void> _onSearch(String query) async {
-    if (query.trim().isEmpty) {
-      setState(() => _searchResults = []);
-      return;
-    }
-    try {
-      final results = await storage_api.searchChannelMessages(
-        serverId: widget.serverId!,
-        channelId: widget.channelId!,
-        query: query.trim(),
-        limit: 20,
+  Future<void> _onSearch(String query) => _search.run(
+        query,
+        (q) => storage_api.searchChannelMessages(
+          serverId: widget.serverId!,
+          channelId: widget.channelId!,
+          query: q,
+          limit: 20,
+        ),
+        (apply) {
+          if (mounted && !_routeDeactivated) setState(apply);
+        },
       );
-      if (mounted) setState(() => _searchResults = results);
-    } catch (_) {}
-  }
 
   /// Bottom snap, INSTANT: an animated scroll renders the new row and then
   /// glides to it, which reads as a jump followed by a move.
@@ -618,19 +640,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.3),
-            blurRadius: 12,
-            offset: const Offset(0, -2),
-          ),
-        ],
+        boxShadow: HollowShadows.float,
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: ListView.builder(
           shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
           itemCount: _mentionCandidates.length,
           itemBuilder: (ctx, i) {
             final c = _mentionCandidates[i];
@@ -730,19 +746,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.3),
-            blurRadius: 12,
-            offset: const Offset(0, -2),
-          ),
-        ],
+        boxShadow: HollowShadows.float,
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: ListView.builder(
           shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
           itemCount: _emoteCandidates.length,
           itemBuilder: (ctx, i) {
             final c = _emoteCandidates[i];
@@ -761,7 +771,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                       child: c.hash != null
                           ? EmoteImage(name: c.name, hash: c.hash!, size: 24)
                           : Text(c.char!,
-                              style: const TextStyle(fontSize: 20)),
+                              style: const TextStyle(fontSize: 20)), // design-ignore: emoji glyph at its cell size
                     ),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
@@ -879,11 +889,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
+    final replyText = _replyToText;
+    final replySender = _replyToSenderName;
     _urlDebounce?.cancel();
     _clearComposerState();
 
     if (staged.isNotEmpty) {
-      await _sendFiles(staged, caption: text, errorToast: 'Failed to send file');
+      await _sendFiles(staged,
+          caption: text, errorToast: "A file didn't send. Try again.");
     } else {
       // The provider adds the bubble only AFTER the network send, so a failure
       // here would vanish silently: composer cleared, no bubble.
@@ -910,9 +923,22 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           // Nothing is in flight when the debounce never fired.
           if (!wasLoading) _fetchPreview(pendingUrl);
         }
-      } catch (_) {
+      } catch (e) {
         if (!mounted || _routeDeactivated) return;
-        HollowToast.show(context, 'Failed to send message',
+        if (restoreFailedDraft(_controller, text)) {
+          if (_replyToMessageId == null) {
+            setState(() {
+              _replyToMessageId = replyMid;
+              _replyToText = replyText;
+              _replyToSenderName = replySender;
+            });
+          }
+          _urlDebounce?.cancel();
+          _detectUrl();
+        }
+        // Mute, slow mode and missing permission each carry their own sentence.
+        HollowToast.show(
+            context, friendlyError(e, fallback: kSendFailedFallback),
             type: HollowToastType.error);
         return;
       }
@@ -978,7 +1004,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final members = widget.isDm
         ? null
         : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
-    final failed = await sendStagedAttachments(
+    final outcome = await sendStagedAttachments(
       items: items,
       caption: caption,
       addOptimistic: (item, messageId, text, albumId) {
@@ -1025,8 +1051,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 album: albumId,
               ),
     );
-    if (failed > 0 && mounted && !_routeDeactivated) {
-      HollowToast.show(context, errorToast, type: HollowToastType.error);
+    if (outcome.failed > 0 && mounted && !_routeDeactivated) {
+      final cause = outcome.firstError;
+      HollowToast.show(context,
+          cause == null ? errorToast : friendlyError(cause, fallback: errorToast),
+          type: HollowToastType.error);
     }
   }
 
@@ -1139,7 +1168,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Future<void> _shareFileToChat(String path, String fileName) async {
     if (!mounted) return;
     await _sendFiles([StagedAttachment.fromPath(path, name: fileName)],
-        caption: '', errorToast: 'Failed to share pack');
+        caption: '', errorToast: "The pack didn't send. Try again.");
   }
   void _showAttachSheet() {
     final hollow = HollowTheme.of(context);
@@ -1190,7 +1219,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     await _sendFiles([
       StagedAttachment(
           path: result.filePath, name: _kVoiceMessageName, sizeBytes: size),
-    ], caption: '', errorToast: 'Failed to send voice message');
+    ], caption: '', errorToast: "Your voice message didn't send. Try again.");
     try { await file.delete(); } catch (_) {}
   }
 
@@ -1537,7 +1566,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       _searchOpen = !_searchOpen;
       if (!_searchOpen) {
         _searchController.clear();
-        _searchResults = [];
+        _search.clear();
       }
     });
     if (_searchOpen) {
@@ -1817,7 +1846,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       children: [
         Positioned.fill(
           child: Container(
-            color: Colors.black,
+            color: HollowColors.mediaBlack,
             child: Image.memory(
               bg.imageBytes!,
               fit: BoxFit.cover,
@@ -1835,6 +1864,26 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         scaffold,
       ],
     );
+  }
+
+  bool _retryingSync = false;
+
+  Future<void> _retrySync() async {
+    setState(() => _retryingSync = true);
+    try {
+      await network_api.requestChannelSync(
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+      );
+    } catch (e) {
+      if (mounted && !_routeDeactivated) {
+        HollowToast.show(context,
+            friendlyError(e, fallback: "Sync didn't start. Try again."),
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted && !_routeDeactivated) setState(() => _retryingSync = false);
+    }
   }
 
   Widget _buildSyncIndicator(HollowTheme hollow) {
@@ -1880,18 +1929,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 style: HollowTypography.caption.copyWith(color: hollow.error),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              GestureDetector(
-                onTap: () => network_api.requestChannelSync(
-                  serverId: widget.serverId!,
-                  channelId: widget.channelId!,
-                ).catchError((_) {}),
-                child: Text(
-                  'Retry',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+              HollowButton.ghost(
+                touch: true,
+                loading: _retryingSync,
+                onPressed: _retrySync,
+                child: const Text('Retry'),
               ),
             ],
           ),
@@ -1915,9 +1957,16 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     required Widget Function(List<T> messages, int revIndex,
             Map<String, int> indexById, int? unreadIndex)
         rowBuilder,
+    // What an empty conversation that loaded fine shows.
+    required Widget Function() conversationStart,
   }) {
     if (messages.isEmpty) {
-      return const HollowEmptyState(title: 'No messages yet');
+      return chatHistoryPlaceholder(
+        loaded: _historyLoaded,
+        failed: _historyFailed,
+        onRetry: _retryHistory,
+        start: conversationStart,
+      );
     }
 
     // Message id to chronological index, for findChildIndexCallback.
@@ -1975,17 +2024,22 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     ref.listen<Map<String, List<ChatMessage>>>(
         chatProvider, _onDmMessagesChanged);
 
-    final calls = ref.watch(dmCallRecordsProvider(_callPeer));
-    if (messages.isEmpty && calls.isNotEmpty) {
-      return CallRecordsOnly(records: calls);
-    }
-
     return _buildMessageListShell<ChatMessage>(
       messages: messages,
       messageIdOf: (m) => m.messageId,
       markerKey: dmMarkerKey(widget.peerId!),
       isMine: (m) => m.isMe,
       rowBuilder: _buildDmRow,
+      conversationStart: () {
+        final savedId = ref.watch(savedMessagesPeerIdProvider);
+        return dmConversationStart(
+          calls: ref.watch(dmCallRecordsProvider(_callPeer)),
+          isSavedMessages: savedId != null &&
+              ref.watch(deviceLinkProvider).identityOf(widget.peerId!) ==
+                  savedId,
+          name: displayNameFor(ref.watch(profileProvider), widget.peerId!),
+        );
+      },
     );
   }
 
@@ -2215,9 +2269,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       } else {
         await notifier.addReaction(widget.peerId!, msg.messageId!, emoji);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted || _routeDeactivated) return;
-      HollowToast.show(context, 'Failed to update reaction',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your reaction didn't go through. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2234,9 +2289,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         await notifier.addReaction(
             widget.serverId!, widget.channelId!, msg.messageId!, emoji);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted || _routeDeactivated) return;
-      HollowToast.show(context, 'Failed to update reaction',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your reaction didn't go through. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2256,6 +2312,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       markerKey: channelMarkerKey(widget.serverId!, widget.channelId!),
       isMine: (m) => m.isMe,
       rowBuilder: _buildChannelRow,
+      conversationStart: () =>
+          channelConversationStart(widget.channelName ?? 'channel'),
     );
   }
 
@@ -2593,11 +2651,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           messageId: messageId,
         );
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted || _routeDeactivated) return;
       HollowToast.show(
           context,
-          isPinned ? 'Failed to unpin message' : 'Failed to pin message',
+          friendlyError(e,
+              fallback: isPinned
+                  ? "Couldn't unpin the message. Try again."
+                  : "Couldn't pin the message. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2614,9 +2675,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         await ref.read(channelChatProvider.notifier).deleteMessage(
             widget.serverId!, widget.channelId!, messageId);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted || _routeDeactivated) return;
-      HollowToast.show(context, 'Failed to delete message',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Couldn't delete the message. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -2632,9 +2694,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         await ref.read(channelChatProvider.notifier).editMessage(
             widget.serverId!, widget.channelId!, messageId, newText);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted || _routeDeactivated) return;
-      HollowToast.show(context, 'Failed to save changes',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your edit didn't save. Try again."),
           type: HollowToastType.error);
       return;
     }
@@ -2659,16 +2722,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             controller: _searchController,
             focusNode: _searchFocusNode,
             autofocus: true,
-            style: HollowTypography.body.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 13,
-            ),
+            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
             decoration: InputDecoration(
               hintText: 'Search in #${widget.channelName}...',
-              hintStyle: HollowTypography.body.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 13,
-              ),
+              hintStyle:
+                  HollowTypography.body.copyWith(color: hollow.textSecondary),
               prefixIcon: Icon(LucideIcons.search,
                   size: 16, color: hollow.textSecondary),
               filled: true,
@@ -2685,21 +2743,16 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             ),
             onChanged: _onSearch,
           ),
-          if (_searchResults.isNotEmpty)
-            ConstrainedBox(
-              // Sized to the space left above the keyboard, or a small phone
-              // shows two results while typing.
-              constraints: BoxConstraints(
-                maxHeight: ((MediaQuery.sizeOf(context).height -
-                            MediaQuery.viewInsetsOf(context).bottom) *
-                        0.35)
-                    .clamp(120.0, 360.0),
-              ),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: _searchResults.length,
-                itemBuilder: (_, index) {
-                  final msg = _searchResults[index];
+          ChatSearchResultsView<storage_api.StoredChannelMessage>(
+            results: _search,
+            onRetry: () => _onSearch(_searchController.text),
+            // Sized to the space left above the keyboard, or a small phone
+            // shows two results while typing.
+            maxHeight: ((MediaQuery.sizeOf(context).height -
+                        MediaQuery.viewInsetsOf(context).bottom) *
+                    0.35)
+                .clamp(120.0, 360.0),
+            itemBuilder: (msg) {
                   final profiles = ref.watch(profileProvider);
                   // Collapse device to master so a result shows the person.
                   final name = displayNameFor(profiles,
@@ -2722,7 +2775,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                         setState(() {
                           _searchOpen = false;
                           _searchController.clear();
-                          _searchResults = [];
+                          _search.clear();
                         });
                         if (idx != -1) _scrollToMessage(idx);
                       },
@@ -2739,29 +2792,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                               Text(
                                 name,
                                 style: HollowTypography.caption.copyWith(
-                                  color: hollow.accent,
+                                  color: hollow.accentText,
                                   fontWeight: FontWeight.w600,
-                                  fontSize: 11,
                                 ),
                               ),
                               const SizedBox(width: HollowSpacing.sm),
                               Text(
                                 timeStr,
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.textSecondary
-                                      .withValues(alpha: 0.5),
-                                  fontSize: 10,
-                                ),
+                                style: HollowTypography.caption
+                                    .copyWith(color: hollow.textTertiary),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 2),
+                          const SizedBox(height: HollowSpacing.xxs),
                           Text(
                             msg.text,
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.textPrimary,
-                              fontSize: 12,
-                            ),
+                            style: HollowTypography.bodySmall
+                                .copyWith(color: hollow.textPrimary),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -2770,8 +2817,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     ),
                   );
                 },
-              ),
-            ),
+          ),
         ],
       ),
     );
@@ -3010,7 +3056,14 @@ class _MobileChatHeader extends ConsumerWidget {
       BuildContext context, WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved}) {
     if (isDm) {
+      final offline = ownLinkOfflineStatus(ref);
       return [
+        // Our own link, or a dead link reads as the friend being offline.
+        if (offline != null)
+          Padding(
+            padding: const EdgeInsets.only(right: HollowSpacing.xs),
+            child: offline,
+          ),
         // Saved messages hides the call buttons: you cannot call yourself.
         if (!isSaved) _DmCallButtons(peerId: peerId!),
         _DmMuteButton(peerId: peerId!),
@@ -3111,8 +3164,18 @@ class _MobileChannelStatus extends ConsumerWidget {
           ),
         );
       },
-      loading: () => const SizedBox.shrink(),
-      error: (_, _) => const SizedBox.shrink(),
+      // Without the member list only our own link is known.
+      loading: () => _offlineOnly(ref),
+      error: (_, _) => _offlineOnly(ref),
+    );
+  }
+
+  Widget _offlineOnly(WidgetRef ref) {
+    final offline = ownLinkOfflineStatus(ref);
+    if (offline == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(right: HollowSpacing.xs),
+      child: offline,
     );
   }
 }

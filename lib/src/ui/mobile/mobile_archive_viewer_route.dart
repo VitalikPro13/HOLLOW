@@ -122,9 +122,11 @@ class _MobileArchiveViewerRouteState
           ),
         Expanded(
           child: messagesAsync.when(
-            loading: () => const Center(child: HollowSpinner.large()),
+            loading: () =>
+                const Center(child: HollowSpinner.large(delayed: true)),
             error: (_, _) => archiveLoadError(
-                () => ref.invalidate(archiveDmMessagesProvider(peerId))),
+                () => ref.invalidate(archiveDmMessagesProvider(peerId)),
+                touch: true),
             data: (messages) => _dmList(messages, peerId),
           ),
         ),
@@ -255,9 +257,11 @@ class _MobileArchiveViewerRouteState
           ),
         Expanded(
           child: messagesAsync.when(
-            loading: () => const Center(child: HollowSpinner.large()),
+            loading: () =>
+                const Center(child: HollowSpinner.large(delayed: true)),
             error: (_, _) => archiveLoadError(
-                () => ref.invalidate(archiveChannelMessagesProvider(key))),
+                () => ref.invalidate(archiveChannelMessagesProvider(key)),
+                touch: true),
             data: (_) => _channelList(filtered, allMessages, serverId, key),
           ),
         ),

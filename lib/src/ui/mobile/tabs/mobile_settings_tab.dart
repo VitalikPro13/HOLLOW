@@ -129,7 +129,9 @@ class MobileSettingsTab extends ConsumerWidget {
               const HomeNewsCard(),
               // All four mobile tabs stay mounted, so the load bars (and their
               // poll) run only while this one shows.
-              HomeRelayCard(loadBars: ref.watch(mobileTabProvider) == 3),
+              HomeRelayCard(
+                  touch: true,
+                  loadBars: ref.watch(mobileTabProvider) == 3),
             ],
           ),
         ),

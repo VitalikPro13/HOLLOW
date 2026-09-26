@@ -252,10 +252,8 @@ class DeepLinkService {
               const SizedBox(height: HollowSpacing.md),
               Text(
                 detail,
-                style: HollowTypography.mono.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 11,
-                ),
+                style: HollowTypography.monoSmall
+                    .copyWith(color: hollow.textSecondary),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),

@@ -23,15 +23,12 @@ class RelayNoTurnChip extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: hollow.warning.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(compact ? 4 : hollow.radiusXs),
+          borderRadius: BorderRadius.circular(hollow.radiusXs),
         ),
         child: Text(
           'No TURN server',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.warning,
-            fontSize: compact ? 9 : 11,
-            fontWeight: FontWeight.w600,
-          ),
+          style: (compact ? HollowTypography.micro : HollowTypography.caption)
+              .copyWith(color: hollow.warning, fontWeight: FontWeight.w600),
         ),
       ),
     );

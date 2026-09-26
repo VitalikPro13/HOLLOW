@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -12,6 +13,7 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
@@ -63,13 +65,35 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     // Push taps land here, including the buffered cold-start ones, which are
     // delivered on registration.
     if (Platform.isAndroid || Platform.isIOS) {
+      ref.listenManual<bool>(appLockedProvider, (prev, locked) {
+        if (!locked && prev == true) _replayHeldTap();
+      });
       PushNotificationService.registerOpenChatHandler(_openChatFromPush);
       PushNotificationService.registerOpenChannelHandler(_openChannelFromPush);
     }
   }
 
+  /// A tap that lands while the lock cover is up, held until it lifts: a route
+  /// pushed now would sit ABOVE the cover and show the conversation.
+  VoidCallback? _heldTap;
+
+  /// True (and the tap held) while the lock is up. Checked again after every
+  /// await, since the lock can rise while a tap resolves its target.
+  bool _holdWhileLocked(VoidCallback replay) {
+    if (!ref.read(appLockedProvider)) return false;
+    _heldTap = replay;
+    return true;
+  }
+
+  void _replayHeldTap() {
+    final replay = _heldTap;
+    _heldTap = null;
+    if (replay != null && mounted) replay();
+  }
+
   Future<void> _openChatFromPush(String peerId) async {
     if (!mounted) return;
+    if (_holdWhileLocked(() => _openChatFromPush(peerId))) return;
     // A DM push `sender` is the friend's DEVICE id while every thread and
     // provider keys on the MASTER, so without this the tap opens a separate
     // empty thread.
@@ -86,6 +110,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     }
     if (masterId.isEmpty) masterId = peerId;
     if (!mounted) return;
+    if (_holdWhileLocked(() => _openChatFromPush(peerId))) return;
     if (ref.read(selectedPeerProvider) == masterId) return;
     ref.read(selectedPeerProvider.notifier).state = masterId;
     ref.read(selectedServerProvider.notifier).state = null;
@@ -111,6 +136,8 @@ class _MobileShellState extends ConsumerState<MobileShell> {
 
   Future<void> _openChannelFromPush(String serverId, String channelId) async {
     if (!mounted) return;
+    void replay() => _openChannelFromPush(serverId, channelId);
+    if (_holdWhileLocked(replay)) return;
     // Already viewing this channel.
     if (ref.read(selectedServerProvider) == serverId &&
         ref.read(selectedChannelProvider) == channelId) {
@@ -122,7 +149,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       final channels = await ChannelListNotifier.fetchChannels(serverId);
       channelName = channels[channelId]?.name ?? '';
     } catch (_) {}
-    if (!mounted) return;
+    if (!mounted || _holdWhileLocked(replay)) return;
     ref.read(selectedServerProvider.notifier).state = serverId;
     ref.read(selectedChannelProvider.notifier).state = channelId;
     _subscribeActiveChannel(serverId, channelId);
@@ -202,7 +229,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         children: [
           Positioned.fill(
             child: Container(
-              color: Colors.black,
+              color: HollowColors.mediaBlack,
               child: Image.memory(
                 bg.imageBytes!,
                 fit: BoxFit.cover,

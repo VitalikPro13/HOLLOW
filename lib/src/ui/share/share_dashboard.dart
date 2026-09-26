@@ -6,7 +6,6 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
-import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -15,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/ui/shell/place_header.dart';
@@ -146,8 +146,30 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
     );
   }
 
+  /// What an empty list means depends on whether the list has arrived: before
+  /// it lands, or when asking for it failed, "none yet" would be untrue.
+  Widget? _listNotReady() {
+    final status = ref.watch(shareListStatusProvider);
+    if (status.failed) {
+      return HollowEmptyState(
+        glyph: LucideIcons.share2,
+        title: "Your shares didn't load",
+        action: HollowButton.ghost(
+          onPressed: () => ref.read(shareTabProvider.notifier).loadAll(),
+          child: const Text('Try again'),
+        ),
+      );
+    }
+    if (!status.loaded) {
+      return const Center(child: HollowSpinner.large(delayed: true));
+    }
+    return null;
+  }
+
   Widget _buildMyShares(List<ShareItemState> userShares, HollowTheme hollow) {
     if (userShares.isEmpty) {
+      final notReady = _listNotReady();
+      if (notReady != null) return notReady;
       return const HollowEmptyState(
         glyph: LucideIcons.share2,
         title: 'No shares yet',
@@ -170,6 +192,8 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
 
   Widget _buildServerFiles(List<ShareItemState> serverFiles, HollowTheme hollow) {
     if (serverFiles.isEmpty) {
+      final notReady = _listNotReady();
+      if (notReady != null) return notReady;
       return const HollowEmptyState(
         glyph: LucideIcons.server,
         title: 'No server files',
@@ -197,7 +221,9 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
     if (result == null || result.files.single.path == null || !mounted) return;
     setState(() => _sharing = true);
     try {
-      await share_api.shareCreateFromFile(sourcePath: result.files.single.path!);
+      await ref
+          .read(shareTabProvider.notifier)
+          .createFromFile(result.files.single.path!);
     } catch (e) {
       if (mounted) {
         HollowToast.show(

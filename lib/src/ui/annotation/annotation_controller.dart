@@ -13,7 +13,7 @@ class AnnotationController extends ChangeNotifier {
   int _historyIndex = 0;
 
   AnnotationTool _tool = AnnotationTool.freehand;
-  Color _color = Colors.red;
+  Color _color = const Color(0xFFEF4444); // design-ignore: default drawing ink, the palette's red
   double _width = 4.0;
   LineStyle _style = LineStyle.solid;
 

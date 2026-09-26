@@ -5,6 +5,12 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
+/// [serverListProvider]'s load, kept apart so its many readers keep the map.
+/// The same shape as `ListLoadState` in friends_provider.dart.
+final serverListLoadStateProvider =
+    StateProvider<({bool loaded, Object? error})>(
+        (_) => (loaded: false, error: null));
+
 /// Manages the list of servers the user has joined.
 class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   @override
@@ -12,6 +18,9 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
 
   /// Load servers from the local DB (called on startup).
   Future<void> loadFromDb() async {
+    final load = ref.read(serverListLoadStateProvider.notifier);
+    // A retry reads as loading again, not as the failure it follows.
+    if (load.state.error != null) load.state = (loaded: false, error: null);
     try {
       final servers = await crdt_api.getJoinedServers();
       final map = <String, ServerInfo>{};
@@ -24,8 +33,11 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
         );
       }
       state = map;
+      load.state = (loaded: true, error: null);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load servers: $e');
+      // A list already on screen stays; only one never read fails.
+      if (!load.state.loaded) load.state = (loaded: false, error: e);
     }
   }
 

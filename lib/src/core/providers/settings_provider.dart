@@ -992,6 +992,12 @@ class AlwaysRelayCallsNotifier extends Notifier<bool> {
   @override
   bool build() => false;
 
+  /// The value this process started with, which is the one in force.
+  bool _applied = false;
+
+  /// Whether the saved value differs from the one in force until a restart.
+  bool get needsRestart => state != _applied;
+
   /// Load persisted value from DB during bootstrap, BEFORE the node starts: a
   /// peer connection built before this lands would use the wrong policy.
   Future<void> load() async {
@@ -1001,6 +1007,7 @@ class AlwaysRelayCallsNotifier extends Notifier<bool> {
     } catch (e) {
       debugPrint('[HOLLOW] alwaysRelayCalls.load() failed: $e');
     }
+    _applied = state;
   }
 
   /// Persist the flag. Deliberately does NOT swallow a save failure — call

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -317,8 +318,8 @@ class _ChannelActionsSheetState extends ConsumerState<_ChannelActionsSheet> {
           labels: labels,
         );
       }
-    } catch (_) {
-      _failed();
+    } catch (e) {
+      _failed(e);
       return;
     }
     if (!mounted) return;
@@ -334,9 +335,10 @@ class _ChannelActionsSheetState extends ConsumerState<_ChannelActionsSheet> {
     widget.onChanged?.call();
   }
 
-  void _failed() {
+  void _failed(Object e) {
     if (mounted) {
-      HollowToast.show(context, 'Could not update channel',
+      HollowToast.show(
+          context, friendlyError(e, fallback: "Couldn't update the channel"),
           type: HollowToastType.error);
     }
   }
@@ -356,8 +358,8 @@ class _ChannelActionsSheetState extends ConsumerState<_ChannelActionsSheet> {
         channelId: widget.channel.channelId,
         visibility: value,
       );
-    } catch (_) {
-      _failed();
+    } catch (e) {
+      _failed(e);
       return;
     }
     if (!mounted) return;
@@ -382,8 +384,8 @@ class _ChannelActionsSheetState extends ConsumerState<_ChannelActionsSheet> {
         channelId: widget.channel.channelId,
         posting: value,
       );
-    } catch (_) {
-      _failed();
+    } catch (e) {
+      _failed(e);
       return;
     }
     if (!mounted) return;

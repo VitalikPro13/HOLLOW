@@ -2,9 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/services/reveal_in_folder.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -183,10 +185,9 @@ class _DownloadManagerOverlayState
                             const SizedBox(width: HollowSpacing.xs),
                             Text(
                               'Downloads',
-                              style: HollowTypography.subheading.copyWith(
+                              style: HollowTypography.label.copyWith(
                                 color: hollow.textPrimary,
                                 fontWeight: FontWeight.w600,
-                                fontSize: 13,
                               ),
                             ),
                             const Spacer(),
@@ -205,7 +206,6 @@ class _DownloadManagerOverlayState
                                   'Clear',
                                   style: HollowTypography.caption.copyWith(
                                     color: hollow.textSecondary,
-                                    fontSize: 11,
                                   ),
                                 ),
                               ),
@@ -217,7 +217,7 @@ class _DownloadManagerOverlayState
 
                       if (entries.isEmpty && shareItems.isEmpty)
                         const HollowEmptyState(
-                          title: 'Nothing here yet',
+                          title: 'No downloads yet',
                           description:
                               'Downloaded files and shard activity show up here.',
                         )
@@ -313,12 +313,12 @@ class _SavedFileTile extends ConsumerWidget {
                         ),
                         if (entry.isVideo)
                           Container(
-                            color: Colors.black.withValues(alpha: 0.3),
+                            color: HollowColors.mediaBlack.withValues(alpha: 0.3),
                             alignment: Alignment.center,
                             child: const Icon(
                               LucideIcons.play,
                               size: 16,
-                              color: Colors.white,
+                              color: HollowColors.onMedia,
                             ),
                           ),
                       ],
@@ -335,15 +335,14 @@ class _SavedFileTile extends ConsumerWidget {
               children: [
                 Text(
                   entry.displayName,
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.bodySmall.copyWith(
                     color: hollow.textPrimary,
-                    fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 if (entry.savedPath != null)
                   Text(
                     entry.savedPath!,
@@ -445,26 +444,25 @@ class _ShareDownloadTile extends StatelessWidget {
               children: [
                 Text(
                   item.fileName,
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.bodySmall.copyWith(
                     color: hollow.textPrimary,
-                    fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 Text(
                   completed
                       ? ShareCard.formatSize(item.totalSize)
                       : failed
-                          ? item.error ?? 'Failed'
+                          ? friendlyError(item.error ?? '',
+                              fallback: 'This download stopped. Try again.')
                           : '${item.chunksHave}/${item.chunksTotal} chunks  ·  ${ShareCard.formatSpeed(item.bytesPerSec)}/s',
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.micro.copyWith(
                     color: completed ? hollow.success
                         : failed ? hollow.error
                         : hollow.textSecondary,
-                    fontSize: 10,
                   ),
                   maxLines: 1,
                 ),
@@ -517,20 +515,18 @@ class _RebalanceTile extends StatelessWidget {
               children: [
                 Text(
                   entry.displayName,
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.bodySmall.copyWith(
                     color: hollow.textPrimary,
-                    fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
                   maxLines: 1,
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: HollowSpacing.xxs),
                 if (entry.statusText != null)
                   Text(
                     entry.statusText!,
-                    style: HollowTypography.caption.copyWith(
+                    style: HollowTypography.micro.copyWith(
                       color: active ? hollow.textSecondary : hollow.success,
-                      fontSize: 10,
                     ),
                     maxLines: 1,
                   ),

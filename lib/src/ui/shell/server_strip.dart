@@ -26,6 +26,7 @@ import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
@@ -101,11 +102,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         },
         child: Text(
           'H',
-          style: TextStyle(
-            color: hollow.textOnAccent,
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-          ),
+          style: HollowTypography.heading.copyWith(color: hollow.textOnAccent),
         ),
       ),
     );
@@ -248,7 +245,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       height: 2,
       decoration: BoxDecoration(
         color: hollow.border,
-        borderRadius: BorderRadius.circular(1),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
       ),
     );
 
@@ -269,14 +266,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     return Container(
       width: kServerStripWidth * panelScale,
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            hollow.opaqueSurface,
-            Color.lerp(hollow.opaqueSurface, hollow.accent, 0.08)!,
-          ],
-        ),
+        color: hollow.opaqueSurface,
         border: Border(
           right: BorderSide(color: hollow.border),
         ),
@@ -417,10 +407,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       isSelected: isSelected,
       fallback: Text(
         initialsFromName(name.isNotEmpty ? name : serverId),
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
+        style: HollowTypography.subheading.copyWith(
+          color: Colors.white, // design-ignore: initials on an identity colour, as HollowAvatar
         ),
       ),
     );
@@ -440,8 +428,10 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         return LongPressDraggable<_StripDragData>(
           data: _StripDragData(serverId: serverId, sourceIndex: index),
           delay: const Duration(milliseconds: 300),
-          feedback: Material(
-            color: Colors.transparent,
+          // The drag feedback lives in the root Overlay, outside any route's
+          // text style.
+          feedback: DefaultTextStyle(
+            style: HollowTypography.label,
             child: AnimatedOpacity(
               opacity: 0.8,
               duration: Duration.zero,
@@ -539,7 +529,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
               child: Icon(
                 rejected ? LucideIcons.ban : LucideIcons.clock,
                 size: 20,
-                color: Colors.white,
+                color: Colors.white, // design-ignore: glyph on an identity colour, as HollowAvatar
               ),
             ),
           ),
@@ -580,8 +570,10 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         return LongPressDraggable<_StripDragData>(
           data: _StripDragData(folderId: folder.id, sourceIndex: index),
           delay: const Duration(milliseconds: 300),
-          feedback: Material(
-            color: Colors.transparent,
+          // The drag feedback lives in the root Overlay, outside any route's
+          // text style.
+          feedback: DefaultTextStyle(
+            style: HollowTypography.label,
             child: AnimatedOpacity(
               opacity: 0.8,
               duration: Duration.zero,
@@ -723,10 +715,12 @@ class _VerticalReorderGap extends StatelessWidget {
             duration: HollowDurations.fast,
             width: 36,
             height: isActive ? 4 : HollowSpacing.xs,
-            margin: EdgeInsets.symmetric(vertical: isActive ? 2 : 0),
+            margin: isActive
+                ? const EdgeInsets.symmetric(vertical: HollowSpacing.xxs)
+                : EdgeInsets.zero,
             decoration: BoxDecoration(
               color: hollow.accent.withValues(alpha: isActive ? 1 : 0),
-              borderRadius: BorderRadius.circular(2),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
             ),
           ),
         );
@@ -837,7 +831,7 @@ class _ServerIconWithIndicatorState
                   ),
               ],
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: HollowSpacing.md),
           ],
         ),
       ),

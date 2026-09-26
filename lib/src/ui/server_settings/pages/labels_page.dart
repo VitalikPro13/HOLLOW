@@ -87,10 +87,15 @@ class LabelsPage extends ConsumerWidget {
             child: const Text('New label'),
           ),
           children: [
-            if (labels == null)
+            if (labels == null && labelsAsync.hasError)
+              SettingsLoadFailed(
+                title: "The labels didn't load",
+                onRetry: () => ref.invalidate(serverLabelsProvider(serverId)),
+              )
+            else if (labels == null)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-                child: Center(child: HollowSpinner.medium()),
+                child: Center(child: HollowSpinner.medium(delayed: true)),
               )
             else if (labels.isEmpty)
               const HollowEmptyState(

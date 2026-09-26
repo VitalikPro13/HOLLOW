@@ -42,7 +42,7 @@ class RainbowSliderTrackShape extends SliderTrackShape {
 
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(7));
 
-    final gradient = LinearGradient(
+    final gradient = LinearGradient( // design-ignore: a hue picker's colour track
       colors: List.generate(
         13,
         (i) => HSLColor.fromAHSL(1.0, i * 30.0, 0.85, 0.5).toColor(),

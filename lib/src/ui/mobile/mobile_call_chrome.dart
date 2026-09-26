@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -107,6 +108,7 @@ void openMobileCallChat(
   // The call screen is gone by the time the chat pops, so nothing below may
   // lean on its ref.
   final container = ProviderScope.containerOf(context);
+  if (container.read(appLockedProvider)) return;
   final nav = Navigator.of(context, rootNavigator: true);
   final showing = peer != null
       ? container.read(selectedPeerProvider) == peer
@@ -193,7 +195,7 @@ Future<void> toggleMobileShare(BuildContext context, WidgetRef ref,
 
 /// The call screen's top: Minimise the call, the title over a mono subtitle
 /// (the timer, or "Synth Lab · 42:17"), Open the chat.
-class MobileCallTopBar extends StatelessWidget {
+class MobileCallTopBar extends ConsumerWidget {
   final String title;
   final Widget? subtitle;
   final VoidCallback onMinimise;
@@ -210,9 +212,10 @@ class MobileCallTopBar extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final openChat = onOpenChat;
+    // The chat would open ABOVE the lock cover.
+    final openChat = ref.watch(appLockedProvider) ? null : onOpenChat;
     return SizedBox(
       height: MobileCallMetrics.bar,
       child: Padding(
@@ -767,12 +770,14 @@ class MobileOwnShare extends ConsumerWidget {
 class MobileLiveShare extends StatelessWidget {
   final CallShare share;
   final VoidCallback? onStopWatching;
+  final Future<void> Function()? onRetryWatch;
   final VoidCallback? onFullscreen;
 
   const MobileLiveShare({
     super.key,
     required this.share,
     this.onStopWatching,
+    this.onRetryWatch,
     this.onFullscreen,
   });
 
@@ -789,6 +794,7 @@ class MobileLiveShare extends StatelessWidget {
             size: CallTileSize.large,
             onTap: fullscreen,
             onStopWatching: onStopWatching,
+            onRetryWatch: onRetryWatch,
           ),
           // The share's own sound, where the desktop keeps it in More.
           Positioned(
@@ -880,6 +886,9 @@ class MobileWatchingView extends StatelessWidget {
           child: MobileLiveShare(
             share: share,
             onStopWatching: () => data.onStopWatching(share.owner),
+            onRetryWatch: data.onRetryWatch == null
+                ? null
+                : () => data.onRetryWatch!(share.owner),
             onFullscreen: onFullscreen,
           ),
         ),

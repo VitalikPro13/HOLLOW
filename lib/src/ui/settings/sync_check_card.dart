@@ -18,11 +18,7 @@ import 'package:hollow/src/ui/settings/settings_kit.dart';
 final _dmMessageCountProvider = FutureProvider.autoDispose<int>((ref) async {
   // The last-message map is the cheapest proxy for "the DM table changed".
   ref.watch(lastDmMessageProvider);
-  try {
-    return await storage_api.countAllDmMessages();
-  } catch (_) {
-    return 0;
-  }
+  return storage_api.countAllDmMessages();
 });
 
 /// Settings > Devices: counts that fully converge across a person's devices,
@@ -54,10 +50,13 @@ class SyncCheckCard extends ConsumerWidget {
             children: [
               _Count('Friends', '${ref.watch(sortedFriendsProvider).length}'),
               _Count('Servers', '${ref.watch(serverListProvider).length}'),
-              _Count(
-                'Direct messages',
-                dmCount.maybeWhen(data: (n) => '$n', orElse: () => '…'),
-              ),
+              // A failed count is left out, not shown as 0: a 0 beside a
+              // sibling's real number reads as out of sync.
+              if (!dmCount.hasError)
+                _Count(
+                  'Direct messages',
+                  dmCount.maybeWhen(data: (n) => '$n', orElse: () => '…'),
+                ),
               _Count(
                 'Devices online',
                 '$devicesOnline / ${devices.length}',
@@ -72,6 +71,14 @@ class SyncCheckCard extends ConsumerWidget {
             ],
           ),
         ),
+        if (dmCount.hasError)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+            child: SettingsLoadFailed(
+              title: "Couldn't count your direct messages",
+              onRetry: () => ref.invalidate(_dmMessageCountProvider),
+            ),
+          ),
       ],
     );
   }

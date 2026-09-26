@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -201,6 +202,9 @@ void main() {
     // app state directly. UncontrolledProviderScope is what ProviderScope
     // builds internally, so the app cannot tell the difference.
     final container = ProviderContainer();
+    final binding = tester.binding as LiveTestWidgetsFlutterBinding;
+    binding.deviceEventDispatcher =
+        _ForwardCancels(binding, binding.deviceEventDispatcher!);
     final runner = ProbeRunner(
       tester: tester,
       outDir: outDir,
@@ -350,4 +354,32 @@ List<dynamic>? _loadSteps(Map<String, String> env) {
   }
   throw StateError('a scenario must be a JSON array of steps, or an object '
       'with a "steps" array; got ${decoded.runtimeType}');
+}
+
+/// Delivers the framework's own pointer cancels to the app.
+///
+/// A route pushed mid-gesture (a long press opening a sheet) cancels the
+/// active pointers through `GestureBinding.cancelPointer`, which the live test
+/// binding counts as a DEVICE event and hands to the tester instead of the
+/// app. The row's recognizers then never see their pointer end and ignore
+/// every later tap and long press, which a real phone never does.
+class _ForwardCancels implements HitTestDispatcher {
+  final LiveTestWidgetsFlutterBinding binding;
+  final HitTestDispatcher fallback;
+
+  _ForwardCancels(this.binding, this.fallback);
+
+  @override
+  void dispatchEvent(PointerEvent event, HitTestResult result) {
+    if (event is! PointerCancelEvent) {
+      fallback.dispatchEvent(event, result);
+      return;
+    }
+    binding.shouldPropagateDevicePointerEvents = true;
+    try {
+      binding.dispatchEvent(event, result);
+    } finally {
+      binding.shouldPropagateDevicePointerEvents = false;
+    }
+  }
 }

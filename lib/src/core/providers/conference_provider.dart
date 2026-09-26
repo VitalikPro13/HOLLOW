@@ -19,6 +19,7 @@ import 'package:hollow/src/rust/api/conference.dart' as conference_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 
 /// Whether the desktop center pane shows the Conferences tab
 /// (Archive/Share tab pattern).
@@ -42,10 +43,11 @@ enum ConferenceLobbyStatus {
   /// Joiner: the host declined (see [ConferenceState.denyReason]).
   denied,
 
-  /// Joiner: MLS Welcome landed — joining the call now (transient).
+  /// Joining the call now (transient): an admitted joiner, or a host who
+  /// started the meeting, until the voice room seats us.
   admitted,
 
-  /// In the call (host or admitted joiner).
+  /// Seated in the call (host or admitted joiner).
   inCall,
 }
 
@@ -105,6 +107,9 @@ class ConferenceState {
   final List<ConferenceRoom> rooms;
   final bool roomsLoaded;
 
+  /// Why the room list failed to load, while it never has.
+  final Object? roomsError;
+
   /// The meeting we're hosting or trying to join (null = none).
   final String? activeConfId;
   final bool isHost;
@@ -127,6 +132,7 @@ class ConferenceState {
   const ConferenceState({
     this.rooms = const [],
     this.roomsLoaded = false,
+    this.roomsError,
     this.activeConfId,
     this.isHost = false,
     this.lobbyStatus = ConferenceLobbyStatus.none,
@@ -149,6 +155,8 @@ class ConferenceState {
   ConferenceState copyWith({
     List<ConferenceRoom>? rooms,
     bool? roomsLoaded,
+    Object? roomsError,
+    bool clearRoomsError = false,
     String? activeConfId,
     bool? isHost,
     ConferenceLobbyStatus? lobbyStatus,
@@ -159,15 +167,19 @@ class ConferenceState {
     List<WaitingEntry>? waiting,
     bool clearActive = false,
   }) {
+    final nextRoomsError =
+        clearRoomsError ? null : (roomsError ?? this.roomsError);
     if (clearActive) {
       return ConferenceState(
         rooms: rooms ?? this.rooms,
         roomsLoaded: roomsLoaded ?? this.roomsLoaded,
+        roomsError: nextRoomsError,
       );
     }
     return ConferenceState(
       rooms: rooms ?? this.rooms,
       roomsLoaded: roomsLoaded ?? this.roomsLoaded,
+      roomsError: nextRoomsError,
       activeConfId: activeConfId ?? this.activeConfId,
       isHost: isHost ?? this.isHost,
       lobbyStatus: lobbyStatus ?? this.lobbyStatus,
@@ -201,14 +213,21 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   }
 
   Future<void> loadRooms() async {
+    // A retry reads as loading again, not as the failure it follows.
+    if (state.roomsError != null) {
+      state = state.copyWith(clearRoomsError: true);
+    }
     try {
       final infos = await conference_api.conferenceList();
       state = state.copyWith(
         rooms: infos.map(ConferenceRoom.fromInfo).toList(),
         roomsLoaded: true,
+        clearRoomsError: true,
       );
     } catch (e) {
       debugPrint('[HOLLOW-CONF] loadRooms failed: $e');
+      // Rooms already on screen stay; only a list that never loaded fails.
+      if (!state.roomsLoaded) state = state.copyWith(roomsError: e);
     }
   }
 
@@ -287,9 +306,12 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       return;
     }
     if (state.activeConfId == room.confId &&
-        state.lobbyStatus == ConferenceLobbyStatus.inCall) {
-      return; // Already in this meeting.
+        (state.lobbyStatus == ConferenceLobbyStatus.inCall ||
+            state.lobbyStatus == ConferenceLobbyStatus.admitted)) {
+      return; // Already in this meeting, or joining it.
     }
+    // The voice join would decline on its own, after the meeting started.
+    if (!await ensureTurnForCallFromRef(ref)) return;
     if (state.meetingActive) {
       // Hosting/attending another meeting — leave it first.
       if (state.isHost) {
@@ -317,14 +339,71 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     state = state.copyWith(
       activeConfId: room.confId,
       isHost: true,
-      lobbyStatus: ConferenceLobbyStatus.inCall,
+      lobbyStatus: ConferenceLobbyStatus.admitted,
       hostPeerId: myId,
       hostName: displayName,
       waiting: const [],
     );
-    await ref
-        .read(voiceChannelProvider.notifier)
-        .joinChannel(conferenceServerId(room.confId), kConferenceChannelId);
+    if (await _takeSeatOrGiveUp(room.confId) &&
+        state.activeConfId == room.confId) {
+      state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.inCall);
+    }
+  }
+
+  /// How long the meeting's voice room may take to seat us.
+  static const _seatTimeout = Duration(seconds: 20);
+  static const _seatFailed = "Couldn't join the meeting's call. Try again.";
+
+  /// Joins the meeting's voice room and waits until it seats us. When it
+  /// never does, the meeting is ended or left again (a toast says why), so the
+  /// screen is never stuck on "Joining the meeting".
+  Future<bool> _takeSeatOrGiveUp(String confId) async {
+    final sid = conferenceServerId(confId);
+    bool seated(VoiceChannelState vc) =>
+        vc.currentServerId == sid &&
+        vc.currentChannelId == kConferenceChannelId;
+    final seatedNow = Completer<void>();
+    final sub = ref.listen<bool>(voiceChannelProvider.select(seated),
+        (_, next) {
+      if (next && !seatedNow.isCompleted) seatedNow.complete();
+    });
+    Object? failure;
+    try {
+      await ref
+          .read(voiceChannelProvider.notifier)
+          .joinChannel(sid, kConferenceChannelId);
+      var seat = seated(ref.read(voiceChannelProvider));
+      // joinChannel returns quietly when it declines, and it already said why.
+      if (!seat && ref.read(callProvider).status == CallStatus.idle) {
+        await seatedNow.future.timeout(_seatTimeout);
+        seat = true;
+      }
+      if (seat) {
+        // Left while the seat was on its way: give the voice room back.
+        if (state.activeConfId == confId) return true;
+        await _leaveVoiceIfInConference(confId);
+        return false;
+      }
+    } on TimeoutException {
+      failure = const FriendlyException(_seatFailed);
+    } catch (e) {
+      failure = e;
+    } finally {
+      sub.close();
+    }
+    if (state.activeConfId == confId) {
+      if (state.isHost) {
+        await endMeeting();
+      } else {
+        await leaveMeeting();
+      }
+    }
+    if (failure != null) {
+      _toast(
+          friendlyError(failure, fallback: _seatFailed),
+          HollowToastType.error);
+    }
+    return false;
   }
 
   /// (Host) end the meeting for everyone. The room + link survive.
@@ -348,6 +427,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       _toast('Leave your call first', HollowToastType.error);
       return;
     }
+    // Knocking is pointless when the call it leads to cannot start.
+    if (!await ensureTurnForCallFromRef(ref)) return;
 
     // Self-check: our OWN room's link means "start the meeting", not "knock on
     // our own door" (the host handler ignores self-knocks, so it would wait forever).
@@ -489,10 +570,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   Future<void> onAdmitted(String confId) async {
     if (state.activeConfId != confId || state.isHost) return;
     state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.admitted);
-    await ref
-        .read(voiceChannelProvider.notifier)
-        .joinChannel(conferenceServerId(confId), kConferenceChannelId);
-    if (state.activeConfId == confId) {
+    if (await _takeSeatOrGiveUp(confId) && state.activeConfId == confId) {
       state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.inCall);
     }
   }

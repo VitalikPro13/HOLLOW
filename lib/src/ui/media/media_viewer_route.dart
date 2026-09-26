@@ -7,11 +7,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/perf_sentinel.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
@@ -646,7 +648,10 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
       await save(_current.attachment);
     } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Save failed', type: HollowToastType.error);
+        HollowToast.show(
+            context,
+            friendlyError(e, fallback: "Couldn't save the file. Try again."),
+            type: HollowToastType.error);
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -728,9 +733,12 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
     setState(() => _deleting = true);
     try {
       await delete(messageId);
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        HollowToast.show(context, 'Failed to delete message',
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't delete the message. Try again."),
             type: HollowToastType.error);
       }
       if (mounted) setState(() => _deleting = false);
@@ -859,8 +867,8 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
     final fade = _reduced ? 1.0 : (_controlsVisible ? 1.0 : 0.0);
     final specs = _actionSpecs();
 
-    return Material(
-      color: Colors.black.withValues(
+    return Material( // design-ignore: route host, the Material ancestor the sliders need
+      color: HollowColors.mediaBlack.withValues(
           alpha: 1.0 - (_dragDy.abs() / (_kDismissDrag * 3)).clamp(0.0, 0.6)),
       child: MouseRegion(
         onHover: (_) => _showControls(),
@@ -1026,7 +1034,7 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
                   for (final spec in specs)
                     Padding(
                       key: spec.label == 'React' ? _reactAnchor : null,
-                      padding: const EdgeInsets.symmetric(horizontal: 1),
+                      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
                       child: MediaControlButton(spec: spec),
                     ),
                 ]),
@@ -1084,7 +1092,7 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
                     for (final spec in specs)
                       Padding(
                         key: spec.label == 'React' ? _reactAnchor : null,
-                        padding: const EdgeInsets.symmetric(horizontal: 1),
+                        padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
                         child: MediaControlButton(spec: spec),
                       ),
                   ]),

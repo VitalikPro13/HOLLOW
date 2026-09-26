@@ -7,6 +7,10 @@ import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
+/// The ambient blobs' second hue, beside the accent: part of the opt-in
+/// Appearance feature, not a theme colour.
+const Color kAmbientSecondHue = Color(0xFF6366F1); // design-ignore: the ambient background's own hue, an Appearance opt-in
+
 /// Very slow-drifting ambient background for the chat area.
 ///
 /// Driven by [SharedTickers.ambient], a shared 30fps timer rather than a
@@ -21,7 +25,7 @@ class AmbientBackground extends ConsumerWidget {
   const AmbientBackground({
     super.key,
     required this.color1,
-    required this.color2,
+    this.color2 = kAmbientSecondHue,
     this.opacity = 0.04,
     required this.child,
   });
@@ -102,7 +106,7 @@ class _AmbientPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final c1 = Offset(center1.dx * size.width, center1.dy * size.height);
     final r1 = size.width * 0.55;
-    _paint1.shader = RadialGradient(
+    _paint1.shader = RadialGradient( // design-ignore: the ambient background's blobs are the opt-in feature itself
       colors: [color1, color1, color1Fade],
       stops: const [0.0, 0.35, 1.0],
     ).createShader(Rect.fromCircle(center: c1, radius: r1));
@@ -110,7 +114,7 @@ class _AmbientPainter extends CustomPainter {
 
     final c2 = Offset(center2.dx * size.width, center2.dy * size.height);
     final r2 = size.width * 0.5;
-    _paint2.shader = RadialGradient(
+    _paint2.shader = RadialGradient( // design-ignore: the ambient background's blobs are the opt-in feature itself
       colors: [color2, color2, color2Fade],
       stops: const [0.0, 0.35, 1.0],
     ).createShader(Rect.fromCircle(center: c2, radius: r2));

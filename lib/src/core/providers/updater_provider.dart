@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/version_compare.dart';
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
@@ -120,6 +121,10 @@ class VersionManifest {
 
 enum UpdateStatus { idle, checking, downloading, extracting, readyToInstall, error }
 
+/// Which step an [UpdateStatus.error] belongs to: the check, or getting a
+/// release onto disk and started.
+enum UpdateFailure { check, install }
+
 class UpdateState {
   final UpdateStatus status;
   final VersionManifest? manifest;
@@ -129,7 +134,9 @@ class UpdateState {
   final int totalBytes;
   final String? downloadedZipPath;
   final String? batPath;
+  /// A sentence for a person, never the raw exception.
   final String? error;
+  final UpdateFailure? failure;
   final String currentVersion;
 
   /// When a manifest last arrived, manual or background; a failed check
@@ -146,6 +153,7 @@ class UpdateState {
     this.downloadedZipPath,
     this.batPath,
     this.error,
+    this.failure,
     this.currentVersion = '',
     this.lastChecked,
   });
@@ -160,6 +168,7 @@ class UpdateState {
     String? downloadedZipPath,
     String? batPath,
     String? error,
+    UpdateFailure? failure,
     String? currentVersion,
     DateTime? lastChecked,
   }) =>
@@ -173,6 +182,7 @@ class UpdateState {
         downloadedZipPath: downloadedZipPath ?? this.downloadedZipPath,
         batPath: batPath ?? this.batPath,
         error: error ?? this.error,
+        failure: failure ?? this.failure,
         currentVersion: currentVersion ?? this.currentVersion,
         lastChecked: lastChecked ?? this.lastChecked,
       );
@@ -228,7 +238,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
       if (background) return;
       state = state.copyWith(
           status: UpdateStatus.error,
-          error: 'Failed to check for updates: $e');
+          failure: UpdateFailure.check,
+          error: friendlyError(e,
+              fallback: "Couldn't reach the update server. Try again."));
     }
   }
 
@@ -242,6 +254,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
     if (version.platformSha256.isEmpty) {
       state = state.copyWith(
         status: UpdateStatus.error,
+        failure: UpdateFailure.install,
         error: 'This release carries no checksum for your platform, so the '
             'updater will not install it. Download it from the website '
             'instead.',
@@ -274,7 +287,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
         if (failure != null) {
           state = state.copyWith(
             status: UpdateStatus.error,
-            error: 'Download failed: $failure',
+            failure: UpdateFailure.install,
+            error: friendlyError(failure,
+                fallback: "The download didn't finish. Try again."),
           );
           return;
         }
@@ -318,6 +333,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
       if (!flatpak && !_dirWritable(appDir)) {
         state = state.copyWith(
           status: UpdateStatus.error,
+          failure: UpdateFailure.install,
           error: 'The app folder is not writable, so the update cannot be '
               'installed in place. Move the app to a writable location and '
               'try again.',
@@ -331,6 +347,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
           !_dirWritable(Directory(appDir).parent.path)) {
         state = state.copyWith(
           status: UpdateStatus.error,
+          failure: UpdateFailure.install,
           error: 'The folder that contains Hollow is not writable, so the '
               'update cannot swap the app in place. Move Hollow to a folder '
               'you own and try again.',
@@ -350,7 +367,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
     } catch (e) {
       state = state.copyWith(
         status: UpdateStatus.error,
-        error: 'Download failed: $e',
+        failure: UpdateFailure.install,
+        error: friendlyError(e,
+            fallback: "The download didn't finish. Try again."),
       );
     }
   }
@@ -380,10 +399,12 @@ class UpdateNotifier extends Notifier<UpdateState> {
         final flatpak = isFlatpakInstall;
         state = state.copyWith(
           status: UpdateStatus.error,
+          failure: UpdateFailure.install,
           error: flatpak
-              ? 'The update is installed, but Hollow could not schedule its '
-                  'own restart: $e. Close and reopen Hollow to finish.'
-              : 'Hollow could not start the update script: $e',
+              ? "The update is installed, but Hollow couldn't restart itself. "
+                  'Close and reopen Hollow to finish.'
+              : friendlyError(e,
+                  fallback: "Hollow couldn't start the update. Try again."),
         );
         return;
       }

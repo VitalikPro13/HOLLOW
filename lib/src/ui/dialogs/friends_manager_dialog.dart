@@ -12,6 +12,7 @@ import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
@@ -1086,6 +1087,11 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final nicknameState = ref.watch(temporaryNicknameProvider);
+    // A claim travels to the relay, so without our link it can only spin.
+    final link = ref.watch(overallConnectionProvider);
+    final offline = link == OverallConnection.offline ||
+        link == OverallConnection.reconnecting ||
+        link == OverallConnection.error;
     ref.listen(temporaryNicknameProvider, (_, next) {
       if (next.status == NicknameStatus.claimed) _claimController.clear();
     });
@@ -1171,13 +1177,20 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.outline(
                 touch: touch,
-                onPressed: _claim,
+                onPressed: offline ? null : _claim,
                 loading: nicknameState.status == NicknameStatus.claiming,
                 child: const Text('Claim'),
               ),
             ],
           ),
-        if (nicknameState.status == NicknameStatus.failed &&
+        if (offline && nicknameState.status != NicknameStatus.claimed) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          const HollowEmptyState(
+            dense: true,
+            title: "You're offline",
+            description: "Claim a nickname once you're back.",
+          ),
+        ] else if (nicknameState.status == NicknameStatus.failed &&
             nicknameState.error != null) ...[
           const SizedBox(height: HollowSpacing.sm),
           Text(
@@ -1193,5 +1206,6 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
 String _claimError(String error) => switch (error) {
       'taken' => 'That nickname is already taken',
       'invalid' => 'Use 3 to 20 lowercase letters, numbers or underscores',
+      'timeout' => "The relay didn't answer. Try again.",
       _ => 'Could not claim that nickname',
     };

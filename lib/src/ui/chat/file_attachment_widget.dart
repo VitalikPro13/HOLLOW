@@ -198,10 +198,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                 children: [
                   Text(
                     attachment.fileName,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 13,
-                    ),
+                    style: HollowTypography.label.copyWith(color: hollow.textSecondary),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -249,10 +246,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                   children: [
                     Text(
                       attachment.fileName,
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 13,
-                      ),
+                      style: HollowTypography.label.copyWith(color: hollow.textSecondary),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -452,10 +446,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                 child: Text(
                   status.caption!,
                   textAlign: TextAlign.center,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
-                  ),
+                  style: HollowTypography.micro.copyWith(color: hollow.textSecondary),
                 ),
               )
             else
@@ -469,13 +460,10 @@ class FileAttachmentWidget extends ConsumerWidget {
                     size: 12,
                     color: hollow.textSecondary,
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: HollowSpacing.xs),
                   Text(
                     attachment.formattedSize,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 10,
-                    ),
+                    style: HollowTypography.micro.copyWith(color: hollow.textSecondary),
                   ),
                 ],
               ),
@@ -510,10 +498,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                   : progress > 0
                       ? '${_formatSize(bytesReceived)} / ${attachment.formattedSize}'
                       : 'Downloading...',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
+              style: HollowTypography.micro.copyWith(color: hollow.textSecondary),
             ),
           ] else if (progress > 0 && progress < 1) ...[
             SizedBox(
@@ -527,20 +512,14 @@ class FileAttachmentWidget extends ConsumerWidget {
             const SizedBox(height: HollowSpacing.xs),
             Text(
               '${(progress * 100).toInt()}%',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
+              style: HollowTypography.micro.copyWith(color: hollow.textSecondary),
             ),
           ] else ...[
             Icon(LucideIcons.image, size: 32, color: hollow.textSecondary),
             const SizedBox(height: HollowSpacing.sm),
             Text(
               attachment.formattedSize,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
+              style: HollowTypography.micro.copyWith(color: hollow.textSecondary),
             ),
           ],
         ],
@@ -613,10 +592,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                                     : attachment.fileExt.isEmpty
                                         ? attachment.formattedSize
                                         : '${attachment.formattedSize} · .${attachment.fileExt.toLowerCase()}',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                        ),
+                        style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
                       ),
                     ],
                   ),

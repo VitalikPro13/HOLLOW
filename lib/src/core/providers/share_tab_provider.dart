@@ -1,10 +1,20 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 final shareTabOpenProvider = StateProvider<bool>((ref) => false);
+
+/// Whether the share list has arrived (it comes later, as an event) and
+/// whether asking for it failed, so an empty list is never shown before then.
+typedef ShareListStatus = ({bool loaded, bool failed});
+
+final shareListStatusProvider =
+    StateProvider<ShareListStatus>((ref) => (loaded: false, failed: false));
 
 class ShareItemState {
   final String rootHash;
@@ -85,14 +95,44 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
   List<ShareItemState> build() => [];
 
   Future<void> loadAll() async {
+    final status = ref.read(shareListStatusProvider.notifier);
+    status.state = (loaded: status.state.loaded, failed: false);
     try {
       await share_api.shareList();
     } catch (e) {
       debugPrint('[HOLLOW-SHARE] loadAll failed: $e');
+      status.state = (loaded: status.state.loaded, failed: true);
+    }
+  }
+
+  // The create command only queues: the outcome arrives as ShareCreated, or
+  // as a ShareFailed with an empty root hash (no row exists to carry it).
+  Completer<void>? _pendingCreate;
+  String? _pendingCreateName;
+
+  /// Shares the file at [sourcePath] and completes once the node reports the
+  /// share made, throws its failure, or gives up quietly after [timeout].
+  Future<void> createFromFile(
+    String sourcePath, {
+    Duration timeout = const Duration(minutes: 5),
+  }) async {
+    final completer = Completer<void>();
+    _pendingCreate = completer;
+    _pendingCreateName = p.basename(sourcePath);
+    try {
+      await share_api.shareCreateFromFile(sourcePath: sourcePath);
+      await completer.future.timeout(timeout, onTimeout: () {});
+    } finally {
+      if (identical(_pendingCreate, completer)) {
+        _pendingCreate = null;
+        _pendingCreateName = null;
+      }
     }
   }
 
   void handleShareList(List<network_api.ShareEntry> entries) {
+    ref.read(shareListStatusProvider.notifier).state =
+        (loaded: true, failed: false);
     final existing = {for (final s in state) s.rootHash: s};
     state = entries.map((e) {
       final prev = existing[e.rootHash];
@@ -146,6 +186,11 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
   }
 
   void handleShareFailed(String rootHash, String error) {
+    if (rootHash.isEmpty) {
+      final pending = _pendingCreate;
+      if (pending != null && !pending.isCompleted) pending.completeError(error);
+      return;
+    }
     if (error == 'Cancelled' || error == 'No seeders found') {
       state = state.where((s) =>
           s.rootHash != rootHash || s.state == 'completed').toList();
@@ -163,6 +208,12 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
   void handleShareCreated(
     String rootHash, String link, String fileName, int totalSize,
   ) {
+    final pending = _pendingCreate;
+    if (pending != null &&
+        !pending.isCompleted &&
+        fileName == _pendingCreateName) {
+      pending.complete();
+    }
     final exists = state.any((s) => s.rootHash == rootHash);
     if (exists) {
       state = [

@@ -3,6 +3,7 @@
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
@@ -79,13 +80,7 @@ class _ChatDropZoneState extends State<ChatDropZone> {
                           color: hollow.accent,
                           width: 2,
                         ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: hollow.accent.withValues(alpha: 0.3),
-                            blurRadius: 24,
-                            spreadRadius: 4,
-                          ),
-                        ],
+                        boxShadow: HollowShadows.float,
                       ),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,

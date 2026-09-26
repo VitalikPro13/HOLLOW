@@ -473,7 +473,9 @@ class _ScreenShareDialogState extends State<ScreenShareDialog> {
           child: SettingsFieldLabel(label: label),
         ),
         Padding(
-          padding: EdgeInsets.only(bottom: last ? 0 : HollowSpacing.sm),
+          padding: last
+              ? EdgeInsets.zero
+              : const EdgeInsets.only(bottom: HollowSpacing.sm),
           child: Wrap(
             spacing: HollowSpacing.sm,
             runSpacing: HollowSpacing.sm,

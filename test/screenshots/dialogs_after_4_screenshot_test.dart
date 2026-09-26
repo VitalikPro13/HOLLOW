@@ -14,6 +14,7 @@ import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/pending_join_info.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -205,6 +206,15 @@ void main() {
         builder: (_) =>
             const UnlockDialog(isPin: false, hasBiometric: false)));
   });
+  both('unlock_in_call', (t) async {
+    unawaited(showHollowDialog<String>(
+        context: host,
+        builder: (_) =>
+            const UnlockDialog(isPin: false, hasBiometric: true)));
+  }, extra: [
+    callProvider.overrideWith(() => _InCall(const CallState(
+        status: CallStatus.active, peerId: _ada, callId: 'c1'))),
+  ]);
   RecoveryPhraseDialog locked() => RecoveryPhraseDialog(
         title: 'Identity locked',
         paragraphs: const [
@@ -505,6 +515,13 @@ class _Friends extends FriendsNotifier {
   Future<void> removeFriend(String peerId) async {
     if (fail) throw Exception('boom');
   }
+}
+
+class _InCall extends CallNotifier {
+  final CallState initial;
+  _InCall(this.initial);
+  @override
+  CallState build() => initial;
 }
 
 class _Voice extends VoiceChannelNotifier {

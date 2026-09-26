@@ -1,6 +1,7 @@
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -103,6 +104,13 @@ String wearKindLabel(String kind) {
   }
 }
 
+/// Whether the library has been read yet and whether the last read failed, so
+/// an empty list never reads as "no art" before, or instead of, a real answer.
+typedef OwnedArtStatus = ({bool loaded, bool failed});
+
+final ownedArtStatusProvider =
+    StateProvider<OwnedArtStatus>((ref) => (loaded: false, failed: false));
+
 class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
   bool _scheduled = false;
 
@@ -144,8 +152,12 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
           ),
       ]..sort((a, b) => b.importedAt.compareTo(a.importedAt));
       state = items;
+      ref.read(ownedArtStatusProvider.notifier).state =
+          (loaded: true, failed: false);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to list owned art: $e');
+      final status = ref.read(ownedArtStatusProvider.notifier);
+      status.state = (loaded: status.state.loaded, failed: true);
     }
   }
 
@@ -158,14 +170,16 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
 
   /// Put [kinds] of [item] on my profile.
   ///
-  /// Rethrows so the call site can toast a real failure.
+  /// Rethrows so the call site can toast a real failure; the failures this
+  /// method names itself are [FriendlyException]s, shown word for word.
   ///
   /// The still rides the profile push and the animation rides the asset rail, so
   /// a still-only pick sends `''` for the animation hash: null means PRESERVE.
   Future<void> wear(OwnedItem item, Set<String> kinds) async {
     final me = ref.read(identityProvider).peerId ?? '';
     if (me.isEmpty) {
-      throw Exception('Your identity is not loaded yet; try again in a moment');
+      throw const FriendlyException(
+          'Hollow is still loading your identity. Try again in a moment.');
     }
     final current = ref.read(profileProvider)[me];
 
@@ -178,7 +192,7 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
     if (kinds.contains('frame')) {
       final hash = item.frameHash;
       if (hash == null) {
-        throw Exception('This item has no frame to wear');
+        throw const FriendlyException('This item has no frame to wear.');
       }
       avatarFrame = hash;
       final bytes = await emotes_api.getEmoteBytes(hash: hash);
@@ -192,8 +206,8 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
       final bytes =
           still == null ? null : await emotes_api.getEmoteBytes(hash: still);
       if (bytes == null || bytes.isEmpty) {
-        throw Exception(
-            'The avatar for this item is missing; import its pack again');
+        throw const FriendlyException(
+            'The avatar for this item is missing. Import its pack again.');
       }
       avatarBytes = bytes;
       final anim = item.avatarAnimHash;
@@ -211,8 +225,8 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
       final bytes =
           still == null ? null : await emotes_api.getEmoteBytes(hash: still);
       if (bytes == null || bytes.isEmpty) {
-        throw Exception(
-            'The banner for this item is missing; import its pack again');
+        throw const FriendlyException(
+            'The banner for this item is missing. Import its pack again.');
       }
       bannerBytes = bytes;
       final anim = item.bannerAnimHash;

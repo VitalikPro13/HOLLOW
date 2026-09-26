@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -58,6 +59,10 @@ class MobileImageCropRoute extends StatefulWidget {
 class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   ui.Image? _decodedImage;
   bool _imageLoaded = false;
+
+  /// The bytes are not an image Flutter can decode (HEIC on some phones, a
+  /// corrupt file): the route says so instead of loading forever.
+  bool _decodeFailed = false;
   bool _cropping = false;
   bool _layoutDone = false;
 
@@ -93,13 +98,22 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   Future<void> _decodeImage() async {
     // A full-res camera photo decoded as raw RGBA can exceed 100 MB and OOM a
     // budget phone; the Rust processor downsizes further anyway.
-    final codec = await ui.instantiateImageCodec(
-      widget.imageBytes,
-      targetWidth: 2048,
-      allowUpscaling: false,
-    );
-    final frame = await codec.getNextFrame();
-    if (!mounted) return;
+    final ui.FrameInfo frame;
+    try {
+      final codec = await ui.instantiateImageCodec(
+        widget.imageBytes,
+        targetWidth: 2048,
+        allowUpscaling: false,
+      );
+      frame = await codec.getNextFrame();
+    } catch (_) {
+      if (mounted) setState(() => _decodeFailed = true);
+      return;
+    }
+    if (!mounted) {
+      frame.image.dispose();
+      return;
+    }
 
     setState(() {
       _decodedImage = frame.image;
@@ -318,11 +332,12 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  Text(
-                    'Pinch to zoom',
-                    style: HollowTypography.caption
-                        .copyWith(color: hollow.textSecondary),
-                  ),
+                  if (!_decodeFailed)
+                    Text(
+                      'Pinch to zoom',
+                      style: HollowTypography.caption
+                          .copyWith(color: hollow.textSecondary),
+                    ),
                 ],
               ),
             ),
@@ -371,7 +386,14 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                         );
                       },
                     )
-                  : const Center(child: HollowSpinner.medium()),
+                  : _decodeFailed
+                      ? const Center(
+                          child: HollowEmptyState(
+                            title: "This image can't be opened",
+                            description: 'Try a JPEG or PNG.',
+                          ),
+                        )
+                      : const Center(child: HollowSpinner.medium(delayed: true)),
             ),
 
             Padding(
@@ -385,14 +407,16 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                       onPressed: _cropping
                           ? null
                           : () => Navigator.of(context).pop(null),
-                      child: const Text('Cancel'),
+                      child: Text(_decodeFailed ? 'Close' : 'Cancel'),
                     ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    HollowButton.filled(
-                      onPressed: _onConfirm,
-                      loading: _cropping,
-                      child: const Text('Apply'),
-                    ),
+                    if (!_decodeFailed) ...[
+                      const SizedBox(width: HollowSpacing.sm),
+                      HollowButton.filled(
+                        onPressed: _onConfirm,
+                        loading: _cropping,
+                        child: const Text('Apply'),
+                      ),
+                    ],
                   ],
                 ),
               ),

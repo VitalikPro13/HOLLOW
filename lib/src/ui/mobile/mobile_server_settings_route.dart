@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
@@ -90,13 +91,31 @@ class MobileServerSettingsRoute extends ConsumerWidget {
 
     Widget body;
     if (server == null) {
-      body = Center(
-        child: Text('This server is gone',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary)),
+      body = HollowEmptyState(
+        title: 'This server is gone',
+        action: HollowButton.ghost(
+          touch: true,
+          onPressed: () => Navigator.of(context).maybePop(),
+          child: const Text('Back'),
+        ),
+      );
+    } else if (access == null &&
+        (ref.watch(myPermissionsProvider(serverId)).hasError ||
+            ref.watch(myRoleProvider(serverId)).hasError)) {
+      body = HollowEmptyState(
+        title: "Server settings didn't load",
+        action: HollowButton.ghost(
+          touch: true,
+          onPressed: () {
+            ref.invalidate(myPermissionsProvider(serverId));
+            ref.invalidate(myRoleProvider(serverId));
+          },
+          child: const Text('Try again'),
+        ),
       );
     } else if (access == null) {
       // Nothing until the permissions load: the wrong pages would flash.
-      body = const Center(child: HollowSpinner.medium());
+      body = const Center(child: HollowSpinner.medium(delayed: true));
     } else {
       final pages = serverSettingsPagesFor(access.perms);
       Widget row(ServerSettingsPage p) => MobileSettingsNavRow(

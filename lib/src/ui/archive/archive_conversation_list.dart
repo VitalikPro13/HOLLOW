@@ -36,6 +36,9 @@ class _ArchiveConversationListState
     extends ConsumerState<ArchiveConversationList> {
   bool _hiddenExpanded = false;
 
+  static bool _firstRead(AsyncValue<Object> v) => !v.hasValue && v.isLoading;
+  static bool _failed(AsyncValue<Object> v) => !v.hasValue && v.hasError;
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -54,13 +57,16 @@ class _ArchiveConversationListState
       ),
     );
 
-    if (dmsAsync.isLoading || channelsAsync.isLoading) {
+    // The lists are refreshed on every open: a refresh keeps the list on
+    // screen, and only a first read waits or fails.
+    if (_firstRead(dmsAsync) || _firstRead(channelsAsync)) {
       return Column(children: [
         field,
-        const Expanded(child: Center(child: HollowSpinner.medium())),
+        const Expanded(
+            child: Center(child: HollowSpinner.medium(delayed: true))),
       ]);
     }
-    if (dmsAsync.hasError || channelsAsync.hasError) {
+    if (_failed(dmsAsync) || _failed(channelsAsync)) {
       return Column(children: [
         field,
         Expanded(

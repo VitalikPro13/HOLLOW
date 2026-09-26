@@ -202,27 +202,23 @@ void _showEmoteContextMenu(
         Positioned(
           left: left,
           top: top,
-          child: Material(
-            color: Colors.transparent,
+          child: DefaultTextStyle(
+            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
             child: Container(
               width: menuWidth,
               decoration: BoxDecoration(
                 color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 12,
-                  ),
-                ],
+                boxShadow: HollowShadows.float,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+                    padding: const EdgeInsets.fromLTRB(HollowSpacing.md,
+                        HollowSpacing.sm, HollowSpacing.md, HollowSpacing.xs),
                     child: Text(
                       header,
                       maxLines: 1,
@@ -233,7 +229,7 @@ void _showEmoteContextMenu(
                   ),
                   const HollowDivider(),
                   Padding(
-                    padding: const EdgeInsets.all(4),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: HollowPressable(
                       onTap: () {
                         dismiss();
@@ -241,11 +237,12 @@ void _showEmoteContextMenu(
                       },
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 6),
+                          horizontal: HollowSpacing.sm,
+                          vertical: HollowSpacing.sm),
                       child: Row(
                         children: [
                           Icon(LucideIcons.trash2, size: 14, color: hollow.error),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: HollowSpacing.sm),
                           Text(
                             actionLabel,
                             style: HollowTypography.label
@@ -331,7 +328,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
             rise: true,
             alignment:
                 flippedBelow ? Alignment.topRight : Alignment.bottomRight,
-            child: Material(
+            child: Material( // design-ignore: overlay host, a raw OverlayEntry has no Material above it for the search field
               color: Colors.transparent,
               child: Container(
                 width: pickerWidth,
@@ -440,11 +437,12 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
         _ffzResults = rows;
         _ffzLoading = false;
       });
-    }).catchError((e) {
+    }).catchError((Object e) {
       if (!mounted || seq != _ffzQuerySeq) return;
       setState(() {
         _ffzLoading = false;
-        _ffzError = 'Search failed. Check your connection';
+        _ffzError = friendlyError(e,
+            fallback: 'Check your connection and try again.');
       });
     });
   }
@@ -526,9 +524,28 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     }
   }
 
+  /// A list that has not arrived renders nothing, and one that failed says so:
+  /// neither may read as "you have none".
+  Widget? _notLoaded(
+      AsyncValue<Object?> async, String failedTitle, VoidCallback retry) {
+    if (async.hasValue) return null;
+    if (!async.hasError) return const SizedBox.shrink();
+    return HollowEmptyState(
+      title: failedTitle,
+      action: HollowButton.ghost(
+        onPressed: retry,
+        child: const Text('Try again'),
+      ),
+    );
+  }
+
   Widget _serverTab(HollowTheme hollow) {
     final serverId = widget.serverId!;
-    final emotes = ref.watch(serverEmotesProvider(serverId)).valueOrNull ?? [];
+    final async = ref.watch(serverEmotesProvider(serverId));
+    final notLoaded = _notLoaded(async, "Server emotes didn't load",
+        () => ref.invalidate(serverEmotesProvider(serverId)));
+    if (notLoaded != null) return notLoaded;
+    final emotes = async.value ?? const <emotes_api.ServerEmote>[];
     final filtered = _search.isEmpty
         ? emotes
         : emotes.where((e) => e.name.contains(_search)).toList();
@@ -550,7 +567,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
   }
 
   Widget _mineTab(HollowTheme hollow) {
-    final emotes = ref.watch(personalEmotesProvider).valueOrNull ?? [];
+    final async = ref.watch(personalEmotesProvider);
+    final notLoaded = _notLoaded(async, "Your emotes didn't load",
+        () => ref.invalidate(personalEmotesProvider));
+    final emotes = async.valueOrNull ?? const <emotes_api.PersonalEmote>[];
     final filtered = _search.isEmpty
         ? emotes
         : emotes.where((e) => e.name.contains(_search)).toList();
@@ -560,7 +580,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     final body = Column(
       children: [
         Expanded(
-          child: filtered.isEmpty
+          child: notLoaded ?? (filtered.isEmpty
               ? emotes.isEmpty
                   ? const HollowEmptyState(
                       title: 'Your personal emotes work in every chat',
@@ -585,7 +605,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
                       }
                     },
                   ),
-                ),
+                )),
         ),
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -593,12 +613,13 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
             onTap: _uploadPersonalEmote,
             semanticLabel: 'Upload a personal emote image',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(LucideIcons.imagePlus, size: 14, color: hollow.textSecondary),
-                const SizedBox(width: 6),
+                const SizedBox(width: HollowSpacing.xs),
                 Text('Upload emote',
                     style: HollowTypography.caption
                         .copyWith(color: hollow.textSecondary)),
@@ -639,7 +660,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     } catch (e) {
       _logLine('[HOLLOW-EMOTE] add failed: $e');
       if (mounted) {
-        HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't add the emote. Try again."),
             type: HollowToastType.error);
       }
     }
@@ -647,9 +671,18 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
 
   Widget _ffzTab(HollowTheme hollow) {
     if (_ffzLoading) {
-      return const Center(child: HollowSpinner.medium());
+      return const Center(child: HollowSpinner.medium(delayed: true));
     }
-    if (_ffzError != null) return HollowEmptyState(title: _ffzError!);
+    if (_ffzError != null) {
+      return HollowEmptyState(
+        title: "Emotes didn't load",
+        description: _ffzError,
+        action: HollowButton.ghost(
+          onPressed: _runFfzSearch,
+          child: const Text('Try again'),
+        ),
+      );
+    }
     final rows = _ffzResults ?? const [];
     if (rows.isEmpty) {
       return const HollowEmptyState(title: 'No emotes found');
@@ -671,7 +704,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
                 onTap: () => _importFfz(e),
                 semanticLabel: 'Use FFZ emote ${e.name}',
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(4),
+                padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: HollowTooltip(
                   message: '${e.name} · by ${e.owner}',
                   child: Image.network(
@@ -755,7 +788,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
           _select(emotes_api.emoteToken(name: name, hash: hash)),
       semanticLabel: 'Emote $name',
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(4),
+      padding: const EdgeInsets.all(HollowSpacing.xs),
       child: HollowTooltip(
         message: ':$name:',
         child: Center(
@@ -892,7 +925,10 @@ class _UnicodeGrid extends StatelessWidget {
 
   Widget _headerTile(HollowTheme hollow, _HeaderEntry entry) {
     return Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 4, left: 2),
+      padding: const EdgeInsets.only(
+          top: HollowSpacing.sm,
+          bottom: HollowSpacing.xs,
+          left: HollowSpacing.xxs),
       child: Text(
         entry.title,
         style: HollowTypography.caption.copyWith(
@@ -944,11 +980,12 @@ class _EmojiCell extends StatelessWidget {
       onTap: () => onSelect(emoji.char),
       semanticLabel: emoji.name.isEmpty ? 'Emoji ${emoji.char}' : emoji.name,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(3),
+      padding: const EdgeInsets.all(HollowSpacing.xs),
       child: Center(
         child: emote != null
             ? EmoteImage(name: emote.name, hash: emote.hash, size: 22)
-            : Text(emoji.char, style: const TextStyle(fontSize: 21)),
+            : Text(emoji.char,
+                style: const TextStyle(fontSize: 21)), // design-ignore: emoji glyph at its cell size
       ),
     );
     if (onRemove == null) return cell;

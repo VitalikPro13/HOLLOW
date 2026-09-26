@@ -58,6 +58,6 @@ int stableHash(String s) {
 }
 
 Color _compute(String id, double saturation, double lightness) {
-  final hue = (id.hashCode % 360).abs().toDouble();
+  final hue = (stableHash(id) % 360).toDouble();
   return HSLColor.fromAHSL(1.0, hue, saturation, lightness).toColor();
 }

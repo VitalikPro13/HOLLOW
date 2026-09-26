@@ -1,4 +1,6 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:async';
+
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
@@ -22,6 +24,33 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+
+/// How long a server's public channel list may take to answer.
+const _channelListTimeout = Duration(seconds: 10);
+final Map<String, Timer> _channelListTimers = {};
+
+/// Asks a server's members for its public channels. The loading flag clears on
+/// the answer (event_provider), on a failed request, or after
+/// [_channelListTimeout], so a server nobody answers for reaches its empty
+/// state instead of spinning. Takes the container: the timer can outlive the
+/// sidebar.
+void _requestGuestChannels(ProviderContainer container, String serverId) {
+  void done() {
+    _channelListTimers.remove(serverId)?.cancel();
+    final loading = container.read(guestLoadingProvider);
+    if (!loading.contains(serverId)) return;
+    container.read(guestLoadingProvider.notifier).state = {...loading}
+      ..remove(serverId);
+  }
+
+  container.read(guestLoadingProvider.notifier).state = {
+    ...container.read(guestLoadingProvider),
+    serverId,
+  };
+  _channelListTimers.remove(serverId)?.cancel();
+  _channelListTimers[serverId] = Timer(_channelListTimeout, done);
+  crdt_api.requestPublicChannels(serverId: serverId).catchError((_) => done());
+}
 
 class GuestServerSidebar extends ConsumerStatefulWidget {
   const GuestServerSidebar({super.key});
@@ -90,10 +119,8 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
       }
       ref.read(guestExpandedServerProvider.notifier).state = serverId;
       ref.read(guestSelectedServerProvider.notifier).state = serverId;
-      final loading = Set<String>.from(ref.read(guestLoadingProvider));
-      loading.add(serverId);
-      ref.read(guestLoadingProvider.notifier).state = loading;
-      crdt_api.requestPublicChannels(serverId: serverId).catchError((_) {});
+      _requestGuestChannels(
+          ProviderScope.containerOf(context, listen: false), serverId);
     });
 
     _addController.clear();
@@ -145,7 +172,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
                   }),
                   semanticLabel: 'Add channel',
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.all(4),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(
                     _showAddField ? LucideIcons.x : LucideIcons.plus,
                     size: 16,
@@ -207,13 +234,9 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
                         onToggleExpand: () => _toggleExpand(server.serverId),
                         onChannelTap: (channelId) =>
                             _selectChannel(server.serverId, channelId),
-                        onRefresh: () {
-                          final loading = Set<String>.from(ref.read(guestLoadingProvider));
-                          loading.add(server.serverId);
-                          ref.read(guestLoadingProvider.notifier).state = loading;
-                          crdt_api.requestPublicChannels(serverId: server.serverId)
-                              .catchError((_) {});
-                        },
+                        onRefresh: () => _requestGuestChannels(
+                            ProviderScope.containerOf(context, listen: false),
+                            server.serverId),
                         onRemove: () => ref
                             .read(savedGuestServersProvider.notifier)
                             .removeServer(server.serverId),
@@ -245,10 +268,8 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
 
     final channels = ref.read(guestChannelMapProvider)[serverId];
     if (channels == null || channels.isEmpty) {
-      final loading = Set<String>.from(ref.read(guestLoadingProvider));
-      loading.add(serverId);
-      ref.read(guestLoadingProvider.notifier).state = loading;
-      crdt_api.requestPublicChannels(serverId: serverId).catchError((_) {});
+      _requestGuestChannels(
+          ProviderScope.containerOf(context, listen: false), serverId);
     }
   }
 
@@ -381,10 +402,9 @@ class _GuestServerSection extends ConsumerWidget {
                             alignment: Alignment.center,
                             child: Text(
                               name[0].toUpperCase(), // design-ignore: avatar initial
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
+                              style: HollowTypography.micro.copyWith(
+                                color: Colors.white, // design-ignore: initials on an identity colour, as HollowAvatar
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
                           ),
@@ -394,11 +414,10 @@ class _GuestServerSection extends ConsumerWidget {
                     child: Text(
                       name,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
+                      style: HollowTypography.label.copyWith(
                         color: isExpanded
                             ? hollow.textPrimary
                             : hollow.textSecondary,
-                        fontSize: 13,
                         fontWeight:
                             isExpanded ? FontWeight.w600 : FontWeight.w500,
                       ),
@@ -410,12 +429,12 @@ class _GuestServerSection extends ConsumerWidget {
                     color: hollow.textSecondary.withValues(alpha: 0.5),
                   ),
                   if (isExpanded) ...[
-                    const SizedBox(width: 2),
+                    const SizedBox(width: HollowSpacing.xxs),
                     HollowPressable(
                       onTap: onRefresh,
                       semanticLabel: 'Refresh',
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.all(2),
+                      padding: const EdgeInsets.all(HollowSpacing.xxs),
                       child: Icon(
                         LucideIcons.refreshCw,
                         size: 12,
@@ -423,7 +442,7 @@ class _GuestServerSection extends ConsumerWidget {
                       ),
                     ),
                   ],
-                  const SizedBox(width: 4),
+                  const SizedBox(width: HollowSpacing.xs),
                   AnimatedRotation(
                     turns: isExpanded ? 0.25 : 0.0,
                     duration: HollowDurations.fast,
@@ -482,13 +501,13 @@ class _GuestServerSection extends ConsumerWidget {
     if (isLoading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: HollowSpacing.md),
-        child: Center(child: HollowSpinner()),
+        child: Center(child: HollowSpinner(delayed: true)),
       );
     }
 
     if (channels.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(
+      return Padding(
+        padding: const EdgeInsets.symmetric(
           vertical: HollowSpacing.md,
           horizontal: HollowSpacing.lg,
         ),
@@ -496,6 +515,11 @@ class _GuestServerSection extends ConsumerWidget {
           title: 'No public channels found',
           description: 'Members may be offline.',
           dense: true,
+          action: HollowButton.ghost(
+            compact: true,
+            onPressed: onRefresh,
+            child: const Text('Try again'),
+          ),
         ),
       );
     }
@@ -576,29 +600,24 @@ class _GuestChannelTile extends StatelessWidget {
       ),
       // Not animated: a weight tween shifts the name's width every frame.
       child: DefaultTextStyle(
-        style: HollowTypography.body.copyWith(
+        style: HollowTypography.label.copyWith(
           color: isSelected ? hollow.textPrimary : hollow.textSecondary,
           fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-          fontSize: 13,
         ),
         child: Row(
           children: [
             Text(
               isLast ? '└' : '├',
-              style: TextStyle(
-                color: hollow.textSecondary.withValues(alpha: 0.4),
-                fontSize: 13,
-                fontFamily: 'monospace',
-                height: 1,
-              ),
+              style: HollowTypography.mono
+                  .copyWith(color: hollow.textTertiary, height: 1),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: HollowSpacing.xs),
             Icon(
               LucideIcons.hash,
               size: 14,
               color: isSelected ? hollow.textPrimary : hollow.textSecondary,
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: HollowSpacing.xs),
             Expanded(
               child: Text(name, overflow: TextOverflow.ellipsis),
             ),

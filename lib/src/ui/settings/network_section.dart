@@ -39,9 +39,10 @@ const double _kFieldWidth = 340;
 Future<void> _saveSetting(BuildContext context, Future<void> write) async {
   try {
     await write;
-  } catch (_) {
+  } catch (e) {
     if (!context.mounted) return;
-    HollowToast.show(context, 'Could not save that setting',
+    HollowToast.show(
+        context, friendlyError(e, fallback: 'Could not save that setting'),
         type: HollowToastType.error);
   }
 }
@@ -113,9 +114,10 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
       if (_selectedRelay == domain) {
         setState(() => _selectedRelay = kDefaultRelayDomain);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Could not remove that relay',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'Could not remove that relay'),
           type: HollowToastType.error);
     }
   }
@@ -133,9 +135,10 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
     if (ref.read(savedRelayListProvider).contains(domain)) return;
     try {
       await ref.read(savedRelayListProvider.notifier).addRelay(domain);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Could not add that relay',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'Could not add that relay'),
           type: HollowToastType.error);
       return;
     }
@@ -695,9 +698,10 @@ class _KlipyKeyRowsState extends ConsumerState<KlipyKeyRows> {
               ? 'Back to the Hollow proxy'
               : 'Using your own KLIPY key',
           type: HollowToastType.success);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'That does not look like a KLIPY API key',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'That does not look like a KLIPY API key'),
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _keyBusy = false);
@@ -712,9 +716,10 @@ class _KlipyKeyRowsState extends ConsumerState<KlipyKeyRows> {
       _hostsController.text = ref.read(gifMediaHostsProvider).join(', ');
       HollowToast.show(context, 'Allowed media hosts updated',
           type: HollowToastType.success);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'That is not a valid host name',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'That is not a valid host name'),
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _hostsBusy = false);
@@ -847,9 +852,10 @@ class _GifProxyRowState extends ConsumerState<GifProxyRow> {
       _controller.text = ref.read(gifProxyUrlProvider);
       HollowToast.show(context, 'GIF proxy updated',
           type: HollowToastType.success);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'The proxy address must start with https://',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'The proxy address must start with https://'),
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -927,9 +933,10 @@ class _SocialPreviewProxyRowState extends ConsumerState<SocialPreviewProxyRow> {
               ? 'Social lookups go direct again'
               : 'Social lookups go through your proxy',
           type: HollowToastType.success);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'The proxy address must start with https://',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'The proxy address must start with https://'),
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -1058,10 +1065,7 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
       await network_api.stopNode();
       await Future.delayed(const Duration(milliseconds: 200));
     } catch (_) {}
-    final exe = Platform.resolvedExecutable;
-    await Process.start(exe, [], mode: ProcessStartMode.detached);
-    await Future.delayed(const Duration(milliseconds: 100));
-    exit(0);
+    await relaunchApp();
   }
 
   @override
@@ -1084,10 +1088,7 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
           'looks like ordinary HTTPS to a real website. It\'s pre-configured. '
           'Turn it on and restart. Only touch Advanced if you run your own '
           'relay.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 11,
-          ),
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.md),
         SettingsToggleRow(
@@ -1161,10 +1162,7 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
         children: [
           Text(
             label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 10,
-            ),
+            style: HollowTypography.micro.copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.xs),
           HollowTextField(

@@ -45,15 +45,16 @@ class StatusCountdown extends StatefulWidget {
   final DateTime until; // UTC
   final String label;
   final Color color;
-  final double fontSize;
 
   const StatusCountdown({
     super.key,
     required this.until,
     required this.label,
     required this.color,
-    this.fontSize = 11,
   });
+
+  /// The clock glyph matches the caption it sits beside.
+  static const double _iconSize = 11;
 
   @override
   State<StatusCountdown> createState() => _StatusCountdownState();
@@ -129,13 +130,13 @@ class _StatusCountdownState extends State<StatusCountdown> {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(LucideIcons.clock, size: widget.fontSize, color: widget.color),
+        Icon(LucideIcons.clock,
+            size: StatusCountdown._iconSize, color: widget.color),
         const SizedBox(width: HollowSpacing.xs),
         Text(
           text,
           style: HollowTypography.caption.copyWith(
             color: widget.color,
-            fontSize: widget.fontSize,
             fontWeight: FontWeight.w600,
             // Tabular figures stop the countdown jittering as digits change.
             fontFeatures: const [FontFeature.tabularFigures()],
@@ -448,7 +449,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.only(top: 1),
+            padding: const EdgeInsets.only(top: HollowSpacing.xxs),
             child: Icon(vis.icon, size: 14, color: color),
           ),
           const SizedBox(width: HollowSpacing.sm),
@@ -458,9 +459,8 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
               children: [
                 Text(
                   'System Status',
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.bodySmall.copyWith(
                     color: hollow.textPrimary,
-                    fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -469,10 +469,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                   maxLines: showFull ? null : 2,
                   overflow:
                       showFull ? TextOverflow.clip : TextOverflow.ellipsis,
-                  style: HollowTypography.caption.copyWith(
-                    color: color,
-                    fontSize: 10,
-                  ),
+                  style: HollowTypography.caption.copyWith(color: color),
                 ),
                 if (sub != null)
                   Text(
@@ -482,23 +479,21 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                         showFull ? TextOverflow.clip : TextOverflow.ellipsis,
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 10,
                       height: showFull ? 1.35 : null,
                     ),
                   ),
                 if (status.until != null) ...[
-                  const SizedBox(height: 3),
+                  const SizedBox(height: HollowSpacing.xxs),
                   StatusCountdown(
                     until: status.until!,
                     label: status.untilLabel,
                     color: color,
-                    fontSize: 10,
                   ),
                 ],
                 // Expand-only: an underlined link in a glanceable summary would
                 // compete with the tap-to-expand affordance.
                 if (showFull && status.link.isNotEmpty) ...[
-                  const SizedBox(height: 5),
+                  const SizedBox(height: HollowSpacing.xs),
                   HollowFocusRing(
                     enabled: true,
                     onActivate: () => _openLink(status.link),
@@ -521,8 +516,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                                 : 'Details',
                             style: HollowTypography.caption.copyWith(
                               color: color,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: FontWeight.w600,
                               decoration: TextDecoration.underline,
                               decorationColor: color,
                             ),
@@ -538,7 +532,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
           if (hasDetail) ...[
             const SizedBox(width: HollowSpacing.xs),
             Padding(
-              padding: const EdgeInsets.only(top: 1),
+              padding: const EdgeInsets.only(top: HollowSpacing.xxs),
               child: Icon(
                 showFull ? LucideIcons.chevronUp : LucideIcons.chevronDown,
                 size: 14,

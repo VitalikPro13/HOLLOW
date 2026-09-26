@@ -140,9 +140,7 @@ class DmCallRow extends ConsumerWidget {
           label: call.isVideoEnabled ? 'Turn off camera' : 'Turn on camera',
           size: 32,
           on: call.isVideoEnabled,
-          onPressed: active
-              ? () => calls.toggleVideo().catchError((Object _) {})
-              : null,
+          onPressed: active ? () => toggleCallCamera(context, dm: true) : null,
         ),
         if (callCanShareScreen) ...[
           const SizedBox(width: HollowSpacing.xs),

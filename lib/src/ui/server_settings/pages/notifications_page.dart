@@ -36,7 +36,8 @@ class ServerNotificationsPage extends ConsumerWidget {
     final level = state.serverLevels[serverId] ?? NotificationLevel.all;
     final serverName = ref.watch(serverListProvider)[serverId]?.name ?? 'This server';
     // Only channels you can see: naming a restricted one would leak it.
-    final all = ref.watch(serverChannelsProvider(serverId)).valueOrNull ?? {};
+    final allAsync = ref.watch(serverChannelsProvider(serverId));
+    final all = allAsync.valueOrNull ?? {};
     final channels = [
       for (final c in all.values)
         if (c.meCanSee) c,
@@ -60,7 +61,15 @@ class ServerNotificationsPage extends ConsumerWidget {
           title: 'Channels',
           subtitle: "A channel set here ignores the server's choice",
           children: [
-            if (channels.isEmpty)
+            if (!allAsync.hasValue && allAsync.hasError)
+              SettingsLoadFailed(
+                title: "The channels didn't load",
+                onRetry: () =>
+                    ref.invalidate(serverChannelsProvider(serverId)),
+              )
+            else if (!allAsync.hasValue)
+              const SizedBox.shrink()
+            else if (channels.isEmpty)
               const HollowEmptyState(dense: true, title: 'No channels yet')
             else
               for (final c in channels)

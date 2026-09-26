@@ -12,26 +12,17 @@ import 'gif_provider.dart';
 /// sticker catalog. Bytes are NOT here: a sticker's image rides the same
 /// content-addressed rail as emotes and GIFs. Everything below is metadata.
 
-/// The user's personal sticker vault, pack-major and in upload order.
+/// The user's personal sticker vault, pack-major and in upload order. A failed
+/// read is an error, never an empty vault.
 final personalStickersProvider =
-    FutureProvider<List<stickers_api.PersonalSticker>>((ref) async {
-  try {
-    return await stickers_api.listPersonalStickers();
-  } catch (_) {
-    return const [];
-  }
-});
+    FutureProvider<List<stickers_api.PersonalSticker>>(
+        (ref) => stickers_api.listPersonalStickers());
 
-/// A server's sticker set (CRDT-replicated metadata), invalidated on `ServerUpdated`.
+/// A server's sticker set (CRDT-replicated metadata), invalidated on
+/// `ServerUpdated`. A failed read is an error, never an empty set.
 final serverStickersProvider =
     FutureProvider.family<List<stickers_api.ServerSticker>, String>(
-        (ref, serverId) async {
-  try {
-    return await stickers_api.getServerStickers(serverId: serverId);
-  } catch (_) {
-    return const [];
-  }
-});
+        (ref, serverId) => stickers_api.getServerStickers(serverId: serverId));
 
 /// Authoring caps, read from Rust rather than mirrored: `[per server, per
 /// pack, packs, vault total, label chars]`.

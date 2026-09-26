@@ -1,0 +1,452 @@
+{
+  "_": [
+    "The design language mop-up's render proof (2026-09-26): the surfaces the",
+    "literal sweep touches, shot on the unswept commit and again after, then diffed.",
+    "One throwaway peer, its own Saved messages, then one throwaway server deleted at the end.",
+    "Fixtures: build/mopup_fixtures (probe_still.png, probe_clip.mp4, probe_tone.mp3,",
+    "probe_notes.txt).",
+    "",
+    "run: powershell -File scripts\\fleet.ps1 -Scenario mopup_renders -Peers a"
+  ],
+  "peers": [
+    "a"
+  ],
+  "steps": [
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Accept",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Saved messages",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Saved messages",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "field"
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "**bold** and *italic* with `code`, ||a spoiler|| and a mention of #general ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "> a quoted line\n```\na code block\n```"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "attach_file",
+      "path": "${REPO}/build/mopup_fixtures/probe_still.png"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:AttachmentImage",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "attach_file",
+      "path": "${REPO}/build/mopup_fixtures/probe_clip.mp4"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:VideoMessageBubble",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "attach_file",
+      "path": "${REPO}/build/mopup_fixtures/probe_tone.mp3"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2000
+    },
+    {
+      "peer": "a",
+      "op": "attach_file",
+      "path": "${REPO}/build/mopup_fixtures/probe_notes.txt"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-02-chat-dark"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "light",
+      "frames": 30
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-03-chat-light"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "dark",
+      "frames": 30
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Emoji, GIFs and stickers",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-04-emoji"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:GIFs",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-05-gifs"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Stickers",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-06-stickers"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Downloads",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-07-downloads"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap_at",
+      "of": "type:VideoMessageBubble",
+      "align": "topLeft",
+      "dx": 150,
+      "dy": -60
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:MediaViewerView",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-08-viewer"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "i"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-09-viewer-info"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "i"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "arrowRight",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-10-viewer-video"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Help",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-11-help"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Add a server",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "mopup"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "server:mopup",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "mopup"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "mu-12-server"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:mopup",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Delete server",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Delete server",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "server:mopup",
+      "timeout_ms": 30000,
+      "soft": true
+    }
+  ]
+}

@@ -7,6 +7,8 @@ import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart';
@@ -51,7 +53,25 @@ class _ServerSettingsPlaceState extends ConsumerState<ServerSettingsPlace> {
           if (mounted) closeServerSettings(ref.read);
         });
       }
-      return ColoredBox(color: hollow.background);
+      final failed = sid != null &&
+          server != null &&
+          (ref.watch(myPermissionsProvider(sid)).hasError ||
+              ref.watch(myRoleProvider(sid)).hasError);
+      return ColoredBox(
+        color: hollow.background,
+        child: failed
+            ? HollowEmptyState(
+                title: "Server settings didn't load",
+                action: HollowButton.ghost(
+                  onPressed: () {
+                    ref.invalidate(myPermissionsProvider(sid));
+                    ref.invalidate(myRoleProvider(sid));
+                  },
+                  child: const Text('Try again'),
+                ),
+              )
+            : null,
+      );
     }
 
     final pages = serverSettingsPagesFor(access.perms);

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -51,8 +52,12 @@ class _MobileIncomingCallOverlayState
   bool _video = false;
   String? _leavesRoom;
 
+  /// A call answered under the lock cover, whose screen opens once it lifts.
+  ProviderSubscription<bool>? _openAfterUnlock;
+
   @override
   void dispose() {
+    _openAfterUnlock?.close();
     _ringtone.stop();
     _controller.dispose();
     super.dispose();
@@ -66,8 +71,34 @@ class _MobileIncomingCallOverlayState
             type: HollowToastType.error);
       }
     });
+    if (master.isEmpty) return;
+    _openAfterUnlock?.close();
+    _openAfterUnlock = null;
+    // Ringing over the lock is fine, but a route pushed now would sit ABOVE
+    // the cover: the call is answered and its screen waits for the unlock.
+    if (ref.read(appLockedProvider)) {
+      _openAfterUnlock =
+          ref.listenManual<bool>(appLockedProvider, (_, locked) {
+        if (locked) return;
+        _openAfterUnlock?.close();
+        _openAfterUnlock = null;
+        final call = ref.read(callProvider);
+        final peer = call.peerId;
+        if (call.status == CallStatus.idle ||
+            peer == null ||
+            ref.read(deviceLinkProvider).identityOf(peer) != master) {
+          return;
+        }
+        _openCallScreen(master);
+      });
+      return;
+    }
+    _openCallScreen(master);
+  }
+
+  void _openCallScreen(String master) {
     final nav = (widget.navigatorKey ?? hollowNavigatorKey).currentState;
-    if (nav != null && master.isNotEmpty) openMobileDmCall(nav, master);
+    if (nav != null) openMobileDmCall(nav, master);
   }
 
   void _decline() {

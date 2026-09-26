@@ -97,7 +97,7 @@ class _HollowToggleState extends State<HollowToggle>
 
     Widget visual = HollowFocusRing(
       enabled: !isDisabled,
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(_height / 2),
       onActivate: isDisabled ? null : toggle,
       child: FadeTransition(
         opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
@@ -112,7 +112,7 @@ class _HollowToggleState extends State<HollowToggle>
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   color: _trackColorAnimation.value,
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(_height / 2),
                 ),
                 child: Stack(
                   children: [
@@ -123,7 +123,7 @@ class _HollowToggleState extends State<HollowToggle>
                         width: 16,
                         height: 16,
                         decoration: const BoxDecoration(
-                          color: Colors.white,
+                          color: Colors.white, // design-ignore: the switch knob stays white on every fill
                           shape: BoxShape.circle,
                           boxShadow: [_thumbShadow],
                         ),

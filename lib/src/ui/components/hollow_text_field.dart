@@ -226,7 +226,7 @@ class _HollowTextFieldState extends State<HollowTextField>
         children: [
           field,
           Padding(
-            padding: const EdgeInsets.only(top: 3),
+            padding: const EdgeInsets.only(top: HollowSpacing.xs),
             child: Row(
               children: [
                 if (hasError)

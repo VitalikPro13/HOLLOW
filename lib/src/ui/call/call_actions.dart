@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -16,6 +17,39 @@ bool get callCanShareScreen =>
     Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
 bool get _isPhone => Platform.isAndroid || Platform.isIOS;
+
+/// Turns your camera on or off in the DM call ([dm]) or the voice room. A
+/// camera that stays off (none, or another app holds it) says so rather than
+/// leaving a button that did nothing.
+Future<void> toggleCallCamera(BuildContext context, {required bool dm}) async {
+  final container = ProviderScope.containerOf(context, listen: false);
+  bool on() => dm
+      ? container.read(callProvider).isVideoEnabled
+      : container.read(voiceChannelProvider).isCameraOn;
+  final wasOn = on();
+  try {
+    if (dm) {
+      await container.read(callProvider.notifier).toggleVideo();
+    } else {
+      await container.read(voiceChannelProvider.notifier).toggleCamera();
+    }
+  } catch (e) {
+    if (context.mounted) {
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: wasOn
+                  ? "Couldn't turn off the camera"
+                  : "Couldn't turn on the camera"),
+          type: HollowToastType.error);
+    }
+    return;
+  }
+  if (!wasOn && !on() && context.mounted) {
+    HollowToast.show(context, 'No camera found, or another app is using it',
+        type: HollowToastType.error);
+  }
+}
 
 /// THE way to start a DM call, from any surface (the header, a person's menu,
 /// the Friends Manager): the TURN check, the leave-the-voice-room confirm

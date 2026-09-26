@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
@@ -23,7 +24,8 @@ class CallRecordingToasts extends ConsumerWidget {
       }
       final error = next.lastError;
       if (error != null && error != prev?.lastError) {
-        HollowToast.show(context, 'Recording: $error',
+        HollowToast.show(
+            context, friendlyError(error, fallback: "Couldn't record the call"),
             type: HollowToastType.error);
         ref.read(recordingProvider.notifier).acknowledgeLastError();
       }

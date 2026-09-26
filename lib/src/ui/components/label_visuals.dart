@@ -8,9 +8,9 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Canonical preset palette for label colours, shared by desktop and mobile.
 const kLabelPresetColors = <Color>[
-  Color(0xFFEF4444), Color(0xFFF97316), Color(0xFFEAB308),
-  Color(0xFF22C55E), Color(0xFF06B6D4), Color(0xFF3B82F6),
-  Color(0xFF8B5CF6), Color(0xFFEC4899), Color(0xFF78909C),
+  Color(0xFFEF4444), Color(0xFFF97316), Color(0xFFEAB308), // design-ignore: user-chosen label colours, content
+  Color(0xFF22C55E), Color(0xFF06B6D4), Color(0xFF3B82F6), // design-ignore: user-chosen label colours, content
+  Color(0xFF8B5CF6), Color(0xFFEC4899), Color(0xFF78909C), // design-ignore: user-chosen label colours, content
 ];
 
 /// Canonical label color parser (accepts #RRGGBB and #AARRGGBB).
@@ -18,7 +18,7 @@ Color parseLabelColor(String hex) {
   final cleaned = hex.replaceFirst('#', '');
   if (cleaned.length == 6) return Color(int.parse('FF$cleaned', radix: 16));
   if (cleaned.length == 8) return Color(int.parse(cleaned, radix: 16));
-  return const Color(0xFF78909C);
+  return kLabelPresetColors.last;
 }
 
 /// Short peer-id suffix ("…T7iS4F") that tells apart members sharing a display

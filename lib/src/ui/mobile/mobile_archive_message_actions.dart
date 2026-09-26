@@ -112,8 +112,10 @@ class _ArchiveActionsSheet extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(HollowSpacing.lg, 0,
-                HollowSpacing.lg, HollowSpacing.sm),
+            padding: const EdgeInsets.only(
+                left: HollowSpacing.lg,
+                right: HollowSpacing.lg,
+                bottom: HollowSpacing.sm),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,

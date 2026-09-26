@@ -72,7 +72,7 @@ class PeerCard extends ConsumerWidget {
                         color: hollow.surface,
                         shape: BoxShape.circle,
                       ),
-                      padding: const EdgeInsets.all(1.5),
+                      padding: const EdgeInsets.all(HollowSpacing.xxs),
                       child: StatusDot(
                         color: isOnline ? hollow.success : hollow.textSecondary,
                         size: 8,
@@ -103,8 +103,7 @@ class PeerCard extends ConsumerWidget {
                             peerName,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: HollowTypography.body.copyWith(
-                              fontSize: 13,
+                            style: HollowTypography.label.copyWith(
                               fontWeight: isSelected || hasUnread
                                   ? FontWeight.w600
                                   : FontWeight.w400,

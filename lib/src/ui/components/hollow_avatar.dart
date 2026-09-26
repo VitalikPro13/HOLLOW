@@ -66,8 +66,8 @@ class HollowAvatar extends ConsumerWidget {
       child: Text(
         peerInitials(displayName, peerId),
         style: TextStyle(
-          color: Colors.white,
-          fontSize: size * 0.38,
+          color: Colors.white, // design-ignore: initials on an identity colour, as ServerAvatar
+          fontSize: size * 0.38, // design-ignore: initials scale with the avatar tile, art not type
           fontWeight: FontWeight.w600,
         ),
       ),

@@ -131,13 +131,8 @@ final canPostInChannelProvider =
 /// Active mutes for a server. Invalidated on ServerUpdated via the event
 /// provider's ramp, because the CrdtStore write is fire-and-forget.
 final mutedMembersProvider = FutureProvider.autoDispose
-    .family<List<crdt_api.MutedMemberFfi>, String>((ref, serverId) async {
-  try {
-    return await crdt_api.getMutedMembers(serverId: serverId);
-  } catch (_) {
-    return const [];
-  }
-});
+    .family<List<crdt_api.MutedMemberFfi>, String>(
+        (ref, serverId) => crdt_api.getMutedMembers(serverId: serverId));
 
 /// My mute status in a server: null = not muted, else the FFI record
 /// (permanent flag + expiry ms). Master-keyed. Invalidated on ServerUpdated.

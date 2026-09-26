@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../core/friendly_error.dart';
 import '../../core/providers/sticker_provider.dart';
 import '../../rust/api/stickers.dart' as stickers_api;
 import '../../theme/hollow_spacing.dart';
@@ -89,7 +90,8 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
       if (mounted) setState(() => _preview = preview);
     } catch (e) {
       if (mounted) {
-        setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
+        setState(() => _error = friendlyError(e,
+            fallback: "This sticker pack couldn't be read."));
       }
     }
   }
@@ -114,7 +116,10 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
+      HollowToast.show(
+          context,
+          friendlyError(e,
+              fallback: "Couldn't add the sticker pack. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -201,11 +206,8 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                     children: [
                       Text(
                         _title,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                        ),
+                        style: HollowTypography.label
+                            .copyWith(color: hollow.textPrimary),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -216,7 +218,6 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                           color: _error != null
                               ? hollow.error
                               : hollow.textSecondary,
-                          fontSize: 11,
                         ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,

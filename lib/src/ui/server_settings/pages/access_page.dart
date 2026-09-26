@@ -41,6 +41,10 @@ class _AccessPageState extends ConsumerState<AccessPage> {
   final Map<String, String> _values = {};
   bool _loaded = false;
 
+  /// A failed read hides the controls: shown with blank values, one tap
+  /// would overwrite the real ones.
+  bool _loadFailed = false;
+
   static const _keys = [
     'is_private',
     'is_nsfw',
@@ -62,15 +66,24 @@ class _AccessPageState extends ConsumerState<AccessPage> {
   }
 
   Future<void> _load() async {
-    for (final key in _keys) {
-      try {
+    try {
+      for (final key in _keys) {
         _values[key] = await ref
             .read(serverSettingProvider((serverId: _sid, key: key)).future);
-      } catch (_) {
-        _values[key] = '';
       }
+    } catch (_) {
+      if (mounted) setState(() => _loadFailed = true);
+      return;
     }
     if (mounted) setState(() => _loaded = true);
+  }
+
+  void _retry() {
+    for (final key in _keys) {
+      ref.invalidate(serverSettingProvider((serverId: _sid, key: key)));
+    }
+    setState(() => _loadFailed = false);
+    _load();
   }
 
   bool _flag(String key) => _values[key] == 'true';
@@ -150,10 +163,25 @@ class _AccessPageState extends ConsumerState<AccessPage> {
     final minDays =
         effectiveFollowStep(int.tryParse(_values['twitch_min_follow_days'] ?? '') ?? 0);
 
+    const intro = "Who can get in, and what the relay keeps for members "
+        "while they're away.";
+    if (!_loaded) {
+      return SettingsPage(
+        title: 'Access',
+        intro: intro,
+        children: [
+          if (_loadFailed)
+            SettingsLoadFailed(
+              title: "The access settings didn't load",
+              onRetry: _retry,
+            ),
+        ],
+      );
+    }
+
     return SettingsPage(
       title: 'Access',
-      intro: "Who can get in, and what the relay keeps for members while "
-          "they're away.",
+      intro: intro,
       children: [
         SettingsSection(
           title: 'Joining',

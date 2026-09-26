@@ -1,4 +1,7 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
@@ -20,49 +23,45 @@ class AnnotationToolbar extends StatelessWidget {
   });
 
   static const _palette = <Color>[
-    Color(0xFFEF4444), // red
-    Color(0xFFF59E0B), // amber
-    Color(0xFFFACC15), // yellow
-    Color(0xFF22C55E), // green
-    Color(0xFF06B6D4), // cyan
-    Color(0xFF3B82F6), // blue
-    Color(0xFF8B5CF6), // purple
-    Color(0xFFEC4899), // pink
-    Color(0xFFFFFFFF), // white
-    Color(0xFF000000), // black
+    Color(0xFFEF4444), // design-ignore: drawing ink (red)
+    Color(0xFFF59E0B), // design-ignore: drawing ink (amber)
+    Color(0xFFFACC15), // design-ignore: drawing ink (yellow)
+    Color(0xFF22C55E), // design-ignore: drawing ink (green)
+    Color(0xFF06B6D4), // design-ignore: drawing ink (cyan)
+    Color(0xFF3B82F6), // design-ignore: drawing ink (blue)
+    Color(0xFF8B5CF6), // design-ignore: drawing ink (purple)
+    Color(0xFFEC4899), // design-ignore: drawing ink (pink)
+    Color(0xFFFFFFFF), // design-ignore: drawing ink (white)
+    Color(0xFF000000), // design-ignore: drawing ink (black)
   ];
 
   @override
   Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return AnimatedBuilder(
       animation: controller,
-      builder: (context, _) => Material(
+      builder: (context, _) => Material( // design-ignore: overlay host, the slider needs a Material ancestor
         color: Colors.transparent,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
           decoration: BoxDecoration(
-            color: const Color(0xCC1A1D24),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0x33FFFFFF)),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x80000000),
-                blurRadius: 18,
-                offset: Offset(0, 6),
-              ),
-            ],
+            color: hollow.overlay,
+            borderRadius: BorderRadius.circular(hollow.radiusLg),
+            border: Border.all(color: hollow.border),
+            boxShadow: HollowShadows.float,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _toolButton(AnnotationTool.freehand, LucideIcons.pencil, 'Freehand'),
-              _toolButton(AnnotationTool.line, LucideIcons.minus, 'Line'),
-              _toolButton(AnnotationTool.arrow, LucideIcons.arrowUpRight, 'Arrow'),
-              _toolButton(AnnotationTool.eraser, LucideIcons.eraser, 'Eraser'),
+              _toolButton(hollow, AnnotationTool.freehand, LucideIcons.pencil, 'Freehand'),
+              _toolButton(hollow, AnnotationTool.line, LucideIcons.minus, 'Line'),
+              _toolButton(hollow, AnnotationTool.arrow, LucideIcons.arrowUpRight, 'Arrow'),
+              _toolButton(hollow, AnnotationTool.eraser, LucideIcons.eraser, 'Eraser'),
               const _Divider(),
-              _styleButton(LineStyle.solid, 'Solid'),
-              _styleButton(LineStyle.dashed, 'Dashed'),
-              _styleButton(LineStyle.dotted, 'Dotted'),
+              _styleButton(hollow, LineStyle.solid, 'Solid'),
+              _styleButton(hollow, LineStyle.dashed, 'Dashed'),
+              _styleButton(hollow, LineStyle.dotted, 'Dotted'),
               const _Divider(),
               SizedBox(
                 width: 110,
@@ -76,16 +75,16 @@ class AnnotationToolbar extends StatelessWidget {
                 ),
               ),
               const _Divider(),
-              ..._palette.map(_colorSwatch),
+              ..._palette.map((c) => _colorSwatch(hollow, c)),
               const _Divider(),
-              _iconButton(LucideIcons.undo2, 'Undo (⌘Z)',
+              _iconButton(hollow, LucideIcons.undo2, 'Undo (⌘Z)',
                   enabled: controller.canUndo, onPressed: controller.undo),
-              _iconButton(LucideIcons.redo2, 'Redo (⇧⌘Z)',
+              _iconButton(hollow, LucideIcons.redo2, 'Redo (⇧⌘Z)',
                   enabled: controller.canRedo, onPressed: controller.redo),
-              _iconButton(LucideIcons.trash2, 'Clear',
+              _iconButton(hollow, LucideIcons.trash2, 'Clear',
                   enabled: controller.hasContent, onPressed: controller.clear),
               const _Divider(),
-              _iconButton(LucideIcons.x, 'Close (Esc)', onPressed: onClose),
+              _iconButton(hollow, LucideIcons.x, 'Close (Esc)', onPressed: onClose),
             ],
           ),
         ),
@@ -93,9 +92,10 @@ class AnnotationToolbar extends StatelessWidget {
     );
   }
 
-  Widget _toolButton(AnnotationTool t, IconData icon, String tooltip) {
+  Widget _toolButton(HollowTheme hollow, AnnotationTool t, IconData icon, String tooltip) {
     final active = controller.tool == t;
     return _iconButton(
+      hollow,
       icon,
       tooltip,
       active: active,
@@ -103,7 +103,7 @@ class AnnotationToolbar extends StatelessWidget {
     );
   }
 
-  Widget _styleButton(LineStyle s, String tooltip) {
+  Widget _styleButton(HollowTheme hollow, LineStyle s, String tooltip) {
     final active = controller.style == s;
     return HollowTooltip(
       message: tooltip,
@@ -115,8 +115,8 @@ class AnnotationToolbar extends StatelessWidget {
           height: 36,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: active ? const Color(0x33FFFFFF) : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+            color: active ? hollow.hover : null,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           child: CustomPaint(
             size: const Size(22, 4),
@@ -127,7 +127,7 @@ class AnnotationToolbar extends StatelessWidget {
     );
   }
 
-  Widget _colorSwatch(Color c) {
+  Widget _colorSwatch(HollowTheme hollow, Color c) {
     final active = controller.color.toARGB32() == c.toARGB32();
     return HollowTooltip(
       message: '#${c.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}',
@@ -135,14 +135,14 @@ class AnnotationToolbar extends StatelessWidget {
         radius: 16,
         onTap: () => controller.setColor(c),
         child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 2),
+          margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
           width: 22,
           height: 22,
           decoration: BoxDecoration(
             color: c,
             shape: BoxShape.circle,
             border: Border.all(
-              color: active ? const Color(0xFFFFFFFF) : const Color(0x66FFFFFF),
+              color: active ? hollow.textPrimary : hollow.textTertiary,
               width: active ? 2.5 : 1,
             ),
           ),
@@ -151,7 +151,7 @@ class AnnotationToolbar extends StatelessWidget {
     );
   }
 
-  Widget _iconButton(IconData icon, String tooltip,
+  Widget _iconButton(HollowTheme hollow, IconData icon, String tooltip,
       {VoidCallback? onPressed, bool enabled = true, bool active = false}) {
     return HollowTooltip(
       message: tooltip,
@@ -166,10 +166,10 @@ class AnnotationToolbar extends StatelessWidget {
             height: 36,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: active ? const Color(0x33FFFFFF) : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
+              color: active ? hollow.hover : null,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
-            child: Icon(icon, size: 18, color: const Color(0xFFE6E6E6)),
+            child: Icon(icon, size: 18, color: hollow.textPrimary),
           ),
         ),
       ),
@@ -183,8 +183,8 @@ class _Divider extends StatelessWidget {
   Widget build(BuildContext context) => Container(
         width: 1,
         height: 20,
-        margin: const EdgeInsets.symmetric(horizontal: 6),
-        color: const Color(0x33FFFFFF),
+        margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
+        color: HollowTheme.of(context).border,
       );
 }
 

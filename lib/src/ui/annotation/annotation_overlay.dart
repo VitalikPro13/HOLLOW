@@ -4,7 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/surface_ladder.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'annotation_canvas.dart';
@@ -48,6 +51,8 @@ class AnnotationOverlay {
       ),
     );
     overlay.insert(_entry!);
+    // A raw root entry paints above every route, the lock cover included.
+    OverlayHosts.register(_entry!, () => hide().catchError((Object _) {}));
 
     if (Platform.isMacOS) {
       try {
@@ -63,7 +68,9 @@ class AnnotationOverlay {
   }
 
   static Future<void> hide() async {
-    _entry?.remove();
+    final entry = _entry;
+    if (entry != null) OverlayHosts.unregister(entry);
+    entry?.remove();
     _entry = null;
     _controller?.dispose();
     _controller = null;
@@ -100,7 +107,7 @@ class AnnotationOverlay {
   static Future<void> _exitWindowsAnnotation() async {
     try {
       if (!Platform.isLinux) {
-        await windowManager.setBackgroundColor(const Color(0xFF0D0F14));
+        await windowManager.setBackgroundColor(_windowBackground());
         await windowManager.setSkipTaskbar(false);
       }
       await windowManager.setAlwaysOnTop(false);
@@ -110,6 +117,15 @@ class AnnotationOverlay {
     } catch (e) {
       debugPrint('[annotation] exit failed: $e');
     }
+  }
+
+  /// The theme canvas to restore under the window once it stops being
+  /// transparent; the dark canvas when the navigator is gone.
+  static Color _windowBackground() {
+    final ctx = hollowNavigatorKey.currentContext;
+    return ctx != null
+        ? HollowTheme.of(ctx).background
+        : SurfaceLadders.dark.canvas;
   }
 
   /// Sets the annotation-mode flag through the long-lived [ProviderContainer]

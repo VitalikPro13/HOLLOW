@@ -571,9 +571,12 @@ class _ChannelOverrideList extends ConsumerWidget {
     final channels = ref.watch(serverChannelsProvider(serverId));
 
     return channels.when(
-      loading: () => const SettingsNote('Loading channels…'),
-      error: (_, _) =>
-          const SettingsNote("Could not load this server's channels."),
+      // A local read: a note from frame 0 would only flash.
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => SettingsLoadFailed(
+        title: "This server's channels didn't load",
+        onRetry: () => ref.invalidate(serverChannelsProvider(serverId)),
+      ),
       data: (all) {
         // Only channels the local user can see: naming a restricted channel
         // here would leak that it exists.

@@ -41,6 +41,7 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -306,7 +307,7 @@ class ChannelSidebar extends StatelessWidget {
                 right: -1,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(
+                    gradient: LinearGradient( // design-ignore: legibility scrim over the server banner, fading to the sidebar surface
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
                       colors: [
@@ -602,7 +603,19 @@ class _ServerContentState extends State<_ServerContent> {
               child: child!,
             ),
             child: items.isEmpty
-                ? const HollowEmptyState(title: 'No channels')
+                ? HollowEmptyState(
+                    title: 'No channels',
+                    description:
+                        'They show up once this server finishes syncing.',
+                    action: w.canManageChannels
+                        ? HollowButton.ghost(
+                            compact: true,
+                            icon: const Icon(LucideIcons.plus, size: 14),
+                            onPressed: w.onCreateChannel,
+                            child: const Text('Create channel'),
+                          )
+                        : null,
+                  )
                 : ListView.builder(
                     padding:
                         const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
@@ -765,6 +778,7 @@ class _HomeContent extends ConsumerWidget {
   @override
   Widget build(BuildContext innerContext, WidgetRef ref) {
     final friends = ref.watch(friendsProvider);
+    final friendsLoad = ref.watch(friendsLoadStateProvider);
     // A friend is online if ANY of their devices is, collapsed to the master
     // identity.
     final online = ref.watch(onlineIdentitiesProvider);
@@ -843,9 +857,12 @@ class _HomeContent extends ConsumerWidget {
                   await ref
                       .read(friendsProvider.notifier)
                       .acceptRequest(req.peerId);
-                } catch (_) {
+                } catch (e) {
                   if (innerContext.mounted) {
-                    HollowToast.show(innerContext, 'Could not accept request',
+                    HollowToast.show(
+                        innerContext,
+                        friendlyError(e,
+                            fallback: "Couldn't accept the request."),
                         type: HollowToastType.error);
                   }
                 }
@@ -855,9 +872,12 @@ class _HomeContent extends ConsumerWidget {
                   await ref
                       .read(friendsProvider.notifier)
                       .rejectRequest(req.peerId);
-                } catch (_) {
+                } catch (e) {
                   if (innerContext.mounted) {
-                    HollowToast.show(innerContext, 'Could not decline request',
+                    HollowToast.show(
+                        innerContext,
+                        friendlyError(e,
+                            fallback: "Couldn't decline the request."),
                         type: HollowToastType.error);
                   }
                 }
@@ -886,7 +906,25 @@ class _HomeContent extends ConsumerWidget {
         ),
 
         Expanded(
-          child: accepted.isEmpty && !hasPending
+          child: accepted.isEmpty && !hasPending && !friendsLoad.loaded
+              // Still reading: nothing, never "No friends yet".
+              ? (friendsLoad.error == null
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.all(HollowSpacing.md),
+                      child: HollowEmptyState(
+                        dense: true,
+                        title: "Your friends didn't load",
+                        description: friendlyError(friendsLoad.error!),
+                        action: HollowButton.ghost(
+                          compact: true,
+                          onPressed: () =>
+                              ref.read(friendsProvider.notifier).loadAll(),
+                          child: const Text('Try again'),
+                        ),
+                      ),
+                    ))
+              : accepted.isEmpty && !hasPending
               ? const HollowEmptyState(
                   glyph: LucideIcons.users,
                   title: 'No friends yet',
@@ -1244,9 +1282,10 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
       await ref
           .read(voiceChannelProvider.notifier)
           .joinChannel(widget.serverId, widget.channel.channelId);
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        HollowToast.show(context, "Couldn't join the voice room",
+        HollowToast.show(context,
+            friendlyError(e, fallback: "Couldn't join the voice room"),
             type: HollowToastType.error);
       }
     }

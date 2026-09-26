@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
 /// A repeatable, self-contained unit (a listing, a device, a news item),
@@ -20,7 +21,7 @@ class HollowCard extends StatelessWidget {
     final hollow = HollowTheme.of(context);
 
     return Container(
-      padding: padding ?? const EdgeInsets.all(16),
+      padding: padding ?? const EdgeInsets.all(HollowSpacing.lg),
       decoration: BoxDecoration(
         color: color ?? hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),

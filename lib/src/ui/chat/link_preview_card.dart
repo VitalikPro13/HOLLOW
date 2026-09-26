@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/audio_playback_provider.dart';
 import 'package:hollow/src/core/providers/video_playback_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -242,7 +243,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
               // the same line twice.
               if (preview.author != null && preview.author!.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
+                  padding: const EdgeInsets.only(bottom: HollowSpacing.xxs),
                   child: Text(
                     preview.author!,
                     style: HollowTypography.body.copyWith(
@@ -351,9 +352,9 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
           fit: StackFit.expand,
           children: [
             image,
-            const ColoredBox(color: Color(0x66000000)),
+            ColoredBox(color: HollowColors.mediaBlack.withValues(alpha: 0.4)),
             const Center(
-              child: HollowSpinner.medium(color: Colors.white), // design-ignore: over a scrim
+              child: HollowSpinner.medium(color: HollowColors.onMedia),
             ),
           ],
         ),
@@ -392,14 +393,14 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
                 child: Container(
                   decoration: BoxDecoration(
                     // Scrim, or the glyph vanishes on a bright poster.
-                    color: Colors.black.withValues(alpha: 0.45),
+                    color: HollowColors.mediaBlack.withValues(alpha: 0.45),
                     shape: BoxShape.circle,
                   ),
                   padding: const EdgeInsets.all(HollowSpacing.sm),
                   child: Icon(
                     inline ? LucideIcons.play : LucideIcons.externalLink,
                     size: 26,
-                    color: Colors.white,
+                    color: HollowColors.onMedia,
                   ),
                 ),
               ),
@@ -414,7 +415,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     final header = _headerLine();
     if (header.isEmpty) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.only(bottom: HollowSpacing.xxs),
       child: Text(
         header,
         style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
@@ -427,7 +428,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
   Widget _titleText(HollowTheme hollow, {required int maxLines}) {
     if (preview.title.isEmpty) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.only(bottom: HollowSpacing.xxs),
       child: Text(
         preview.title,
         style: HollowTypography.body.copyWith(

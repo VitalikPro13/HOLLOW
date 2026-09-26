@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/nav_selection_mark.dart';
@@ -228,7 +229,7 @@ class _NavTab extends StatelessWidget {
                   ),
               ],
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: HollowSpacing.xxs),
             // A fixed-height control, so like the iOS and Android tab bars it
             // caps label scaling; content areas still honour the full OS scale.
             MediaQuery.withClampedTextScaling(

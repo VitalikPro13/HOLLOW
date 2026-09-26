@@ -246,7 +246,7 @@ class ChatAssetImage extends ConsumerWidget {
           kind: _dbKind, serverId: scope?.serverId, peerHint: scope?.peerHint);
     }
 
-    final radius = borderRadius ?? BorderRadius.circular(8);
+    final radius = borderRadius ?? BorderRadius.circular(hollow.radiusMd);
 
     Widget placeholder() => DecoratedBox(
           decoration: BoxDecoration(

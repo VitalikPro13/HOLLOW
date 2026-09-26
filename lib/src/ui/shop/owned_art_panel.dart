@@ -61,6 +61,18 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
 
   bool get _isMobile => Platform.isAndroid || Platform.isIOS;
 
+  bool _retrying = false;
+
+  Future<void> _retry() async {
+    if (_retrying) return;
+    setState(() => _retrying = true);
+    try {
+      await ref.read(ownedArtProvider.notifier).reload();
+    } finally {
+      if (mounted) setState(() => _retrying = false);
+    }
+  }
+
   Future<void> _handleDrop(DropDoneDetails details) async {
     setState(() => _dragging = false);
     if (details.files.isEmpty) return;
@@ -85,6 +97,7 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
 
     final hollow = HollowTheme.of(context);
     final items = ref.watch(ownedArtProvider);
+    final status = ref.watch(ownedArtStatusProvider);
 
     Widget body = SettingsSection(
       title: 'Your art',
@@ -95,7 +108,20 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
         child: const Text('Import a pack'),
       ),
       children: [
-        if (items.isEmpty)
+        if (items.isEmpty && status.failed)
+          HollowEmptyState(
+            dense: true,
+            title: "Your art didn't load",
+            action: HollowButton.ghost(
+              onPressed: _retry,
+              loading: _retrying,
+              compact: true,
+              child: const Text('Try again'),
+            ),
+          )
+        else if (items.isEmpty && !status.loaded)
+          const SizedBox.shrink()
+        else if (items.isEmpty)
           HollowEmptyState(
             dense: true,
             title: 'No art yet',

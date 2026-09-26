@@ -18,6 +18,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -170,8 +171,13 @@ void main() {
   });
 
   group('Open a share link', () {
-    Future<void> openWith(WidgetTester tester, String link) async {
-      await _pumpHost(tester);
+    Future<void> openWith(WidgetTester tester, String link,
+        {bool online = true}) async {
+      await _pumpHost(tester, extra: [
+        overallConnectionProvider.overrideWithValue(online
+            ? OverallConnection.connected
+            : OverallConnection.offline),
+      ]);
       unawaited(showHollowDialog<void>(
           context: _host, builder: (_) => const PasteLinkDialog()));
       await tester.pumpAndSettle();
@@ -194,6 +200,13 @@ void main() {
       await tester.pump(const Duration(seconds: 11));
       expect(find.textContaining('Nobody sharing'), findsNothing);
       expect(_fieldError(tester), isNot(contains("isn't a share link")));
+    });
+
+    testWidgets('offline, the dialog blames our own link', (tester) async {
+      await openWith(tester, 'hollow://share/abc', online: false);
+      expect(find.text('Open'), findsOneWidget);
+      expect(_fieldError(tester),
+          "You're offline. Reconnect to fetch this file.");
     });
 
     testWidgets('text that is not a link says so', (tester) async {

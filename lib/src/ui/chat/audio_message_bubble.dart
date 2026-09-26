@@ -451,10 +451,8 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
             children: [
               Text(
                 widget.attachment.fileName,
-                style: HollowTypography.body.copyWith(
+                style: HollowTypography.label.copyWith(
                   color: hollow.textPrimary,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -467,14 +465,12 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
                       durationText,
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary,
-                        fontSize: 11,
                       ),
                     ),
                     Text(
                       '  ·  ',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary,
-                        fontSize: 11,
                       ),
                     ),
                   ],
@@ -492,7 +488,6 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
                                       : widget.attachment.formattedSize),
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary,
-                        fontSize: 11,
                       ),
                     ),
                   ),
@@ -530,10 +525,8 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
             children: [
               Text(
                 widget.attachment.fileName,
-                style: HollowTypography.body.copyWith(
+                style: HollowTypography.label.copyWith(
                   color: hollow.textPrimary,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -556,7 +549,6 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
                     _fmt(_position),
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 11,
                       fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
@@ -567,7 +559,6 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
                         : Duration(milliseconds: _probedDurationMs ?? 0)),
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 11,
                       fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
@@ -575,7 +566,6 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
                     '  ·  ${widget.attachment.formattedSize}',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 11,
                     ),
                   ),
                 ],
@@ -640,6 +630,8 @@ class _StatusCircle extends StatelessWidget {
 /// Circular play/pause button. The play triangle reads off-centre when it is
 /// geometrically centred, so it is nudged right.
 class _PlayButton extends StatelessWidget {
+  static const double _kPlayNudge = 1.5;
+
   final IconData icon;
   final Color color;
   final VoidCallback? onTap;
@@ -659,7 +651,7 @@ class _PlayButton extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       semanticLabel: semanticLabel,
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(HollowRadius.pill),
       child: Container(
         width: 36,
         height: 36,
@@ -668,9 +660,10 @@ class _PlayButton extends StatelessWidget {
           shape: BoxShape.circle,
         ),
         child: Center(
-          child: Padding(
-            padding: EdgeInsets.only(left: isPlay ? 1.5 : 0),
-            child: Icon(icon, color: Colors.white, size: 16),
+          child: Transform.translate(
+            offset: Offset(isPlay ? _kPlayNudge : 0, 0),
+            child: Icon(icon,
+                color: HollowTheme.of(context).textOnAccent, size: 16),
           ),
         ),
       ),

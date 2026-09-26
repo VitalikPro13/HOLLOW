@@ -206,7 +206,9 @@ class _GroupHeader extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     final side = touch ? HollowSpacing.lg : HollowSpacing.sm;
     return Padding(
-      padding: EdgeInsets.only(top: first ? 0 : HollowSpacing.lg),
+      padding: first
+          ? EdgeInsets.zero
+          : const EdgeInsets.only(top: HollowSpacing.lg),
       child: HollowPressable(
         subtle: true,
         semanticButton: false,

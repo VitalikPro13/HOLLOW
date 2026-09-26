@@ -26,12 +26,23 @@ class FriendInfo {
   });
 }
 
+/// Whether a list has been read from this device yet, and why the first read
+/// failed. An empty list means "none" only once [loaded] is true.
+typedef ListLoadState = ({bool loaded, Object? error});
+
+/// [friendsProvider]'s load, kept apart so its many readers keep the map.
+final friendsLoadStateProvider =
+    StateProvider<ListLoadState>((_) => (loaded: false, error: null));
+
 /// Manages the friends list. Loaded from local DB.
 class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
   @override
   Map<String, FriendInfo> build() => {};
 
   Future<void> loadAll() async {
+    final load = ref.read(friendsLoadStateProvider.notifier);
+    // A retry reads as loading again, not as the failure it follows.
+    if (load.state.error != null) load.state = (loaded: false, error: null);
     try {
       final rows = await storage_api.loadFriends();
       final map = <String, FriendInfo>{};
@@ -45,11 +56,14 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
         );
       }
       state = map;
+      load.state = (loaded: true, error: null);
       // Refresh the iOS push-hints cache. Debounced + iOS-gated internally, and
       // covers every friend mutation since they all funnel through loadAll().
       PushHintsCache.scheduleWrite(map.keys);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load friends: $e');
+      // A list already on screen stays; only one never read fails.
+      if (!load.state.loaded) load.state = (loaded: false, error: e);
     }
   }
 

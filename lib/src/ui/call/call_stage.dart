@@ -326,6 +326,9 @@ class _CallStageState extends ConsumerState<CallStage> {
       onTap: onTap ?? () => data.onFocus(share.source),
       onWatch: () => data.onWatch(share.owner),
       onStopWatching: () => data.onStopWatching(share.owner),
+      onRetryWatch: data.onRetryWatch == null
+          ? null
+          : () => data.onRetryWatch!(share.owner),
       onStopSharing: data.onStopSharing,
     );
   }

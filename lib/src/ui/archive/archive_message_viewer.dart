@@ -43,11 +43,14 @@ void toggleArchiveSearch(WidgetRef ref) {
   }
 }
 
-/// A failed history load, with the one thing to do about it.
-Widget archiveLoadError(VoidCallback retry) => HollowEmptyState(
+/// A failed history load, with the one thing to do about it. [touch] on a
+/// phone, where the retry takes the touch target.
+Widget archiveLoadError(VoidCallback retry, {bool touch = false}) =>
+    HollowEmptyState(
       title: "These messages didn't load",
       action: HollowButton.ghost(
-        compact: true,
+        compact: !touch,
+        touch: touch,
         onPressed: retry,
         child: const Text('Try again'),
       ),
@@ -124,7 +127,8 @@ class _ArchiveDmViewer extends ConsumerWidget {
           ),
           Expanded(
             child: messagesAsync.when(
-              loading: () => const Center(child: HollowSpinner.large()),
+              loading: () =>
+                  const Center(child: HollowSpinner.large(delayed: true)),
               error: (_, _) => archiveLoadError(
                   () => ref.invalidate(archiveDmMessagesProvider(peerId))),
               data: (messages) =>
@@ -273,7 +277,8 @@ class _ArchiveChannelViewer extends ConsumerWidget {
           ),
           Expanded(
             child: messagesAsync.when(
-              loading: () => const Center(child: HollowSpinner.large()),
+              loading: () =>
+                  const Center(child: HollowSpinner.large(delayed: true)),
               error: (_, _) => archiveLoadError(
                   () => ref.invalidate(archiveChannelMessagesProvider(key))),
               data: (_) => _ChannelMessageList(

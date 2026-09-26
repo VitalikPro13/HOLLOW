@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 
 /// Pulsing red dot and "REC", marking anyone recording the call.
 class RecordingIndicator extends StatefulWidget {
@@ -10,27 +12,29 @@ class RecordingIndicator extends StatefulWidget {
   final DateTime? startedAt;
 
   final double dotSize;
-  final double fontSize;
+
+  /// Sets the label in `micro` instead of `caption`.
+  final bool compact;
   final bool showLabel;
 
   const RecordingIndicator({
     super.key,
     this.startedAt,
     this.dotSize = 8,
-    this.fontSize = 11,
+    this.compact = false,
     this.showLabel = true,
   });
 
   const RecordingIndicator.compact({super.key, this.startedAt})
       : dotSize = 6,
-        fontSize = 9,
+        compact = true,
         showLabel = true;
 
   /// No text, for use as an overlay badge on an avatar.
   const RecordingIndicator.dotOnly({super.key})
       : startedAt = null,
         dotSize = 8,
-        fontSize = 0,
+        compact = false,
         showLabel = false;
 
   @override
@@ -110,7 +114,7 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
 
   @override
   Widget build(BuildContext context) {
-    const recRed = Color(0xFFE53935);
+    final recRed = HollowTheme.of(context).error;
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -120,16 +124,9 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
           child: Container(
             width: widget.dotSize,
             height: widget.dotSize,
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: recRed,
-              boxShadow: [
-                BoxShadow(
-                  color: Color(0x88E53935),
-                  blurRadius: 4,
-                  spreadRadius: 1,
-                ),
-              ],
             ),
           ),
         ),
@@ -139,10 +136,12 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
             widget.startedAt != null
                 ? 'REC ${_formatElapsed(_elapsed)}'
                 : 'REC',
-            style: TextStyle(
+            style: (widget.compact
+                    ? HollowTypography.micro
+                    : HollowTypography.caption)
+                .copyWith(
               color: recRed,
-              fontSize: widget.fontSize,
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w600,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),

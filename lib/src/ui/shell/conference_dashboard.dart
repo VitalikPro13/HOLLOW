@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -54,6 +56,33 @@ String conferenceDenyMessage(String? reason) {
     default:
       return 'You could not join this meeting.';
   }
+}
+
+/// Whether OUR relay link is down, the one reason a knock cannot travel.
+bool conferenceLinkDown(OverallConnection link) =>
+    link == OverallConnection.offline ||
+    link == OverallConnection.reconnecting ||
+    link == OverallConnection.error;
+
+/// The lobby's title and note. LobbyInfo is the host's reply to our knock, so
+/// until it arrives the meeting has not started. Shared with mobile.
+(String, String) conferenceLobbyCopy(
+    {String? hostName, required bool joining, required bool offline}) {
+  if (joining) {
+    return ('Joining the meeting', 'This takes a moment.');
+  }
+  final title = hostName != null
+      ? "You're in the waiting room for $hostName's meeting"
+      : 'Waiting for the host to start the meeting';
+  if (offline) {
+    return (title, "You're offline. You'll knock again when you're back.");
+  }
+  return (
+    title,
+    hostName != null
+        ? 'The host will let you in.'
+        : "You'll join automatically once it begins.",
+  );
 }
 
 /// Display name for a possibly device-level peer id, collapsed to master first.
@@ -164,7 +193,22 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
             ],
           ),
           Expanded(
-            child: conf.rooms.isEmpty
+            child: !conf.roomsLoaded
+                ? (conf.roomsError != null
+                    ? HollowEmptyState(
+                        title: "Your rooms didn't load",
+                        description: friendlyError(conf.roomsError!),
+                        action: HollowButton.ghost(
+                          compact: true,
+                          onPressed: () => ref
+                              .read(conferenceProvider.notifier)
+                              .loadRooms(),
+                          child: const Text('Try again'),
+                        ),
+                      )
+                    : const Center(
+                        child: HollowSpinner.large(delayed: true)))
+                : conf.rooms.isEmpty
                 ? const HollowEmptyState(
                     glyph: LucideIcons.video,
                     title: 'No conference rooms yet',
@@ -189,9 +233,29 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
 
 /// One room: its name, what it asks of a joiner, and its actions. Edit and
 /// Delete sit in More (and a right click), out of reach at rest.
-class _RoomRow extends ConsumerWidget {
+class _RoomRow extends ConsumerStatefulWidget {
   final ConferenceRoom room;
   const _RoomRow({super.key, required this.room});
+
+  @override
+  ConsumerState<_RoomRow> createState() => _RoomRowState();
+}
+
+class _RoomRowState extends ConsumerState<_RoomRow> {
+  bool _starting = false;
+
+  ConferenceRoom get room => widget.room;
+
+  /// Busy while the meeting starts, so a second click cannot start it twice.
+  Future<void> _start() async {
+    if (_starting) return;
+    setState(() => _starting = true);
+    try {
+      await ref.read(conferenceProvider.notifier).startMeeting(room);
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
+  }
 
   void _openMenu(BuildContext context, WidgetRef ref, Offset anchor,
       {bool alignEnd = false}) {
@@ -206,7 +270,7 @@ class _RoomRow extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return ContextMenuTarget(
       semanticLabel: 'Room actions',
       onOpen: (anchor) => _openMenu(context, ref, anchor),
@@ -226,8 +290,8 @@ class _RoomRow extends ConsumerWidget {
             HollowButton.outline(
               compact: true,
               icon: const Icon(LucideIcons.video, size: 14),
-              onPressed: () =>
-                  ref.read(conferenceProvider.notifier).startMeeting(room),
+              loading: _starting,
+              onPressed: _start,
               child: const Text('Start meeting'),
             ),
             const SizedBox(width: HollowSpacing.xs),
@@ -565,6 +629,13 @@ class _LobbyView extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final hostName = conf.hostName;
     final hostKnown = hostName != null && hostName.isNotEmpty;
+    final joining = conf.lobbyStatus == ConferenceLobbyStatus.admitted;
+    final offline =
+        !joining && conferenceLinkDown(ref.watch(overallConnectionProvider));
+    final (title, note) = conferenceLobbyCopy(
+        hostName: hostKnown ? hostName : null,
+        joining: joining,
+        offline: offline);
 
     return ColoredBox(
       color: hollow.background,
@@ -587,30 +658,29 @@ class _LobbyView extends ConsumerWidget {
                 const SizedBox(height: HollowSpacing.lg),
               ],
               Text(
-                hostKnown
-                    ? "You're in the waiting room for $hostName's meeting"
-                    : 'Waiting for the host to start the meeting',
+                title,
                 style: HollowTypography.subheading
                     .copyWith(color: hollow.textPrimary),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: HollowSpacing.xs),
               Text(
-                // LobbyInfo is the host's reply to our knock, so until it
-                // arrives the meeting has not started.
-                hostKnown
-                    ? 'The host will let you in.'
-                    : "You'll join automatically once it begins.",
+                note,
                 style: HollowTypography.bodySmall
                     .copyWith(color: hollow.textSecondary),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: HollowSpacing.lg),
-              const HollowSpinner.medium(),
-              const SizedBox(height: HollowSpacing.lg),
+              // Offline, nothing is on its way, so nothing spins.
+              if (!offline) ...[
+                HollowSpinner.medium(delayed: joining),
+                const SizedBox(height: HollowSpacing.lg),
+              ],
               HollowButton.ghost(
-                onPressed: () => leaveConferenceMeeting(context, ref),
-                child: const Text('Cancel'),
+                onPressed: () => joining
+                    ? endOrLeaveConferenceMeeting(context, ref)
+                    : leaveConferenceMeeting(context, ref),
+                child: Text(joining ? 'Leave' : 'Cancel'),
               ),
             ],
           ),
@@ -1058,8 +1128,21 @@ class _ConferenceCallArea extends ConsumerWidget {
     }
     return ColoredBox(
       color: hollow.background,
-      child: const Center(
-        child: HollowEmptyState(title: 'Joining the meeting'),
+      child: Center(
+        child: HollowEmptyState(
+          title: 'Joining the meeting',
+          action: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const HollowSpinner.medium(delayed: true),
+              const SizedBox(height: HollowSpacing.lg),
+              HollowButton.ghost(
+                onPressed: () => endOrLeaveConferenceMeeting(context, ref),
+                child: const Text('Leave'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

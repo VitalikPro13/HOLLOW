@@ -124,6 +124,10 @@ class CallStageData {
   final void Function(bool on) onGrid;
   final void Function(String owner) onWatch;
   final void Function(String owner) onStopWatching;
+
+  /// Asks for a watched share again after it never connected: the old watch
+  /// is withdrawn first, so the sharer sees want:false before want:true.
+  final Future<void> Function(String owner)? onRetryWatch;
   final VoidCallback onStopSharing;
 
   const CallStageData({
@@ -135,6 +139,7 @@ class CallStageData {
     required this.onGrid,
     required this.onWatch,
     required this.onStopWatching,
+    this.onRetryWatch,
     required this.onStopSharing,
   });
 

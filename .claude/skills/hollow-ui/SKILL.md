@@ -234,7 +234,8 @@ its content sits on the text edge and the hover bleeds past it, and a list
 that clips wraps its scroll view in `HollowBleed`) ·
 `HollowSkeleton` (2 to 10 second loads, keeps the final geometry) · `HollowSpinner`
 (small 14 in a row or button, medium 20 in a card, large 32 for a pane; quiet
-`textSecondary`, never the accent) · `showHollowSheet()` (the only bottom sheet:
+`textSecondary`, never the accent; `delayed: true` for a load that is usually fast, so
+nothing shows for its first second; never on a button) · `showHollowSheet()` (the only bottom sheet:
 overlay, `radiusXl`, one `HollowSheetHandle`) · `HollowSlider` (the only
 slider; `onMedia: true` over video) · `HollowToggle` (the only switch, with a
 `semanticLabel`; it grows its own 48 px hit area on touch) · `HollowCard` ·

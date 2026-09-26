@@ -337,7 +337,7 @@ void main() {
     await tester.ensureVisible(find.text('Recent'));
     await tester.tap(find.text('Recent'));
     await tester.pump();
-    expect(find.textContaining('Nothing here yet'), findsOneWidget);
+    expect(find.textContaining('No recent GIFs'), findsOneWidget);
   });
 
   testWidgets('picker: Recent lists picks newest-first', (tester) async {
@@ -421,7 +421,7 @@ void main() {
     await tester.pump();
     catalog.pending['|1']!.completeError(Exception('proxy down'));
     await tester.pump();
-    expect(find.text('Search failed. Check your connection'), findsOneWidget);
+    expect(find.text("GIFs didn't load. Check your connection."), findsOneWidget);
 
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();

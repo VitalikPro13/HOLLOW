@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Shows a crop dialog, returning the cropped region as raw PNG bytes or null.
@@ -52,6 +53,9 @@ class _ImageCropDialogState extends State<_ImageCropDialog>
   ui.Image? _decodedImage;
   bool _imageLoaded = false;
 
+  /// The bytes are not an image Flutter can decode (HEIC, a corrupt file).
+  bool _decodeFailed = false;
+
   static const double _maxDisplayWidth = 420.0;
   static const double _maxDisplayHeight = 380.0;
 
@@ -85,9 +89,18 @@ class _ImageCropDialogState extends State<_ImageCropDialog>
   }
 
   Future<void> _decodeImage() async {
-    final codec = await ui.instantiateImageCodec(widget.imageBytes);
-    final frame = await codec.getNextFrame();
-    if (!mounted) return;
+    final ui.FrameInfo frame;
+    try {
+      final codec = await ui.instantiateImageCodec(widget.imageBytes);
+      frame = await codec.getNextFrame();
+    } catch (_) {
+      if (mounted) setState(() => _decodeFailed = true);
+      return;
+    }
+    if (!mounted) {
+      frame.image.dispose();
+      return;
+    }
 
     final img = frame.image;
     final imgW = img.width.toDouble();
@@ -276,13 +289,15 @@ class _ImageCropDialogState extends State<_ImageCropDialog>
               color: hollow.textPrimary,
             ),
           ),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            'Drag to move, corners to resize. Arrow keys move it too.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
+          if (!_decodeFailed) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Text(
+              'Drag to move, corners to resize. Arrow keys move it too.',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: HollowSpacing.lg),
 
           Center(
@@ -335,8 +350,13 @@ class _ImageCropDialogState extends State<_ImageCropDialog>
                   )
                 : SizedBox.fromSize(
                     size: _placeholder,
-                    child: const Center(
-                      child: HollowSpinner.large(),
+                    child: Center(
+                      child: _decodeFailed
+                          ? const HollowEmptyState(
+                              title: "This image can't be opened",
+                              description: 'Try a JPEG or PNG.',
+                            )
+                          : const HollowSpinner.large(delayed: true),
                     ),
                   ),
           ),
@@ -359,14 +379,16 @@ class _ImageCropDialogState extends State<_ImageCropDialog>
                   onPressed: actionRunning
                       ? null
                       : () => Navigator.of(context).pop(null),
-                  child: const Text('Cancel'),
+                  child: Text(_decodeFailed ? 'Close' : 'Cancel'),
                 ),
-                const SizedBox(width: HollowSpacing.sm),
-                HollowButton.filled(
-                  onPressed: _onConfirm,
-                  loading: actionRunning,
-                  child: const Text('Apply'),
-                ),
+                if (!_decodeFailed) ...[
+                  const SizedBox(width: HollowSpacing.sm),
+                  HollowButton.filled(
+                    onPressed: _onConfirm,
+                    loading: actionRunning,
+                    child: const Text('Apply'),
+                  ),
+                ],
               ],
             ),
           ),

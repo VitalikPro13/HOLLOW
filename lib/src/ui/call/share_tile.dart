@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -28,6 +30,9 @@ class ShareTile extends ConsumerWidget {
   final VoidCallback? onTap;
   final VoidCallback? onWatch;
   final VoidCallback? onStopWatching;
+
+  /// Asks again for a watched share that never connected.
+  final Future<void> Function()? onRetryWatch;
   final VoidCallback? onStopSharing;
 
   /// The labels and controls on a live share; the fullscreen stage fades them
@@ -41,6 +46,7 @@ class ShareTile extends ConsumerWidget {
     this.onTap,
     this.onWatch,
     this.onStopWatching,
+    this.onRetryWatch,
     this.onStopSharing,
     this.chromeVisible = true,
   });
@@ -168,19 +174,10 @@ class ShareTile extends ConsumerWidget {
               size: 24, color: media.textSecondary),
         )
       else
-        Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              HollowSpinner(color: media.textSecondary),
-              if (_large) ...[
-                const SizedBox(height: HollowSpacing.sm),
-                Text('Connecting',
-                    style: HollowTypography.caption
-                        .copyWith(color: media.textSecondary)),
-              ],
-            ],
-          ),
+        _ShareConnecting(
+          large: _large,
+          color: media.textSecondary,
+          onRetry: onRetryWatch,
         ),
     ];
 
@@ -290,6 +287,94 @@ class ShareTile extends ConsumerWidget {
     return ColoredBox(
       color: HollowColors.mediaBlack,
       child: Stack(fit: StackFit.expand, children: children),
+    );
+  }
+}
+
+/// A watched share with no picture yet. Past [_giveUpAfter] it says so and
+/// offers the watch again; Stop watching stays in the tile's top row.
+class _ShareConnecting extends StatefulWidget {
+  final bool large;
+  final Color color;
+  final Future<void> Function()? onRetry;
+
+  const _ShareConnecting({
+    required this.large,
+    required this.color,
+    required this.onRetry,
+  });
+
+  @override
+  State<_ShareConnecting> createState() => _ShareConnectingState();
+}
+
+const Duration _giveUpAfter = Duration(seconds: 10);
+
+class _ShareConnectingState extends State<_ShareConnecting> {
+  Timer? _timer;
+  bool _stuck = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(_giveUpAfter, () {
+      if (mounted) setState(() => _stuck = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final retry = widget.onRetry;
+    final text = HollowTypography.caption.copyWith(color: widget.color);
+    if (!_stuck) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            HollowSpinner(color: widget.color),
+            if (widget.large) ...[
+              const SizedBox(height: HollowSpacing.sm),
+              Text('Connecting', style: text),
+            ],
+          ],
+        ),
+      );
+    }
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(HollowSpacing.sm),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.large
+                    ? "Couldn't connect to this share"
+                    : "Couldn't connect",
+                textAlign: TextAlign.center,
+                style: widget.large
+                    ? HollowTypography.label.copyWith(color: widget.color)
+                    : text,
+              ),
+              if (widget.large && retry != null) ...[
+                const SizedBox(height: HollowSpacing.md),
+                CallScrimButton(
+                  icon: LucideIcons.refreshCw,
+                  label: 'Try again',
+                  onTap: () => retry().catchError((Object _) {}),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

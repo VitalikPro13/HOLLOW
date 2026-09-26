@@ -9,6 +9,7 @@ import 'package:hollow/src/core/android_platform.dart';
 import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
@@ -60,6 +61,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -70,6 +72,7 @@ import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -1527,6 +1530,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     final hollow = HollowTheme.of(context);
 
+    // Bootstrap stops at a failed identity load, so nothing below would ever
+    // fill in: say so instead of an empty shell reading "Connecting".
+    final identityError = ref.watch(identityProvider
+        .select((s) => s.isLoaded ? null : s.error));
+    if (identityError != null) {
+      return ColoredBox(
+        color: hollow.background,
+        child: HollowEmptyState(
+          title: "Hollow couldn't open your identity",
+          description: friendlyError(identityError),
+          action: const HollowButton.ghost(
+            onPressed: relaunchApp,
+            child: Text('Restart Hollow'),
+          ),
+        ),
+      );
+    }
+
     final nodeState = ref.watch(nodeProvider);
     final peers = ref.watch(peersProvider);
     final selectedPeerId = ref.watch(selectedPeerProvider);
@@ -1692,7 +1713,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
                 child: RepaintBoundary(
                   child: AmbientBackground(
                     color1: hollow.accent,
-                    color2: const Color(0xFF6366F1),
                     // Switching conversations is instant; the key resets the
                     // pane's state per conversation.
                     child: Container(
@@ -1849,7 +1869,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
                         key: const ValueKey('single'),
                         child: AmbientBackground(
                           color1: hollow.accent,
-                          color2: const Color(0xFF6366F1),
                           child: Container(
                             key: ValueKey((
                               singleKey,
@@ -2049,7 +2068,6 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
                 child: RepaintBoundary(
                   child: AmbientBackground(
                     color1: hollow.accent,
-                    color2: const Color(0xFF6366F1),
                     child: Container(
                       key: ValueKey(widget.selectedChannelId ??
                           widget.selectedPeerId ??
@@ -2100,7 +2118,6 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
                 child: RepaintBoundary(
                   child: AmbientBackground(
                     color1: hollow.accent,
-                    color2: const Color(0xFF6366F1),
                     child: _RightPaneChatContent(hollow: hollow),
                   ),
                 ),
@@ -2368,7 +2385,7 @@ class _SplitDividerState extends State<_SplitDivider> {
                 color: isActive
                     ? hollow.accent
                     : hollow.border,
-                borderRadius: BorderRadius.circular(1),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
             ),
           ),
@@ -2388,8 +2405,9 @@ class _UnlockingOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Positioned.fill(
-      child: Material(
-        type: MaterialType.transparency,
+      // Outside every route, so it sets its own text style.
+      child: DefaultTextStyle(
+        style: HollowTypography.body,
         child: Container(
           color: hollow.background.withValues(alpha: 0.82),
           alignment: Alignment.center,
@@ -2447,7 +2465,7 @@ class _ShellScaffold extends ConsumerWidget {
         children: [
           Positioned.fill(
             child: Container(
-              color: Colors.black,
+              color: HollowColors.mediaBlack,
               child: Image.memory(
                 bg.imageBytes!,
                 fit: BoxFit.cover,

@@ -5,7 +5,6 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
-import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -50,7 +49,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
@@ -153,7 +151,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// In-conversation message search (issue #54).
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
-  List<storage_api.StoredMessage> _searchResults = const [];
+  final _search = ChatSearchResults<storage_api.StoredMessage>();
   /// Picked but not yet sent.
   List<StagedAttachment> _staged = const [];
   /// True while recording, which swaps the input row for the
@@ -459,6 +457,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
+    final replyText = _replyToText;
+    final replySender = _replyToSenderName;
+    final replyImage = _replyToImagePath;
     // Capture the staged preview BEFORE clearing state; with the fetch still in
     // flight there is nothing to capture, so the URL is remembered and the card
     // attaches when it lands (issue #45).
@@ -493,11 +494,24 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         // Nothing is in flight when the debounce never fired.
         if (!wasLoading) _fetchPreview(pendingUrl);
       }
-    } catch (_) {
-      // The provider adds the bubble only AFTER the network send, so a failure
-      // here would vanish silently: composer cleared, no bubble.
+    } catch (e) {
+      // The provider adds the bubble only AFTER the network send, so the text
+      // goes back where it came from or it is simply gone.
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to send message',
+      if (restoreFailedDraft(_controller, text)) {
+        if (_replyToMessageId == null) {
+          setState(() {
+            _replyToMessageId = replyMid;
+            _replyToText = replyText;
+            _replyToSenderName = replySender;
+            _replyToImagePath = replyImage;
+          });
+        }
+        _urlDebounce?.cancel();
+        _detectUrl();
+      }
+      HollowToast.show(
+          context, friendlyError(e, fallback: kSendFailedFallback),
           type: HollowToastType.error);
       return;
     }
@@ -582,7 +596,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (items.isEmpty) return;
     final caption = _controller.expandedText().trim();
     _controller.clear();
-    final failed = await sendStagedAttachments(
+    final outcome = await sendStagedAttachments(
       items: items,
       caption: caption,
       addOptimistic: (item, messageId, text, albumId) {
@@ -615,10 +629,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         }
       },
     );
-    if (failed > 0 && mounted) {
-      HollowToast.show(
-          context,
-          failed == 1 ? 'A file failed to send' : '$failed files failed to send',
+    if (outcome.failed > 0 && mounted) {
+      HollowToast.show(context,
+          stagedSendFailureMessage(outcome.failed, outcome.firstError),
           type: HollowToastType.error);
     }
   }
@@ -825,29 +838,22 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           .addPostFrameCallback((_) => _searchFocusNode.requestFocus());
       return;
     }
-    if (_searchResults.isEmpty && _searchController.text.isEmpty) return;
+    if (_search.query.isEmpty && _searchController.text.isEmpty) return;
     _searchController.clear();
-    setState(() => _searchResults = const []);
+    setState(_search.clear);
   }
 
-  Future<void> _onSearch(String query) async {
-    final q = query.trim();
-    if (q.isEmpty) {
-      setState(() => _searchResults = const []);
-      return;
-    }
-    try {
-      final results = await storage_api.searchDmMessages(
-        peerId: widget.peerId,
-        query: q,
-        limit: 20,
+  Future<void> _onSearch(String query) => _search.run(
+        query,
+        (q) => storage_api.searchDmMessages(
+          peerId: widget.peerId,
+          query: q,
+          limit: 20,
+        ),
+        (apply) {
+          if (mounted) setState(apply);
+        },
       );
-      if (mounted) setState(() => _searchResults = results);
-    } catch (_) {
-      // Store closed or a transient FFI error: leave the last results up rather
-      // than blanking the list under the cursor.
-    }
-  }
 
   /// Closes search and scrolls to the tapped result. The index is against the
   /// DISPLAY list, possibly frozen, which is what [_scrollToMessage] takes.
@@ -857,7 +863,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final idx = messages.indexWhere((m) => m.messageId == msg.messageId);
     ref.read(chatSearchOpenProvider.notifier).state = false;
     _searchController.clear();
-    setState(() => _searchResults = const []);
+    setState(_search.clear);
     if (idx != -1) _scrollToMessage(idx);
   }
 
@@ -912,6 +918,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       title: isSavedMessages ? 'Saved messages' : (hasNick ? localNick : realName),
       subtitle: isSavedMessages ? null : (hasNick ? realName : status),
       badges: [if (stageShown) const _InCallMark()],
+      // Our own link, or a dead link reads as the friend being offline.
+      status: ownLinkOfflineStatus(ref),
       actions: [
         // Hidden for Saved messages (you cannot call yourself) and during a
         // call with this person, which has its own controls.
@@ -998,16 +1006,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             prefixIcon: const Icon(LucideIcons.search, size: 16),
             onChanged: _onSearch,
           ),
-          if (_searchResults.isNotEmpty)
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 200),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: _searchResults.length,
-                itemBuilder: (_, index) => _buildSearchResultTile(
-                    hollow, _searchResults[index], isSavedMessages),
-              ),
-            ),
+          ChatSearchResultsView<storage_api.StoredMessage>(
+            results: _search,
+            itemBuilder: (hit) =>
+                _buildSearchResultTile(hollow, hit, isSavedMessages),
+            onRetry: () => _onSearch(_searchController.text),
+          ),
         ],
       ),
     );
@@ -1204,43 +1208,30 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Nothing while the first read runs (it is local and brief), a retry when
-  /// it failed, and the start of the conversation when there is none yet.
+  /// Skeleton rows while the first read runs long, a retry when it failed,
+  /// and the start of the conversation when there is none yet.
   Widget _buildConversationStart() {
-    if (!_historyLoaded) return const SizedBox.shrink();
-    final calls = ref.watch(dmCallRecordsProvider(_callPeer));
-    if (!_historyFailed && calls.isNotEmpty) {
-      return CallRecordsOnly(records: calls);
-    }
-    if (_historyFailed) {
-      return HollowEmptyState(
-        glyph: LucideIcons.circleAlert,
-        title: "These messages didn't load",
-        action: HollowButton.ghost(
-          onPressed: () {
-            setState(() {
-              _historyStarted = false;
-              _historyLoaded = false;
-            });
-            _loadHistory();
-          },
-          child: const Text('Try again'),
-        ),
-      );
-    }
-    final savedId = ref.watch(savedMessagesPeerIdProvider);
-    if (savedId != null &&
-        ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId) {
-      return const HollowEmptyState(
-        glyph: LucideIcons.bookmark,
-        title: 'Nothing saved yet',
-        description: 'Notes and messages you keep for yourself land here.',
-      );
-    }
-    final name = displayNameFor(ref.watch(profileProvider), widget.peerId);
-    return HollowEmptyState(
-      glyph: LucideIcons.messageCircle,
-      title: 'This is the start of your conversation with $name',
+    return chatHistoryPlaceholder(
+      loaded: _historyLoaded,
+      failed: _historyFailed,
+      onRetry: () {
+        setState(() {
+          _historyStarted = false;
+          _historyLoaded = false;
+          _historyFailed = false;
+        });
+        _loadHistory();
+      },
+      start: () {
+        final savedId = ref.watch(savedMessagesPeerIdProvider);
+        return dmConversationStart(
+          calls: ref.watch(dmCallRecordsProvider(_callPeer)),
+          isSavedMessages: savedId != null &&
+              ref.watch(deviceLinkProvider).identityOf(widget.peerId) ==
+                  savedId,
+          name: displayNameFor(ref.watch(profileProvider), widget.peerId),
+        );
+      },
     );
   }
 
@@ -1538,9 +1529,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       await ref
           .read(chatProvider.notifier)
           .deleteMessage(widget.peerId, messageId);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to delete message',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Couldn't delete the message. Try again."),
           type: HollowToastType.error);
     }
   }
@@ -1550,9 +1542,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       await ref
           .read(chatProvider.notifier)
           .editMessage(widget.peerId, messageId, newText);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to save changes',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your edit didn't save. Try again."),
           type: HollowToastType.error);
       return;
     }
@@ -1620,9 +1613,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       } else {
         await notifier.addReaction(widget.peerId, msg.messageId!, emoji);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to update reaction',
+      HollowToast.show(context,
+          friendlyError(e, fallback: "Your reaction didn't go through. Try again."),
           type: HollowToastType.error);
     }
   }

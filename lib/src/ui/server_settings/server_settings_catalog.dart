@@ -98,6 +98,19 @@ Widget serverSettingsPageFor(ServerSettingsPage page, String serverId) =>
         ServerNotificationsPage(serverId: serverId),
     };
 
+/// The app's own container, above the scope a foreign server's settings put
+/// over [selectedServerProvider]: clearing the selection inside that scope
+/// clears nothing, and reading a provider built on it there asserts.
+ProviderContainer _appContainer(BuildContext context) {
+  var container = ProviderScope.containerOf(context, listen: false);
+  context.visitAncestorElements((element) {
+    final widget = element.widget;
+    if (widget is UncontrolledProviderScope) container = widget.container;
+    return true;
+  });
+  return container;
+}
+
 /// After a delete or leave: server settings close if they showed this server,
 /// and the server is deselected if it was selected. A phone pops back to its
 /// shell.
@@ -123,7 +136,7 @@ Future<void> confirmDeleteServer(
     BuildContext context, WidgetRef ref, String serverId) async {
   // The container, not [ref]: a menu or sheet that opened this may be gone
   // by the time the dialog answers.
-  final read = ProviderScope.containerOf(context, listen: false).read;
+  final read = _appContainer(context).read;
   final name = read(serverListProvider)[serverId]?.name ?? 'this server';
   final phoneNavigator =
       SettingsDensity.touchOf(context) ? Navigator.of(context) : null;
@@ -149,7 +162,7 @@ Future<void> confirmLeaveServer(
     BuildContext context, WidgetRef ref, String serverId) async {
   // The container, not [ref]: a menu or sheet that opened this may be gone
   // by the time the dialog answers.
-  final read = ProviderScope.containerOf(context, listen: false).read;
+  final read = _appContainer(context).read;
   final name = read(serverListProvider)[serverId]?.name ?? 'this server';
   final phoneNavigator =
       SettingsDensity.touchOf(context) ? Navigator.of(context) : null;

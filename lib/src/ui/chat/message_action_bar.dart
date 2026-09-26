@@ -814,7 +814,7 @@ class _QuickReactionStrip extends StatelessWidget {
               alignment: Alignment.center,
               child: Text(
                 kQuickReactionEmojis[i],
-                style: const TextStyle(fontSize: 17),
+                style: const TextStyle(fontSize: 17), // design-ignore: emoji glyph at its cell size
               ),
             ),
           ),

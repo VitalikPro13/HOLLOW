@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -45,9 +46,10 @@ class _BlockedUserRowState extends ConsumerState<BlockedUserRow> {
       if (!overlay.mounted) return;
       HollowToast.show(overlay.context, 'Unblocked $name',
           type: HollowToastType.success, overlayState: overlay);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Failed to unblock',
+      HollowToast.show(
+          context, friendlyError(e, fallback: 'Failed to unblock'),
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);

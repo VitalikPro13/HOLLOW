@@ -133,7 +133,7 @@ class DesktopWindowFrame extends ConsumerWidget {
         !ref.watch(appLockedProvider);
     final controlsWidth = ref.watch(windowControlsWidthProvider);
     final scale = ref.watch(uiScaleProvider);
-    return Material(
+    return Material( // design-ignore: the root host above the Navigator, where the window chrome and every overlay host render outside any route
       type: MaterialType.transparency,
       child: LayoutBuilder(builder: (context, constraints) {
         // The header's height once the zoom has scaled it, in window pixels.

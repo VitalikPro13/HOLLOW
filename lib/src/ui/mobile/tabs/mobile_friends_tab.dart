@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -110,6 +111,13 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     favFriends.sort((a, b) => favRank(a.peerId).compareTo(favRank(b.peerId)));
 
     final showRequests = _searchQuery.isEmpty;
+    final friendsLoad = ref.watch(friendsLoadStateProvider);
+    // Presence rides OUR relay link: while it is down every friend would read
+    // "Offline", blaming them, so one note says it is us instead.
+    final link = ref.watch(overallConnectionProvider);
+    final linkDown = link == OverallConnection.offline ||
+        link == OverallConnection.reconnecting ||
+        link == OverallConnection.error;
 
     return CustomScrollView(
       slivers: [
@@ -138,6 +146,19 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
             ),
           ),
         ),
+
+        if (linkDown && accepted.isNotEmpty)
+          const SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
+              child: HollowEmptyState(
+                dense: true,
+                title: "You're offline",
+                description: "Who's online shows up once you're back.",
+              ),
+            ),
+          ),
 
         if (showRequests && incoming.isNotEmpty) ...[
           _sectionHeaderSliver('Received', incoming.length),
@@ -171,6 +192,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
               key: ValueKey(favFriends[index].peerId),
               peerId: favFriends[index].peerId,
               isFavourite: true,
+              linkDown: linkDown,
               // A phone has no drag, so the order moves from the sheet, as
               // Move up and Move down do in the desktop Friends Manager.
               onMove: (delta) => _moveFavourite(
@@ -188,11 +210,31 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
             itemBuilder: (context, index) => _FriendRow(
               key: ValueKey(otherFriends[index].peerId),
               peerId: otherFriends[index].peerId,
+              linkDown: linkDown,
             ),
           ),
         ],
 
-        if (accepted.isEmpty && incoming.isEmpty && outgoing.isEmpty)
+        if (accepted.isEmpty &&
+            incoming.isEmpty &&
+            outgoing.isEmpty &&
+            !friendsLoad.loaded)
+          // Still reading: nothing, never "No friends yet".
+          SliverToBoxAdapter(
+            child: friendsLoad.error == null
+                ? const SizedBox.shrink()
+                : HollowEmptyState(
+                    title: "Your friends didn't load",
+                    description: friendlyError(friendsLoad.error!),
+                    action: HollowButton.ghost(
+                      touch: true,
+                      onPressed: () =>
+                          ref.read(friendsProvider.notifier).loadAll(),
+                      child: const Text('Try again'),
+                    ),
+                  ),
+          )
+        else if (accepted.isEmpty && incoming.isEmpty && outgoing.isEmpty)
           const SliverToBoxAdapter(
             child: HollowEmptyState(
               glyph: LucideIcons.users,
@@ -281,10 +323,14 @@ class _FriendRow extends ConsumerWidget {
   final bool canMoveUp;
   final bool canMoveDown;
 
+  /// Our own link is down, so their presence is unknown, not "Offline".
+  final bool linkDown;
+
   const _FriendRow({
     super.key,
     required this.peerId,
     this.isFavourite = false,
+    this.linkDown = false,
     this.onMove,
     this.canMoveUp = false,
     this.canMoveDown = false,
@@ -300,7 +346,7 @@ class _FriendRow extends ConsumerWidget {
     final status = profile?.status.trim() ?? '';
     final line = isOnline && status.isNotEmpty
         ? status
-        : (isOnline ? 'Online' : 'Offline');
+        : (isOnline ? 'Online' : (linkDown ? null : 'Offline'));
 
     return HollowPressable(
       onTap: () => _openChat(context, ref, peerId),
@@ -329,10 +375,11 @@ class _FriendRow extends ConsumerWidget {
                           isOnline ? hollow.textPrimary : hollow.textSecondary,
                     ),
                     maxLines: 1, overflow: TextOverflow.ellipsis),
-                Text(line,
-                    style: HollowTypography.bodySmall
-                        .copyWith(color: hollow.textTertiary),
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                if (line != null)
+                  Text(line,
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.textTertiary),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
               ],
             ),
           ),
@@ -433,9 +480,10 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
       if (success != null && mounted) {
         HollowToast.show(context, success, type: HollowToastType.success);
       }
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        HollowToast.show(context, failure, type: HollowToastType.error);
+        HollowToast.show(context, friendlyError(e, fallback: failure),
+            type: HollowToastType.error);
       }
     } finally {
       if (mounted) setState(() => _busy = null);
@@ -557,6 +605,7 @@ class _AddFriendSheet extends ConsumerStatefulWidget {
 class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
   final _inputController = TextEditingController();
   bool _sending = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -567,7 +616,10 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
   Future<void> _send() async {
     final input = _inputController.text.trim();
     if (input.isEmpty || _sending) return;
-    setState(() => _sending = true);
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
     try {
       await sendFriendRequestTo(ref, input);
       if (mounted) {
@@ -576,13 +628,14 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
             type: HollowToastType.success);
       }
     } catch (e) {
+      // Under the field, as in the desktop Friends Manager, so the input
+      // stays for a fix.
       if (mounted) {
-        HollowToast.show(
-            context,
-            friendlyError(e,
-                fallback: "Couldn't send the request. Try again."),
-            type: HollowToastType.error);
-        setState(() => _sending = false);
+        setState(() {
+          _sending = false;
+          _error = friendlyError(e,
+              fallback: "Couldn't send the request. Try again.");
+        });
       }
     }
   }
@@ -620,6 +673,10 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                   autofocus: true,
                   style: HollowTypography.mono
                       .copyWith(color: hollow.textPrimary),
+                  errorText: _error,
+                  onChanged: (_) {
+                    if (_error != null) setState(() => _error = null);
+                  },
                   onSubmitted: (_) => _send(),
                 ),
                 const SizedBox(height: HollowSpacing.sm),

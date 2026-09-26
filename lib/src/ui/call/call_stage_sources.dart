@@ -193,6 +193,10 @@ class DmCallStageSource extends CallStageSource {
         focusOn(CallSourceId.screen(peerMaster));
       },
       onStopWatching: (_) => calls.stopWatchingRemoteScreenShare(),
+      onRetryWatch: (_) async {
+        await calls.stopWatchingRemoteScreenShare();
+        await calls.watchRemoteScreenShare();
+      },
       onStopSharing: () => calls.stopScreenShare(),
     );
   }
@@ -219,9 +223,7 @@ class DmCallStageSource extends CallStageSource {
       onMute: calls.toggleMute,
       onDeafen: calls.toggleDeafen,
       cameraOn: call.isVideoEnabled,
-      onCamera: active
-          ? () => calls.toggleVideo().catchError((Object _) {})
-          : null,
+      onCamera: active ? () => toggleCallCamera(context, dm: true) : null,
       sharing: call.isScreenSharing,
       onShare: callCanShareScreen && active
           ? () => toggleDmScreenShare(context, ref)
@@ -426,6 +428,10 @@ class VcCallStageSource extends CallStageSource {
       onGrid: notifier.setGridView,
       onWatch: (owner) => notifier.watchScreenShare(owner),
       onStopWatching: (owner) => notifier.stopWatchingScreenShare(owner),
+      onRetryWatch: (owner) async {
+        await notifier.stopWatchingScreenShare(owner);
+        await notifier.watchScreenShare(owner);
+      },
       onStopSharing: () => notifier.stopScreenShare(),
     );
   }
@@ -498,7 +504,7 @@ class VcCallStageSource extends CallStageSource {
       onMute: notifier.toggleMute,
       onDeafen: notifier.toggleDeafen,
       cameraOn: vc.isCameraOn,
-      onCamera: () => notifier.toggleCamera().catchError((Object _) {}),
+      onCamera: () => toggleCallCamera(context, dm: false),
       sharing: vc.isScreenSharing,
       onShare: callCanShareScreen
           ? () => toggleVcScreenShare(context, ref)

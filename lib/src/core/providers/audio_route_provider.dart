@@ -16,7 +16,11 @@ class AudioRouteState {
   /// the first refresh lands or when the platform can't say.
   final AudioRouteKind? activeKind;
 
-  const AudioRouteState({this.routes = const [], this.activeKind});
+  /// A read has finished, so empty [routes] means none rather than not yet.
+  final bool loaded;
+
+  const AudioRouteState(
+      {this.routes = const [], this.activeKind, this.loaded = false});
 
   /// True once there is a real choice to make (a headset is attached), which
   /// is when the call controls should offer a picker instead of a toggle.
@@ -32,10 +36,12 @@ class AudioRouteState {
   AudioRouteState copyWith({
     List<AudioRoute>? routes,
     AudioRouteKind? activeKind,
+    bool? loaded,
   }) {
     return AudioRouteState(
       routes: routes ?? this.routes,
       activeKind: activeKind ?? this.activeKind,
+      loaded: loaded ?? this.loaded,
     );
   }
 }
@@ -92,13 +98,27 @@ class AudioRouteNotifier extends Notifier<AudioRouteState> {
 
   /// Re-read the available routes and the live one.
   Future<void> refresh() async {
-    if (!AudioRoutes.isSupported) return;
+    if (!AudioRoutes.isSupported) {
+      if (!_disposed && !state.loaded) state = state.copyWith(loaded: true);
+      return;
+    }
     final generation = ++_refreshGeneration;
-    final routes = await AudioRoutes.list();
-    final active = await AudioRoutes.current();
+    final List<AudioRoute> routes;
+    final AudioRouteKind? active;
+    try {
+      routes = await AudioRoutes.list();
+      active = await AudioRoutes.current();
+    } catch (e) {
+      debugPrint('[HOLLOW] audio route refresh failed: $e');
+      // What was known stays; the picker stops waiting either way.
+      if (!_disposed && generation == _refreshGeneration) {
+        state = state.copyWith(loaded: true);
+      }
+      return;
+    }
     // A newer refresh (or a reset) landed — its answer is the fresher one.
     if (_disposed || generation != _refreshGeneration) return;
-    state = AudioRouteState(routes: routes, activeKind: active);
+    state = AudioRouteState(routes: routes, activeKind: active, loaded: true);
   }
 
   /// Switch the live call to [route]. Optimistically marks it active so the

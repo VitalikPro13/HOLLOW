@@ -148,7 +148,7 @@ class _PanelResizeHandleState extends State<PanelResizeHandle> {
                         width: active || focused ? 2 : 0,
                         decoration: BoxDecoration(
                           color: hollow.accent.withValues(alpha: 0.7),
-                          borderRadius: BorderRadius.circular(1),
+                          borderRadius: BorderRadius.circular(hollow.radiusXs),
                         ),
                       ),
                     ),

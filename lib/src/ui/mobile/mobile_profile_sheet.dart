@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
@@ -162,9 +163,8 @@ class MobileProfileSheet extends ConsumerWidget {
                       height: 4,
                       decoration: BoxDecoration(
                         color: hasBanner
-                            ? Colors.white.withValues(
-                                alpha: 0.7,
-                              ) // design-ignore: handle on banner art
+                            // Over the banner art, a picture, not a surface.
+                            ? HollowColors.onMedia.withValues(alpha: 0.7)
                             : hollow.border,
                         borderRadius: BorderRadius.circular(HollowRadius.pill),
                       ),

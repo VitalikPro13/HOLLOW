@@ -298,9 +298,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         ),
       cameraControl(
         on: call.isVideoEnabled,
-        onTap: active
-            ? () => calls.toggleVideo().catchError((Object _) {})
-            : null,
+        onTap: active ? () => toggleCallCamera(context, dm: true) : null,
       ),
       if (isPhoneCallPlatform || callCanShareScreen)
         shareControl(

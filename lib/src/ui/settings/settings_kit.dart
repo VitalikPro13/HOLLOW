@@ -6,6 +6,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
@@ -630,4 +631,31 @@ class _SettingsAdvancedState extends State<SettingsAdvanced> {
       ),
     );
   }
+}
+
+/// A read that failed, in place of what it would have filled: one honest line
+/// and a retry, never an empty list or editable defaults that look real.
+class SettingsLoadFailed extends StatelessWidget {
+  final String title;
+  final String? description;
+  final VoidCallback onRetry;
+
+  const SettingsLoadFailed({
+    super.key,
+    required this.title,
+    this.description,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) => HollowEmptyState(
+        dense: true,
+        title: title,
+        description: description,
+        action: HollowButton.ghost(
+          touch: SettingsDensity.touchOf(context),
+          onPressed: onRetry,
+          child: const Text('Try again'),
+        ),
+      );
 }

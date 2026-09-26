@@ -57,12 +57,18 @@ const double _kCompactReadoutWidth = 40;
 /// on voice activity (issue #38).
 bool get _isDesktop => !Platform.isAndroid && !Platform.isIOS;
 
+const String _kListFailed = "Couldn't list your devices";
+
 class _AudioVideoSettingsViewState
     extends ConsumerState<AudioVideoSettingsView> {
   List<_AudioDeviceInfo> _audioInputs = [];
   List<_AudioDeviceInfo> _audioOutputs = [];
   List<webrtc.MediaDeviceInfo> _cameras = [];
   bool _loading = true;
+
+  /// An enumerator threw: "No microphone found" would then be a guess.
+  bool _audioListFailed = false;
+  bool _cameraListFailed = false;
   bool _micTesting = false;
   AudioPlayer? _ringtonePreview;
   rec.AudioRecorder? _micRecorder;
@@ -261,12 +267,16 @@ class _AudioVideoSettingsViewState
       List<_AudioDeviceInfo> inputs = [];
       List<_AudioDeviceInfo> outputs = [];
       List<webrtc.MediaDeviceInfo> cameras = [];
+      var audioFailed = false;
+      var cameraFailed = false;
 
       if (Platform.isMacOS) {
         final mac = await _enumerateMacAudio();
         if (mac != null) {
           inputs = mac.$1;
           outputs = mac.$2;
+        } else {
+          audioFailed = true;
         }
       }
 
@@ -277,6 +287,7 @@ class _AudioVideoSettingsViewState
         cameras = devices.where((d) => d.kind == 'videoinput').toList();
       } catch (e) {
         debugPrint('[HOLLOW] Device enumeration (webrtc) failed: $e');
+        cameraFailed = true;
       }
 
       // Linux: the prebuilt libwebrtc AudioDeviceModule reports 0 audio devices
@@ -288,6 +299,8 @@ class _AudioVideoSettingsViewState
         if (linux != null) {
           inputs = linux.$1;
           outputs = linux.$2;
+        } else {
+          audioFailed = true;
         }
       }
 
@@ -296,6 +309,8 @@ class _AudioVideoSettingsViewState
         if (win != null) {
           inputs = win.$1;
           outputs = win.$2;
+        } else {
+          audioFailed = true;
         }
       }
 
@@ -304,13 +319,19 @@ class _AudioVideoSettingsViewState
         _audioInputs = inputs;
         _audioOutputs = outputs;
         _cameras = cameras;
+        _audioListFailed = audioFailed;
+        _cameraListFailed = cameraFailed;
         _loading = false;
       });
 
       _autoSelectDefaults(inputs, outputs, cameras);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _loading = false);
+      setState(() {
+        _audioListFailed = true;
+        _cameraListFailed = true;
+        _loading = false;
+      });
     }
   }
 
@@ -713,7 +734,7 @@ class _AudioVideoSettingsViewState
           title: _isDesktop ? 'Speaker and camera' : 'Calls',
           children: [
             if (_isDesktop) _buildSpeakerRow(touch),
-            if (_cameras.isNotEmpty) _buildCameraRow(touch),
+            if (_isDesktop) _buildCameraRow(touch),
             SettingsChoiceRow<AudioQualityPreset>(
               title: 'Call quality',
               subtitle: _qualityLine(ref.watch(audioQualityProvider).valueOrNull ??
@@ -877,9 +898,11 @@ class _AudioVideoSettingsViewState
       title: 'Microphone',
       subtitle: _loading
           ? 'Looking for devices'
-          : _audioInputs.isEmpty
-              ? 'No microphone found'
-              : null,
+          : _audioListFailed
+              ? _kListFailed
+              : _audioInputs.isEmpty
+                  ? 'No microphone found'
+                  : null,
       wideTrailing: true,
       trailing: _deviceControl(
         touch,
@@ -901,22 +924,31 @@ class _AudioVideoSettingsViewState
             }
           },
         ),
-        before: HollowIconButton(
-          icon: LucideIcons.refreshCw,
-          label: 'Look for devices again',
-          size: touch ? 44 : 32,
-          onPressed: _loading ? null : _reloadDevices,
-        ),
+        before: _reloadButton(touch),
       ),
     );
   }
+
+  /// The retry for every device row: the microphone's always, the others'
+  /// only when their list failed.
+  Widget _reloadButton(bool touch) => HollowIconButton(
+        icon: LucideIcons.refreshCw,
+        label: 'Look for devices again',
+        size: touch ? 44 : 32,
+        onPressed: _loading ? null : _reloadDevices,
+      );
 
   Widget _buildSpeakerRow(bool touch) {
     final selectedOutput = ref.watch(audioOutputDeviceProvider).valueOrNull;
     return SettingsRow(
       title: 'Speaker',
-      subtitle:
-          !_loading && _audioOutputs.isEmpty ? 'No speaker found' : null,
+      subtitle: _loading
+          ? null
+          : _audioListFailed
+              ? _kListFailed
+              : _audioOutputs.isEmpty
+                  ? 'No speaker found'
+                  : null,
       wideTrailing: true,
       trailing: _deviceControl(
         touch,
@@ -941,6 +973,7 @@ class _AudioVideoSettingsViewState
             }
           },
         ),
+        before: _audioListFailed ? _reloadButton(touch) : null,
       ),
     );
   }
@@ -949,6 +982,13 @@ class _AudioVideoSettingsViewState
     final selectedCamera = ref.watch(cameraDeviceProvider).valueOrNull;
     return SettingsRow(
       title: 'Camera',
+      subtitle: _loading
+          ? null
+          : _cameraListFailed
+              ? _kListFailed
+              : _cameras.isEmpty
+                  ? 'No camera found'
+                  : null,
       wideTrailing: true,
       trailing: _deviceControl(
         touch,
@@ -970,6 +1010,7 @@ class _AudioVideoSettingsViewState
             }
           },
         ),
+        before: _cameraListFailed ? _reloadButton(touch) : null,
       ),
     );
   }

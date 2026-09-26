@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -91,7 +92,7 @@ class _NavTab extends StatelessWidget {
               size: 22,
               color: isActive ? hollow.accent : hollow.textSecondary,
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: HollowSpacing.xxs),
             // Bottom-nav labels cap their scale so the fixed-height bar stays
             // intact; content areas still honour the full OS scale.
             MediaQuery.withClampedTextScaling(

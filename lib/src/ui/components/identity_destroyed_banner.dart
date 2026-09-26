@@ -45,8 +45,8 @@ class IdentityDestroyedBanner extends ConsumerWidget {
             child: Text(
               'This identity was destroyed. The keys and messages behind it '
               'are gone.',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textPrimary, fontSize: 12),
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textPrimary),
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),

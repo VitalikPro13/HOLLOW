@@ -207,7 +207,7 @@ void main() {
 
 /// Toasts that interpolate `$e`, `${e}`, `$err` or `$error`, the day the rule
 /// landed. May fall, never rise.
-const _rawExceptionToastBaseline = 3;
+const _rawExceptionToastBaseline = 0;
 
 /// The text between the `(` at [open] and its matching `)`.
 String _balancedArgs(String source, int open) {
@@ -258,6 +258,10 @@ String _blankComments(String source) => source
 const _theme = 'lib/src/theme';
 const _components = 'lib/src/ui/components';
 
+/// Draws offscreen to compile shaders before the first frame and is never
+/// shown; its literals mirror the theme's values on purpose.
+const _notRendered = ['lib/src/ui/shader_warmup.dart'];
+
 final _rules = <_Rule>[
   _Rule(
     id: 'font-size-literal',
@@ -266,7 +270,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 104,
+    baseline: 0,
   ),
   _Rule(
     id: 'material-colors',
@@ -274,7 +278,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 77,
+    baseline: 0,
   ),
   _Rule(
     id: 'color-literal',
@@ -283,7 +287,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 74,
+    baseline: 0,
   ),
   _Rule(
     id: 'radius-literal',
@@ -291,7 +295,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 22,
+    baseline: 0,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -410,7 +414,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 60,
+    baseline: 0,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -419,7 +423,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 38,
+    baseline: 0,
   ),
   _Rule(
     id: 'gradient',
@@ -428,7 +432,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'\b(Linear|Radial|Sweep)Gradient\b'),
     excludeDirs: [_theme],
     excludeFiles: ['annotation_overlay.dart'],
-    baseline: 11,
+    baseline: 0,
   ),
   _Rule(
     id: 'big-shadow',
@@ -438,7 +442,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'blurRadius\s*:\s*(\d+(?:\.\d+)?)'),
     threshold: 12,
     excludeDirs: [_theme],
-    baseline: 4,
+    baseline: 0,
   ),
   _Rule(
     id: 'raw-dialog',
@@ -458,7 +462,7 @@ final _rules = <_Rule>[
         'a documented overlay host is the only exception',
     pattern: RegExp(r'(?<![\w.])Material\('),
     excludeDirs: [_theme, _components],
-    baseline: 16,
+    baseline: 0,
   ),
 ];
 
@@ -509,6 +513,7 @@ class _Rule {
       final path = entity.path.replaceAll(r'\', '/');
       if (excludeDirs.any(path.startsWith)) continue;
       if (excludeFiles.any((f) => path.endsWith('/$f'))) continue;
+      if (_notRendered.contains(path)) continue;
 
       final lines = entity.readAsLinesSync();
       for (var i = 0; i < lines.length; i++) {

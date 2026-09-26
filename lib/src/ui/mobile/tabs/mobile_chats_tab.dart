@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -23,6 +24,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
@@ -357,12 +359,13 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
 
     // Text chat is pushed first, so the back arrow reveals it under the voice
     // route.
-    ref
+    final join = ref
         .read(voiceChannelProvider.notifier)
-        .joinChannel(serverId, channel.channelId)
-        .catchError((Object _) {
+        .joinChannel(serverId, channel.channelId);
+    join.catchError((Object e) {
       if (mounted) {
-        HollowToast.show(context, "Couldn't join the voice room",
+        HollowToast.show(
+            context, friendlyError(e, fallback: "Couldn't join the voice room"),
             type: HollowToastType.error);
       }
     });
@@ -392,13 +395,23 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         serverId: serverId,
         channelId: channel.channelId,
         channelName: channel.name,
+        join: join,
       ),
     ));
   }
 
   Future<void> _openVoiceRoom(HomeVoiceRoom room) async {
-    final channels =
-        await ref.read(serverChannelsProvider(room.serverId).future);
+    final Map<String, ChannelInfo> channels;
+    try {
+      channels = await ref.read(serverChannelsProvider(room.serverId).future);
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(
+            context, friendlyError(e, fallback: "Couldn't open the room"),
+            type: HollowToastType.error);
+      }
+      return;
+    }
     final channel = channels[room.channelId];
     if (channel == null || !mounted) return;
     await _openVoiceChannel(room.serverId, channel);
@@ -574,7 +587,29 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                     ),
                   ),
                 ),
-                if (shown.isEmpty)
+                if (shown.isEmpty && !hasConversations && !homeListsLoaded(ref))
+                  SliverToBoxAdapter(
+                    // Still reading friends and servers: nothing, never "none yet".
+                    child: homeListsError(ref) == null
+                        ? const SizedBox.shrink()
+                        : Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: HollowSpacing.lg,
+                              vertical: HollowSpacing.xl,
+                            ),
+                            child: HollowEmptyState(
+                              dense: true,
+                              title: "Your conversations didn't load",
+                              description: friendlyError(homeListsError(ref)!),
+                              action: HollowButton.ghost(
+                                touch: true,
+                                onPressed: () => homeRetryLists(ref),
+                                child: const Text('Try again'),
+                              ),
+                            ),
+                          ),
+                  )
+                else if (shown.isEmpty)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
@@ -1024,6 +1059,7 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   List<_DisplayItem> _displayItems = [];
   final _collapsedCategories = <String, bool>{};
   bool _loading = true;
+  bool _failed = false;
 
   @override
   void initState() {
@@ -1041,23 +1077,47 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
         _displayItems = [];
         _collapsedCategories.clear();
         _loading = true;
+        _failed = false;
       });
       _loadChannels();
     }
   }
 
   Future<void> _loadChannels() async {
-    final results = await Future.wait([
-      ChannelListNotifier.fetchChannels(widget.serverId),
-      ChannelLayoutNotifier.fetchLayout(widget.serverId),
-    ]);
-    if (!mounted) return;
+    final serverId = widget.serverId;
+    final List<Object> results;
+    try {
+      results = await Future.wait([
+        ChannelListNotifier.fetchChannels(serverId),
+        ChannelLayoutNotifier.fetchLayout(serverId),
+      ]);
+    } catch (_) {
+      if (!mounted || serverId != widget.serverId) return;
+      // A list already on screen stays; only a first read shows the failure.
+      if (_loading) {
+        setState(() {
+          _loading = false;
+          _failed = true;
+        });
+      }
+      return;
+    }
+    if (!mounted || serverId != widget.serverId) return;
     final channelMap = results[0] as Map<String, ChannelInfo>;
     final layoutJson = results[1] as String;
     setState(() {
       _displayItems = _buildDisplayItems(channelMap, layoutJson);
       _loading = false;
+      _failed = false;
     });
+  }
+
+  void _retry() {
+    setState(() {
+      _failed = false;
+      _loading = true;
+    });
+    _loadChannels();
   }
 
   List<_DisplayItem> _buildDisplayItems(
@@ -1157,7 +1217,26 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
           bottom: HollowSpacing.sm,
           top: HollowSpacing.xs,
         ),
-        child: HollowSpinner(),
+        child: HollowSpinner(delayed: true),
+      );
+    }
+
+    if (_failed) {
+      return Padding(
+        padding: const EdgeInsets.only(
+          left: _kTreeIndent,
+          right: HollowSpacing.lg,
+          bottom: HollowSpacing.sm,
+        ),
+        child: HollowEmptyState(
+          dense: true,
+          title: "Channels didn't load",
+          action: HollowButton.ghost(
+            touch: true,
+            onPressed: _retry,
+            child: const Text('Try again'),
+          ),
+        ),
       );
     }
 

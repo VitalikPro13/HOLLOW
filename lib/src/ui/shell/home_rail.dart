@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/changelog.dart';
+import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -10,6 +12,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
+import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -215,7 +218,10 @@ class HomeRelayCard extends ConsumerWidget {
   /// mounted but not on screen (a phone keeps every tab mounted).
   final bool loadBars;
 
-  const HomeRelayCard({super.key, this.loadBars = true});
+  /// Full-size Try again, for a finger.
+  final bool touch;
+
+  const HomeRelayCard({super.key, this.loadBars = true, this.touch = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -223,6 +229,8 @@ class HomeRelayCard extends ConsumerWidget {
     final connection = ref.watch(overallConnectionProvider);
     final visual = connectionVisual(hollow, connection);
     final domain = ref.watch(relayDomainProvider);
+    final node = ref.watch(nodeProvider);
+    final nodeFailed = node.status == NodeStatus.error;
     return _RailCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -257,6 +265,21 @@ class HomeRelayCard extends ConsumerWidget {
             style: HollowTypography.monoSmall
                 .copyWith(color: hollow.textTertiary),
           ),
+          // "Error" alone gives no cause and no way out.
+          if (nodeFailed) ...[
+            const SizedBox(height: HollowSpacing.md),
+            HollowEmptyState(
+              dense: true,
+              title: friendlyError(node.error ?? '',
+                  fallback: "Hollow couldn't start its connection."),
+              action: HollowButton.ghost(
+                compact: !touch,
+                touch: touch,
+                onPressed: () => ref.read(nodeProvider.notifier).start(),
+                child: const Text('Try again'),
+              ),
+            ),
+          ],
           if (loadBars) ...[
             const SizedBox(height: HollowSpacing.md),
             const RelayLoadBars(),
@@ -371,12 +394,39 @@ class _ActiveNow extends ConsumerWidget {
       for (final r in rooms)
         for (final p in r.people) p: r.serverName,
     };
+    // Presence rides OUR relay link, so while it is down nobody reads as
+    // around, which is our doing, not theirs.
+    final link = ref.watch(overallConnectionProvider);
+    final linkDown = link == OverallConnection.offline ||
+        link == OverallConnection.reconnecting ||
+        link == OverallConnection.error;
+    final nobody = rooms.isEmpty && onlineFriends.isEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _Inset(child: HollowSectionHeader('Active Now')),
-        if (rooms.isEmpty && onlineFriends.isEmpty)
+        if (linkDown && nobody)
+          const _Inset(
+            child: HollowEmptyState(
+              dense: true,
+              title: "You're offline",
+              description: "Friends who are online show up here once you're "
+                  'back.',
+            ),
+          )
+        else if (linkDown)
+          _Inset(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+              child: Text(
+                "You're offline, so who's around may be out of date.",
+                style: HollowTypography.caption
+                    .copyWith(color: hollow.textSecondary),
+              ),
+            ),
+          )
+        else if (nobody)
           const _Inset(
             child: HollowEmptyState(
               dense: true,
@@ -482,9 +532,10 @@ class _HomeVoiceRoomTileState extends ConsumerState<HomeVoiceRoomTile> {
             .joinChannel(room.serverId, room.channelId);
       }
       await openServerChannel(container, room.serverId, room.channelId);
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        HollowToast.show(context, "Couldn't join the voice room",
+        HollowToast.show(context,
+            friendlyError(e, fallback: "Couldn't join the voice room"),
             type: HollowToastType.error);
       }
     } finally {

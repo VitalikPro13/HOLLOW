@@ -73,7 +73,8 @@ class _ServerProfilePageState extends ConsumerState<ServerProfilePage> {
     final serverName = ref.watch(serverListProvider)[_sid]?.name ?? 'this server';
     final isOwner = ref.watch(myRoleProvider(_sid)).valueOrNull == 'owner';
     final draft = ref.read(serverSettingsDraftProvider(_sid).notifier);
-    final labels = ref.watch(serverLabelsProvider(_sid)).valueOrNull;
+    final labelsAsync = ref.watch(serverLabelsProvider(_sid));
+    final labels = labelsAsync.valueOrNull;
     final members = ref.watch(serverMembersProvider(_sid)).valueOrNull;
     if (_wearing == null && members != null) {
       _wearing = members
@@ -137,7 +138,12 @@ class _ServerProfilePageState extends ConsumerState<ServerProfilePage> {
           subtitle: '${SettingsDensity.touchOf(context) ? 'Tap' : 'Click'} one '
               'to wear it or take it off. Access labels come from staff.',
           children: [
-            if (labels == null)
+            if (labels == null && labelsAsync.hasError)
+              SettingsLoadFailed(
+                title: "The labels didn't load",
+                onRetry: () => ref.invalidate(serverLabelsProvider(_sid)),
+              )
+            else if (labels == null)
               const SizedBox.shrink()
             else if (labels.isEmpty)
               const HollowEmptyState(

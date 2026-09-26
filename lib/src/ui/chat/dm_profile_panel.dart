@@ -238,8 +238,10 @@ class _Panel extends ConsumerWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(HollowSpacing.md, 0,
-                HollowSpacing.md, HollowSpacing.md),
+            padding: const EdgeInsets.only(
+                left: HollowSpacing.md,
+                right: HollowSpacing.md,
+                bottom: HollowSpacing.md),
             child: HollowButton.ghost(
               expand: true,
               onPressed: () => showProfileDialog(context, peerId: peerId),
@@ -316,7 +318,7 @@ class _RingedAvatar extends ConsumerWidget {
           right: 0,
           bottom: 0,
           child: Container(
-            padding: const EdgeInsets.all(_kAvatarRing - 1),
+            padding: const EdgeInsets.all(HollowSpacing.xxs),
             decoration:
                 BoxDecoration(color: hollow.surface, shape: BoxShape.circle),
             child: StatusDot(

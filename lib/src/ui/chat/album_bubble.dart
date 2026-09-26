@@ -9,6 +9,7 @@ import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -249,11 +250,11 @@ class _MoreOverlay extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: ColoredBox(
-        color: Colors.black.withValues(alpha: 0.55),
+        color: HollowColors.mediaBlack.withValues(alpha: 0.55),
         child: Center(
           child: Text(
             '+$count',
-            style: HollowTypography.subheading.copyWith(color: Colors.white),
+            style: HollowTypography.subheading.copyWith(color: HollowColors.onMedia),
           ),
         ),
       ),

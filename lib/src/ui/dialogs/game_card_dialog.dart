@@ -545,7 +545,7 @@ class _Hero extends StatelessWidget {
 
     if (art == null) {
       return Padding(
-        padding: EdgeInsets.fromLTRB(inset, inset, inset, 0),
+        padding: EdgeInsets.only(left: inset, top: inset, right: inset),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
@@ -581,7 +581,8 @@ class _Hero extends StatelessWidget {
         children: [
           image,
           Padding(
-            padding: EdgeInsets.fromLTRB(inset, HollowSpacing.lg, inset, 0),
+            padding: EdgeInsets.only(
+                left: inset, top: HollowSpacing.lg, right: inset),
             child: titleRow(),
           ),
         ],

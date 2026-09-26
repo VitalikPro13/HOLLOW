@@ -64,13 +64,11 @@ final rolePermissionsProvider = FutureProvider.autoDispose
         (ref, serverId) async {
   final out = <String, ({int perms, int defaults})>{};
   for (final role in _kRoles) {
+    // A failed read errors the page instead of falling back to the defaults:
+    // shown as real, one tap on a toggle would overwrite the stored bits.
     final defaults = crdt_api.defaultRolePermissions(role: role);
-    int perms;
-    try {
-      perms = await crdt_api.getRolePermissions(serverId: serverId, role: role);
-    } catch (_) {
-      perms = defaults;
-    }
+    final perms =
+        await crdt_api.getRolePermissions(serverId: serverId, role: role);
     out[role] = (perms: perms, defaults: defaults);
   }
   return out;
@@ -144,10 +142,12 @@ class _RolesPageState extends ConsumerState<RolesPage> {
         intro: intro,
         children: [
           if (loaded.hasError)
-            Text('Could not load the roles',
-                style: HollowTypography.body.copyWith(color: hollow.error))
+            SettingsLoadFailed(
+              title: "The roles didn't load",
+              onRetry: () => ref.invalidate(rolePermissionsProvider(_sid)),
+            )
           else
-            const Center(child: HollowSpinner.medium()),
+            const Center(child: HollowSpinner.medium(delayed: true)),
         ],
       );
     }

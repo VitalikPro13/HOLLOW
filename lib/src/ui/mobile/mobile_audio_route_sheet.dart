@@ -5,8 +5,10 @@ import 'package:hollow/src/core/services/audio_route.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Icon for an audio route, shared by the sheet and the in-call control row so
@@ -105,11 +107,10 @@ class _AudioRouteSheetState extends ConsumerState<_AudioRouteSheet> {
               Padding(
                 padding: const EdgeInsets.symmetric(
                     vertical: HollowSpacing.lg, horizontal: HollowSpacing.xs),
-                child: Text(
-                  'Looking for audio devices…',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textTertiary),
-                ),
+                child: routeState.loaded
+                    ? const HollowEmptyState(
+                        dense: true, title: 'No other audio devices')
+                    : const HollowSpinner.medium(delayed: true),
               )
             else
               for (final route in routes)

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -16,7 +17,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_skeleton.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
@@ -30,16 +31,20 @@ class StorageBreakdownView extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final async = ref.watch(storageBreakdownProvider);
 
     return async.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.all(HollowSpacing.xl),
-        child: Center(child: HollowSpinner.medium()),
+      // The scan walks every file, often for seconds.
+      loading: () => const _BreakdownSkeleton(),
+      error: (e, _) => Padding(
+        padding: const EdgeInsets.only(top: HollowSpacing.lg),
+        child: SettingsLoadFailed(
+          title: "Your storage didn't load",
+          description: friendlyError(e,
+              fallback: "Couldn't read this device's files."),
+          onRetry: () => ref.invalidate(storageBreakdownProvider),
+        ),
       ),
-      error: (e, _) => Text('Could not read storage: $e',
-          style: HollowTypography.bodySmall.copyWith(color: hollow.error)),
       data: (b) {
         final contexts = [...b.contexts]
           ..sort((a, c) => c.bytesDb.compareTo(a.bytesDb));
@@ -63,6 +68,39 @@ class StorageBreakdownView extends ConsumerWidget {
           ],
         );
       },
+    );
+  }
+}
+
+/// The summary's geometry while the scan runs, so nothing jumps when it lands.
+class _BreakdownSkeleton extends StatelessWidget {
+  const _BreakdownSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.only(top: HollowSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HollowSkeleton(
+              width: 200, height: HollowSpacing.lg + HollowSpacing.xs),
+          SizedBox(height: HollowSpacing.md),
+          HollowSkeleton(height: HollowSpacing.sm),
+          SizedBox(height: HollowSpacing.sm),
+          Wrap(
+            spacing: HollowSpacing.md,
+            runSpacing: HollowSpacing.xs,
+            children: [
+              HollowSkeleton(width: 96, height: HollowSpacing.md),
+              HollowSkeleton(width: 72, height: HollowSpacing.md),
+              HollowSkeleton(width: 120, height: HollowSpacing.md),
+              HollowSkeleton(width: 120, height: HollowSpacing.md),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

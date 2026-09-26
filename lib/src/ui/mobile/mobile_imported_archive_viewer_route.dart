@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -71,14 +73,23 @@ class _MobileImportedArchiveViewerRouteState
     return Scaffold(
       backgroundColor: hollow.background,
       body: SafeArea(
+        // Opening an archive checks every signature in it, so it can take a
+        // while: Back is there from the first frame.
         child: dataAsync.when(
-          loading: () => const Center(child: HollowSpinner.large()),
+          loading: () => Column(
+            children: [
+              _backHeader(hollow),
+              const Expanded(child: Center(child: _OpeningArchive())),
+            ],
+          ),
           error: (_, _) => Column(
             children: [
               _backHeader(hollow),
               Expanded(
-                child: archiveLoadError(() => ref
-                    .invalidate(importedArchiveDataProvider(widget.path))),
+                child: archiveLoadError(
+                    () => ref
+                        .invalidate(importedArchiveDataProvider(widget.path)),
+                    touch: true),
               ),
             ],
           ),
@@ -324,6 +335,51 @@ class _MobileImportedArchiveViewerRouteState
                   preverified: preverified,
                 ),
               ),
+    );
+  }
+}
+
+/// The wait while an archive opens, held back for its first second like a
+/// delayed spinner so a quick open never flashes.
+class _OpeningArchive extends StatefulWidget {
+  const _OpeningArchive();
+
+  @override
+  State<_OpeningArchive> createState() => _OpeningArchiveState();
+}
+
+class _OpeningArchiveState extends State<_OpeningArchive> {
+  Timer? _reveal;
+  bool _shown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _reveal = Timer(HollowSpinner.revealAfter, () {
+      if (mounted) setState(() => _shown = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _reveal?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_shown) return const SizedBox.shrink();
+    final hollow = HollowTheme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const HollowSpinner.large(),
+        const SizedBox(height: HollowSpacing.md),
+        Text(
+          'Opening the archive',
+          style: HollowTypography.bodyTouch.copyWith(color: hollow.textSecondary),
+        ),
+      ],
     );
   }
 }
