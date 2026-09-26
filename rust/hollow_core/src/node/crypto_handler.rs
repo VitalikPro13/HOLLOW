@@ -1341,10 +1341,22 @@ pub(crate) async fn ingest_device_list(
             Some(cur) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
             None => (Vec::new(), Vec::new(), 0),
         };
+    // SECURITY: a master's signature speaks only for its OWN devices. Any identity
+    // can sign a list naming our device, or a third identity's, in `revoked` (which
+    // used to wipe this device) or in `devices` (which rebinds it to them), so both
+    // sets drop every id already bound to another master, ours included.
+    let speaks_for = |id: &String| {
+        if id == local_device_peer_id || id == local_master_peer_id {
+            return false;
+        }
+        let bound = super::resolver::resolve(id);
+        bound == *id || bound == list.master_peer_id
+    };
+    let list_devices: Vec<String> = list.devices.iter().filter(|d| speaks_for(d)).cloned().collect();
     // TOMBSTONES, max-version-wins: a higher-version list is the latest master
     // word; a replay (version <= prev) keeps our set, so it can never un-revoke.
     let new_revoked: Vec<String> = if list.version > prev_version {
-        let mut r = list.revoked.clone();
+        let mut r: Vec<String> = list.revoked.iter().filter(|d| speaks_for(d)).cloned().collect();
         r.sort();
         r.dedup();
         r
@@ -1352,13 +1364,6 @@ pub(crate) async fn ingest_device_list(
         prev_revoked.clone()
     };
     let is_revoked = |id: &str| new_revoked.iter().any(|r| r == id);
-    // SELF-NUKE: our own id in the revoked set means the identity cut us off.
-    // Defensive here; the real path is the sibling merge below.
-    if is_revoked(local_device_peer_id) {
-        hollow_log!("[HOLLOW-REVOKE] This device was revoked (friend list) — self-nuking");
-        let _ = event_tx.send(NetworkEvent::SelfRevoked).await;
-        return IngestOutcome::default();
-    }
     // Phantom-chat guard: mark every revoked id of this master so inbound DMs and
     // typing from a still-alive revoked device are dropped until it self-nukes.
     if !new_revoked.is_empty() {
@@ -1372,7 +1377,10 @@ pub(crate) async fn ingest_device_list(
     // Register the SENDER device to master link. Safe only now: the binding check
     // above proved the master's own signature NAMES this device. A revoked sender
     // is skipped, or it could re-register itself with a pre-revocation list.
-    if sender_peer_id != list.master_peer_id && !is_revoked(sender_peer_id) {
+    if sender_peer_id != list.master_peer_id
+        && !is_revoked(sender_peer_id)
+        && speaks_for(&sender_peer_id.to_string())
+    {
         super::resolver::update(sender_peer_id, &list.master_peer_id);
     }
 
@@ -1382,7 +1390,7 @@ pub(crate) async fn ingest_device_list(
     let mut merged: Vec<String> = prev_devices.iter().filter(|d| !is_revoked(d)).cloned().collect();
     let mut known: std::collections::HashSet<String> = merged.iter().cloned().collect();
     let mut added = 0u32;
-    for d in &list.devices {
+    for d in &list_devices {
         if !is_revoked(d) && !known.contains(d) {
             merged.push(d.clone());
             known.insert(d.clone());
@@ -4908,6 +4916,79 @@ mod tests {
             .flatten()
             .map(|l| l.devices)
             .unwrap_or_default()
+    }
+
+    /// Ingest [list] as a friend-path ProfileUpdate would, with the local identity
+    /// (master 0x01, device 0x02) and the given resolver links already in place, and
+    /// hand back every event it emitted.
+    async fn ingest_foreign_events(
+        list: &SignedDeviceList,
+        sender_peer_id: &str,
+    ) -> Vec<NetworkEvent> {
+        let local_master = kp(0x01);
+        let local_master_id = local_master.peer_id();
+        let local_device = kp(0x02).peer_id();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        ingest_device_list(
+            &event_tx, &local_master_id, &local_device, &local_master,
+            sender_peer_id, &ws_cmd_tx, &rooms, Some(list.clone()), &db, &pass,
+        )
+        .await;
+        drop(event_tx);
+        let mut events = Vec::new();
+        while let Some(e) = event_rx.recv().await {
+            events.push(e);
+        }
+        events
+    }
+
+    /// Only our OWN master can revoke this device. Another identity's validly signed
+    /// list naming our device in `revoked` must not wipe us, must not mark our id or a
+    /// third identity's device revoked, and must not claim either as its own.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let local_master_id = kp(0x01).peer_id();
+        let local_device = kp(0x02).peer_id();
+        let friend_master_id = kp(0x60).peer_id();
+        let friend_device = kp(0x61).peer_id();
+        super::super::resolver::seed_self(&local_master_id, std::slice::from_ref(&local_device));
+        super::super::resolver::update(&friend_device, &friend_master_id);
+
+        let attacker = kp(0x50);
+        let attacker_device = kp(0x51).peer_id();
+        let list = build_signed_device_list(
+            &attacker,
+            1,
+            vec![attacker_device.clone(), friend_device.clone()],
+            vec![local_device.clone(), friend_device.clone()],
+        );
+        assert!(verify_device_list(&list), "the attacker signs its own list validly");
+
+        let events = ingest_foreign_events(&list, &attacker_device).await;
+        assert!(
+            !events.iter().any(|e| matches!(e, NetworkEvent::SelfRevoked)),
+            "another identity's list wiped this device"
+        );
+        assert!(!super::super::resolver::is_revoked(&local_device));
+        assert!(!super::super::resolver::is_revoked(&friend_device));
+        assert_eq!(super::super::resolver::resolve(&friend_device), friend_master_id);
+        assert_eq!(super::super::resolver::resolve(&local_device), local_master_id);
+        assert_eq!(
+            super::super::resolver::resolve(&attacker_device),
+            attacker.peer_id(),
+            "the attacker's own device still binds normally"
+        );
     }
 
     /// CRYPTO-1. A master-signed device list is public the moment it is announced,
