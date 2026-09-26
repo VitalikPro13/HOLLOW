@@ -80,11 +80,23 @@ class HollowEmptyState extends StatelessWidget {
         child: column,
       );
     }
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: column,
-      ),
+    final padded = Padding(
+      padding: const EdgeInsets.all(HollowSpacing.xl),
+      child: column,
+    );
+    // A pane can be shorter than its state (a phone's expression panel is only
+    // keyboard-high), so a bounded one scrolls rather than clipping the text.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (!constraints.hasBoundedHeight) return Center(child: padded);
+        return SingleChildScrollView(
+          primary: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Center(child: padded),
+          ),
+        );
+      },
     );
   }
 }

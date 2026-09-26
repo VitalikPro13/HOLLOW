@@ -214,7 +214,7 @@ class _MobileIncomingCallOverlayState
                             _AnswerButton(
                               icon: LucideIcons.phoneOff,
                               label: 'Decline',
-                              fill: hollow.error,
+                              fill: hollow.errorFill,
                               ink: hollow.textOnError,
                               onTap: _decline,
                             ),

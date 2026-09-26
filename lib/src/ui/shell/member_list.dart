@@ -212,9 +212,9 @@ class _GroupHeader extends StatelessWidget {
       child: HollowPressable(
         subtle: true,
         semanticButton: false,
-        semanticLabel: item.folded
-            ? 'Expand ${item.label}, ${item.count} members'
-            : 'Collapse ${item.label}, ${item.count} members',
+        semanticLabel:
+            '${item.folded ? 'Expand' : 'Collapse'} ${item.label}, '
+            '${item.count} ${item.count == 1 ? 'member' : 'members'}',
         onTap: onToggle,
         borderRadius:
             touch ? BorderRadius.zero : BorderRadius.circular(hollow.radiusMd),

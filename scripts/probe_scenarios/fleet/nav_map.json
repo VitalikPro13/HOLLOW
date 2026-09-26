@@ -1,0 +1,89 @@
+{
+  "_": [
+    "One pass over the main screens, one map each. Feeds reports/reference/UI_NAVIGATION_MAP.md.",
+    "A throwaway peer and its own server, deleted in cleanup, never a real identity.",
+    "",
+    "run: powershell -File scripts\\ui_nav_map.ps1"
+  ],
+  "peers": ["a"],
+  "steps": [
+    {"peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
+    {"peer": "a", "op": "wait", "ms": 2000},
+    {"peer": "a", "op": "tap", "target": "text:Accept", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 800},
+
+    {"peer": "a", "op": "dump", "name": "01-home"},
+    {"peer": "a", "op": "shot", "name": "01-home"},
+
+    {"peer": "a", "op": "tap", "target": "semantics:Create a server"},
+    {"peer": "a", "op": "wait_for", "target": "dialog > text:Add a server", "timeout_ms": 10000},
+    {"peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "navmap"},
+    {"peer": "a", "op": "tap", "target": "dialog > text:Create", "index": 0},
+    {"peer": "a", "op": "wait_for", "target": "server:navmap", "timeout_ms": 30000},
+    {"peer": "a", "op": "open_server", "name": "navmap"},
+    {"peer": "a", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000},
+    {"peer": "a", "op": "wait", "ms": 1500},
+    {"peer": "a", "op": "dump", "name": "02-server"},
+    {"peer": "a", "op": "shot", "name": "02-server"},
+
+    {"peer": "a", "op": "log", "message": "channel row menu"},
+    {"peer": "a", "op": "right_click", "target": "channel:general", "soft": true},
+    {"peer": "a", "op": "wait", "ms": 600},
+    {"peer": "a", "op": "dump", "name": "03-channel-menu", "soft": true},
+    {"peer": "a", "op": "shot", "name": "03-channel-menu", "soft": true},
+    {"peer": "a", "op": "key", "value": "escape", "soft": true},
+    {"peer": "a", "op": "wait", "ms": 600},
+
+    {"peer": "a", "op": "log", "message": "sidebar background menu"},
+    {"peer": "a", "op": "right_click_at", "of": "type:_ServerContent", "align": "bottomLeft", "dx": 110, "dy": -40, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 600},
+    {"peer": "a", "op": "dump", "name": "04-sidebar-menu", "soft": true},
+    {"peer": "a", "op": "shot", "name": "04-sidebar-menu", "soft": true},
+    {"peer": "a", "op": "key", "value": "escape", "soft": true},
+    {"peer": "a", "op": "wait", "ms": 600},
+
+    {"peer": "a", "op": "log", "message": "server settings"},
+    {"peer": "a", "op": "tap", "target": "semantics:Server settings", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 1500},
+    {"peer": "a", "op": "dump", "name": "05-server-settings", "soft": true},
+    {"peer": "a", "op": "shot", "name": "05-server-settings", "soft": true},
+
+    {"peer": "a", "op": "log", "message": "the Channels editor, the other surface that owns the layout"},
+    {"peer": "a", "op": "tap", "target": "text:Channels", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 1500},
+    {"peer": "a", "op": "dump", "name": "06-channels-tab", "soft": true},
+    {"peer": "a", "op": "shot", "name": "06-channels-tab", "soft": true},
+    {"peer": "a", "op": "key", "value": "escape", "soft": true},
+    {"peer": "a", "op": "wait", "ms": 800},
+
+    {"peer": "a", "op": "log", "message": "a member card, opened from the member panel"},
+    {"peer": "a", "op": "open_server", "name": "navmap", "soft": true},
+    {"peer": "a", "op": "wait", "ms": 800},
+    {"peer": "a", "op": "tap", "target": "type:PersonRow", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 1000},
+    {"peer": "a", "op": "dump", "name": "07-member-card", "soft": true},
+    {"peer": "a", "op": "shot", "name": "07-member-card", "soft": true},
+    {"peer": "a", "op": "key", "value": "escape", "soft": true},
+    {"peer": "a", "op": "wait", "ms": 600},
+
+    {"peer": "a", "op": "log", "message": "settings"},
+    {"peer": "a", "op": "tap", "target": "semantics:Settings", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 1200},
+    {"peer": "a", "op": "dump", "name": "08-settings", "soft": true},
+    {"peer": "a", "op": "shot", "name": "08-settings", "soft": true},
+
+    {"peer": "a", "op": "log", "message": "back home"},
+    {"peer": "a", "op": "tap", "target": "semantics:Home", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 1200},
+    {"peer": "a", "op": "dump", "name": "09-home-dock", "soft": true},
+    {"peer": "a", "op": "shot", "name": "09-home-dock", "soft": true}
+  ],
+  "cleanup": [
+    {"peer": "a", "op": "key", "value": "escape", "soft": true},
+    {"peer": "a", "op": "right_click", "target": "server:navmap", "soft": true},
+    {"peer": "a", "op": "tap", "target": "menu > text:Delete server", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait", "ms": 800},
+    {"peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0, "soft": true},
+    {"peer": "a", "op": "wait_for", "gone": "server:navmap", "timeout_ms": 30000, "soft": true}
+  ]
+}

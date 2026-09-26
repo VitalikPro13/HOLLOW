@@ -200,9 +200,9 @@ class _HollowButtonState extends State<HollowButton>
               : tint.withValues(alpha: 0.4),
         );
       case HollowButtonVariant.danger:
-        bg = hollow.error;
+        bg = hollow.errorFill;
         fg = hollow.textOnError;
-        hoverBg = hollow.error.withValues(alpha: 0.85);
+        hoverBg = hollow.errorFill.withValues(alpha: 0.85);
     }
 
     // Disabled goes NEUTRAL rather than a faded accent: a 40% fade of a 40%

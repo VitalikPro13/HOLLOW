@@ -1,3 +1,5 @@
+import 'dart:math' show min;
+
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'contrast.dart';
@@ -34,10 +36,12 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   /// alpha-faded textSecondary.
   final Color textTertiary;
   final Color textOnAccent;
-  /// The label on a solid error fill (the danger button).
+  /// The label on [errorFill].
   final Color textOnError;
   final Color border;
+  /// Error as text or an icon. A solid red behind a label is [errorFill].
   final Color error;
+  final Color errorFill;
   final Color success;
   final Color warning;
   /// Series colours for a chart or a split bar, in fixed order: never cycled,
@@ -68,6 +72,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.textOnError,
     required this.border,
     required this.error,
+    required this.errorFill,
     required this.success,
     required this.warning,
     required this.categorical,
@@ -88,6 +93,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         textOnAccent: HollowColors.textOnAccent,
         border: HollowColors.border,
         error: HollowColors.error,
+        errorFill: HollowColors.errorFill,
         success: HollowColors.success,
         warning: HollowColors.warning,
         categorical: HollowColors.categorical,
@@ -107,6 +113,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         textOnAccent: HollowColors.textOnAccentLight,
         border: HollowColors.borderLight,
         error: HollowColors.errorLight,
+        errorFill: HollowColors.errorFillLight,
         success: HollowColors.successLight,
         warning: HollowColors.warningLight,
         categorical: HollowColors.categoricalLight,
@@ -141,6 +148,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required Color textOnAccent,
     required Color border,
     required Color error,
+    required Color errorFill,
     required Color success,
     required Color warning,
     required List<Color> categorical,
@@ -148,6 +156,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     final surfaces = ladder.all;
     Color legible(Color c, [double ratio = 4.5]) =>
         Contrast.ensureContrastOnAll(c, surfaces, targetRatio: ratio);
+    final foreground = accentForeground ?? accent;
     return HollowTheme(
       background: ladder.canvas,
       surface: ladder.chrome,
@@ -158,15 +167,16 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       accent: accent,
       accentHover: accentHover,
       accentMuted: accentMuted,
-      accentText: legible(accentForeground ?? accent),
-      focusRing: legible(accentForeground ?? accent, 3.0),
+      accentText: _accentText(foreground, accentMuted, surfaces),
+      focusRing: legible(foreground, 3.0),
       textPrimary: textPrimary,
       textSecondary: legible(textSecondary),
       textTertiary: legible(textTertiary),
       textOnAccent: textOnAccent,
       textOnError: HollowColors.textOnError,
       border: border,
-      error: error,
+      error: legible(error),
+      errorFill: errorFill,
       success: success,
       warning: warning,
       categorical: [for (final c in categorical) legible(c, 3.0)],
@@ -184,11 +194,30 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       accent: accent,
       accentHover: hover,
       accentMuted: muted,
-      accentText:
-          Contrast.ensureContrastOnAll(accent, surfaces, targetRatio: 4.5),
+      accentText: _accentText(accent, muted, surfaces),
       focusRing:
           Contrast.ensureContrastOnAll(accent, surfaces, targetRatio: 3.0),
+      textOnAccent: _inkOn([accent, hover]),
     );
+  }
+
+  /// The accent as text also labels a selected chip, which sits on
+  /// [muted] laid over a surface, so it clears those as well.
+  static Color _accentText(Color accent, Color muted, List<Color> surfaces) =>
+      Contrast.ensureContrastOnAll(
+        accent,
+        [...surfaces, for (final s in surfaces) Color.alphaBlend(muted, s)],
+        targetRatio: 4.5,
+      );
+
+  /// Dark or white ink, whichever reads better on every one of [fills]: a
+  /// deep custom hue (blue, purple, red) needs white where teal takes dark.
+  static Color _inkOn(List<Color> fills) {
+    double worst(Color ink) =>
+        fills.map((f) => Contrast.ratio(ink, f)).reduce(min);
+    return worst(HollowColors.textOnAccent) >= worst(HollowColors.textOnDeepAccent)
+        ? HollowColors.textOnAccent
+        : HollowColors.textOnDeepAccent;
   }
 
   /// Returns a copy with semi-transparent panels, for a custom background
@@ -243,6 +272,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     Color? textOnError,
     Color? border,
     Color? error,
+    Color? errorFill,
     Color? success,
     Color? warning,
     List<Color>? categorical,
@@ -270,6 +300,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       textOnError: textOnError ?? this.textOnError,
       border: border ?? this.border,
       error: error ?? this.error,
+      errorFill: errorFill ?? this.errorFill,
       success: success ?? this.success,
       warning: warning ?? this.warning,
       categorical: categorical ?? this.categorical,
@@ -302,6 +333,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       textOnError: Color.lerp(textOnError, other.textOnError, t)!,
       border: Color.lerp(border, other.border, t)!,
       error: Color.lerp(error, other.error, t)!,
+      errorFill: Color.lerp(errorFill, other.errorFill, t)!,
       success: Color.lerp(success, other.success, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
       categorical: [

@@ -354,7 +354,7 @@ File: `lib/src/ui/components/hollow_button.dart`
 | `filled` | `hollow.accent` | `hollow.textOnAccent` | `hollow.accentHover` | The ONE commit of a screen, pane, dialog or sheet |
 | `ghost` | `textPrimary` 6% at alpha 0 | `hollow.textSecondary` (grey; `textPrimary` on hover) | `textPrimary` at 6% | Everything else: toolbars, Cancel, rows with several actions, two actions with no primary |
 | `outline` | accent at alpha 0 + accent border (40%, 60% hover) | `hollow.accentText` | `hollow.accentMuted` | An alternative beside a filled; the one action of a row, card, section or field; ANY per-item action (compact). `danger: true` = cautionary (error tint) |
-| `danger` | `hollow.error` | `hollow.textOnError` | error at 85% | The final destructive confirmation ONLY |
+| `danger` | `hollow.errorFill` | `hollow.textOnError` | errorFill at 85% | The final destructive confirmation ONLY |
 
 Rule detail: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 4.2 (sweep 9, 2026-09-19). Two `.filled` in one `children:`/`actions:` list fail `test/design_language_guard_test.dart`. The outline's 1 px border comes out of its padding, so every variant is the same size (widget test in `design_primitives_test.dart`). Busy = `loading: true` (spinner over the invisible label, presses ignored), never a label swap. `HollowButton(variant: ...)` switches the variant in one build (Updates' Check steps to ghost once Install is ready).
 

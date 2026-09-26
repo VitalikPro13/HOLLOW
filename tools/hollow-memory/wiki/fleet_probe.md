@@ -21,6 +21,10 @@ powershell -File scripts/fleet.ps1 -Stop
 powershell -File scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
 ```
 
+`scripts/ui_nav_map.ps1` regenerates `reports/reference/UI_NAVIGATION_MAP.md` through this fleet
+(`fleet/nav_map.json` on peer `a`, its own server deleted in cleanup), never through the
+single-peer probe, whose default mirrors Vitalik's real identity.
+
 `pwsh` is NOT installed on this machine: use `powershell -File`. Both scripts are 5.1-compatible.
 
 ## The fast loop, and what each part of it costs
@@ -509,6 +513,8 @@ pwsh scripts/fleet.ps1 -Stop
   `<container>/Documents/probe_out`; `build/fleet_out/<peer>` is a SYMLINK there, refreshed on
   every launch (the container UUID changes with every `simctl install`), so every reader of an
   out directory keeps its usual path. Fixtures are mirrored with rsync, not robocopy.
+  So the NEXT run's launch wipes the previous run's shots: copy them off (`tar` over SSH)
+  between two scenarios, never after a chain of them.
 - **Configuration is a file, not the environment.** `Platform.environment` is EMPTY on iOS
   (zero variables, measured, while `ps eww` on the same process showed every `SIMCTL_CHILD_`
   value present). `Start-Peer` writes `<container>/Documents/probe.env` (KEY=VALUE lines) and

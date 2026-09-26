@@ -18,6 +18,7 @@ abstract final class HollowColors {
   // (~2:1). It still reads as quieter because brighter text sits next to it.
   static const textTertiary = Color(0xFF808690);
   static const textOnAccent = Color(0xFF0D0F14);
+  static const textOnDeepAccent = Color(0xFFFFFFFF);
   static const textOnError = Color(0xFFFFFFFF);
 
   static const border = Color(0x14FFFFFF); // ~8% white
@@ -29,6 +30,9 @@ abstract final class HollowColors {
   static const mediaBlack = Color(0xFF000000);
 
   static const error = Color(0xFFEF4444);
+  // A solid red behind white (danger button, end call, mention count): the
+  // text red is too light for white ink, so fills take a deeper step.
+  static const errorFill = Color(0xFFDC2626); // white 4.83:1
   static const success = Color(0xFF10B981);
   static const warning = Color(0xFFFBBF24);
 
@@ -48,6 +52,7 @@ abstract final class HollowColors {
 
   // Light-theme variants: the shared dark ones fail on white.
   static const errorLight = Color(0xFFB91C1C);   // 6.47:1 on white
+  static const errorFillLight = Color(0xFFB91C1C);
   static const successLight = Color(0xFF047857); // 5.48:1 on white
   static const warningLight = Color(0xFF92600A); // 5.38:1 on white
 

@@ -100,6 +100,62 @@ void main() {
     });
   });
 
+  const hues = [0.0, 60.0, 120.0, 200.0, 240.0, 270.0, 300.0, 330.0];
+  final everyTheme = <String, HollowTheme>{
+    'dark': HollowTheme.dark(),
+    'light': HollowTheme.light(),
+    for (final h in hues) 'dark@$h': HollowTheme.darkWithHue(h),
+    for (final h in hues) 'light@$h': HollowTheme.lightWithHue(h),
+  };
+
+  test('semantic colours read as text on every surface', () {
+    // An error line inside a dialog or a red menu row sits on overlay or
+    // hover, not the canvas, and that is where the dark red failed (3.87:1).
+    for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+      for (final bg in _surfaces(t)) {
+        expectRatio('error', t.error, bg, bodyMin);
+        expectRatio('success', t.success, bg, bodyMin);
+        expectRatio('warning', t.warning, bg, bodyMin);
+      }
+    }
+  });
+
+  test('white on a red fill clears body threshold', () {
+    for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+      expectRatio('textOnError', t.textOnError, t.errorFill, bodyMin);
+    }
+  });
+
+  test('a filled label reads on the accent, whatever the hue', () {
+    // A deep hue with dark ink was 1.55:1 (blue), so the ink follows the fill.
+    expectRatio('textOnAccent', HollowTheme.dark().textOnAccent,
+        HollowTheme.dark().accent, bodyMin);
+    for (final e in everyTheme.entries) {
+      final t = e.value;
+      expectRatio('textOnAccent ${e.key}', t.textOnAccent, t.accent, uiMin);
+      expectRatio(
+          'textOnAccent hover ${e.key}', t.textOnAccent, t.accentHover, uiMin);
+    }
+  });
+
+  test('a selected chip label reads on its muted fill on every surface', () {
+    for (final e in everyTheme.entries) {
+      final t = e.value;
+      for (final bg in _surfaces(t)) {
+        expectRatio('selected chip ${e.key}', t.accentText,
+            Color.alphaBlend(t.accentMuted, bg), bodyMin);
+      }
+    }
+  });
+
+  test('the focus ring clears 3:1 on every surface, whatever the hue', () {
+    for (final e in everyTheme.entries) {
+      for (final bg in _surfaces(e.value)) {
+        expectRatio('focusRing ${e.key}', e.value.focusRing, bg, uiMin);
+      }
+    }
+  });
+
   group('custom accent hues stay legible as foreground', () {
     // Worst offenders are low-luminance hues (deep blue ~240, purple ~270,
     // red ~0). ensureContrast must lift/lower them to clear threshold.

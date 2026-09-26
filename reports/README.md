@@ -14,7 +14,6 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 |---|---|---|
 | `planned/relay-and-sync/MULTI_RELAY_CLIENT_PLAN.md` | relay-and-sync | One client holding sockets to several relays, servers and friendships bound to the relay they live on, no relay-to-relay protocol. Designed 2026-09-12. |
 | `planned/relay-and-sync/STORAGE_NODES_PLAN.md` | relay-and-sync | Always-on storage nodes that members bring: a Worker in front of a volunteer's own R2 bucket with an enforced quota and zero-bill guards, or a self-hosted blob service beside a relay or on a NAS; server pools and personal nodes, one protocol. Designed 2026-09-17. |
-| `planned/ui-and-accessibility/HOLLOW_DESIGN_LANGUAGE_PLAN.md` | ui-and-accessibility | The research digest and the screen-by-screen redesign program for desktop and mobile. Designed 2026-09-14; the rules themselves shipped 2026-09-18 as `reference/HOLLOW_DESIGN_LANGUAGE.md`, so what remains here is the consolidation sweeps and the screen work. |
 
 ## Shipped
 
@@ -45,6 +44,7 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/shop/REDEEM_PHASE2.md` | shop | Support credentials redeem flow, built 2026-09-02 (the Creem rail it reads through is gone since 2026-09-16). |
 | `shipped/ui-and-accessibility/ACCESSIBILITY_IMPLEMENTATION_PLAN.md` | ui-and-accessibility | Reduce motion, contrast, semantics, keyboard focus, larger text; all code phases done. |
 | `shipped/ui-and-accessibility/PUSH_NOTIFICATION_UX_PLAN.md` | ui-and-accessibility | Making the push notification fast and correct on first appearance. |
+| `shipped/ui-and-accessibility/HOLLOW_DESIGN_LANGUAGE_PLAN.md` | ui-and-accessibility | The research digest and the screen-by-screen redesign of every surface on desktop and phone, sessions 1 to 28 (2026-09-14 to 26). The rules it produced live on as `reference/HOLLOW_DESIGN_LANGUAGE.md`. |
 | `shipped/testing-and-tooling/MULTINODE_TEST_HARNESS_HANDOFF.md` | testing-and-tooling | The in-process multi-node harness, rungs 1 to 3 and the ring-2 control plane. |
 | `shipped/testing-and-tooling/SONAR_CLEANUP_EPIC.md` | testing-and-tooling | SonarQube Cloud go-live and the backlog close-out, closed 2026-07-15. |
 

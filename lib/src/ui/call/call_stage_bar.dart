@@ -359,7 +359,7 @@ class CallLeaveButton extends StatelessWidget {
         onTap: onPressed,
         semanticLabel: label,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        backgroundColor: hollow.error,
+        backgroundColor: hollow.errorFill,
         child: SizedBox(
           width: width,
           height: height,

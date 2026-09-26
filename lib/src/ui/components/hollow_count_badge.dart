@@ -37,7 +37,7 @@ class HollowCountBadge extends StatelessWidget {
       // A Container folds the border into its padding, so none is added here.
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
       decoration: BoxDecoration(
-        color: mention ? hollow.error : hollow.accent,
+        color: mention ? hollow.errorFill : hollow.accent,
         borderRadius: BorderRadius.circular(_height),
         border: ring == null ? null : Border.all(color: ring!, width: ringWidth),
       ),

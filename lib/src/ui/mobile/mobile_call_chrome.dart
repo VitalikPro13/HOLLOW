@@ -354,7 +354,7 @@ class _MobileControlButton extends StatelessWidget {
           hollow.error.withValues(alpha: 0.18),
           hollow.error
         ),
-      MobileControlTone.end => (hollow.error, hollow.textOnError),
+      MobileControlTone.end => (hollow.errorFill, hollow.textOnError),
     };
     final enabled = control.onTap != null;
     return AnimatedOpacity(

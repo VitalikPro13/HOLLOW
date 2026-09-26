@@ -92,7 +92,8 @@ times for chips alone. Do not invent a 47th. Reach for the component.
   The accent means interactive or primary and nothing else. It never tints a
   card, never glows, never lands on a heading.
 - Semantics: `success`, `warning`, `error`. `Colors.amber` where `hollow.warning`
-  exists is exactly the bug this guards.
+  exists is exactly the bug this guards. A solid red behind a label is
+  `errorFill` with `textOnError`, never `error` (too light for white ink).
 - Never colour alone: pair it with shape, an icon or a word.
 
 ## Spacing and gaps

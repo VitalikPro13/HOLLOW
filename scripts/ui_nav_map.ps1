@@ -2,21 +2,20 @@
 # what it finds.
 #
 #   powershell -File scripts\ui_nav_map.ps1
-#   powershell -File scripts\ui_nav_map.ps1 -ReuseData -Server test3
+#   powershell -File scripts\ui_nav_map.ps1 -Attach      # reuse a fleet left up with -Live
 #   powershell -File scripts\ui_nav_map.ps1 -SkipRun     # restitch the last run
 #
-# Runs the `nav_map` probe scenario (one dump per main screen), then stitches
-# the per-screen digests into one document.
+# Runs the fleet `nav_map` scenario on the throwaway peer `a` (one dump per main
+# screen), then stitches the per-screen digests into one document. Never the
+# single-peer probe: its default mirrors Vitalik's real identity.
 #
 # NEVER hand-edit the report: it is generated, and a hand-written navigation
 # note goes stale the first time a label changes. Change the scenario or the
 # dump, then run this again.
 
 param(
-    [string]$Server = 'test3',
-    [switch]$ReuseData,
-    [switch]$Fresh,
-    # Stitch whatever maps build\ui_probe already holds, without driving the
+    [switch]$Attach,
+    # Stitch whatever maps build\fleet_out\a already holds, without driving the
     # app. For iterating on the document itself.
     [switch]$SkipRun
 )
@@ -24,21 +23,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+$mapDir = Join-Path $repoRoot 'build\fleet_out\a'
 
 $probeExit = 0
 if (-not $SkipRun) {
+    Get-ChildItem $mapDir -Filter 'map-*.md' -ErrorAction SilentlyContinue | Remove-Item
     # A HASHTABLE splat, not an array: an array splat passes its elements
     # positionally, so the switches land on the wrong parameters.
-    $probeArgs = @{ Scenario = 'nav_map'; Server = $Server }
-    if ($ReuseData) { $probeArgs['ReuseData'] = $true }
-    if ($Fresh) { $probeArgs['Fresh'] = $true }
-    & (Join-Path $PSScriptRoot 'ui_probe.ps1') @probeArgs
+    $fleetArgs = @{ Scenario = 'nav_map'; Peers = 'a' }
+    if ($Attach) { $fleetArgs['Attach'] = $true }
+    & (Join-Path $PSScriptRoot 'fleet.ps1') @fleetArgs
     $probeExit = $LASTEXITCODE
 }
 
-$maps = Get-ChildItem (Join-Path $repoRoot 'build\ui_probe') -Filter 'map-*.md' |
-        Sort-Object Name
-if (-not $maps) { throw 'no maps in build\ui_probe; run without -SkipRun' }
+$maps = Get-ChildItem $mapDir -Filter 'map-*.md' | Sort-Object Name
+if (-not $maps) { throw "no maps in $mapDir; run without -SkipRun" }
 
 $out = Join-Path $repoRoot 'reports\reference\UI_NAVIGATION_MAP.md'
 New-Item -ItemType Directory -Path (Split-Path $out) -Force | Out-Null

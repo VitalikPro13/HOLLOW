@@ -428,6 +428,26 @@ void main() {
       expect(pressed, 1);
     });
 
+    testWidgets('a pane shorter than the state scrolls instead of clipping',
+        (tester) async {
+      // The phone's sticker panel is keyboard-high: title, description and
+      // the padding did not fit and the second line lost a pixel.
+      await _pump(
+        tester,
+        const SizedBox(
+          width: 360,
+          height: 70,
+          child: HollowEmptyState(
+            title: 'Your stickers work in every chat',
+            description: 'Upload artwork, or save some from the KLIPY tab.',
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(SingleChildScrollView), findsOneWidget);
+    });
+
     testWidgets('the glyph is the slot Holly takes, at 24', (tester) async {
       await _pump(
         tester,

@@ -1,7 +1,7 @@
 # The Hollow design language, version 1
 
-**Status:** LIVE. This document is the rule set. When it and the code disagree, the code is wrong.
-**Written:** 2026-09-18, from `reports/planned/ui-and-accessibility/HOLLOW_DESIGN_LANGUAGE_PLAN.md` section 3, with every number re-measured against the tree on the same day.
+**Status:** LIVE, and the redesign that applied it to every screen shipped 2026-09-26. This document is the rule set. When it and the code disagree, the code is wrong.
+**Written:** 2026-09-18, from `reports/shipped/ui-and-accessibility/HOLLOW_DESIGN_LANGUAGE_PLAN.md` section 3, with every number re-measured against the tree on the same day.
 **Enforced by:** the `hollow-ui` skill (loaded before any widget work) and `test/design_language_guard_test.dart` (a source-scan ratchet).
 **Owner:** Vitalik. Every debatable visual choice is decided by a render, never by a paragraph.
 
@@ -80,10 +80,12 @@ Exactly three tiers, plus the accent pair. There is no fourth tier and no ad hoc
 | `textSecondary` | Supporting text, inactive labels. |
 | `textTertiary` | Faded metadata: timestamps, "(edited)", counters. Guarded at 4.5:1. |
 | `accentText` | The accent as a foreground. The only accent text colour there is. Raw `accent` is for fills. |
-| `textOnAccent` | Text on an accent fill. |
-| `textOnError` | Text on a solid error fill (the danger button). |
+| `textOnAccent` | Text on an accent fill. Dark ink on teal; a custom hue picks dark or white ink, whichever reads better on the fill. |
+| `textOnError` | Text on `errorFill`. |
 
-Every foreground token is validated against **all five** surfaces (`Contrast.ensureContrastOnAll`), because text on a hovered row or inside a menu sits on the worst of them. `test/contrast_test.dart` loops all five.
+`error` is red as text or an icon; a solid red behind a label (the danger button, End call, Decline, the mention count) is `errorFill`, a deeper step, because white on the text red was 3.76:1.
+
+Every foreground token is validated against **all five** surfaces (`Contrast.ensureContrastOnAll`), because text on a hovered row or inside a menu sits on the worst of them. `accentText` also clears `accentMuted` laid over each surface, since it labels a selected chip. `test/contrast_test.dart` loops all five on both themes and eight custom hues: text 4.5:1, the focus ring and a filled label 3:1.
 
 Fading text with `withOpacity` or `withValues(alpha:)` is forbidden. It was how `textTertiary` used to fail contrast at roughly 2:1. Pick a tier.
 
