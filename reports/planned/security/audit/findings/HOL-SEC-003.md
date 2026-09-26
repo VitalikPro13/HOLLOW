@@ -1,7 +1,7 @@
 # HOL-SEC-003: A relay operator can open an Olm session in any device's name and read that device's DMs, history included
 
 ```
-ID:          HOL-SEC-003                 Status: Fixed in the working tree (2026-09-26), retest at release
+ID:          HOL-SEC-003                 Status: Fixed on local main (2026-09-26), retest at release
 Severity:    Critical                    (Impact H: DM history, new DMs, file keys and call keys readable, unsigned envelopes forgeable;
                                           Exploitability H: from the relay position it is unilateral, repeatable and silent on first contact)
 Category:    Authentication (identity misbinding, class 7 of the plan's section 2.2)
@@ -55,29 +55,13 @@ Once the relay holds the session, everything the receiver authorises by
 
 Master-signed content (DM text, edits, deletes) still cannot be forged.
 
-## Exploit (reproduced)
+## Reproduction
 
 `authz_olm_prekey_relay_cannot_open_a_session_as_another_device`
-(node/test_harness.rs) uses only relay powers: recorded frames, a replay, a
-forged `from`.
-
-1. Alice and Bob are friends with a confirmed Olm session and a short history.
-2. Mallory (the relay) replays Alice's recorded, still-fresh `KeyRequest` to Bob.
-   Bob tears down his session and answers with a `KeyBundle` holding a fresh
-   one-time key. Alice ignores it (she holds a session).
-3. Mallory's own vodozemac account builds an outbound session on Bob's identity
-   key and that one-time key, and sends Bob a PreKey frame with its own identity
-   key and `from = Alice's device`, carrying a `CallSignal` invite.
-4. Bob builds the inbound session, rings for a call "from Alice", and sends his
-   `SessionAck` on it.
-5. Mallory sends a plaintext `DmSyncRequest { since: 0, both_directions: true }`
-   as Alice's device. Bob serves the history over the hijacked session.
-6. Bob's next DM to Alice goes to Alice's device over the same session.
-
-Result before the fix: forged call rang, the relay read the new DM, and the relay
-read the pre-attack history. Bob's client logged one `identity_key_changed`
-alert, because Alice's real key had been pinned during the handshake; on a first
-contact there is no alert at all.
+(node/test_harness.rs), using only relay powers. Before the fix the receiver
+accepted a session in its contact's name, rang a forged call, and the relay read
+both new DMs and the earlier history. An existing pinned key raised one alert; a
+first contact raises none.
 
 ## Fix
 

@@ -2159,6 +2159,22 @@ pub(crate) fn channel_readable_by(
         && state.can_see_channel(&master, channel_id)
 }
 
+/// Whether `sender` may BACKFILL `channel_id` to us: a current member who can
+/// read it. Stricter than [`channel_readable_by`], which also lets guests read a
+/// public channel: a guest may read history, never write it into ours.
+pub(crate) fn channel_backfill_allowed_from(
+    state: Option<&crate::crdt::server_state::ServerState>,
+    sender_peer_id: &str,
+    channel_id: &str,
+) -> bool {
+    let master = super::resolver::resolve(sender_peer_id);
+    let allowed = state.is_some_and(|s| s.is_member(&master) && s.can_see_channel(&master, channel_id));
+    if !allowed {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED channel backfill for {channel_id} from {sender_peer_id}: not a member who can read it");
+    }
+    allowed
+}
+
 /// Collapse online MLS leaf credential ids (device ids, or master ids for legacy
 /// leaves) into the sorted, deduped set of distinct MASTER identities that are
 /// online; `local_peer` always counts. Coordinator elections use it so a human

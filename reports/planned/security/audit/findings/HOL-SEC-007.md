@@ -1,7 +1,7 @@
 # HOL-SEC-007: Any peer could kill another user's node with one profile announce, and a member could name a file outside the data folder
 
 ```
-ID:          HOL-SEC-007                 Status: Fixed in the working tree (2026-09-26), retest at release
+ID:          HOL-SEC-007                 Status: Fixed on local main (2026-09-26), retest at release
 Severity:    High                        (Impact M-H: the node's event loop dies, so the app shows a live window with no
                                           network until restarted, repeatable on every reconnect; Exploitability H: any peer
                                           sharing any room, including a stranger in the inbox room, or the relay)
@@ -31,11 +31,10 @@ itself is named by a hash), so a member could store a shard under `\..\..\x`
 and ask for it back: on Windows the path collapses lexically out of `files/` and
 the shard bytes, which the attacker chose, land there.
 
-## Exploit (reproduced for the panic)
+## Reproduction
 
-`authz_a_remote_string_never_panics_the_node`: Mallory joins Alice's inbox room
-and sends a plaintext `profile_update` whose display name is 63 ASCII bytes and
-`é`. Before the fix: `byte index 64 is not a char boundary`, Alice's node gone.
+`authz_a_remote_string_never_panics_the_node`: before the fix, a display name
+with a multi-byte character across the cut panicked the node.
 
 ## Fix
 
@@ -55,7 +54,7 @@ and sends a plaintext `profile_update` whose display name is 63 ASCII bytes and
   key we minted (64 hex).
 - Every format string that turns a remote id into a path: FILE-1 (fixed 0.10.2),
   `parse_id` for stream ids (allowlisted), and this cid.
-- Arithmetic panics on remote numbers: `hlc` `counter + 1` (candidate E13).
+- Arithmetic panics on remote numbers: `hlc` `counter + 1` (candidate E14).
 
 ## Test
 

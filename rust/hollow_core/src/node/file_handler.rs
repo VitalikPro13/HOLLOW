@@ -216,6 +216,24 @@ pub(crate) fn file_meta_write_allowed(
     false
 }
 
+/// The file card riding a verified sync item, when it may land. The item's
+/// signature binds `file_id` but not the `file_meta` blob, so the blob must
+/// describe exactly that file, and ownership is judged against the item's verified
+/// `author`, never the blob's own `sender` field.
+pub(crate) fn synced_file_meta<'a>(
+    store: &crate::storage::MessageStore,
+    file_meta: Option<&'a super::types::SyncFileMetaItem>,
+    signed_file_id: Option<&str>,
+    author: &str,
+) -> Option<&'a super::types::SyncFileMetaItem> {
+    let fm = file_meta?;
+    if signed_file_id != Some(fm.fid.as_str()) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED synced file card {} riding an item signed for {signed_file_id:?}", fm.fid);
+        return None;
+    }
+    file_meta_write_allowed(store, &fm.fid, author).then_some(fm)
+}
+
 /// Handle NodeCommand::SendFile.
 ///
 /// Image conversion is CPU work that used to run inline here, and a multi-MB GIF

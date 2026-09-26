@@ -30,6 +30,16 @@ settled in each finding file.
    release; the pre-auth crash (I1) first.
 5. `hollow_push_decrypt` (O4): delete it.
 
+**Decided 2026-09-26 (session 3):**
+2a. The author half of decision 2 ("rows whose author was never a member are
+   refused") is a real fix, not an accepted risk and not a label: it becomes
+   candidate E4 (High), built together with E1. Today `ServerState` keeps only
+   current `members` and the op log is capped, so "ever a member" cannot be proven;
+   until E4 lands, the sender gate stands alone (a current member who can read the
+   channel can still backfill posts signed by a never-member, a stranger or a
+   non-reader cannot). A Message Proof "not a member" label was considered and
+   DROPPED: only real fixes.
+
 ---
 
 ## Class A. The relay is trusted to say who sent a plaintext frame
@@ -73,15 +83,15 @@ or channel the item names. Class kill: every row mutation goes through one
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| B1 | Rewrite, re-attribute, card and then delete ANY channel message by id through an unsolicited `ChannelSyncBatch` (Olm and MLS) | channel:S1 | High | CONFIRMED (to become HOL-SEC-004) |
-| B2 | Rewrite any DM row by id through a `DmSyncBatch`; graft a card and swap the signature | dm:S-09, dm:S-15 | High | AGENT |
+| B1 | Rewrite, re-attribute, card and then delete ANY channel message by id through an unsolicited `ChannelSyncBatch` (Olm and MLS) | channel:S1 | High | FIXED HOL-SEC-004 |
+| B2 | Rewrite any DM row by id through a `DmSyncBatch`; graft a card and swap the signature | dm:S-09, dm:S-15 | High | FIXED HOL-SEC-004 (sibling batch too) |
 | B3 | Live DM edit: signer never compared to the row's author | dm:S-10, dm:S-05 | High | AGENT |
 | B4 | Push-path DM edit has no `is_mine` check: a friend rewrites our own sent rows | dm:S-11, transport:S-04 | High | AGENT |
 | B5 | Live DM delete takes its signer from the sender, not the row (sync twin is right) | dm:S-12 | Medium | AGENT |
 | B6 | DM `AddReaction` attaches to any id, channel messages included, skipping mute | dm:S-13 | Low | AGENT |
 | B7 | DM `LinkPreviewSet` grafts a card onto any received row and swaps its signature | dm:S-14 | Medium | AGENT |
 | B8 | Push path promotes any `[file:..]` row by id to the attacker's caption and signature | dm:S-17, transport:S-03 | Medium | AGENT |
-| B9 | File metadata owner guard is fed the item's claimed sender, so a sync responder relabels any file card | dm:S-16, files:F1-5, channel:S14 | Medium | AGENT |
+| B9 | File metadata owner guard is fed the item's claimed sender, so a sync responder relabels any file card | dm:S-16, files:F1-5, channel:S14 | Medium | Sync half FIXED HOL-SEC-004 (blob bound to the signed `file_id`, owner = verified author); live half AGENT |
 | B10 | Edits carry no `edited_at` ordering: a replayed older plaintext edit reverts text | channel:S11 | Low | AGENT |
 | B11 | Replayed reaction add resurrects a removed reaction (`reaction_removals` ignored) | channel:S10 | Low | AGENT |
 
@@ -91,7 +101,7 @@ or channel the item names. Class kill: every row mutation goes through one
 |---|---|---|---|---|
 | C1 | `PublicChannelMessage` is stored for ANY channel: a stranger posts into private or admin-only channels (live and push) | channel:S3, transport:S-09 | High | AGENT |
 | C2 | MLS inner `sid`/`cid` not bound to the decrypting group: a member of any shared group (a conference included) posts into another server or a restricted channel, deletes a real server, joins its voice | channel:S4, server_mls:S-10, transport:S-07, media:S-05 | High | AGENT |
-| C3 | `ChannelSyncBatch` accepted unsolicited from anyone, any server, skipping posting gates | channel:S2 | High | CONFIRMED (Olm arm) |
+| C3 | `ChannelSyncBatch` accepted unsolicited from anyone, any server, skipping posting gates | channel:S2 | High | Sender half FIXED (decision 2: both arms accept a batch only from a current member who can see the channel, `channel_backfill_allowed_from`, test `authz_channel_backfill_only_from_a_member_who_can_read_it`); author half = candidate E4 (with E1) |
 | C4 | `can_post_in_channel` enforced only on the sender's own client | channel:S5 | Medium | AGENT |
 | C5 | Olm and push channel paths skip mute, slow mode, media-only | channel:S6, transport:S-08 | Medium | AGENT |
 | C6 | Mute check keyed on the sender-supplied `sid`: omit it to bypass | channel:S7 | Medium | AGENT |
@@ -123,20 +133,21 @@ or channel the item names. Class kill: every row mutation goes through one
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| E1 | While a join is pending, a `ServerStateSnapshot` from any sender is adopted whole: the joiner can be handed a state where the attacker is Owner | crdt:S1 | High | AGENT |
+| E1 | While a join is pending, a `ServerStateSnapshot` from any sender is adopted whole: the joiner can be handed a state where the attacker is Owner | crdt:S1 | High | AGENT (E4 builds on its fix) |
 | E2 | The pending-join skeleton has no Owner, so the first `ServerCreated` naming itself wins | crdt:S2 | High | AGENT |
 | E3 | Replay after the 1000-op dedup window (restart reloads only the newest 1000): old ops re-apply, deleted registers come back | crdt:S5 | High | PLAUSIBLE reach |
-| E4 | Several registers apply in arrival order, not HLC: the relay picks each replica's final value | crdt:S6 | Medium | AGENT |
-| E5 | Unknown authors count as Member: strangers author self ops everyone persists and re-floods | crdt:S7 | Medium | AGENT |
-| E6 | `MemberAdded` at ingest checks only that the author is a member: ban, private, cap, Twitch, owner-verify bypassed | crdt:S8, server_mls:S-02 | Medium | AGENT |
-| E7 | Admin targets an Owner device id the replica cannot resolve yet; canonicalisation later demotes, bans or mutes the Owner | crdt:S9 | Medium | PLAUSIBLE |
-| E8 | A device key authors with its master's authority through the process-global resolver; a revoked device keeps it where the revocation has not landed | crdt:S10 | Medium | PLAUSIBLE |
-| E9 | `ServerSettingChanged` has no key/value validation: an Admin sets `retention_files` to 0 and every member deletes channel files and vault content | crdt:S11 | Medium | AGENT |
-| E10 | Unban/unmute check no target; Admin edits the Owner's nickname, pledge, twitch; `RolePermissionsChanged` unbounded; author/ingest gates disagree | crdt:S12 | Low | AGENT |
-| E11 | Owner can create co-Owners or remove itself at ingest; an Owner-less server takes `ServerCreated` from anyone | crdt:S13 | Low | AGENT |
-| E12 | Olm `CrdtOp` path re-pushes duplicates: unbounded op log | crdt:S14 | Low | AGENT |
-| E13 | `hlc.actor` not bound to the author; `counter + 1` unchecked | crdt:S16 | Low | PLAUSIBLE |
-| E14 | A replayed founding `ServerCreated` resets the name and replaces the Owner's role register | crdt:S18 | Low | AGENT |
+| E4 | No provable record of past membership: a current member backfills channel posts signed by an identity that was NEVER a member; they verify, show as Verified in the Message Proof, and spread server-wide through every receiver's own sync. Fix = keep every signed `MemberAdded`/`MemberRemoved` op forever (exempt from the op-log cap) so "was a member" is provable and never-member authors are refused; built on the E1 fix, since a joiner today trusts whoever sends its starting state | decision 2a, sync_handler/swarm channel batch arms, api/network.rs `verify_message_proof_v2` | High | CONFIRMED (read in session 3); fix with E1 |
+| E5 | Several registers apply in arrival order, not HLC: the relay picks each replica's final value | crdt:S6 | Medium | AGENT |
+| E6 | Unknown authors count as Member: strangers author self ops everyone persists and re-floods | crdt:S7 | Medium | AGENT |
+| E7 | `MemberAdded` at ingest checks only that the author is a member: ban, private, cap, Twitch, owner-verify bypassed | crdt:S8, server_mls:S-02 | Medium | AGENT |
+| E8 | Admin targets an Owner device id the replica cannot resolve yet; canonicalisation later demotes, bans or mutes the Owner | crdt:S9 | Medium | PLAUSIBLE |
+| E9 | A device key authors with its master's authority through the process-global resolver; a revoked device keeps it where the revocation has not landed | crdt:S10 | Medium | PLAUSIBLE |
+| E10 | `ServerSettingChanged` has no key/value validation: an Admin sets `retention_files` to 0 and every member deletes channel files and vault content | crdt:S11 | Medium | AGENT |
+| E11 | Unban/unmute check no target; Admin edits the Owner's nickname, pledge, twitch; `RolePermissionsChanged` unbounded; author/ingest gates disagree | crdt:S12 | Low | AGENT |
+| E12 | Owner can create co-Owners or remove itself at ingest; an Owner-less server takes `ServerCreated` from anyone | crdt:S13 | Low | AGENT |
+| E13 | Olm `CrdtOp` path re-pushes duplicates: unbounded op log | crdt:S14 | Low | AGENT |
+| E14 | `hlc.actor` not bound to the author; `counter + 1` unchecked | crdt:S16 | Low | PLAUSIBLE |
+| E15 | A replayed founding `ServerCreated` resets the name and replaces the Owner's role register | crdt:S18 | Low | AGENT |
 
 ## Class F. Device lists and revocation (variants of HOL-SEC-001)
 
@@ -257,4 +268,4 @@ or channel the item names. Class kill: every row mutation goes through one
 | O1 | Any sender's `LinkSnapshotKey` + link stream stashes a blob; the next launch deletes identity and DB before decrypting | identity:S5, relay:2 | Critical | FIXED HOL-SEC-005 |
 | O2 | Any peer pops the "your other device wants to sync" prompt; Accept sends the full backup encrypted with our public master id | identity:S6 | Critical (one click) | FIXED HOL-SEC-005 |
 | O3 | A hostile relay resolves a link code to its own device and hands the linking device an identity of its choosing | relay:3 | Medium | Folded into HOL-SEC-002 (the PAKE redesign) |
-| O4 | `hollow_push_decrypt` (exported, unused by Swift) builds first-contact sessions on an unauthenticated key | this session | Info | Dead code: delete (Vitalik) |
+| O4 | `hollow_push_decrypt` (exported, unused by Swift) builds first-contact sessions on an unauthenticated key | this session | Info | DELETED (session 3) |

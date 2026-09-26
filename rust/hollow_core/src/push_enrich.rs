@@ -1,8 +1,6 @@
 //! C-ABI entry point for the iOS Notification Service Extension (Tier B).
 //!
-//! The NSE runs in a separate ~24 MB process when the app is force-killed, and it
-//! must show decrypted TEXT without advancing the canonical Olm ratchet the app
-//! relies on, so it decrypts on a FORK built from the pickles and drops it. Raw C
+//! The NSE runs in a separate ~24 MB process when the app is force-killed. Raw C
 //! ABI, not flutter_rust_bridge: Swift declares the prototypes in a bridging header
 //! and links the same `libhollow_core.a` the Runner already force-loads.
 
@@ -12,75 +10,10 @@ use std::time::Duration;
 
 use crate::crypto::OlmManager;
 
-/// Decrypt a single Olm push message on a FORKED session, for the iOS NSE.
-///
-/// All string inputs are NUL-terminated UTF-8 owned by the caller:
-/// - `account_pickle_json`: account pickle, needed for a first-contact PreKey.
-/// - `session_pickle_json`: per-peer session pickle, `""` if there is none yet.
-/// - `sender_identity_key_b64`: only for first contact, `""` otherwise.
-/// - `message_type`: 0 = PreKey, 1 = Normal.
-///
-/// Returns a heap C string with the plaintext, or NULL on any failure; the caller
-/// MUST free it with [`hollow_push_string_free`]. Never mutates on-disk state.
+/// Free a string returned by [`hollow_push_fetch_and_decrypt`].
 ///
 /// # Safety
-/// Every pointer must be valid for the call, strings NUL-terminated, and
-/// `ciphertext` readable for `ciphertext_len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hollow_push_decrypt(
-    account_pickle_json: *const c_char,
-    session_pickle_json: *const c_char,
-    sender_peer_id: *const c_char,
-    sender_identity_key_b64: *const c_char,
-    message_type: usize,
-    ciphertext: *const u8,
-    ciphertext_len: usize,
-) -> *mut c_char {
-    // Bail to NULL on anything malformed; every raw-pointer read is confined here.
-    let (account, session, peer_id, sender_idk, ct_owned) = unsafe {
-        let account = match cstr(account_pickle_json) {
-            Some(s) => s,
-            None => return ptr::null_mut(),
-        };
-        let session = cstr(session_pickle_json).unwrap_or_default();
-        let peer_id = match cstr(sender_peer_id) {
-            Some(s) if !s.is_empty() => s,
-            _ => return ptr::null_mut(),
-        };
-        let sender_idk = cstr(sender_identity_key_b64).unwrap_or_default();
-        if ciphertext.is_null() && ciphertext_len != 0 {
-            return ptr::null_mut();
-        }
-        let ct: Vec<u8> = if ciphertext_len == 0 {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(ciphertext, ciphertext_len).to_vec()
-        };
-        (account, session, peer_id, sender_idk, ct)
-    };
-
-    let plaintext = match decrypt_forked(
-        &account,
-        &session,
-        &peer_id,
-        &sender_idk,
-        message_type,
-        &ct_owned,
-    ) {
-        Ok(p) => p,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    match CString::new(plaintext) {
-        Ok(c) => c.into_raw(),
-        Err(_) => ptr::null_mut(), // plaintext contained an interior NUL
-    }
-}
-
-/// Free a string returned by [`hollow_push_decrypt`].
-///
-/// # Safety
-/// `ptr` must be a pointer previously returned by [`hollow_push_decrypt`], or
+/// `ptr` must be a pointer previously returned by [`hollow_push_fetch_and_decrypt`], or
 /// NULL. Must not be called twice on the same pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_push_string_free(ptr: *mut c_char) {
@@ -336,88 +269,10 @@ fn fetch_and_decrypt(
     Ok(serde_json::Value::Array(items).to_string())
 }
 
-/// Core fork-and-decrypt, pure Rust. Builds a THROWAWAY `OlmManager` from the
-/// supplied pickles and drops it, so the canonical on-disk session is never touched.
-fn decrypt_forked(
-    account_pickle_json: &str,
-    session_pickle_json: &str,
-    peer_id: &str,
-    sender_identity_key_b64: &str,
-    message_type: usize,
-    ciphertext: &[u8],
-) -> Result<String, String> {
-    if session_pickle_json.is_empty() {
-        // First contact: create the inbound session on a fork. PreKey only.
-        if message_type != 0 {
-            return Err("no session and message is not a PreKey".into());
-        }
-        let mut fork = OlmManager::from_pickles(account_pickle_json, vec![])?;
-        let bytes = fork.create_inbound_session(peer_id, sender_identity_key_b64, ciphertext)?;
-        return String::from_utf8(bytes).map_err(|e| format!("plaintext not UTF-8: {e}"));
-    }
-
-    let mut fork = OlmManager::from_pickles(
-        account_pickle_json,
-        vec![(peer_id.to_string(), session_pickle_json.to_string())],
-    )?;
-    let bytes = fork.decrypt(peer_id, message_type, ciphertext)?;
-    String::from_utf8(bytes).map_err(|e| format!("plaintext not UTF-8: {e}"))
-}
-
 /// Convert a C string pointer to an owned Rust String. None if null or not UTF-8.
 unsafe fn cstr(p: *const c_char) -> Option<String> {
     if p.is_null() {
         return None;
     }
     unsafe { CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crypto::OlmManager;
-
-    // Exercises the pure-Rust core of the C ABI end to end.
-    #[test]
-    fn push_enrich_forked_decrypt_existing_session() {
-        let mut alice = OlmManager::new();
-        let mut bob = OlmManager::new();
-        let bob_idk = bob.identity_key_base64();
-        let bob_otk = bob.generate_one_time_key();
-        alice.create_outbound_session("bob", &bob_idk, &bob_otk).unwrap();
-        let (_t, ct) = alice.encrypt("bob", b"hi").unwrap();
-        let alice_idk = alice.identity_key_base64();
-        bob.create_inbound_session("alice", &alice_idk, &ct).unwrap();
-        let (t2, ct2) = bob.encrypt("alice", b"ack").unwrap();
-        alice.decrypt("bob", t2, &ct2).unwrap();
-
-        // Bob's canonical pickles (the phone's DB state).
-        let acct = bob.account_pickle_json().unwrap();
-        let sess = bob.session_pickle_json("alice").unwrap().unwrap();
-
-        let (mt, ctp) = alice.encrypt("bob", b"push body").unwrap();
-
-        let pt = decrypt_forked(&acct, &sess, "alice", "", mt, &ctp).unwrap();
-        assert_eq!(pt, "push body");
-
-        // The canonical session is untouched: a fresh load decrypts the same message.
-        let mut app = OlmManager::from_pickles(&acct, vec![("alice".into(), sess)]).unwrap();
-        assert_eq!(app.decrypt("alice", mt, &ctp).unwrap(), b"push body");
-    }
-
-    #[test]
-    fn push_enrich_forked_decrypt_first_contact() {
-        let mut alice = OlmManager::new();
-        let mut bob = OlmManager::new();
-        let bob_idk = bob.identity_key_base64();
-        let bob_otk = bob.generate_one_time_key();
-        alice.create_outbound_session("bob", &bob_idk, &bob_otk).unwrap();
-        let (mt, ct) = alice.encrypt("bob", b"first").unwrap();
-        let alice_idk = alice.identity_key_base64();
-        let acct = bob.account_pickle_json().unwrap();
-
-        // Empty session pickle = first contact; NSE creates inbound on a fork.
-        let pt = decrypt_forked(&acct, "", "alice", &alice_idk, mt, &ct).unwrap();
-        assert_eq!(pt, "first");
-    }
 }

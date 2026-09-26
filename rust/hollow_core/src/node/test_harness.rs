@@ -6503,9 +6503,11 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
 
     // --- Simulate the PRE-FIX corruption: poison J's stored row to the ghost device
     // id (sender no longer matches the signature → 'unverified' bubble). This is the
-    // exact wedged state VM was in (stored under a sibling device, sig won't verify).
+    // exact wedged state VM was in: stored under a sibling device, still carrying the
+    // author's signature and key, which is what lets the repair prove it is A's row.
+    let good = j.store().get_channel_message_sig_row(MID).expect("row");
     let changed = j.store().repair_channel_message_sender(
-        MID, &ghost_dev, false, None, None,
+        MID, &ghost_dev, false, good.signature.as_deref(), good.public_key.as_deref(),
     ).expect("poison row");
     assert!(changed, "the poison write must mutate the row");
     assert_eq!(

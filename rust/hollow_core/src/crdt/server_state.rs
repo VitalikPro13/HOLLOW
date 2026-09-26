@@ -2552,6 +2552,25 @@ mod tests {
         s
     }
 
+    /// Channel backfill is written into OUR history, so it comes only from a
+    /// current member who can read that channel (audit decision 2, candidate C3).
+    #[test]
+    fn authz_channel_backfill_only_from_a_member_who_can_read_it() {
+        let _g = crate::node::resolver::test_lock();
+        let allowed = crate::node::crypto_handler::channel_backfill_allowed_from;
+        let mut s = label_gate_fixture();
+        assert!(allowed(Some(&s), "member", "ch"));
+        assert!(!allowed(Some(&s), "stranger", "ch"));
+        assert!(!allowed(None, "member", "ch"), "a server we do not hold");
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(!allowed(Some(&s), "member", "ch"), "a member who cannot see the channel");
+        assert!(allowed(Some(&s), "vipper", "ch"));
+    }
+
     #[test]
     fn label_gate_replaces_visibility_tier() {
         let mut s = label_gate_fixture();

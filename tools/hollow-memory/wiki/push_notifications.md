@@ -216,9 +216,8 @@ iOS content resolution happens in the NSE.
   `hollow_push_string_free`). Wraps `node::fetch::run_fetch` with its OWN
   `current_thread` tokio runtime (no Dart isolate / global runtime in the NSE).
   `set_data_dir(data_dir)` first so identity + DB resolve to the App Group copy.
-- `hollow_push_decrypt(...)` — an offline fork-decrypt variant (decrypts a single
-  supplied ciphertext on a THROWAWAY session copy via `Session::from_pickle`,
-  never writes back). Kept as a proven alternative; the fetch path is the one used.
+- The old `hollow_push_decrypt` fork-decrypt export was DELETED (audit 2026-09-26,
+  candidate O4): unused, and it built first-contact sessions on an unauthenticated key.
 - Edition 2024: `#[unsafe(no_mangle)]` + explicit `unsafe {}` inside `unsafe fn`.
 
 ### Data-dir migration & shared DB

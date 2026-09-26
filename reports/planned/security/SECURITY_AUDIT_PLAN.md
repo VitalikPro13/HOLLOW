@@ -42,10 +42,19 @@ into possible holes, so this file itself belongs on the security branch.
   friend's master id), HOL-SEC-007 (remote panic, shard temp path). Confirmed,
   not yet fixed: HOL-SEC-004 (message rows rewritten by id through sync
   batches, channel and DM).
-- **Next:** fix HOL-SEC-004; then verify the candidate classes in the plan's
-  priority order (MLS credentials D, CRDT snapshot E1/E2, channel ingest C1/C2,
-  files H, relay I1/I2); every AGENT-status row must be re-read before it counts.
-  Policy decisions for Vitalik are listed at the top of `candidate_findings.md`.
+- **Session 3 (2026-09-26):** finding files now name the reproducing test and
+  never walk through the steps (template line "Reproduction"). HOL-SEC-004 FIXED
+  (one row-ownership guard for every sync item, both channel transports merged
+  into one ingest function, file cards bound to the signed `file_id`). Decision 2's
+  sender half built (channel backfill only from a current member who can see the
+  channel); its author half is candidate E4 (a provable membership record, High,
+  built with E1; decision 2a). `hollow_push_decrypt` deleted.
+- **Next:** verify the candidate classes in the plan's priority order (MLS
+  credentials D, CRDT snapshot E1/E2 with the membership record E4, channel
+  ingest C1/C2, files H, relay I1/I2),
+  and the live-path variants of HOL-SEC-004 (B3..B8); every AGENT-status row must
+  be re-read before it counts. Policy decisions for Vitalik are listed at the top
+  of `candidate_findings.md`.
 
 ---
 
@@ -307,7 +316,7 @@ Component:       file::handler, trust boundary crossed
 Traces to:       claim C-##, threat T-##, authz row A-##
 Attacker:        profile and position
 Description:     what the code does vs what the requirement says
-Exploit:         numbered steps with Alice and Mallory, preconditions, observable result
+Reproduction:    <test name>: the narrow "must be refused" test that failed before the fix
 Fix:             short term (this bug) and long term (kill the class)
 Variants:        what was searched, where, how, variants found
 Test:            name and harness (failed before the fix, passes after)
@@ -493,7 +502,7 @@ asked of every breakout.
 its DFD breakout, its matrix rows and its requirements, never just our
 invariants. Reviewer prompt shape: "for each row, show the line that enforces
 the policy, or construct an exploit with Alice and Mallory". Only findings
-with a reproduced exploit count.
+reproduced by a test count; the finding file names the test, never the steps.
 
 | WP | Area |
 |---|---|
@@ -652,7 +661,9 @@ Taken 2026-09-26, third round (phase B, see `audit/candidate_findings.md`):
 8. Every state-changing plaintext message is secured (Olm/MLS where a session
    exists, device-signed otherwise), as a breaking change.
 9. Backfill only from current members who can read the channel; former
-   members' rows stay, never-member authors are refused.
+   members' rows stay, never-member authors are refused. The last part needs a
+   provable membership record (every signed join/leave op kept forever), candidate
+   E4, built with E1; no accepted risk, no UI label in its place (2a, session 3).
 10. Device-list entries get device co-signatures, designed inside ID-1.
 11. Relay fixes deploy before the 0.12 client release, the pre-auth crash first.
 12. The unused `hollow_push_decrypt` export is deleted.

@@ -33,21 +33,11 @@ passphrase is a value the relay already holds:
 The whitepaper (section 3.4) says "the relay carries ciphertext only". The
 relay does carry ciphertext, but it holds the key to it.
 
-## Exploit
+## Reproduction
 
-1. Mallory runs a relay (or has access to one: the official VPS, a community's
-   self-hosted relay, a compromised host) and logs `claim_link_code` codes, or
-   notes the master id of any stream tagged `LinkSnapshot`.
-2. Alice links a new phone. The populated device shows its confirm prompt,
-   Alice accepts, and the snapshot streams through Mallory's relay.
-3. Mallory runs `import_backup`'s decryption with the logged code (or Alice's
-   public master id) and obtains Alice's master identity key, device key,
-   SQLCipher contents (DMs, servers, friends) and, if selected, files and vault.
-4. With the master key Mallory can sign as Alice, publish device lists adding
-   her own device, and issue master-signed orders. Nothing on Alice's side
-   shows it happened.
-
-Passive: nothing is altered in transit, so no user-visible failure.
+Not yet written (see Test). The relay needs nothing beyond what it already
+records: the link code or the public master id opens the snapshot, and nothing
+on the user's side shows it happened.
 
 ## Fix
 

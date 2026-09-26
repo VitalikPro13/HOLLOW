@@ -1,7 +1,7 @@
 # HOL-SEC-006: A stranger's device list could claim a friend's master id, taking over the friendship and, on the victim's replica, the friend's server role
 
 ```
-ID:          HOL-SEC-006                 Status: Fixed in the working tree (2026-09-26), retest at release
+ID:          HOL-SEC-006                 Status: Fixed on local main (2026-09-26), retest at release
 Severity:    Critical                    (Impact H: a friendship moves to the attacker, the friend's server membership and
                                           role fold into the attacker at the next canonicalisation, the owner's included;
                                           a legacy contact can be silenced. Exploitability H: any identity, through the
@@ -35,13 +35,11 @@ other identity's master id:
 The same gap let a list tombstone ids it never held and apply the process-wide
 revoked mark to them.
 
-## Exploit (reproduced)
+## Reproduction
 
 `a_foreign_device_list_cannot_claim_a_master_id_or_silence_a_legacy_contact`
-(node/crypto_handler.rs tests): Alice has Bob (multi-device) and Carol (legacy)
-as accepted friends with their lists stored. Mallory signs her own list
-`{devices: [mallory_device, bob_master], revoked: [carol]}` and delivers it from
-`mallory_device`. Before the fix `resolve(bob_master)` returned Mallory's master.
+(node/crypto_handler.rs tests): before the fix, a friend's master id resolved to
+the attacker's master and a legacy contact was marked revoked.
 
 ## Fix
 

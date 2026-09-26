@@ -46,7 +46,7 @@ char *hollow_push_fetch_and_decrypt(const char *data_dir,
                                     uint32_t timeout_secs,
                                     const char *server_room);
 
-// Free a string returned by hollow_push_fetch_and_decrypt / hollow_push_decrypt.
+// Free a string returned by hollow_push_fetch_and_decrypt.
 void hollow_push_string_free(char *ptr);
 
 #ifdef __cplusplus

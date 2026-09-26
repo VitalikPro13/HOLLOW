@@ -3410,27 +3410,9 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     let mut pk_cache = PkCache::new();
     let mut new_count = 0u32;
     for msg in &messages {
-        let sig_check = verify_sync_item_sig(msg, &sid, &cid, &mut pk_cache);
-        // SECURITY: only a VERIFYING signature gets stored, and the whole item is
-        // dropped (text, edit, file metadata, reactions and the hidden flag all ride
-        // it). Unsigned is refused too as of 0.8.5: the item names its own sender,
-        // so omitting the signature was an impersonation primitive.
-        if !sig_check.is_acceptable() {
-            hollow_log!(
-                "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={})",
-                msg.s, sig_check.reject_reason(), msg.mid, msg.ts
-            );
-            continue;
-        }
-        let sig_verified = sig_check == BackfillSig::Valid;
-        // Multi-device: a message authored by ANY of our own devices is ours.
-        let is_mine = super::resolver::same_identity(&msg.s, local_peer);
-        // The helpers stay synchronous and hand back the events to emit:
-        // holding a `&MessageStore` across an await would un-Send the future
-        // (rusqlite's Connection is !Sync).
-        let (inserted, events) = upsert_synced_channel_message(&store, &sid, &cid, msg, is_mine, sig_verified);
+        let (inserted, events) = ingest_synced_channel_item(&store, &sid, &cid, msg, local_peer, &mut pk_cache);
         new_count += inserted;
-        for ev in events.into_iter().chain(apply_sync_item_extras(&store, &sid, &cid, msg, is_mine, &mut pk_cache)) {
+        for ev in events {
             let _ = event_tx.send(ev).await;
         }
     }
@@ -3459,6 +3441,42 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
             new_message_count: new_count,
         }).await;
     }
+}
+
+/// One `ChannelSyncBatch` item, for both transports: verify, guard the row it
+/// names, then insert or update it with everything riding it. Returns (1 when a
+/// NEW row was inserted, else 0; the events to emit). Synchronous because holding
+/// a `&MessageStore` across an await would un-Send the caller's future.
+pub(crate) fn ingest_synced_channel_item(
+    store: &crate::storage::MessageStore,
+    sid: &str,
+    cid: &str,
+    msg: &SyncMessageItem,
+    local_peer: &str,
+    pk_cache: &mut PkCache,
+) -> (u32, Vec<NetworkEvent>) {
+    let sig_check = verify_sync_item_sig(msg, sid, cid, pk_cache);
+    // SECURITY: only a VERIFYING signature gets stored, and the whole item is
+    // dropped (text, edit, file metadata, reactions and the hidden flag all ride
+    // it). Unsigned is refused too as of 0.8.5: the item names its own sender,
+    // so omitting the signature was an impersonation primitive.
+    if !sig_check.is_acceptable() {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={})",
+            msg.s, sig_check.reject_reason(), msg.mid, msg.ts
+        );
+        return (0, Vec::new());
+    }
+    let scope = super::message_ops::SyncedRowScope::Channel { sid, cid, signer: &msg.s };
+    if !super::message_ops::synced_item_may_touch_row(store, &scope, msg.mid.as_deref()) {
+        return (0, Vec::new());
+    }
+    let sig_verified = sig_check == BackfillSig::Valid;
+    // Multi-device: a message authored by ANY of our own devices is ours.
+    let is_mine = super::resolver::same_identity(&msg.s, local_peer);
+    let (inserted, mut events) = upsert_synced_channel_message(store, sid, cid, msg, is_mine, sig_verified);
+    events.extend(apply_sync_item_extras(store, sid, cid, msg, is_mine, pk_cache));
+    (inserted, events)
 }
 
 /// Verify one synced item's signature (cached pubkey parse) under the backfill
@@ -3616,27 +3634,24 @@ fn apply_sync_item_extras(
             });
         }
     }
-    // Owner guard (0.8.5): the item's v2 signature binds `file_id`, not this
-    // file_meta blob — see `file_handler::file_meta_write_allowed`.
-    if let Some(ref fm) = msg.file_meta
-        .as_ref()
-        .filter(|fm| super::file_handler::file_meta_write_allowed(store, &fm.fid, &fm.sender))
-    {
+    if let Some(fm) = super::file_handler::synced_file_meta(
+        store, msg.file_meta.as_ref(), msg.file_id.as_deref(), &msg.s,
+    ) {
         let ctx_id = format!("{sid}:{cid}");
         let thumb = super::file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime);
         let _ = store.insert_file_metadata(
             &fm.fid, &fm.name, &fm.ext, &fm.mime,
             fm.size, 0, fm.img, fm.w, fm.h,
-            fm.mid.as_deref(), "channel", &ctx_id,
-            &fm.sender, is_mine, fm.ts,
+            msg.mid.as_deref(), "channel", &ctx_id,
+            &msg.s, is_mine, fm.ts,
             fm.vthumb.as_ref(), thumb.as_deref(),
         );
         events.push(NetworkEvent::FileHeaderReceived {
             file_id: fm.fid.clone(), file_name: fm.name.clone(),
             size_bytes: fm.size, is_image: fm.img,
             width: fm.w, height: fm.h,
-            message_id: fm.mid.clone().unwrap_or_default(),
-            sender_id: fm.sender.clone(),
+            message_id: msg.mid.clone().unwrap_or_default(),
+            sender_id: msg.s.clone(),
             server_id: sid.to_string(), channel_id: cid.to_string(),
             video_thumb: fm.vthumb.clone(),
             share_ref: None,

@@ -1,7 +1,7 @@
 # HOL-SEC-005: Any identity could delete another user's identity and messages, or take their identity with one click, through the device-link flow
 
 ```
-ID:          HOL-SEC-005                 Status: Fixed in the working tree (2026-09-26), retest at release
+ID:          HOL-SEC-005                 Status: Fixed on local main (2026-09-26), retest at release
 Severity:    Critical                    (Impact H: identity and message database deleted at the next launch, or the
                                           identity replaced; Exploitability H: any authenticated identity that knows the
                                           victim's public master id, no relationship needed)
@@ -41,17 +41,13 @@ the public master peer id and streams it to the requester, who decrypts it.
 The inbox room `inbox:{master}` is joinable by any authenticated socket (relay
 row A-02), and a master id is public to every friend, server member and guest.
 
-## Exploit (reproduced)
+## Reproduction
 
-`authz_link_frames_from_a_stranger_are_refused` (node/test_harness.rs):
-
-1. Mallory joins `inbox:{alice_master}`.
-2. Mallory sends `LinkSnapshotRequest`, `LinkSnapshotKey { link_id: "link_mallory" }`
-   and one `TYPE_LINK` stream frame carrying arbitrary bytes.
-
-Before the fix: Alice's node raised the sync prompt, completed the snapshot and
-stashed it for the next launch. `pending_link_import_keeps_the_identity_when_the_blob_does_not_open`
-showed the next launch then deletes `identity.key` for a blob that never opens.
+`authz_link_frames_from_a_stranger_are_refused` (node/test_harness.rs): before
+the fix, link frames from a stranger raised the sync prompt and stashed a
+snapshot for the next launch.
+`pending_link_import_keeps_the_identity_when_the_blob_does_not_open`: before the
+fix, that launch deleted the identity for a blob that never opens.
 
 ## Fix
 

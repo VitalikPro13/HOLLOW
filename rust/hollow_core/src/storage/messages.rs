@@ -172,6 +172,14 @@ pub(crate) struct MessageSigRow {
     pub album_id: Option<String>,
 }
 
+/// A channel message's place and claimed author, for the sync row-mutation guard.
+pub(crate) struct ChannelRowOwner {
+    pub server_id: String,
+    pub channel_id: String,
+    pub sender_id: String,
+    pub public_key: Option<String>,
+}
+
 /// A stored file metadata entry.
 pub(crate) struct StoredFile {
     pub file_id: String,
@@ -3045,6 +3053,22 @@ impl MessageStore {
                 "SELECT sender_id FROM channel_messages WHERE message_id = ?1",
                 params![message_id],
                 |row| row.get(0),
+            )
+            .ok()
+    }
+
+    /// Where a channel message lives and who it names as author.
+    pub fn get_channel_message_owner(&self, message_id: &str) -> Option<ChannelRowOwner> {
+        self.conn
+            .query_row(
+                "SELECT server_id, channel_id, sender_id, public_key FROM channel_messages WHERE message_id = ?1",
+                params![message_id],
+                |row| Ok(ChannelRowOwner {
+                    server_id: row.get(0)?,
+                    channel_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    public_key: row.get(3)?,
+                }),
             )
             .ok()
     }

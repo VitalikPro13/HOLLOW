@@ -21,10 +21,11 @@ also silenced third parties' devices (`resolver::mark_revoked`), and its
 (`resolver::update_many`). The signer's authority over the ids it named was
 never checked.
 
-## Exploit
+## Reproduction
 
-Mallory signs her own list `{devices:[mallory_dev], revoked:[alice_dev]}` and
-delivers it on a profile sync in any shared room. Alice's device wipes itself.
+`a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices`: before
+the fix, a list signed by another identity that named our device as revoked
+wiped it.
 
 ## Fix
 

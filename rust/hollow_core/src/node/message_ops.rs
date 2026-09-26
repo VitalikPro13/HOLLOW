@@ -1599,6 +1599,56 @@ fn preview_column(preview: Option<&LinkPreviewRef>) -> Option<String> {
     preview.and_then(|lp| serde_json::to_string(lp).ok())
 }
 
+/// The conversation a synced item names, and the principal its signature proves.
+pub(crate) enum SyncedRowScope<'a> {
+    /// `signer` = the item's verified `s`.
+    Channel { sid: &'a str, cid: &'a str, signer: &'a str },
+    /// `convo` = the conversation master; `is_mine` = OUR direction for the item,
+    /// which already picked the signer the item verified against.
+    Dm { convo: &'a str, is_mine: bool },
+}
+
+/// Whether a verified sync item may change the row its `mid` names. The item's
+/// signature proves who wrote the ITEM, never that the row it lands on is theirs,
+/// so an existing row changes only when it sits in the item's channel or
+/// conversation and its author is the item's signer. `true` when there is no row.
+///
+/// A channel row's author is its sender collapsed to the master, or the key its
+/// stored signature names: a row wedged under an unresolvable device id still
+/// carries its author's key, which is what lets the sender repair converge it.
+pub(crate) fn synced_item_may_touch_row(
+    store: &crate::storage::MessageStore,
+    scope: &SyncedRowScope<'_>,
+    mid: Option<&str>,
+) -> bool {
+    let Some(mid) = mid else { return true };
+    let allowed = match *scope {
+        SyncedRowScope::Channel { sid, cid, signer } => {
+            let Some(row) = store.get_channel_message_owner(mid) else { return true };
+            row.server_id == sid
+                && row.channel_id == cid
+                && (super::resolver::same_identity(&row.sender_id, signer)
+                    || row.public_key.as_deref().and_then(peer_id_of_public_key).as_deref()
+                        == Some(super::resolver::resolve(signer).as_str()))
+        }
+        SyncedRowScope::Dm { convo, is_mine } => {
+            let Some(row_is_mine) = store.get_dm_message_is_mine(mid) else { return true };
+            let row_convo = store.get_dm_message_peer(mid).unwrap_or_default();
+            row_is_mine == is_mine && super::resolver::resolve(&row_convo) == convo
+        }
+    };
+    if !allowed {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED synced item for {mid}: the row belongs to another author or conversation");
+    }
+    allowed
+}
+
+fn peer_id_of_public_key(pk_b64: &str) -> Option<String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(pk_b64).ok()?;
+    crate::identity::native_identity::NativeKeypair::peer_id_from_pubkey_protobuf(&bytes)
+}
+
 /// Land the card riding a VERIFIED sync item on its row.
 ///
 /// Backfill used to carry only `lp_digest`, so a peer offline when a card was
@@ -3489,5 +3539,136 @@ mod tests {
         // Wrong channel context: a real message from another channel cannot be
         // replayed into this one.
         assert!(!guest_item_accepted(&good, sid, "other-chan", &mut cache));
+    }
+
+    // ── Sync items never rewrite a row they do not own (HOL-SEC-004) ──────
+
+    /// A channel sync item signed by `k` as its own author.
+    fn own_channel_item(
+        k: &NativeKeypair, sid: &str, cid: &str, mid: &str, text: &str, ts: i64,
+        edited_at: Option<i64>, file_id: Option<&str>, lp: Option<&LinkPreviewRef>,
+    ) -> crate::node::types::SyncMessageItem {
+        let digest = lp.map(link_preview_digest);
+        let extras = SignedExtras {
+            mid: Some(mid), reply_to: None, file_id,
+            order_us: Some(ts * 1000), lp_digest: digest.as_deref(), album: None,
+        };
+        let (sig, pk) = sign_message_versioned(
+            k, &pk_b64(k), "ch", &format!("{sid}:{cid}"), &k.peer_id(),
+            edited_at.unwrap_or(ts), &extras, text,
+        );
+        crate::node::types::SyncMessageItem {
+            s: k.peer_id(), t: text.to_string(), ts, sig, pk,
+            mid: Some(mid.to_string()), edited_at, reply_to: None,
+            file_id: file_id.map(str::to_string), file_meta: None,
+            hidden_at: None, hidden_sig: None, hidden_pk: None,
+            order_us: Some(ts * 1000), lp_digest: digest, lp: lp.map(|c| Box::new(c.clone())),
+            reactions: Vec::new(), album: None,
+        }
+    }
+
+    fn file_meta_for(fid: &str, sender: &str, name: &str) -> crate::node::types::SyncFileMetaItem {
+        crate::node::types::SyncFileMetaItem {
+            fid: fid.to_string(), name: name.to_string(), ext: "pdf".to_string(),
+            mime: "application/pdf".to_string(), size: 10, img: false, w: None, h: None,
+            mid: None, ts: 1_000, sender: sender.to_string(), vthumb: None, thumb: None,
+        }
+    }
+
+    #[test]
+    fn authz_synced_channel_item_cannot_rewrite_another_authors_row() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let (bob, mallory, alice) = (kp(101), kp(102), kp(103));
+        let (sid, cid, mid, text) = ("srv-b1", "chan-b1", "bob-msg-1", "meet at noon");
+        let ingest = |item: &crate::node::types::SyncMessageItem| {
+            crate::node::sync_handler::ingest_synced_channel_item(
+                &store, sid, cid, item, &alice.peer_id(), &mut PkCache::new(),
+            )
+        };
+
+        let bobs = own_channel_item(&bob, sid, cid, mid, text, 1_000, None, Some("bob-file"), None);
+        let mut with_card = bobs.clone();
+        with_card.file_meta = Some(file_meta_for("bob-file", &bob.peer_id(), "photo.pdf"));
+        assert_eq!(ingest(&with_card).0, 1, "Bob's own item inserts his row");
+
+        // Re-attribution, with a self-signed deletion riding the same item.
+        let mut claim = own_channel_item(&mallory, sid, cid, mid, text, 1_000, None, None, None);
+        let (hsig, hpk) = sign_channel_delete(
+            &store, &mallory, &pk_b64(&mallory), &mallory.peer_id(), sid, cid, mid, 2_000,
+        );
+        (claim.hidden_at, claim.hidden_sig, claim.hidden_pk) = (Some(2_000), hsig, hpk);
+        ingest(&claim);
+        assert_eq!(store.get_channel_message_sender(mid).as_deref(), Some(bob.peer_id().as_str()));
+        assert_eq!(store.get_channel_message_hidden_at(mid), None);
+
+        // Text rewrite under Bob's name, and a card grafted onto his text.
+        ingest(&own_channel_item(&mallory, sid, cid, mid, "send money", 1_000, Some(3_000), None, None));
+        let card = LinkPreviewRef {
+            url: "https://evil.example/".to_string(), title: "Login".to_string(),
+            description: String::new(), domain: "evil.example".to_string(),
+            site_name: String::new(), thumb_webp_b64: None, thumb_w: None, thumb_h: None, rich: None,
+        };
+        ingest(&own_channel_item(&mallory, sid, cid, mid, text, 1_000, Some(3_000), None, Some(&card)));
+        let row = store.get_channel_message_sig_row(mid).expect("row");
+        assert_eq!(row.text, text);
+        assert_eq!(row.link_preview, None);
+
+        // Mallory's own message relabelling Bob's file card.
+        let mut relabel = own_channel_item(&mallory, sid, cid, "mal-1", "hi", 1_500, None, Some("bob-file"), None);
+        relabel.file_meta = Some(file_meta_for("bob-file", &bob.peer_id(), "invoice.pdf"));
+        ingest(&relabel);
+        let mut smuggled = own_channel_item(&mallory, sid, cid, "mal-2", "hi", 1_600, None, None, None);
+        smuggled.file_meta = Some(file_meta_for("bob-file", &bob.peer_id(), "invoice.pdf"));
+        ingest(&smuggled);
+        assert_eq!(store.get_file_metadata("bob-file").unwrap().unwrap().file_name, "photo.pdf");
+
+        // Bob's own edit signed for ANOTHER channel does not land on this row.
+        let elsewhere = own_channel_item(&bob, sid, "chan-other", mid, "moved", 1_000, Some(4_000), None, None);
+        crate::node::sync_handler::ingest_synced_channel_item(
+            &store, sid, "chan-other", &elsewhere, &alice.peer_id(), &mut PkCache::new(),
+        );
+        assert_eq!(store.get_channel_message_sig_row(mid).unwrap().text, text);
+
+        // The author's own edit still applies.
+        ingest(&own_channel_item(&bob, sid, cid, mid, "meet at one", 1_000, Some(5_000), None, None));
+        assert_eq!(store.get_channel_message_sig_row(mid).unwrap().text, "meet at one");
+    }
+
+    /// The wedged-row heal still converges: a row stored under an unresolvable
+    /// device id keeps its author's key, and the author's verified copy repairs it.
+    #[test]
+    fn synced_channel_item_still_repairs_a_row_wedged_under_a_device_id() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let (bob, ghost) = (kp(111), kp(112));
+        let (sid, cid, mid) = ("srv-w", "chan-w", "wedged-1");
+        let item = own_channel_item(&bob, sid, cid, mid, "hello", 1_000, None, None, None);
+        store.insert_channel_message(
+            sid, cid, &ghost.peer_id(), "hello", false, 1_000,
+            item.sig.as_deref(), item.pk.as_deref(), Some(mid), None, None, Some(1_000_000), None,
+        ).unwrap();
+        crate::node::sync_handler::ingest_synced_channel_item(
+            &store, sid, cid, &item, &kp(113).peer_id(), &mut PkCache::new(),
+        );
+        assert_eq!(store.get_channel_message_sender(mid).as_deref(), Some(bob.peer_id().as_str()));
+    }
+
+    #[test]
+    fn authz_synced_dm_item_touches_only_its_own_conversation_and_direction() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let (bob, mallory) = (kp(121).peer_id(), kp(122).peer_id());
+        store.insert(&bob, "from bob", false, 1_000, None, None, Some("dm-b"), None, None, None, None).unwrap();
+        store.insert(&bob, "to bob", true, 1_100, None, None, Some("dm-a"), None, None, None, None).unwrap();
+        let may = |convo: &str, is_mine: bool, mid: &str| synced_item_may_touch_row(
+            &store, &SyncedRowScope::Dm { convo, is_mine }, Some(mid),
+        );
+        assert!(!may(&mallory, false, "dm-b"), "another conversation's row");
+        assert!(!may(&bob, true, "dm-b"), "Bob's row claimed as ours");
+        assert!(!may(&bob, false, "dm-a"), "our row claimed as Bob's");
+        assert!(may(&bob, false, "dm-b"));
+        assert!(may(&bob, true, "dm-a"));
+        assert!(may(&mallory, false, "not-stored-yet"));
     }
 }

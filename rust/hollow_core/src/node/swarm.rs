@@ -7091,6 +7091,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
+                    if !crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), peer_str, &cid) {
+                        return;
+                    }
                     let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
@@ -7099,164 +7102,12 @@ async fn handle_incoming_request(
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
                         for msg in &messages {
-                            // Backfill signature rule: Valid or nothing. An unsigned item is
-                            // an injection that can claim ANY sender via `msg.s`. An edited
-                            // row verifies against its EDIT signature (edited_at plus current
-                            // text). The digest is recomputed from the shipped card when there
-                            // is one, which is what makes the preview signature-covered.
-                            let lp_digest = crypto_handler::backfill_lp_digest(
-                                msg.lp.as_deref(), msg.lp_digest.as_deref(),
+                            let (inserted, events) = super::sync_handler::ingest_synced_channel_item(
+                                &store, &sid, &cid, msg, &local_peer, &mut pk_cache,
                             );
-                            let extras = crypto_handler::SignedExtras {
-                                mid: msg.mid.as_deref(),
-                                reply_to: msg.reply_to.as_deref(),
-                                file_id: msg.file_id.as_deref(),
-                                order_us: msg.order_us,
-                                lp_digest: lp_digest.as_deref(),
-                                album: msg.album.as_deref(),
-                            };
-                            let sig_check = check_backfill_signature(
-                                &msg.s, "ch", &format!("{sid}:{cid}"),
-                                msg.ts, msg.edited_at, &extras, &msg.t,
-                                msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
-                            );
-                            // SECURITY: drop the whole item — text, edit, file
-                            // metadata, reactions and the hidden flag all ride it.
-                            if !sig_check.is_acceptable() {
-                                hollow_log!(
-                                    "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={}, text_len={}, has_pk={})",
-                                    msg.s, sig_check.reject_reason(), msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
-                                );
-                                continue;
-                            }
-                            let sig_verified = sig_check == BackfillSig::Valid;
-
-                            // Through the resolver: a row authored by any of our own
-                            // devices is ours, or our own backfilled posts count unread.
-                            let is_mine = super::resolver::same_identity(&msg.s, &local_peer);
-                            let already_exists = msg.mid.as_ref()
-                                .map(|mid| store.channel_message_exists(mid))
-                                .unwrap_or(false);
-
-                            if !already_exists {
-                                match store.insert_channel_message(
-                                    &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
-                                    msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                    msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
-                                    msg.album.as_deref(),
-                                ) {
-                                    Ok(1) => {
-                                        new_count += 1;
-                                        if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
-                                            let _ = store.set_channel_message_edited_at(mid, edit_ts);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            } else if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
-                                let _ = store.edit_channel_message(
-                                    mid, &msg.t, edit_ts,
-                                    msg.sig.as_deref(), msg.pk.as_deref(),
-                                );
-                            } else if sig_verified {
-                                // Multi-device self-heal: the row may exist under a sender DEVICE id
-                                // with signature material that no longer verifies here, which renders
-                                // as an unverified-signature bubble. This synced copy's signature
-                                // VERIFIED, so a row attributed to a different sender is repaired to
-                                // the verified one. INSERT OR IGNORE blocks re-inserting the good copy,
-                                // so this UPDATE is the only converging path, and it can never forge.
-                                if let Some(mid) = &msg.mid {
-                                    let stored_sender = store.get_channel_message_sender(mid);
-                                    if stored_sender.as_deref() != Some(msg.s.as_str()) {
-                                        match store.repair_channel_message_sender(
-                                            mid, &msg.s, is_mine,
-                                            msg.sig.as_deref(), msg.pk.as_deref(),
-                                        ) {
-                                            Ok(true) => hollow_log!(
-                                                "[HOLLOW-SYNC] Repaired channel msg {mid} sender {stored_sender:?} → {} (verified)", msg.s
-                                            ),
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-
-                            // The card the item's signature covers. Runs on
-                            // every branch above — fresh row, pre-existing
-                            // card-less row, edited row — so a peer catching
-                            // up gets the preview with the message instead of
-                            // a bare link. See `apply_synced_link_preview`.
-                            if sig_verified
-                                && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
-                                && message_ops::apply_synced_link_preview(
-                                    &store, true, mid, &msg.t,
-                                    lp, msg.sig.as_deref(), msg.pk.as_deref(),
-                                )
-                            {
-                                let _ = event_tx.send(NetworkEvent::ChannelLinkPreviewUpdated {
-                                    server_id: sid.clone(),
-                                    channel_id: cid.clone(),
-                                    message_id: mid.clone(),
-                                    preview: Some(lp.clone()),
-                                }).await;
-                            }
-
-                            // Apply deletion if the message was hidden on the syncing peer —
-                            // ONLY with the author's own deletion proof (REJECT-ABSENT, 0.8.4).
-                            if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                let _ = message_ops::apply_verified_channel_deletion(
-                                    &store, &sid, &cid, mid, hidden_ts,
-                                    msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(),
-                                    &mut pk_cache,
-                                );
-                            }
-
-                            // Insert file metadata and emit FileHeaderReceived for late joiners. The
-                            // item's v2 signature binds `file_id`, NOT this file_meta blob, so the owner
-                            // guard is what stops a responder relabelling someone else's attachment.
-                            if let Some(ref fm) = msg.file_meta
-                                .as_ref()
-                                .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
-                            {
-                                let ctx_id = format!("{sid}:{cid}");
-                                let _ = store.insert_file_metadata(
-                                    &fm.fid, &fm.name, &fm.ext, &fm.mime,
-                                    fm.size, 0, fm.img, fm.w, fm.h,
-                                    fm.mid.as_deref(), "channel", &ctx_id,
-                                    &fm.sender, msg.s == local_peer, fm.ts,
-                                    fm.vthumb.as_ref(),
-                                    file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
-                                );
-                                let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
-                                    file_id: fm.fid.clone(),
-                                    file_name: fm.name.clone(),
-                                    size_bytes: fm.size,
-                                    is_image: fm.img,
-                                    width: fm.w,
-                                    height: fm.h,
-                                    message_id: fm.mid.clone().unwrap_or_default(),
-                                    sender_id: fm.sender.clone(),
-                                    server_id: sid.clone(),
-                                    channel_id: cid.clone(),
-                                    video_thumb: fm.vthumb.clone(),
-                                    share_ref: None,
-                                    thumb_b64: file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime),
-                                }).await;
-                            }
-
-                            // Sync reactions for this message (INSERT OR IGNORE, idempotent). Each
-                            // reaction names its own reactor and carries its own signature check: the
-                            // item verdict above covers the message, not the reactions on it.
-                            if let Some(mid) = &msg.mid {
-                                for r in &msg.reactions {
-                                    if !message_ops::sync_reaction_accepted(mid, r) {
-                                        continue;
-                                    }
-                                    let _ = store.add_reaction(
-                                        mid, &r.e, &r.p, r.ts,
-                                        r.sig.as_deref(), r.pk.as_deref(),
-                                    );
-                                }
+                            new_count += inserted;
+                            for ev in events {
+                                let _ = event_tx.send(ev).await;
                             }
                         }
                         let _ = store.commit_transaction();
@@ -7496,6 +7347,10 @@ async fn handle_incoming_request(
                                 );
                                 continue;
                             }
+                            let scope = message_ops::SyncedRowScope::Dm { convo: &convo_peer, is_mine };
+                            if !message_ops::synced_item_may_touch_row(&store, &scope, msg.mid.as_deref()) {
+                                continue;
+                            }
 
                             let already_exists = msg.mid.as_ref()
                                 .map(|mid| store.dm_message_exists(mid))
@@ -7609,16 +7464,15 @@ async fn handle_incoming_request(
                             // Insert file metadata and emit FileHeaderReceived for late joiners. A DM
                             // file's context is the conversation MASTER (`convo_peer`), not the raw
                             // device id, so it matches where the message row is stored and
-                            // `_reloadChatForFile` reloads the right thread. Owner guard: see above.
-                            if let Some(ref fm) = msg.file_meta
-                                .as_ref()
-                                .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
-                            {
+                            // `_reloadChatForFile` reloads the right thread.
+                            if let Some(fm) = file_handler::synced_file_meta(
+                                &store, msg.file_meta.as_ref(), msg.file_id.as_deref(), sender_m,
+                            ) {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
                                     fm.size, 0, fm.img, fm.w, fm.h,
-                                    fm.mid.as_deref(), "dm", &convo_peer,
-                                    &fm.sender, false, fm.ts,
+                                    msg.mid.as_deref(), "dm", &convo_peer,
+                                    sender_m, false, fm.ts,
                                     fm.vthumb.as_ref(),
                                     file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                 );
@@ -7629,8 +7483,8 @@ async fn handle_incoming_request(
                                     is_image: fm.img,
                                     width: fm.w,
                                     height: fm.h,
-                                    message_id: fm.mid.clone().unwrap_or_default(),
-                                    sender_id: fm.sender.clone(),
+                                    message_id: msg.mid.clone().unwrap_or_default(),
+                                    sender_id: sender_m.to_string(),
                                     server_id: String::new(),
                                     channel_id: convo_peer.clone(),
                                     video_thumb: fm.vthumb.clone(),
@@ -7744,6 +7598,10 @@ async fn handle_incoming_request(
                                 );
                                 continue;
                             }
+                            let scope = message_ops::SyncedRowScope::Dm { convo: &convo_peer, is_mine: msg.mine };
+                            if !message_ops::synced_item_may_touch_row(&store, &scope, msg.mid.as_deref()) {
+                                continue;
+                            }
 
                             let already_exists = msg.mid.as_ref()
                                 .map(|mid| store.dm_message_exists(mid))
@@ -7851,16 +7709,14 @@ async fn handle_incoming_request(
                             }
 
                             // File metadata (so the card renders; bytes fetch on demand).
-                            // Owner guard: see the channel batch above.
-                            if let Some(ref fm) = msg.file_meta
-                                .as_ref()
-                                .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
-                            {
+                            if let Some(fm) = file_handler::synced_file_meta(
+                                &store, msg.file_meta.as_ref(), msg.file_id.as_deref(), sender_m,
+                            ) {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
                                     fm.size, 0, fm.img, fm.w, fm.h,
-                                    fm.mid.as_deref(), "dm", &convo_peer,
-                                    &fm.sender, false, fm.ts,
+                                    msg.mid.as_deref(), "dm", &convo_peer,
+                                    sender_m, false, fm.ts,
                                     fm.vthumb.as_ref(),
                                     file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                 );
@@ -7871,8 +7727,8 @@ async fn handle_incoming_request(
                                     is_image: fm.img,
                                     width: fm.w,
                                     height: fm.h,
-                                    message_id: fm.mid.clone().unwrap_or_default(),
-                                    sender_id: fm.sender.clone(),
+                                    message_id: msg.mid.clone().unwrap_or_default(),
+                                    sender_id: sender_m.to_string(),
                                     server_id: String::new(),
                                     channel_id: convo_peer.clone(),
                                     video_thumb: fm.vthumb.clone(),
@@ -11264,13 +11120,15 @@ async fn handle_incoming_request(
                             }
 
                             MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. } => {
-                                sync_handler::handle_envelope_channel_sync_batch(
-                                    olm, bundle_keypair, event_tx, ws_cmd_tx,
-                                    ws_room_peers, &local_peer, &sender_peer_id,
-                                    sid, cid, messages, total, has_more,
-                                    crypto_store, crdt_store,
-                                    db_path, db_passphrase,
-                                ).await;
+                                if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
+                                    sync_handler::handle_envelope_channel_sync_batch(
+                                        olm, bundle_keypair, event_tx, ws_cmd_tx,
+                                        ws_room_peers, &local_peer, &sender_peer_id,
+                                        sid, cid, messages, total, has_more,
+                                        crypto_store, crdt_store,
+                                        db_path, db_passphrase,
+                                    ).await;
+                                }
                             }
 
                             // -- Vault/shard envelopes via MLS (same logic as Olm handlers) --
