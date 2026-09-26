@@ -274,6 +274,19 @@ impl MockRelay {
         }
     }
 
+    /// [`Self::inject_direct`] for a binary stream frame (`WsEvent::BinaryDirect`).
+    #[allow(dead_code)]
+    pub(crate) fn inject_binary(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get(target) {
+            let _ = conn.event_tx.send(WsEvent::BinaryDirect {
+                room: room.to_string(),
+                from: from.to_string(),
+                data,
+            });
+        }
+    }
+
     /// Mark a node offline (simulate a disconnect): stop delivering to it, drop
     /// it from every room (broadcasting PeerLeft), so peers see it leave. Its
     /// event loop keeps running but receives nothing until it comes back.
@@ -3220,6 +3233,339 @@ async fn plaintext_call_signal_is_rejected() {
     })
     .await;
     assert!(!rang, "a plaintext call signal must be REJECTED, never surfaced as a call");
+}
+
+// HOL-SEC-003, authz row A-DM-03: a PreKey frame names the Curve25519 identity key
+// the receiver builds its inbound session on. Only the relay-stamped sender id says
+// whose key that is, so the relay must not be able to open a session in another
+// device's name with a key of its own. Uses nothing but relay powers: frames it
+// recorded, a replay inside the freshness window, and a forged `from`.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
+    use super::types::{HavenMessage, MessageEnvelope};
+
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 76;
+    const B_MASTER: u8 = 86;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    relay.set_recording(&a_master, true);
+    relay.set_recording(&b_master, true);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    let dm_room = super::types::dm_room_code(&a.master_id, &b.master_id);
+
+    // History from before the attack, one line each way, so whichever side turns out
+    // to be the victim holds a row the relay has never seen in the clear.
+    for (from, to, mid) in [(&a, &b.master_id, "hist-a"), (&b, &a.master_id, "hist-b")] {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.clone(),
+                text: "history-before-the-attack".to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // The handshake left a signed KeyRequest on the wire. Whoever sent it is the
+    // device the relay will impersonate; whoever it was addressed to is the victim.
+    let key_request_to = |frame: &Vec<u8>| -> Option<String> {
+        match serde_json::from_slice::<HavenMessage>(frame) {
+            Ok(HavenMessage::KeyRequest { to: Some(to), .. }) => Some(to),
+            _ => None,
+        }
+    };
+    let (impersonated, victim, request) = relay
+        .recorded_frames(&a.device_id)
+        .into_iter()
+        .filter(|f| key_request_to(f).as_deref() == Some(b.device_id.as_str()))
+        .map(|f| (a.device_id.clone(), b.device_id.clone(), f))
+        .chain(
+            relay
+                .recorded_frames(&b.device_id)
+                .into_iter()
+                .filter(|f| key_request_to(f).as_deref() == Some(a.device_id.as_str()))
+                .map(|f| (b.device_id.clone(), a.device_id.clone(), f)),
+        )
+        .last()
+        .expect("the handshake must have put a signed KeyRequest on the wire");
+    let victim_node = if victim == a.device_id { &mut a } else { &mut b };
+
+    // Replayed inside its 300 s window, the request makes the victim publish a fresh
+    // one-time key in a KeyBundle. The impersonated device already holds a session
+    // and ignores that bundle, so the key stays unused. Replayed until it lands,
+    // since the handshake may have armed the victim's 5 s re-key cooldown.
+    let seen = relay.recorded_frames(&victim).len();
+    let mut bundle = None;
+    wait_until(15, async || {
+        relay.inject_direct(&dm_room, &impersonated, &victim, request.clone());
+        for frame in relay.recorded_frames(&victim).into_iter().skip(seen) {
+            if let Ok(HavenMessage::KeyBundle { identity_key, one_time_key, to: Some(to), .. }) =
+                serde_json::from_slice::<HavenMessage>(&frame)
+            {
+                if to == impersonated {
+                    bundle = Some((identity_key, one_time_key));
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    let (victim_ik, victim_otk) = bundle.expect("the replayed KeyRequest must draw a KeyBundle");
+
+    // The relay's own Olm account opens a session on that key and speaks first, as
+    // the impersonated device, with a call invite carrying a media key it chose.
+    let mut relay_olm = OlmManager::new();
+    relay_olm
+        .create_outbound_session("victim", &victim_ik, &victim_otk)
+        .expect("outbound session from the published bundle");
+    let invite = MessageEnvelope::CallSignal {
+        signal: Box::new(HavenMessage::CallInvite {
+            call_id: "relay-forged-call".to_string(),
+            video: false,
+            sframe_key: "00000000000000000000000000000000".to_string(),
+        }),
+    };
+    let (message_type, ciphertext) = relay_olm
+        .encrypt("victim", serde_json::to_string(&invite).unwrap().as_bytes())
+        .expect("encrypt");
+    assert_eq!(message_type, 0, "the first message on a fresh session is a PreKey");
+    // The relay signs the binding correctly, with the device key it owns: the wrong
+    // principal for the device it names.
+    let relay_device = NativeKeypair::from_secret_bytes(&seed_bytes(201));
+    let relay_ik = relay_olm.identity_key_base64();
+    let (identity_sig, identity_pk) = super::crypto_handler::sign_message(
+        &relay_device,
+        &base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            relay_device.public_key_protobuf(),
+        ),
+        &super::crypto_handler::olm_identity_signing_payload(&impersonated, &relay_ik),
+    );
+    let forged = serde_json::to_vec(&HavenMessage::Encrypted {
+        message_type: 0,
+        body: OlmManager::encode_base64(&ciphertext),
+        identity_key: Some(relay_ik),
+        identity_sig,
+        identity_pk,
+    })
+    .unwrap();
+    drain_events(victim_node);
+    let seen = relay.recorded_frames(&victim).len();
+    relay.inject_direct(&dm_room, &impersonated, &victim, forged);
+
+    let rang = wait_event(victim_node, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::CallSignal { payload, .. } if payload.contains("relay-forged-call"))
+    })
+    .await;
+
+    // Whatever the victim now encrypts to the impersonated device must stay closed to
+    // the relay: a plaintext sync request in that device's name pulls the old
+    // history, and a new DM rides the same session.
+    let sync_request = serde_json::to_vec(&HavenMessage::DmSyncRequest {
+        since_timestamp: 0,
+        both_directions: true,
+        gap: None,
+    })
+    .unwrap();
+    relay.inject_direct(&dm_room, &impersonated, &victim, sync_request);
+    let impersonated_master = if impersonated == a.device_id { a.master_id.clone() } else { b.master_id.clone() };
+    let victim_node = if victim == a.device_id { &mut a } else { &mut b };
+    victim_node
+        .cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: impersonated_master,
+            text: "only-for-the-real-device".to_string(),
+            message_id: "hol-sec-003-dm".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+
+    // A message key is spent once decrypted, so each frame is tried exactly once.
+    let mut relay_read = String::new();
+    let mut tried = seen;
+    wait_until(8, async || {
+        let frames = relay.recorded_frames(&victim);
+        for frame in frames.iter().skip(tried) {
+            let Ok(HavenMessage::Encrypted { message_type, body, .. }) =
+                serde_json::from_slice::<HavenMessage>(frame)
+            else {
+                continue;
+            };
+            let Ok(ct) = OlmManager::decode_base64(&body) else { continue };
+            if let Ok(pt) = relay_olm.decrypt("victim", message_type, &ct) {
+                relay_read.push_str(&String::from_utf8_lossy(&pt));
+            }
+        }
+        tried = frames.len();
+        relay_read.contains("only-for-the-real-device") && relay_read.contains("history-before-the-attack")
+    })
+    .await;
+    let read_live = relay_read.contains("only-for-the-real-device");
+    let read_history = relay_read.contains("history-before-the-attack");
+
+    assert!(
+        !rang && !read_live && !read_history,
+        "HOL-SEC-003: a PreKey on a relay-minted identity key was accepted as {impersonated} by {victim} \
+         (forged call rang: {rang}; relay read a new DM: {read_live}; relay pulled old history: {read_history})",
+    );
+}
+
+// HOL-SEC-005, authz rows A-ID-LINK-*: device-link frames from a peer we never
+// started a link with. A stashed snapshot is imported over our identity at the next
+// launch, and a request pops a prompt whose Accept hands the identity over.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_link_frames_from_a_stranger_are_refused() {
+    use super::types::HavenMessage;
+
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let mut alice = spawn_node_on(&relay, 77, 77).await;
+    let mallory = spawn_node_on(&relay, 87, 87).await;
+
+    // Any identity can join the inbox room of a master id it knows.
+    let inbox = format!("inbox:{}", alice.master_id);
+    mallory.cmd_tx.send(NodeCommand::JoinRoom { room_code: inbox.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            let room = relay.room_devices(&inbox);
+            room.contains(&mallory.device_id) && room.contains(&alice.device_id)
+        })
+        .await,
+        "Mallory and Alice must share Alice's inbox room",
+    );
+    drain_events(&mut alice);
+
+    let request = HavenMessage::LinkSnapshotRequest {
+        include_vault: false,
+        include_files: false,
+        msg_count: 0,
+        friend_count: 0,
+        has_profile: false,
+    };
+    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&request).unwrap());
+
+    let link_id = "link_mallory";
+    let key = HavenMessage::LinkSnapshotKey {
+        link_id: link_id.to_string(),
+        aes_key: String::new(),
+        aes_nonce: String::new(),
+    };
+    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&key).unwrap());
+    // One TYPE_LINK stream frame: [type][id padded to 64][size u64 LE][bytes].
+    let blob = b"not a backup anyone can open".to_vec();
+    let mut frame = vec![3u8];
+    let mut id = [0u8; 64];
+    id[..link_id.len()].copy_from_slice(link_id.as_bytes());
+    frame.extend_from_slice(&id);
+    frame.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+    frame.extend_from_slice(&blob);
+    relay.inject_binary(&inbox, &mallory.device_id, &alice.device_id, frame);
+
+    let (mut prompted, mut completed) = (false, false);
+    wait_event(&mut alice, std::time::Duration::from_secs(3), |ev| {
+        match ev {
+            NetworkEvent::SiblingLinkAvailable { .. } => prompted = true,
+            NetworkEvent::LinkComplete { .. } => completed = true,
+            _ => {}
+        }
+        prompted && completed
+    })
+    .await;
+    let stashed = crate::api::storage::has_pending_link().unwrap_or(false);
+
+    assert!(
+        !prompted && !completed && !stashed,
+        "HOL-SEC-005: a stranger drove Alice's device-link flow \
+         (sync prompt shown: {prompted}; snapshot completed: {completed}; stashed for the next launch: {stashed})",
+    );
+}
+
+// HOL-SEC-007: remote strings are cut on a character boundary. A byte slice through
+// a multi-byte character panics, and in the event loop that panic is the node.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_a_remote_string_never_panics_the_node() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let alice = spawn_node_on(&relay, 78, 78).await;
+    let mallory = spawn_node_on(&relay, 88, 88).await;
+    let inbox = format!("inbox:{}", alice.master_id);
+    mallory.cmd_tx.send(NodeCommand::JoinRoom { room_code: inbox.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || relay.room_devices(&inbox).contains(&mallory.device_id)).await,
+        "Mallory must reach Alice's inbox room",
+    );
+    assert!(alice.debug_snapshot().await.is_some(), "Alice's node runs before the frame");
+
+    // 63 ASCII bytes and then a two-byte character: byte 64 falls inside it.
+    let name = format!("{}é", "a".repeat(63));
+    let frame = serde_json::json!({
+        "type": "profile_update",
+        "display_name": name,
+        "status": format!("{}é", "s".repeat(95)),
+        "about_me": format!("{}é", "b".repeat(255)),
+        "twitch_username": format!("{}é", "t".repeat(63)),
+        "updated_at": 1,
+    });
+    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&frame).unwrap());
+
+    assert!(
+        wait_until(5, async || alice.debug_snapshot().await.is_some()).await
+            && { sleep_ms(500).await; alice.debug_snapshot().await.is_some() },
+        "HOL-SEC-007: a profile announce killed Alice's node",
+    );
+}
+
+// HOL-SEC-005: the next-launch import opens the stashed blob BEFORE it deletes the
+// identity it replaces, so a blob nobody can open costs nothing.
+
+#[test]
+fn pending_link_import_keeps_the_identity_when_the_blob_does_not_open() {
+    let _g = test_guard();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", data_dir.path()); }
+    for name in ["identity.key", "identity.device", "messages.db"] {
+        std::fs::write(data_dir.path().join(name), b"the real one").unwrap();
+    }
+    crate::api::storage::stash_pending_link(b"HOLLOW-but-not-decryptable-at-all-000000000000000000", "")
+        .expect("stash");
+
+    let result = crate::api::storage::import_pending_link();
+
+    assert!(result.is_err(), "a blob that does not decrypt cannot import");
+    for name in ["identity.key", "identity.device", "messages.db"] {
+        assert!(
+            data_dir.path().join(name).exists(),
+            "HOL-SEC-005: {name} was deleted for a snapshot that never opened",
+        );
+    }
+    assert!(!crate::api::storage::has_pending_link().unwrap(), "the stash is cleared either way");
 }
 
 // Full DM file send end to end: the FileHeader rides Olm and the encrypted bytes
@@ -20818,7 +21164,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-09-17: the two album tests added two spawn staggers, one auto-download
     // advert window and one backfill DB-row settle (7.4 s).
     // 2026-09-23: the three #90 gap and buffered-copy tests added three spawn staggers (3.6 s).
-    const BUDGET_MS: u64 = 624_200;
+    // 2026-09-26: the HOL-SEC-003 hostile-relay test added one spawn stagger (1.2 s),
+    // and the HOL-SEC-007 test one absence proof (0.5 s).
+    const BUDGET_MS: u64 = 625_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.

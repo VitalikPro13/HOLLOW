@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use super::crypto_handler::{
     persist_olm_session, send_message_to_peer_in_room, signed_key_request,
 };
-use super::types::{HavenMessage, MessageEnvelope, NetworkEvent, StreamOrigin, MAX_SDP_SIZE};
+use super::types::{MessageEnvelope, NetworkEvent, StreamOrigin, MAX_SDP_SIZE};
 use crate::crypto::{CryptoStore, OlmManager};
 use crate::hollow_log;
 
@@ -177,15 +177,7 @@ pub(crate) async fn send_fwd_envelope_via_room(
         match olm.encrypt(&target_peer, env_json.as_bytes()) {
             Ok((msg_type, ciphertext)) => {
                 persist_olm_session(olm, crypto_store, &target_peer);
-                let haven = HavenMessage::Encrypted {
-                    message_type: msg_type,
-                    body: OlmManager::encode_base64(&ciphertext),
-                    identity_key: if msg_type == 0 {
-                        Some(olm.identity_key_base64())
-                    } else {
-                        None
-                    },
-                };
+                let haven = super::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
                 let json = serde_json::to_string(&haven).unwrap_or_default();
                 // Send-side observability: splits send-side from transit and
                 // receive-side. Envelope TYPE and sizes only, never content.

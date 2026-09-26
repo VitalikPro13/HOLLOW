@@ -1518,20 +1518,24 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
 /// Extract a plaintext snapshot ZIP into the data directory (REPLACES existing
 /// files of the same name). Shared core of `import_backup` and the link-snapshot
 /// import. Requires the zip to contain `identity.key`.
+fn snapshot_has_identity(zip_bytes: &[u8]) -> bool {
+    zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).is_ok_and(|mut archive| {
+        (0..archive.len()).any(|i| {
+            archive.by_index(i).map(|f| f.name() == "identity.key").unwrap_or(false)
+        })
+    })
+}
+
 pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     use std::io::Read;
 
     let data_dir = crate::identity::data_dir()?;
+    if !snapshot_has_identity(zip_bytes) {
+        return Err("Snapshot does not contain identity.key".into());
+    }
     let cursor = std::io::Cursor::new(zip_bytes.to_vec());
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| format!("Invalid snapshot data: {e}"))?;
-
-    let has_key = (0..archive.len()).any(|i| {
-        archive.by_index(i).map(|f| f.name() == "identity.key").unwrap_or(false)
-    });
-    if !has_key {
-        return Err("Snapshot does not contain identity.key".into());
-    }
 
     // CRITICAL: the link import runs while the node is LIVE on a throwaway identity, so
     // the global STORE holds an open SQLCipher connection with its own WAL. Overwriting
@@ -1676,6 +1680,11 @@ pub fn export_backup(output_path: String, include_vault: bool, include_files: bo
 /// multi-device link blob stashed for next-boot import). Same Argon2id+AES scheme
 /// as `export_backup_bytes`.
 pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), String> {
+    import_snapshot_bytes(&decrypt_backup_bytes(blob, passphrase)?)
+}
+
+/// Open a `.hollow` blob to its snapshot zip without touching the data directory.
+fn decrypt_backup_bytes(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
     use aes_gcm::Nonce;
 
@@ -1697,10 +1706,8 @@ pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), S
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| format!("Cipher init error: {e}"))?;
     let nonce = Nonce::from_slice(nonce_bytes);
-    let zip_bytes = cipher.decrypt(nonce, ciphertext)
-        .map_err(|_| "Wrong passphrase or corrupted backup".to_string())?;
-
-    import_snapshot_bytes(&zip_bytes)
+    cipher.decrypt(nonce, ciphertext)
+        .map_err(|_| "Wrong passphrase or corrupted backup".to_string())
 }
 
 /// Import account backup from a passphrase-encrypted .hollow file.
@@ -1749,6 +1756,16 @@ pub fn import_pending_link() -> Result<(), String> {
         .map_err(|e| format!("Failed to read pending link blob: {e}"))?;
     let code = std::fs::read_to_string(&code_path)
         .map_err(|e| format!("Failed to read pending link code: {e}"))?;
+    // Clean up the stash regardless of outcome (a failed import shouldn't loop).
+    let _ = std::fs::remove_file(&blob_path);
+    let _ = std::fs::remove_file(&code_path);
+
+    // Open the blob BEFORE the identity it replaces is deleted: a snapshot that does
+    // not decrypt, or holds no identity, must cost us nothing.
+    let zip_bytes = decrypt_backup_bytes(&blob, code.trim())?;
+    if !snapshot_has_identity(&zip_bytes) {
+        return Err("Snapshot does not contain identity.key".into());
+    }
 
     // Discard the throwaway identity so import lands on a clean slate, exactly like
     // a fresh "Restore from backup" (which runs on first launch with no identity).
@@ -1758,11 +1775,7 @@ pub fn import_pending_link() -> Result<(), String> {
         if p.exists() { let _ = std::fs::remove_file(&p); }
     }
 
-    let result = import_backup_bytes(&blob, code.trim());
-
-    // Clean up the stash regardless of outcome (a failed import shouldn't loop).
-    let _ = std::fs::remove_file(&blob_path);
-    let _ = std::fs::remove_file(&code_path);
+    let result = import_snapshot_bytes(&zip_bytes);
 
     // The imported DB contains the SOURCE device's MLS identity, and a linked sibling
     // MUST NOT reuse it: two devices sharing one MLS signature key cannot both be

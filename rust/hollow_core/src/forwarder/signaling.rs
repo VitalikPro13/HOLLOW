@@ -58,6 +58,7 @@ pub(crate) async fn run(
     mut out_rx: mpsc::UnboundedReceiver<OutSignal>,
 ) -> Result<(), String> {
     let peer_id = keypair.peer_id();
+    crate::node::crypto_handler::bind_olm_identity(&mut olm, &keypair);
     let proto = keypair.to_protobuf_encoding()?;
     let pub_b64 = {
         use base64::Engine;
@@ -276,13 +277,15 @@ async fn handle_binary_frame(
             )
             .await;
         }
-        HavenMessage::Encrypted { message_type, body, identity_key } => {
+        HavenMessage::Encrypted { message_type, body, identity_key, identity_sig, identity_pk } => {
             let Ok(ciphertext) = OlmManager::decode_base64(&body) else {
                 hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: bad base64 body — dropped");
                 return;
             };
             let Some(plaintext) = olm_decrypt(
-                &sender, message_type, identity_key.as_deref(), &ciphertext, olm, crypto_store,
+                &sender, message_type, identity_key.as_deref(),
+                identity_sig.as_deref(), identity_pk.as_deref(),
+                &ciphertext, olm, crypto_store,
             ) else {
                 hollow_log!(
                     "[HOLLOW-FWD] inbound {frame_len} B: Olm decrypt failed (msg_type {message_type}) — dropped"
@@ -385,16 +388,23 @@ async fn handle_key_request(
 
 /// Olm decrypt for an inbound Encrypted body: prekey messages try the existing
 /// session first, then recreate inbound.
+#[allow(clippy::too_many_arguments)]
 fn olm_decrypt(
     from: &str,
     message_type: usize,
     identity_key: Option<&str>,
+    identity_sig: Option<&str>,
+    identity_pk: Option<&str>,
     ciphertext: &[u8],
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
 ) -> Option<Vec<u8>> {
     if message_type == 0 {
         let their_identity = identity_key?;
+        if !crate::node::crypto_handler::verify_olm_identity(from, their_identity, identity_sig, identity_pk) {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {from}: identity key not signed by that device");
+            return None;
+        }
         if olm.has_session(from) {
             match olm.try_decrypt_prekey_with_existing(from, ciphertext) {
                 Ok(pt) => Some(pt),
@@ -458,15 +468,7 @@ async fn send_encrypted(
     match olm.encrypt(&sig.to_peer, env_json.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, &sig.to_peer);
-            let haven = HavenMessage::Encrypted {
-                message_type: msg_type,
-                body: OlmManager::encode_base64(&ciphertext),
-                identity_key: if msg_type == 0 {
-                    Some(olm.identity_key_base64())
-                } else {
-                    None
-                },
-            };
+            let haven = crate::node::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
             send_haven_direct(write, room, &sig.to_peer, &haven).await;
         }
         Err(e) => {

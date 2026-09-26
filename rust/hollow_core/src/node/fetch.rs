@@ -718,6 +718,8 @@ fn try_decrypt_dm(
             message_type,
             body,
             identity_key,
+            identity_sig,
+            identity_pk,
         } => {
             let ciphertext = match OlmManager::decode_base64(&body) {
                 Ok(b) => b,
@@ -728,7 +730,9 @@ fn try_decrypt_dm(
             };
 
             let plaintext = olm_decrypt_payload(
-                from, message_type, identity_key.as_deref(), &ciphertext, olm, crypto_store,
+                from, message_type, identity_key.as_deref(),
+                identity_sig.as_deref(), identity_pk.as_deref(),
+                &ciphertext, olm, crypto_store,
             )?;
 
             let text = String::from_utf8_lossy(&plaintext).to_string();
@@ -762,10 +766,13 @@ fn try_decrypt_dm(
 
 /// Decrypt an Olm-encrypted DM body. Sessions are keyed by the SENDER DEVICE
 /// id (`from`). Returns `None` (logged) when decryption fails.
+#[allow(clippy::too_many_arguments)]
 fn olm_decrypt_payload(
     from: &str,
     message_type: usize,
     identity_key: Option<&str>,
+    identity_sig: Option<&str>,
+    identity_pk: Option<&str>,
     ciphertext: &[u8],
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
@@ -779,6 +786,12 @@ fn olm_decrypt_payload(
                 return None;
             }
         };
+        // Same gate as the live node, and here it matters twice: a session built
+        // in this isolate is persisted and loaded by the app afterwards.
+        if !crate::node::crypto_handler::verify_olm_identity(from, their_identity, identity_sig, identity_pk) {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {from} in fetch: identity key not signed by that device");
+            return None;
+        }
         if olm.has_session(from) {
             match olm.try_decrypt_prekey_with_existing(from, ciphertext) {
                 Ok(pt) => Some(pt),

@@ -1413,12 +1413,21 @@ pub(crate) enum HavenMessage {
         pk: Option<String>,
     },
 
+    /// SECURITY: a PreKey (`message_type` 0) builds the receiver's inbound session
+    /// on `identity_key`, so it must carry the sender DEVICE's signature over that
+    /// key (`crypto_handler::olm_identity_signing_payload`). Without it a relay
+    /// could open a session in any device's name (HOL-SEC-003); absent = refused.
     #[serde(rename = "encrypted")]
     Encrypted {
         message_type: usize,
         body: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         identity_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_sig: Option<String>,
+        /// Sender DEVICE Ed25519 public key (base64 protobuf) for `identity_sig`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_pk: Option<String>,
     },
 
     #[serde(rename = "ack")]

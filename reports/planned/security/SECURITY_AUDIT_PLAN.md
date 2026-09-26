@@ -33,8 +33,19 @@ into possible holes, so this file itself belongs on the security branch.
   accepted, AR-02 answered by design ID-1 (section 8a: the recovery phrase
   as the root of authority), all of it merged into LOCAL `main` behind a
   pre-push hook. Target release: 0.12.
-- **Next: phase B**, the authorisation matrix. Run it at xhigh effort: every
-  evidence cell is a file:line that must be read, not guessed.
+- **Session 2 (2026-09-26): phase B started.** Nine enumeration passes wrote
+  the evidence (`audit/phase_b_evidence/`, ~275 rows, ~200 suspicions), grouped
+  by root cause in `audit/candidate_findings.md`. Confirmed and FIXED in the
+  working tree, each with a test that failed first: HOL-SEC-003 (relay opens an
+  Olm session as any device), HOL-SEC-005 (stranger wipes identity via the link
+  flow, one-click identity theft), HOL-SEC-006 (a foreign device list claims a
+  friend's master id), HOL-SEC-007 (remote panic, shard temp path). Confirmed,
+  not yet fixed: HOL-SEC-004 (message rows rewritten by id through sync
+  batches, channel and DM).
+- **Next:** fix HOL-SEC-004; then verify the candidate classes in the plan's
+  priority order (MLS credentials D, CRDT snapshot E1/E2, channel ingest C1/C2,
+  files H, relay I1/I2); every AGENT-status row must be re-read before it counts.
+  Policy decisions for Vitalik are listed at the top of `candidate_findings.md`.
 
 ---
 
@@ -636,6 +647,16 @@ Taken 2026-09-26, second round:
 
 ---
 
+Taken 2026-09-26, third round (phase B, see `audit/candidate_findings.md`):
+
+8. Every state-changing plaintext message is secured (Olm/MLS where a session
+   exists, device-signed otherwise), as a breaking change.
+9. Backfill only from current members who can read the channel; former
+   members' rows stay, never-member authors are refused.
+10. Device-list entries get device co-signatures, designed inside ID-1.
+11. Relay fixes deploy before the 0.12 client release, the pre-auth crash first.
+12. The unused `hollow_push_decrypt` export is deleted.
+
 ## 8a. Identity authority design ID-1 (agreed 2026-09-26)
 
 **Problem.** Every device holds the master key (WP 3.6), so the master key
@@ -682,7 +703,9 @@ master key does not yield the recovery key; first-seen pinning for identities
 that already exist; what "told and can refuse" means when every device is
 offline for the whole 7 days; how old clients that ignore the new fields
 behave during the rollout; how the vouch binds to HOL-SEC-002's new link
-handshake (same epic, WP1).
+handshake (same epic, WP1); and the per-entry device co-signature that makes a
+device list unable to name a device, or a master, that never consented
+(decision 10, the real fix for HOL-SEC-006).
 
 ---
 

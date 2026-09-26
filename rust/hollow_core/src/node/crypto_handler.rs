@@ -594,6 +594,67 @@ pub(crate) fn key_exchange_device_unauthorized(sender_device: &str) -> bool {
         .any(|d| d == sender_device)
 }
 
+/// Canonical payload binding a device to its Olm Curve25519 identity key.
+///
+/// Format: "hollow-olm-identity:{sender_device}:{identity_key}"
+///
+/// The signed `KeyBundle` covers the RESPONDER's keys only; a PreKey names the
+/// INITIATOR's key, and the receiver builds its inbound session on it. No recipient
+/// or timestamp: it is a standing fact about the device, and a replayed copy is
+/// useless without the key's private half.
+pub(crate) fn olm_identity_signing_payload(sender_device: &str, identity_key: &str) -> String {
+    format!("hollow-olm-identity:{sender_device}:{identity_key}")
+}
+
+/// Sign this device's Olm identity key into `olm`, which then attaches the proof to
+/// every PreKey it builds through [`encrypted_frame`].
+pub(crate) fn bind_olm_identity(
+    olm: &mut OlmManager,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+) {
+    let payload = olm_identity_signing_payload(&device_keypair.peer_id(), &olm.identity_key_base64());
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(device_keypair.public_key_protobuf());
+    if let (Some(sig), Some(pk)) = sign_message(device_keypair, &pub_b64, &payload) {
+        olm.set_identity_proof(sig, pk);
+    }
+}
+
+/// Whether a PreKey's `identity_key` provably belongs to `sender_device`: signed by
+/// that device, and that device in its master's signed list. Absent is a refusal.
+/// Must pass BEFORE any session is created or torn down for the frame.
+pub(crate) fn verify_olm_identity(
+    sender_device: &str,
+    identity_key: &str,
+    sig: Option<&str>,
+    pk: Option<&str>,
+) -> bool {
+    let payload = olm_identity_signing_payload(sender_device, identity_key);
+    verify_message_signature(sender_device, sig, pk, &payload)
+        && !key_exchange_device_unauthorized(sender_device)
+}
+
+/// The wire frame for one Olm ciphertext. A PreKey carries our identity key and
+/// its device proof; a normal message carries neither.
+pub(crate) fn encrypted_frame(olm: &OlmManager, message_type: usize, ciphertext: &[u8]) -> HavenMessage {
+    let (identity_key, identity_sig, identity_pk) = if message_type == 0 {
+        let proof = olm.identity_proof().cloned();
+        if proof.is_none() {
+            hollow_log!("[HOLLOW-SECURITY] PreKey built with no identity proof; the receiver will refuse it");
+        }
+        let (sig, pk) = proof.unzip();
+        (Some(olm.identity_key_base64()), sig, pk)
+    } else {
+        (None, None, None)
+    };
+    HavenMessage::Encrypted {
+        message_type,
+        body: OlmManager::encode_base64(ciphertext),
+        identity_key,
+        identity_sig,
+        identity_pk,
+    }
+}
+
 // -- Carried Olm key exchange (async friending) --
 
 /// How long a bundle CARRIED inside a friend request stays usable.
@@ -1344,13 +1405,26 @@ pub(crate) async fn ingest_device_list(
     // SECURITY: a master's signature speaks only for its OWN devices. Any identity
     // can sign a list naming our device, or a third identity's, in `revoked` (which
     // used to wipe this device) or in `devices` (which rebinds it to them), so both
-    // sets drop every id already bound to another master, ours included.
+    // sets drop every id already bound to another master, ours included. An id
+    // that resolves to itself is free only if it is not another identity's MASTER
+    // (HOL-SEC-006): a master id is never a resolver key, so it looks unbound.
+    let other_masters: std::collections::HashSet<String> = list
+        .devices
+        .iter()
+        .chain(list.revoked.iter())
+        .filter(|id| {
+            **id != list.master_peer_id
+                && (super::resolver::is_known_master(id)
+                    || store.load_device_list(id).ok().flatten().is_some())
+        })
+        .cloned()
+        .collect();
     let speaks_for = |id: &String| {
         if id == local_device_peer_id || id == local_master_peer_id {
             return false;
         }
         let bound = super::resolver::resolve(id);
-        bound == *id || bound == list.master_peer_id
+        bound == list.master_peer_id || (bound == *id && !other_masters.contains(id))
     };
     let list_devices: Vec<String> = list.devices.iter().filter(|d| speaks_for(d)).cloned().collect();
     // TOMBSTONES, max-version-wins: a higher-version list is the latest master
@@ -1364,12 +1438,23 @@ pub(crate) async fn ingest_device_list(
         prev_revoked.clone()
     };
     let is_revoked = |id: &str| new_revoked.iter().any(|r| r == id);
+    // Enforcement (the process-wide revoked mark, dropped sessions and leaves) reaches
+    // only devices this master already held. Any other id stays a tombstone in ITS
+    // list, which still keeps a stale list from adding it back.
+    let enforced: Vec<String> = new_revoked
+        .iter()
+        .filter(|r| {
+            prev_devices.iter().any(|d| d == *r)
+                || super::resolver::resolve(r) == list.master_peer_id
+        })
+        .cloned()
+        .collect();
     // Phantom-chat guard: mark every revoked id of this master so inbound DMs and
     // typing from a still-alive revoked device are dropped until it self-nukes.
-    if !new_revoked.is_empty() {
-        super::resolver::mark_revoked(&new_revoked);
+    if !enforced.is_empty() {
+        super::resolver::mark_revoked(&enforced);
     }
-    let newly_revoked: Vec<String> = new_revoked
+    let newly_revoked: Vec<String> = enforced
         .iter()
         .filter(|r| !prev_revoked.iter().any(|p| &p == r))
         .cloned()
@@ -1459,8 +1544,8 @@ pub(crate) async fn ingest_device_list(
     }
     // Prune the resolver for revoked ids (the map is insert-only, so without this
     // a revoked device keeps resolving until restart), then warm the survivors.
-    if !new_revoked.is_empty() {
-        super::resolver::forget_many(&new_revoked);
+    if !enforced.is_empty() {
+        super::resolver::forget_many(&enforced);
     }
     super::resolver::update_many(
         &stored.master_peer_id,
@@ -1689,11 +1774,21 @@ pub(crate) fn clip_text(text: String) -> String {
     if text.len() <= MAX_MESSAGE_BYTES {
         return text;
     }
-    let mut end = MAX_MESSAGE_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
+    clip_bytes(&text, MAX_MESSAGE_BYTES).to_string()
+}
+
+/// The longest prefix of `s` that is at most `max` bytes and ends on a character
+/// boundary. The ONE way to cut a remote string: a byte slice through a multi-byte
+/// character panics, and on the event loop that panic takes the node down.
+pub(crate) fn clip_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    text[..end].to_string()
+    &s[..end]
 }
 
 /// Sign a message payload with the local keypair, returning `(sig_b64, pk_b64)`.
@@ -2607,17 +2702,7 @@ pub(crate) async fn send_encrypted_message(
                 hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {peer_id_str}");
             }
 
-            let identity_key = if msg_type == 0 {
-                Some(olm.identity_key_base64())
-            } else {
-                None
-            };
-
-            let haven_msg = HavenMessage::Encrypted {
-                message_type: msg_type,
-                body: OlmManager::encode_base64(&ciphertext),
-                identity_key,
-            };
+            let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
 
             if let Some(room) = ws_room_for_peer(ws_room_peers, peer_id_str) {
                 let json = serde_json::to_string(&haven_msg).unwrap_or_default();
@@ -2662,16 +2747,7 @@ pub(crate) async fn send_encrypted_message_in_room(
     match olm.encrypt(peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, peer_id_str);
-            let identity_key = if msg_type == 0 {
-                Some(olm.identity_key_base64())
-            } else {
-                None
-            };
-            let haven_msg = HavenMessage::Encrypted {
-                message_type: msg_type,
-                body: OlmManager::encode_base64(&ciphertext),
-                identity_key,
-            };
+            let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
             let json = serde_json::to_string(&haven_msg).unwrap_or_default();
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
                 room_code: room_code.to_string(),
@@ -2711,16 +2787,7 @@ pub(crate) async fn send_encrypted_image_to_peer(
     match olm.encrypt(peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, peer_id_str);
-            let identity_key = if msg_type == 0 {
-                Some(olm.identity_key_base64())
-            } else {
-                None
-            };
-            let haven_msg = HavenMessage::Encrypted {
-                message_type: msg_type,
-                body: OlmManager::encode_base64(&ciphertext),
-                identity_key,
-            };
+            let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
             let json = serde_json::to_string(&haven_msg).unwrap_or_default();
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirectImage {
                 room_code: dm_room,
@@ -4989,6 +5056,90 @@ mod tests {
             attacker.peer_id(),
             "the attacker's own device still binds normally"
         );
+    }
+
+    /// HOL-SEC-006, the variant HOL-SEC-001's filter missed: a MASTER id is never a
+    /// key in the resolver, so it read as "unbound" and a foreign list could claim
+    /// it. Naming a friend's master took over our friendship with that person and,
+    /// through the resolver, their server membership; naming a legacy contact
+    /// (device == master) in `revoked` silenced them.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn a_foreign_device_list_cannot_claim_a_master_id_or_silence_a_legacy_contact() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let local_master = kp(0x01);
+        let local_master_id = local_master.peer_id();
+        let local_device = kp(0x02).peer_id();
+        super::super::resolver::seed_self(&local_master_id, std::slice::from_ref(&local_device));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        let ingest = |list: SignedDeviceList, sender: String| {
+            let (event_tx, ws_cmd_tx, rooms, db, pass) =
+                (event_tx.clone(), ws_cmd_tx.clone(), rooms.clone(), db.clone(), pass.clone());
+            let (local_master_id, local_device, local_master) =
+                (local_master_id.clone(), local_device.clone(), kp(0x01));
+            async move {
+                ingest_device_list(
+                    &event_tx, &local_master_id, &local_device, &local_master,
+                    &sender, &ws_cmd_tx, &rooms, Some(list), &db, &pass,
+                )
+                .await
+            }
+        };
+
+        // Bob: a multi-device friend. Carol: a legacy contact whose device IS her master.
+        let bob = kp(0x60);
+        let bob_device = kp(0x61).peer_id();
+        let carol = kp(0x70);
+        let carol_id = carol.peer_id();
+        {
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            store.save_friend(&bob.peer_id(), "accepted", "outgoing", 1).unwrap();
+            store.save_friend(&carol_id, "accepted", "outgoing", 1).unwrap();
+        }
+        ingest(build_signed_device_list(&bob, 1, vec![bob_device.clone()], Vec::new()), bob_device.clone()).await;
+        ingest(build_signed_device_list(&carol, 1, vec![carol_id.clone()], Vec::new()), carol_id.clone()).await;
+        assert_eq!(super::super::resolver::resolve(&bob_device), bob.peer_id());
+
+        let mallory = kp(0x50);
+        let mallory_device = kp(0x51).peer_id();
+        let hostile = build_signed_device_list(
+            &mallory,
+            1,
+            vec![mallory_device.clone(), bob.peer_id()],
+            vec![carol_id.clone()],
+        );
+        let outcome = ingest(hostile, mallory_device.clone()).await;
+
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let bob_row = store.get_friend_status(&bob.peer_id()).ok().flatten();
+        let mallory_row = store.get_friend_status(&mallory.peer_id()).ok().flatten();
+        assert_eq!(
+            super::super::resolver::resolve(&bob.peer_id()),
+            bob.peer_id(),
+            "HOL-SEC-006: a foreign list bound Bob's MASTER id to Mallory",
+        );
+        assert_eq!(
+            (bob_row.as_deref(), mallory_row.as_deref()),
+            (Some("accepted"), None),
+            "HOL-SEC-006: Mallory's list moved our friendship with Bob to her",
+        );
+        assert!(
+            !super::super::resolver::is_revoked(&carol_id) && outcome.newly_revoked.is_empty(),
+            "HOL-SEC-006: Mallory's list revoked a legacy contact's device",
+        );
+        assert_eq!(super::super::resolver::resolve(&mallory_device), mallory.peer_id());
+
+        super::super::resolver::clear_all();
     }
 
     /// CRYPTO-1. A master-signed device list is public the moment it is announced,

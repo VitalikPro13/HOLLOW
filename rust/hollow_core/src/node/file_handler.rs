@@ -2207,6 +2207,8 @@ pub(crate) struct LinkSnapshotState {
     /// is encrypted with. We stash the blob + this code for a next-launch import via
     /// the proven `import_backup` pipeline (NOT an in-place import).
     pub code: String,
+    /// The device that announced it; only its stream may complete it.
+    pub sender: String,
 }
 
 /// Handle a completed stream transfer (file, shard, or link snapshot).
@@ -2272,7 +2274,10 @@ async fn handle_link_snapshot_stream(
     let bare_id = link_id.strip_prefix("link_").unwrap_or(&link_id).to_string();
     hollow_log!("[HOLLOW-LINK] Inbound link snapshot: {link_id} ({} bytes)", request.size);
 
-    let Some(state) = pending_link_snapshots.remove(&link_id) else {
+    let announced_by_sender = pending_link_snapshots
+        .get(&link_id)
+        .is_some_and(|state| state.sender == sender_peer);
+    let Some(state) = announced_by_sender.then(|| pending_link_snapshots.remove(&link_id)).flatten() else {
         // No decryption material registered for this link session — drop it.
         hollow_log!("[HOLLOW-LINK] No pending link state for {link_id} — dropping snapshot");
         let _ = tokio::fs::remove_file(&request.temp_path).await;

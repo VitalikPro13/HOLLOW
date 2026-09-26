@@ -715,16 +715,7 @@ fn encrypt_dm_wire(
     if log_prekey && msg_type == 0 {
         hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {device_peer}");
     }
-    let identity_key = if msg_type == 0 {
-        Some(olm.identity_key_base64())
-    } else {
-        None
-    };
-    let haven_msg = HavenMessage::Encrypted {
-        message_type: msg_type,
-        body: OlmManager::encode_base64(&ciphertext),
-        identity_key,
-    };
+    let haven_msg = super::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
     Ok(serde_json::to_string(&haven_msg).unwrap_or_default())
 }
 

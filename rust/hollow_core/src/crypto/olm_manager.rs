@@ -16,6 +16,9 @@ pub(crate) struct OlmManager {
     /// produces PreKey (type 0) for ALL messages until an inbound session replaces it.
     outbound_only: HashSet<String>,
     session_last_used: HashMap<String, Instant>,
+    /// `(sig_b64, pk_b64)`: our DEVICE's signature over our identity key, attached to
+    /// every PreKey we send. Set once by the owner of the device key.
+    identity_proof: Option<(String, String)>,
 }
 
 impl OlmManager {
@@ -26,6 +29,7 @@ impl OlmManager {
             sessions: HashMap::new(),
             outbound_only: HashSet::new(),
             session_last_used: HashMap::new(),
+            identity_proof: None,
         }
     }
 
@@ -57,12 +61,22 @@ impl OlmManager {
             // the peer replaces them.
             outbound_only: HashSet::new(),
             session_last_used,
+            identity_proof: None,
         })
     }
 
     /// Our Curve25519 identity key as unpadded base64.
     pub fn identity_key_base64(&self) -> String {
         self.account.curve25519_key().to_base64()
+    }
+
+    pub fn set_identity_proof(&mut self, sig_b64: String, pk_b64: String) {
+        self.identity_proof = Some((sig_b64, pk_b64));
+    }
+
+    /// The proof for [`Self::identity_key_base64`], `None` until it is set.
+    pub fn identity_proof(&self) -> Option<&(String, String)> {
+        self.identity_proof.as_ref()
     }
 
     /// Generate a fresh one-time key and return it as unpadded base64.

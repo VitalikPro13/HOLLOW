@@ -35,6 +35,55 @@ pub(crate) fn my_link_code() -> String {
     MY_TYPED_LINK_CODE.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
 }
 
+/// (Receiver) The peers we sent a `LinkSnapshotRequest` to. A snapshot announced or
+/// streamed by anyone else is refused: a stashed blob is imported over our identity
+/// at the next launch.
+static SNAPSHOT_ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// (Populated device) The code we claimed; a snapshot request is honoured only from
+/// a peer in that code's room, or from a verified sibling.
+static MY_CLAIMED_LINK_CODE: Mutex<Option<String>> = Mutex::new(None);
+
+fn note_snapshot_asked(peer: &str) {
+    if let Ok(mut asked) = SNAPSHOT_ASKED.lock() {
+        if !asked.iter().any(|p| p == peer) {
+            asked.push(peer.to_string());
+        }
+    }
+}
+
+fn snapshot_was_asked(peer: &str) -> bool {
+    SNAPSHOT_ASKED.lock().map(|asked| asked.iter().any(|p| p == peer)).unwrap_or(false)
+}
+
+fn set_claimed_code(code: Option<&str>) {
+    if let Ok(mut g) = MY_CLAIMED_LINK_CODE.lock() {
+        *g = code.map(str::to_string);
+    }
+}
+
+/// The relay confirmed our claimed code is gone.
+pub(crate) fn note_link_code_released() {
+    set_claimed_code(None);
+}
+
+/// Whether `requester` may raise the "send your data to this device" prompt: it
+/// sits in the room of the code WE claimed, or it is one of our own devices. Anyone
+/// else gets no prompt, because Accept hands over the identity.
+pub(crate) fn link_request_allowed(
+    requester: &str,
+    local_master: &str,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+) -> bool {
+    if super::resolver::same_identity(requester, local_master) {
+        return true;
+    }
+    let claimed = MY_CLAIMED_LINK_CODE.lock().ok().and_then(|g| g.clone());
+    claimed.is_some_and(|code| {
+        ws_room_peers.get(&link_room(&code)).is_some_and(|room| room.contains(requester))
+    })
+}
+
 /// Deterministic rendezvous room for a link code — both devices join it so they
 /// share a room without needing to know each other's master identity.
 pub(crate) fn link_room(code: &str) -> String {
@@ -47,6 +96,7 @@ pub(crate) fn handle_claim_link_code(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     code: &str,
 ) {
+    set_claimed_code(Some(code));
     let _ = ws_cmd_tx.send(WsCommand::ClaimLinkCode { code: code.to_string() });
     let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: link_room(code) });
     // PRIVACY: the code is the passphrase to the identity snapshot — log only
@@ -59,6 +109,7 @@ pub(crate) fn handle_release_link_code(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     code: &str,
 ) {
+    set_claimed_code(None);
     let _ = ws_cmd_tx.send(WsCommand::ReleaseLinkCode);
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: link_room(code) });
 }
@@ -86,6 +137,7 @@ pub(crate) fn handle_link_code_resolved(
 ) {
     let (msg_count, friend_count, _server_count, has_profile) =
         crate::api::storage::snapshot_state_summary();
+    note_snapshot_asked(peer_id);
     send_message_to_peer(
         ws_cmd_tx, ws_room_peers, peer_id,
         HavenMessage::LinkSnapshotRequest {
@@ -105,6 +157,7 @@ pub(crate) fn handle_request_link_snapshot(
 ) {
     let (msg_count, friend_count, _server_count, has_profile) =
         crate::api::storage::snapshot_state_summary();
+    note_snapshot_asked(target_peer);
     send_message_to_peer(
         ws_cmd_tx, ws_room_peers, target_peer,
         HavenMessage::LinkSnapshotRequest {
@@ -163,7 +216,8 @@ pub(crate) async fn handle_accept_link_push(
 
     // Stream id carries a "link_" prefix so the progress poll routes LinkProgress.
     // Derive a short session id from the device id + target so it's stable per pair.
-    let session = format!("{}_{}", &device_peer_id[device_peer_id.len().saturating_sub(8)..], &target_peer[target_peer.len().saturating_sub(8)..]);
+    let tail = |s: &str| s.char_indices().rev().nth(7).map_or(s, |(i, _)| &s[i..]).to_string();
+    let session = format!("{}_{}", tail(device_peer_id), tail(target_peer));
     let link_id = format!("link_{session}");
 
     // Tell the target the link_id (so it can register the pending stash) — the
@@ -199,11 +253,20 @@ pub(crate) async fn handle_accept_link_push(
 
 /// (Empty device) Register the pending snapshot under the announced link_id,
 /// carrying the CODE we typed so the completion handler can stash blob and code.
+/// Only the peer we asked may announce one, and only while we hold a code.
 pub(crate) fn handle_inbound_link_key(
     pending_link_snapshots: &mut HashMap<String, LinkSnapshotState>,
     link_id: &str,
+    sender: &str,
     code: String,
 ) {
+    if !snapshot_was_asked(sender) || code.is_empty() {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED link snapshot {link_id} from {sender}: we asked no such peer for one");
+        return;
+    }
     hollow_log!("[HOLLOW-LINK] Registered pending link snapshot {link_id}");
-    pending_link_snapshots.insert(link_id.to_string(), LinkSnapshotState { code });
+    pending_link_snapshots.insert(
+        link_id.to_string(),
+        LinkSnapshotState { code, sender: sender.to_string() },
+    );
 }

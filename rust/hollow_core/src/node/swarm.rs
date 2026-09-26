@@ -568,6 +568,7 @@ async fn run_event_loop(
     // authenticate to the relay with. Equal on a pre-multi-device install.
     let master_keypair = bundle_keypair.clone();
     let master_peer_str = local_peer_str.clone();
+    crypto_handler::bind_olm_identity(&mut olm, &device_keypair);
 
     // Decrypt-failure cooldown per peer: prevents session thrashing when many
     // in-flight chunks fail decrypt at once (a 340 MB file is 1360 chunks).
@@ -4540,6 +4541,7 @@ async fn run_event_loop(
                     }
                     WsEvent::LinkCodeReleased => {
                         pending_link_code = None;
+                        link_handler::note_link_code_released();
                     }
                     WsEvent::LinkCodeError { error, code } => {
                         // A resolve we initiated failing means the code was wrong/expired.
@@ -4796,7 +4798,7 @@ async fn run_event_loop(
                                                                         let temp_dir = std::env::temp_dir().join("hollow_recovery");
                                                                         let _ = tokio::fs::create_dir_all(&temp_dir).await;
                                                                         let temp_path = temp_dir.join(format!("{}_{}.shard",
-                                                                            &assignment.content_id[..8.min(assignment.content_id.len())],
+                                                                            crypto_handler::clip_bytes(&assignment.content_id, 8),
                                                                             assignment.shard_index));
                                                                         if tokio::fs::write(&temp_path, &shard_bytes).await.is_ok() {
                                                                             let total_size = shard_bytes.len() as u64;
@@ -6679,7 +6681,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::Encrypted { message_type, body, identity_key } => {
+        HavenMessage::Encrypted { message_type, body, identity_key, identity_sig, identity_pk } => {
             let ciphertext = match OlmManager::decode_base64(&body) {
                 Ok(b) => b,
                 Err(e) => {
@@ -6708,6 +6710,14 @@ async fn handle_incoming_request(
                         return;
                     }
                 };
+                // Before any session is built OR torn down: an unproven key must
+                // not even cost us the session we already hold.
+                if !crypto_handler::verify_olm_identity(
+                    peer_str, their_identity, identity_sig.as_deref(), identity_pk.as_deref(),
+                ) {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {peer_str}: identity key not signed by that device");
+                    return;
+                }
 
                 let had_existing_session = olm.has_session(&peer_str);
 
@@ -8878,7 +8888,10 @@ async fn handle_incoming_request(
                                         ).await;
 
                                         let shard_temp_dir = crate::node::file_transfer::files_dir();
-                                        let shard_safe_prefix = &cid[..16.min(cid.len())];
+                                        // The cid is whatever a member stored the shard under: it names a
+                                        // file here, so only alphanumerics survive (a `\..\` walks out on Windows).
+                                        let shard_safe_prefix: String =
+                                            cid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
                                         let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
                                         let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
                                         if let Ok(()) = tokio::fs::write(&shard_temp_path, &shard_data).await {
@@ -12863,9 +12876,13 @@ async fn handle_incoming_request(
 
         // -- Multi-device link snapshot --
         HavenMessage::LinkSnapshotRequest { include_vault: _, include_files: _, msg_count, friend_count, has_profile } => {
-            // An empty device wants our full snapshot. same_identity is deliberately NOT
-            // required: a code-path requester is not a sibling yet. The authorization is
-            // the human Confirm on THIS device, and the push happens on AcceptLinkPush.
+            // An empty device wants our full snapshot. A code-path requester is not a
+            // sibling yet, so the gate is the room of the code WE claimed; the human
+            // Confirm on THIS device is the second one, and Accept hands over everything.
+            if !link_handler::link_request_allowed(peer_str, local_peer_str, ws_room_peers) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED snapshot request from {peer_str}: not in our link room and not our device");
+                return;
+            }
             link_handler::handle_inbound_link_request(
                 &event_tx, peer_str, msg_count, friend_count, has_profile,
             ).await;
@@ -12876,7 +12893,7 @@ async fn handle_incoming_request(
             // follows is encrypted with the CODE WE typed (no key travels in the
             // message), so register the pending stash keyed by link_id + our code.
             link_handler::handle_inbound_link_key(
-                pending_link_snapshots, &link_id, link_handler::my_link_code(),
+                pending_link_snapshots, &link_id, peer_str, link_handler::my_link_code(),
             );
         }
 
@@ -13472,10 +13489,10 @@ async fn handle_incoming_request(
 
             // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
             // Slightly above UI limits (32/48/128) as a safety backstop.
-            let display_name = if display_name.len() > 64 { display_name[..64].to_string() } else { display_name };
-            let status = if status.len() > 96 { status[..96].to_string() } else { status };
-            let about_me = if about_me.len() > 256 { about_me[..256].to_string() } else { about_me };
-            let twitch_username = if twitch_username.len() > 64 { twitch_username[..64].to_string() } else { twitch_username };
+            let display_name = crypto_handler::clip_bytes(&display_name, 64).to_string();
+            let status = crypto_handler::clip_bytes(&status, 96).to_string();
+            let about_me = crypto_handler::clip_bytes(&about_me, 256).to_string();
+            let twitch_username = crypto_handler::clip_bytes(&twitch_username, 64).to_string();
 
             // Decode avatar/banner from base64.
             // Empty string = no change (None). "CLEAR" = clear (Some(empty)). Otherwise = base64 data.

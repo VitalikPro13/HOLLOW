@@ -44,6 +44,13 @@ pub(crate) fn same_identity(a: &str, b: &str) -> bool {
     a == b || resolve(a) == resolve(b)
 }
 
+/// True when `peer_id` is some identity's MASTER here: a device links to it. A
+/// master id is never a key of the map, so [`resolve`] alone cannot tell it from a
+/// device nobody has claimed yet.
+pub(crate) fn is_known_master(peer_id: &str) -> bool {
+    links().read().is_ok_and(|map| map.values().any(|m| m == peer_id))
+}
+
 /// Record a verified (device → master) link. Idempotent.
 pub(crate) fn update(device_peer_id: &str, master_peer_id: &str) {
     if let Ok(mut map) = links().write() {
