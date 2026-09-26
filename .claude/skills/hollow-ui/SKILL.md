@@ -159,9 +159,12 @@ words, not components.
 If it is clickable it is a chip. If it is not, it is a badge. There is no third
 option and no local variant.
 
-- **Every tab row is `HollowChipTabs<T>`** (dialogs, pages, `PlaceHeader`):
+- **Tab rows are `HollowChipTabs<T>`** (dialog bodies, pages, `PlaceHeader`):
   `hint` for a quiet total, `count` for something waiting, arrows move it,
-  `expand` on a phone. Never an underline tab or a local `_Tab`.
+  `expand` on a phone. **Exception:** a row that IS a surface's header and
+  splits the whole surface into sections (expression picker, Friends manager)
+  is `HollowTabBar<T>`: equal tabs, accent bar under the open one, on the
+  divider. Never a local `_Tab`.
 - Labels: `LabelChip` toggles, `LabelBadge` is worn. "For how long" is
   `HollowDurationPicker` (null = "Until I remove it", never red).
 

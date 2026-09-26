@@ -37,7 +37,7 @@ export 'package:hollow/src/ui/dialogs/showcase_editor_draft.dart'
 
 /// Opens the showcase editor for the LOCAL user: the profile dialog in edit
 /// mode on desktop, a pushed page on a phone.
-void showShowcaseEditorDialog(BuildContext context, WidgetRef ref) {
+void showShowcaseEditorDialog(BuildContext context) {
   final phone =
       Platform.isAndroid ||
       Platform.isIOS ||

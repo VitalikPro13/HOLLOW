@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -38,6 +39,33 @@ class SupportNameGlyph extends ConsumerWidget {
             color: hollow.accentText,
             semanticLabel: 'Supports an artist',
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A verified Twitch account, as a quiet mark after a name in a people list.
+/// The handle itself lives on the profile card.
+class TwitchNameGlyph extends ConsumerWidget {
+  final String peerId;
+
+  const TwitchNameGlyph({super.key, required this.peerId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final login = ref.watch(twitchLoginProvider(peerId));
+    if (login == null) return const SizedBox.shrink();
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(left: HollowSpacing.xs),
+      child: HollowTooltip(
+        message: 'Twitch: $login',
+        child: Icon(
+          BrandIcons.twitch,
+          size: 14,
+          color: hollow.textTertiary,
+          semanticLabel: 'Twitch account $login',
         ),
       ),
     );

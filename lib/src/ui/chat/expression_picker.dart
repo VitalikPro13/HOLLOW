@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
+import 'package:hollow/src/ui/components/hollow_tab_bar.dart';
+import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/popup_animator.dart';
 
@@ -233,71 +233,21 @@ class ExpressionPanelState extends State<ExpressionPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (widget.assets) ...[
-          _Tabs(selected: _tab, onPick: _pick),
+          // Tabs rather than chips: each body carries its own chip row below.
+          HollowTabBar<ExpressionTab>(
+            touch: isTouchForm,
+            selected: _tab,
+            onSelected: _pick,
+            tabs: const [
+              HollowChipTab(value: ExpressionTab.emoji, label: 'Emoji'),
+              HollowChipTab(value: ExpressionTab.gifs, label: 'GIFs'),
+              HollowChipTab(value: ExpressionTab.stickers, label: 'Stickers'),
+            ],
+          ),
           const HollowDivider(),
         ],
         Expanded(child: body),
       ],
-    );
-  }
-}
-
-/// The picker's three kinds, as tabs with the accent bar under the open one.
-/// Tabs rather than chips: each body carries its own row of chips below, and
-/// two chip rows stacked read as one confused row.
-class _Tabs extends StatelessWidget {
-  final ExpressionTab selected;
-  final ValueChanged<ExpressionTab> onPick;
-
-  const _Tabs({required this.selected, required this.onPick});
-
-  static const _labels = {
-    ExpressionTab.emoji: 'Emoji',
-    ExpressionTab.gifs: 'GIFs',
-    ExpressionTab.stickers: 'Stickers',
-  };
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return SizedBox(
-      height: isTouchForm ? 48 : 40,
-      child: Row(
-        children: [
-          for (final tab in ExpressionTab.values)
-            Expanded(
-              child: Semantics(
-                selected: tab == selected,
-                child: HollowPressable(
-                  semanticLabel: _labels[tab],
-                  onTap: () => onPick(tab),
-                  child: Stack(
-                    children: [
-                      Center(
-                        child: Text(
-                          _labels[tab]!,
-                          style: HollowTypography.label.copyWith(
-                            color: tab == selected
-                                ? hollow.textPrimary
-                                : hollow.textSecondary,
-                          ),
-                        ),
-                      ),
-                      if (tab == selected)
-                        Positioned(
-                          left: HollowSpacing.lg,
-                          right: HollowSpacing.lg,
-                          bottom: 0,
-                          height: 2,
-                          child: ColoredBox(color: hollow.accent),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
     );
   }
 }

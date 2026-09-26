@@ -123,7 +123,6 @@ void main() {
   }
 
   late BuildContext hostContext;
-  late WidgetRef hostRef;
 
   /// An empty app shell; the dialog under test is opened from [hostContext].
   Future<void> pumpHost(
@@ -151,10 +150,9 @@ void main() {
             home:
                 home ??
                 Scaffold(
-                  body: Consumer(
-                    builder: (context, ref, _) {
+                  body: Builder(
+                    builder: (context) {
                       hostContext = context;
-                      hostRef = ref;
                       return const SizedBox.expand();
                     },
                   ),
@@ -175,7 +173,7 @@ void main() {
   }) async {
     _Profiles.meBoard = board;
     await pumpHost(tester, size: size, light: light);
-    showShowcaseEditorDialog(hostContext, hostRef);
+    showShowcaseEditorDialog(hostContext);
     await tester.pump();
     await settle(tester, rounds: 8);
   }

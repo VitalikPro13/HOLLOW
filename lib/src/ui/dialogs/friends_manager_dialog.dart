@@ -22,6 +22,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_tab_bar.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -108,6 +109,8 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
   @override
   Widget build(BuildContext context) {
     final friends = ref.watch(friendsProvider);
+    // HollowDialogCloseButton's own size.
+    final closeSize = HollowDialogSurface.isCompact(context) ? 44.0 : 32.0;
 
     // The accepted list is master-collapsed and deduped by the shared provider.
     // Pending requests stay raw, because the device to master mapping is not
@@ -137,27 +140,24 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
           height: _kDialogHeight,
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  HollowSpacing.xl,
-                  HollowSpacing.lg,
-                  HollowSpacing.lg,
-                  HollowSpacing.md,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: _TabBar(
-                        selected: _tab,
-                        friendCount: accepted.length,
-                        waiting: incoming.length,
-                        onPick: _pick,
-                      ),
+              // The tabs run to the dialog's edges (its clip rounds the
+              // corner) and sit on the divider; the close button gets the same
+              // margin above, below and after it.
+              Row(
+                children: [
+                  Expanded(
+                    child: _TabBar(
+                      selected: _tab,
+                      friendCount: accepted.length,
+                      waiting: incoming.length,
+                      height: closeSize + 2 * HollowSpacing.sm,
+                      onPick: _pick,
                     ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    const HollowDialogCloseButton(),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  const HollowDialogCloseButton(),
+                  const SizedBox(width: HollowSpacing.sm),
+                ],
               ),
               const HollowDivider(),
               // Switching tabs is instant. Rows sit on the tab row's and the
@@ -193,39 +193,39 @@ class _TabBar extends StatelessWidget {
   final FriendsManagerTab selected;
   final int friendCount;
   final int waiting;
+  final double height;
   final ValueChanged<FriendsManagerTab> onPick;
 
   const _TabBar({
     required this.selected,
     required this.friendCount,
     required this.waiting,
+    required this.height,
     required this.onPick,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: AlignmentDirectional.centerStart,
-      child: HollowChipTabs<FriendsManagerTab>(
-        selected: selected,
-        onSelected: onPick,
-        tabs: [
-          HollowChipTab(
-            value: FriendsManagerTab.friends,
-            label: 'Friends',
-            hint: '$friendCount',
-          ),
-          HollowChipTab(
-            value: FriendsManagerTab.requests,
-            label: 'Requests',
-            count: waiting,
-          ),
-          const HollowChipTab(
-            value: FriendsManagerTab.add,
-            label: 'Add friend',
-          ),
-        ],
-      ),
+    return HollowTabBar<FriendsManagerTab>(
+      height: height,
+      selected: selected,
+      onSelected: onPick,
+      tabs: [
+        HollowChipTab(
+          value: FriendsManagerTab.friends,
+          label: 'Friends',
+          hint: '$friendCount',
+        ),
+        HollowChipTab(
+          value: FriendsManagerTab.requests,
+          label: 'Requests',
+          count: waiting,
+        ),
+        const HollowChipTab(
+          value: FriendsManagerTab.add,
+          label: 'Add friend',
+        ),
+      ],
     );
   }
 }

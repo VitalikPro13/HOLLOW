@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_tab_bar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
@@ -861,14 +862,26 @@ class _DialogsPassSampleState extends State<_DialogsPassSample> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const HollowSectionHeader('Tabs are chips'),
-            HollowChipTabs<int>(
+            const HollowSectionHeader('Sections of a surface: tab bar'),
+            HollowTabBar<int>(
               selected: _tab,
               onSelected: (v) => setState(() => _tab = v),
               tabs: const [
                 HollowChipTab(value: 0, label: 'Friends', hint: '12'),
                 HollowChipTab(value: 1, label: 'Requests', count: 3),
                 HollowChipTab(value: 2, label: 'Add friend'),
+              ],
+            ),
+            const HollowDivider(),
+            const SizedBox(height: HollowSpacing.lg),
+            const HollowSectionHeader('Tabs inside content: chips'),
+            HollowChipTabs<int>(
+              selected: _tab,
+              onSelected: (v) => setState(() => _tab = v),
+              tabs: const [
+                HollowChipTab(value: 0, label: 'Standard'),
+                HollowChipTab(value: 1, label: 'Server'),
+                HollowChipTab(value: 2, label: 'Mine'),
               ],
             ),
             const SizedBox(height: HollowSpacing.sm),

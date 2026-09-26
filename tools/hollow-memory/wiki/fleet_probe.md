@@ -505,7 +505,7 @@ pwsh scripts/fleet.ps1 -Stop
   the probe reads it in `setUpAll` through path_provider (`probe_env.dart`). The probe also
   calls `setDataDir` + `overrideHollowDataDir` itself for a file-sourced data dir, because the
   real app does that in `main()` and the probe never runs `main()`.
-- **Simulator.app must be showing the devices** (`Start-SimDevice` opens it). A headless boot
+- **The device must be SHOWN** (`Start-SimDevice` does it). Since Xcode 27 there is no Simulator.app: DeviceHub shows a device through `open "devices://device/open?id=<udid>"`, and a device shown once keeps rendering after DeviceHub moves to the next (memory `feedback_xcode27_no_simulator_app`). A headless boot
   renders one frame and then produces none, and the probe's first `tester.pump` waits forever
   with an empty stack. That cost an hour to find; the VM service's `pause`+`getStack` on the
   isolate is what showed the idle loop.

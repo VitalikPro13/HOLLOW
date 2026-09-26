@@ -8,10 +8,10 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_tab_bar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart';
@@ -225,7 +225,8 @@ void main() {
   testWidgets('the tabs are the header: no second "Friends"', (tester) async {
     await _open(tester, FriendsManagerTab.friends);
     expect(find.text('Friends'), findsOneWidget);
-    expect(find.widgetWithText(HollowChip, 'Friends'), findsOneWidget);
+    expect(find.widgetWithText(HollowTabBar<FriendsManagerTab>, 'Friends'),
+        findsOneWidget);
   });
 
   testWidgets('a favourite moves down from More, for the keyboard',
@@ -264,10 +265,9 @@ void main() {
     expect(tester.getTopLeft(find.text('Favourites')).dx, edge);
   });
 
-  testWidgets("request rows sit on the tab row's edge", (tester) async {
+  testWidgets("request rows sit on their section title's edge", (tester) async {
     await _open(tester, FriendsManagerTab.requests);
-    final edge = tester.getTopLeft(find.byType(HollowChip).first).dx;
+    final edge = tester.getTopLeft(find.text('Received')).dx;
     expect(tester.getTopLeft(find.byType(HollowAvatar).first).dx, edge);
-    expect(tester.getTopLeft(find.text('Received')).dx, edge);
   });
 }

@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
+import 'package:hollow/src/ui/call/call_side_panel.dart';
 import 'package:hollow/src/ui/call/call_stage.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
@@ -21,9 +22,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The voice room's chat is in the side panel. Session-sticky, on by default.
 final vcChatPanelOpenProvider = StateProvider<bool>((_) => true);
-
-/// Width of the chat panel beside a voice room's stage.
-const double kVcChatPanelWidth = 300;
 
 /// A voice channel (D3): the room you are in is always the stage, a room you
 /// are not in shows who is there with Join voice, and the channel's chat sits
@@ -42,52 +40,40 @@ class VoiceChannelPane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final joined = ref.watch(voiceChannelProvider.select((s) =>
         s.currentServerId == serverId && s.currentChannelId == channelId));
     final chatOpen = ref.watch(vcChatPanelOpenProvider);
 
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(
-          child: Column(
-            children: [
-              _StageHeader(
-                serverId: serverId,
-                channelId: channelId,
-                channelName: channelName,
-              ),
-              Expanded(
-                child: joined
-                    ? CallStage(
-                        source: VcCallStageSource(
-                            serverId: serverId, channelId: channelId),
-                      )
-                    : _RoomPreview(
-                        serverId: serverId,
-                        channelId: channelId,
-                        channelName: channelName),
-              ),
-            ],
+    return CallStageWithPanel(
+      stage: Column(
+        children: [
+          _StageHeader(
+            serverId: serverId,
+            channelId: channelId,
+            channelName: channelName,
           ),
-        ),
-        if (chatOpen)
-          Container(
-            width: kVcChatPanelWidth,
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              border: Border(left: BorderSide(color: hollow.border)),
-            ),
-            child: ChannelChatPane(
+          Expanded(
+            child: joined
+                ? CallStage(
+                    source: VcCallStageSource(
+                        serverId: serverId, channelId: channelId),
+                  )
+                : _RoomPreview(
+                    serverId: serverId,
+                    channelId: channelId,
+                    channelName: channelName),
+          ),
+        ],
+      ),
+      panel: chatOpen
+          ? ChannelChatPane(
               serverId: serverId,
               channelId: channelId,
               channelName: channelName,
               headerTitle: 'Chat',
               isVoice: true,
-            ),
-          ),
-      ],
+            )
+          : null,
     );
   }
 }

@@ -1,214 +1,53 @@
 # MemberPanel — Right-Side Member List
 
-Source: `lib/src/ui/shell/member_panel.dart` (706 lines)
+Sources: `lib/src/ui/shell/member_panel.dart` (the frame), `lib/src/ui/shell/member_list.dart`
+(the list, shared with the phone), `lib/src/ui/components/person_row.dart` (the row).
+Rebuilt 2026-09-26 (design language pass; tmp3 item 1).
 
-## MemberPanel Widget Overview
+## The frame
 
-`MemberPanel` is a `ConsumerWidget` that renders the right-side panel. Its width comes from `memberPanelWidthProvider` (issue #54): the shell passes nothing and the user drags the `PanelResizeHandle` seam on the panel's LEFT edge (and passes `edgeBorder: false`, because that seam paints the divider itself since 2026-08-21); a caller may still override with an explicit `width`. It sits at the rightmost edge of the shell layout in both Dock and Classic modes, docked at every width the desktop shell runs at — below `_kDesktopBreakpoint` it simply starts collapsed, and re-opening it pushes the chat over rather than covering it (`_syncMemberPanelToWidth`, see `wiki/ui_shell_layout.md`).
+`MemberPanel` is only rendered with a server selected (the shell's `_MemberPanelSlot` gates on
+`selectedServerId != null && memberPanelOpen && !voiceRoomSelected`); the old DM/Home "peers online"
+mode was dead code and is gone. `surface`, width from `memberPanelWidthProvider` (the
+`PanelResizeHandle` seam on its LEFT edge paints the divider, so the shell passes
+`edgeBorder: false`). Top: a `ChatHeaderBar` (users icon, "Members"), level with the chat's header
+and outside `PanelScale`; below it `PanelScale > MemberList`, keyed per server so switching swaps
+instantly.
 
-The panel watches `selectedServerProvider` to determine which content mode to display:
-- **Server selected (`selectedServerId != null`):** Shows `_ServerMemberContent` keyed by `server-members-$serverId`.
-- **No server selected (DM/home mode):** Shows `_PeerMemberContent` keyed by `peer-members`.
+## MemberList (desktop panel AND the phone's member sheet)
 
-Switching servers swaps the list instantly (no `AnimatedSwitcher`; the key resets the content's state). The panel itself opens and closes instantly too: the shell's `_MemberPanelSlot` either renders it or renders nothing, since a width animation would re-wrap the chat text every frame. No startup animation of its own.
+`memberListProvider(serverId)` (autoDispose family, `AsyncValue<List<MemberListItem>>`) is the ONE
+grouping: online members by role in `owner, admin, moderator` order, then plain members (and any
+role this build does not know) under **"Online"**, then **"Offline"**; each group sorted by
+nickname-or-name, case-insensitive. Online = `onlineIdentitiesProvider` (device->master folded,
+invisible applied); yourself follows `invisibleModeProvider`. Items: `MemberGroupItem(label, count,
+folded)` / `MemberPersonItem(member, online)`.
 
-Container styling: `hollow.surface` background, left `BorderSide` using `hollow.border`. The content inside that container is wrapped in `PanelScale` (issue #54) — the panel keeps its slot and its avatars, names, status dots and counts zoom together with `panelScaleProvider`. Widening is the seam's job, zooming is this one's.
+- **Groups fold** (issue #54): `collapsedMemberGroupsProvider`, keyed `serverId:label`, persisted;
+  a folded group keeps its header and full count. The header is `HollowSectionHeader(dense, count)`
+  inside a `HollowPressable` with a trailing chevron (semantics "Collapse/Expand <label>, N
+  members"); groups after the first sit `lg` below the previous rows.
+- **The role shows ONCE**, as its group's header. Rows carry no role line and no role colours (the
+  old hardcoded purple admin / warning-orange moderator / gold owner are gone: status colours are
+  not rank).
+- **States:** loading shows nothing for 1 s, then skeleton rows at the final geometry (`Timer`, no
+  ticker); error = `HollowEmptyState` "Couldn't load the member list" + ghost "Try again"
+  (invalidates `serverMembersProvider`); empty = "No members yet"; our relay link offline /
+  reconnecting / error = a quiet line on top, "You're offline, so who's online may be out of date."
+- `touch: true` (phone sheet): 40 px avatars, full-bleed rows, a tap opens
+  `showMobileProfileSheet`. Desktop: a tap opens `showProfileCardPopup` anchored by
+  `memberCardAnchor` (left of the panel, re-read on resize), a right click `showUserContextMenu`.
 
-### Providers Read
-- `selectedServerProvider` — determines server vs peer content mode
+## PersonRow
 
-## _SectionDivider — Section Headers
-
-`_SectionDivider` is a `StatelessWidget` that renders a section header row: optional chevron + `Label` + a static `HollowDivider` hairline (Expanded) + count. Used for Online, Offline, role-grouped sections and the "Members N" header.
-
-### Parameters
-- `label` (String) — section text (e.g., "Online", "Offline", "Owner", "Admin")
-- `count` (int) — member count shown at the right end
-- `onToggle` (VoidCallback?) — non-null makes the section FOLDABLE (issue #54): the row grows a leading chevron (12px, `chevronRight` folded / `chevronDown` open), becomes a `HollowPressable(subtle: true)` row, and carries an "Expand/Collapse <label>, N members" label. Only the server member list passes it.
-- `collapsed` (bool) — which chevron to draw. The header and its full count stay visible when folded; only the rows underneath go away.
-
-### Folding (issue #54)
-State lives in `collapsedMemberGroupsProvider`, keyed `serverId:label`, persisted and loaded from `HollowShell._bootstrap` like every other layout preference. `_serverMemberEntriesProvider` watches it and skips the member entries of a folded section while still emitting its header — so the counts a user folds away stay honest. Per server, because "hide Offline" on a 200-member server says nothing about a 4-member one.
-
-### Typography
-Label in `HollowTypography.label` with `hollow.textSecondary` (written as-is, no uppercase or tracking); count in `HollowTypography.monoSmall`, `hollow.textTertiary`, tabular figures.
-
-## _SpinningRefreshIcon — Sync Activity Indicator
-
-`_SpinningRefreshIcon` is a `StatefulWidget` with `SingleTickerProviderStateMixin` that renders a continuously spinning `LucideIcons.refreshCw` icon.
-
-### Parameters
-- `size` (double) — icon size
-- `color` (Color) — icon color
-
-### Animation
-`AnimationController` with 1500ms duration, repeating indefinitely. Uses `RotationTransition`. Respects `HollowDurations.animationsDisabled` — sets duration to `Duration.zero` and skips `_controller.repeat()` when animations are disabled.
-
-Used in two contexts:
-- `_ServerMemberTile`: size 9, `hollow.accent` color — shown instead of `StatusDot` when `isPeerSyncingProvider(peerId)` is true
-- `_MemberTile`: size 12, `hollow.textSecondary` color — shown when the peer connection is not yet encrypted
-
-## Role Color and Label Helpers
-
-Two private functions map role strings to visual properties:
-
-### `_roleDividerLabel(String role)`
-Returns the display label:
-- `owner` -> "Owner"
-- `admin` -> "Admin"
-- `moderator` -> "Moderator"
-- default -> "Members"
-
-### `_roleLabelColor(String role, HollowTheme hollow)`
-Returns the color for role label text in member tiles:
-- `owner` -> `hollow.warning` (gold)
-- `admin` -> `Color(0xFFA78BFA)` (purple)
-- `moderator` -> `Color.lerp(hollow.warning, hollow.error, 0.5)` (orange)
-- `member` / default -> `hollow.textSecondary`
-
-The role text itself in `_ServerMemberTile` comes from the shared `roleDisplayName()` (`lib/src/core/role_hierarchy.dart`), which capitalises the role id.
-
-## _ServerMemberContent — Server Member List
-
-`_ServerMemberContent` is a `ConsumerWidget` that displays all members of a server, split into online and offline groups, with role-based sub-grouping for online members.
-
-### Parameters
-- `serverId` (String) — the server to display members for
-
-### Providers Read
-- `serverMembersProvider(serverId)` — `AsyncValue` of member list from CRDT state
-- `peersProvider` — map of currently connected peers
-- `identityProvider` — local peer ID
-- `invisiblePeersProvider` — set of peer IDs that have declared invisible status
-- `invisibleModeProvider` — whether the local user is in invisible mode
-
-### Layout Structure
-Top-level `Column`:
-1. **Header** (48px height) — bordered bottom, contains a `_SectionDivider` showing "Members N". During loading shows "Members ...", on error shows "Members ?".
-2. **Expanded member list** — `ListView.builder` for lazy rendering (Phase 6.25 optimization to prevent jank on first server entry).
-
-### Online/Offline Split Logic
-Members are partitioned based on connection status and invisible mode:
-
-**Online** if:
-- Local user: `!amInvisible`
-- Remote peer: `connectedPeers.containsKey(peerId) && !invisiblePeers.contains(peerId)`
-
-**Offline** if:
-- Local user: `amInvisible` (invisible mode makes self appear offline)
-- Remote peer: not connected OR is in invisible peers set
-
-### Role-Grouped Sub-Sections (Online Only)
-Role ordering: `['owner', 'admin', 'moderator', 'member']`.
-
-Two rendering paths for online members:
-1. **All same role (all `member`):** Simple "Online N" header, followed by flat member tiles.
-2. **Multiple roles present:** Uses `buildRoleGrouped()` which creates per-role sub-sections. Each role group gets its own `_SectionDivider` with a role label (e.g., "Owner 1", "Admin 2").
-
-**Offline members** always get a single "Offline N" header, with no role sub-grouping.
-
-### Empty/Error States
-- Empty members: centered "No members" text
-- Loading: centered `HollowSpinner.large()`
-- Error: centered "Failed to load members" text
-
-## _PeerMemberContent — DM/Home Peer List
-
-`_PeerMemberContent` is a `ConsumerWidget` shown when no server is selected. Displays all online peers (excluding invisible peers).
-
-### Providers Read
-- `peersProvider` — all connected peers map
-- `invisiblePeersProvider` — peers to filter out
-
-### Filtering
-Creates a filtered copy of the peers map by removing all peer IDs present in `invisiblePeers`.
-
-### Layout
-- **Empty state:** centered "No peers online" text
-- **Non-empty:** `ListView.builder` with `peers.length + 1` items (first item is an "Online N" `_SectionDivider`)
-
-Rows render in place: no stagger or slide-in.
-
-## _ServerMemberTile — Server Member Row
-
-`_ServerMemberTile` is a `ConsumerWidget` rendering a compact row for one server member.
-
-### Parameters
-- `peerId` (String) — member's peer ID
-- `displayName` (String) — profile display name (from CRDT member data)
-- `role` (String) — power role: "owner", "admin", "moderator", or "member"
-- `nickname` (String) — server-specific nickname
-- `twitchUsername` (String) — Twitch username from CRDT member data
-- `isOnline` (bool) — online/offline status
-- `serverId` (String?) — owning server ID
-- `labels` (List<crdt_api.LabelFfi>) — cosmetic label badges, defaults to empty
-
-### Providers Read
-- `isPeerSyncingProvider(peerId)` — whether this peer is currently syncing with the local node
-- `profileProvider` — all user profiles (for avatar, name resolution, AND Twitch username fallback)
-- `localNicknameProvider` — triggers rebuild on local nickname changes
-
-### Twitch Username Resolution
-`effectiveTwitch` is resolved at the top of `build()`: if CRDT `twitchUsername` is non-empty, use it; otherwise fall back to `profiles[peerId]?.twitchUsername` from the profile DB. This ensures the Twitch badge appears even when the CRDT data hasn't synced yet (e.g., peer reconnected and sent profile update but CRDT hasn't caught up).
-
-### Name Resolution
-Uses `serverDisplayNameFor(profiles, peerId, nickname: nickname)`. Resolution order: local nickname -> server nickname -> profile display name -> short peer ID (first 8 chars + "...").
-
-### Visual Layout
-Wrapped in `AnimatedOpacity`: 1.0 when online, 0.5 when offline (`HollowDurations.fast` transition).
-
-Inside a `HollowPressable` (subtle mode, sm border radius):
-
-**Left: Avatar stack (28px)**
-- `HollowAvatar` with profile `avatarBytes`
-- Positioned bottom-right overlay (inside `Container` with `hollow.surface` circular border for cutout effect):
-  - If syncing: `_SpinningRefreshIcon` (size 9, accent color)
-  - Else: `StatusDot` — green with pulse when online, `textSecondary` without pulse when offline
-
-**Right: Name + badges column**
-- **Display name:** `HollowTypography.bodySmall` at 12px, `textPrimary`, ellipsis overflow
-- **Role badge** (only if `role != 'member'`): capitalized role name, colored per `_roleLabelColor()`, caption at 10px
-- **Twitch badge** (only if `effectiveTwitch.isNotEmpty`): Row with `SimpleIcons.twitch` (10px, purple #9146FF) + username text (caption at 9px, same purple)
-
-No label badges are shown inline in the tile itself — labels are only displayed in the `ProfileCardPopup` when clicked.
-
-### Click Behavior
-On tap: gets the tile's global position via `findRenderObject()`, then calls `showProfileCardPopup()` with:
-- `anchor: Offset(pos.dx - 290, pos.dy - 100)` — positions card to the left of the member panel
-- Passes `effectiveTwitch` (resolved, not raw CRDT), `nickname`, `role`, and `labels` for display in the profile card
-
-## _MemberTile — Peer/DM Mode Member Row
-
-`_MemberTile` is a `ConsumerWidget` for the simpler peer list (no server context).
-
-### Parameters
-- `peerId` (String) — peer's ID
-- `isEncrypted` (bool) — whether the Olm session with this peer is established
-
-### Providers Read
-- `profileProvider` — user profiles for avatar and name
-- `localNicknameProvider` — triggers rebuild on local nickname changes
-- `webRtcProvider` (selective) — checks if `peers[peerId] == WebRtcPeerStatus.connected`
-
-### Name Resolution
-Uses `displayNameFor(profiles, peerId)`. Resolution order: local nickname -> profile display name -> short peer ID.
-
-### Visual Layout
-Inside a `HollowPressable` (subtle mode):
-
-**Left: Avatar stack (28px)**
-- `HollowAvatar` with profile `avatarBytes`
-- Positioned bottom-right: `StatusDot` — always `hollow.success` (green) with pulse (these are online peers only)
-
-**Center: Display name**
-- `HollowTypography.bodySmall` at 12px, `textSecondary` color, ellipsis overflow
-
-**Right: Status icons**
-- **WebRTC direct connection indicator:** If the peer has a direct P2P WebRTC data channel (`WebRtcPeerStatus.connected`), shows `LucideIcons.radio` (11px, accent color)
-- **Encryption indicator:** If `isEncrypted` is true, shows `LucideIcons.lock` (12px, success/green). If false, shows `_SpinningRefreshIcon` (12px, textSecondary) indicating key exchange is still in progress.
-
-### Click Behavior
-Same pattern as `_ServerMemberTile`: gets global position, calls `showProfileCardPopup()` with `anchor: Offset(pos.dx - 290, pos.dy - 100)`. No server-specific fields (nickname, role, labels) are passed.
+`PersonRow(peerId, name, online, onTap, nameTrailing, subtitle, touch)`: `PresenceAvatar` (32 desktop
+/ 40 touch, dot ring cut from `surface` / `overlay`), name in `body` (`bodyTouch` on a phone) w500,
+glyphs after the name, optional second line. Desktop rows are 36 tall (two-line ~50). Offline
+DIMS THE AVATAR (AnimatedOpacity 0.5) and drops the NAME to `textTertiary` (faded text fails
+contrast). The member list passes `SupportNameGlyph` + `TwitchNameGlyph` (a grey Twitch mark with
+the handle in its tooltip; the handle itself lives on the profile card) and, while online, the
+person's `profile.status` as the subtitle. The per-row sync spinner is gone (it was an operator
+signal and a ticker per row).
 
 ## The User Context Menu (issue #61 phase 3)
 

@@ -121,7 +121,7 @@ class MobileProfileSheet extends ConsumerWidget {
                       onMessage: () => _openChat(context, ref),
                       onEditProfile: () => _editProfile(context),
                       onEditShowcase: () =>
-                          showShowcaseEditorDialog(context, ref),
+                          showShowcaseEditorDialog(context),
                     ),
                     if (!board.isEmpty)
                       Padding(

@@ -266,7 +266,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 108,
+    baseline: 104,
   ),
   _Rule(
     id: 'material-colors',
@@ -283,7 +283,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 80,
+    baseline: 74,
   ),
   _Rule(
     id: 'radius-literal',
@@ -291,7 +291,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 23,
+    baseline: 22,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -410,7 +410,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 64,
+    baseline: 60,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -419,7 +419,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 39,
+    baseline: 38,
   ),
   _Rule(
     id: 'gradient',

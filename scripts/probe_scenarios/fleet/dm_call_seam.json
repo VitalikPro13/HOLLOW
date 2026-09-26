@@ -1,0 +1,256 @@
+{
+ "_": [
+  "A DM call's stage and its chat panel: the seam on the panel's left edge,",
+  "hovered (the accent line) and dragged wide and back to the minimum. Friends a",
+  "and b first, as in calls_after.",
+  "",
+  "run: powershell -File scripts\\fleet.ps1 -Scenario dm_call_seam -Peers a,b -Attach"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Needs Attention",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Accept",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "type:_FriendsManager > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "gone": "type:_FriendsManager",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:probe-a"
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "field",
+   "value": "got a minute to go over the mix? ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:probe-b"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:got a minute to go over the mix? ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Home",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Start voice call",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:Accept",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Accept",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "target": "semantics:Leave the call",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 5000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Open the call",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "hover_at",
+   "x": 5,
+   "y": 400
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "d-01-stage-default"
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "semantics:Resize the side panel"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "d-02-seam-hover"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "semantics:Resize the side panel",
+   "dx": -220,
+   "dy": 0
+  },
+  {
+   "peer": "a",
+   "op": "hover_at",
+   "x": 5,
+   "y": 400
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "d-03-wide"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "semantics:Resize the side panel",
+   "dx": 500,
+   "dy": 0
+  },
+  {
+   "peer": "a",
+   "op": "hover_at",
+   "x": 5,
+   "y": 400
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "d-04-min"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Leave the call",
+   "index": 0
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2500
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Leave the call",
+   "index": 0,
+   "allowMiss": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Cancel",
+   "index": 0,
+   "allowMiss": true
+  }
+ ]
+}

@@ -33,6 +33,10 @@ const double kMemberPanelWidthDefault = 280.0;
 const double kMemberPanelWidthMin = 180.0;
 const double kMemberPanelWidthMax = 420.0;
 
+const double kCallSidePanelWidthDefault = 300.0;
+const double kCallSidePanelWidthMin = 300.0;
+const double kCallSidePanelWidthMax = 560.0;
+
 const double kPanelScaleDefault = 1.0;
 const double kPanelScaleMin = 0.8;
 const double kPanelScaleMax = 1.4;
@@ -43,6 +47,7 @@ Future<void> loadLayoutPrefs(WidgetRef ref) async {
   await ref.read(profileCardStyleProvider.notifier).load();
   await ref.read(channelSidebarWidthProvider.notifier).load();
   await ref.read(memberPanelWidthProvider.notifier).load();
+  await ref.read(callSidePanelWidthProvider.notifier).load();
   await ref.read(panelScaleProvider.notifier).load();
   await ref.read(collapsedMemberGroupsProvider.notifier).load();
 }
@@ -78,7 +83,7 @@ class ProfileCardStyleNotifier extends Notifier<ProfileCardStyle> {
   }
 }
 
-/// Shared body of the two width preferences: same clamp, same write-through,
+/// Shared body of the width preferences: same clamp, same write-through,
 /// different key and bounds.
 abstract class _PanelWidthNotifier extends Notifier<double> {
   String get settingKey;
@@ -148,6 +153,23 @@ class MemberPanelWidthNotifier extends _PanelWidthNotifier {
   double get minWidth => kMemberPanelWidthMin;
   @override
   double get maxWidth => kMemberPanelWidthMax;
+}
+
+/// Width of the panel beside a call stage: a DM call's or a voice room's chat,
+/// a meeting's chat or people. One width for all of them, so it feels like one panel.
+final callSidePanelWidthProvider =
+    NotifierProvider<CallSidePanelWidthNotifier, double>(
+        CallSidePanelWidthNotifier.new);
+
+class CallSidePanelWidthNotifier extends _PanelWidthNotifier {
+  @override
+  String get settingKey => 'call_side_panel_width';
+  @override
+  double get defaultWidth => kCallSidePanelWidthDefault;
+  @override
+  double get minWidth => kCallSidePanelWidthMin;
+  @override
+  double get maxWidth => kCallSidePanelWidthMax;
 }
 
 /// Zoom for the side panels ONLY: server strip, channel sidebar, member panel.

@@ -108,7 +108,16 @@ function Start-SimDevice($udid) {
         & xcrun simctl boot $udid 2>&1 | Out-Null
         & xcrun simctl bootstatus $udid -b 2>&1 | Out-Null
     }
-    & open -a Simulator 2>&1 | Out-Null
+    # A booted device nothing shows renders one frame and then none. Xcode 27
+    # replaced Simulator.app with DeviceHub, which shows a device through its
+    # URL; a device shown once keeps rendering after the view moves on.
+    & open "devices://device/open?id=$udid" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & open -a Simulator --args -CurrentDeviceUDID $udid 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "could not show simulator ${udid}: neither DeviceHub nor Simulator.app opened it"
+        }
+    }
 }
 
 function Get-SimContainer($udid) {

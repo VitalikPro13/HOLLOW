@@ -458,9 +458,10 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.ghost(
+            // Closes the card first, like Edit profile.
             onPressed:
                 widget.onEditShowcase ??
-                () => showShowcaseEditorDialog(context, ref),
+                () => _closeThen(showShowcaseEditorDialog),
             compact: compact,
             touch: _touch,
             icon: const Icon(LucideIcons.layoutGrid),

@@ -95,7 +95,7 @@ Future<_Profiles> _open(
             builder: (context, ref, _) {
               return Center(
                 child: TextButton(
-                  onPressed: () => showShowcaseEditorDialog(context, ref),
+                  onPressed: () => showShowcaseEditorDialog(context),
                   child: const Text('open'),
                 ),
               );

@@ -57,18 +57,21 @@ states into `build/ui_screenshots/redesign_after/`); widget tests
 
 ## showProfileCardPopup() — Compact Popup (desktop)
 
-`lib/src/ui/components/profile_card_popup.dart`. Keeps the OverlayEntry +
+`lib/src/ui/components/profile_card_popup.dart`. A ROUTE since 2026-09-26
+(`showGeneralDialog`, transparent barrier, barrier-dismissible): it was a raw
+OverlayEntry, which sat above every route and painted over its own More menu
+(the menu opened UNDER the card, its first row hidden). Keeps the
 anchoring/flip/clamp shell (estimated height 400, flip-up when overflowing
-the bottom, horizontal clamp) and the shared popover motion (scale from
-`HollowMotion.popoverScale` + fade, `HollowDurations.fast` in, `exit` out,
-growing from the anchor corner: `topLeft` when it opens downward, else
-`bottomLeft`; plain `hollow.border` hairline, `HollowShadows.float`). The
-barrier stops taking clicks as the exit starts. The card
+the bottom, horizontal clamp) and the popover motion (scale from
+`HollowMotion.popoverScale` + fade on the route's animation, growing from the
+anchor corner: `topLeft` when it opens downward, else `bottomLeft`; plain
+`hollow.border` hairline, `HollowShadows.float`). `dismissHost` pops THIS route
+by identity (`removeRoute` when a dialog already sits on top). The card
 interior is `ProfileIdentityColumn(density: compact)`. Member panel anchors derive from
 `kProfileCardPopupWidth`. `showLocalNicknameDialog` lives in
 profile_card_body.dart and is RE-EXPORTED here (chat_pane imports it).
-Expand affordance: "View full profile" over the banner (`onExpand`) → removes
-the overlay instantly → `showProfileDialog`.
+Expand affordance: "View full profile" over the banner (`onExpand`) → pops
+the card → `showProfileDialog`.
 
 **Anchoring is a FUNCTION, not a point (issue #54).** The parameter is
 `anchorOf: Offset Function()`, re-read after any viewport change: a point
@@ -83,10 +86,10 @@ floating. Member-panel rows share one `memberCardAnchor(context)` helper;
 call sites with nothing to follow (the "View profile" menu row) pass a
 constant closure.
 
-Also since issue #54: Escape closes it (a raw OverlayEntry is not a route, so
-nothing else gave it a keyboard exit), `_dismissing` guards the double
-teardown that would otherwise dispose an entry twice, and the upward-opening
-branch is clamped so a short window cannot push the card off the top edge.
+Escape closes it (the route's own dismiss), and the upward-opening branch is
+clamped so a short window cannot push the card off the top edge. **Edit
+showcase** on your own card closes the card first (`_closeThen`), like Edit
+profile; `showShowcaseEditorDialog(context)` takes no ref.
 
 **Which surface opens (issue #54):** `profileCardStyleProvider`
 (Settings > Appearance, "Open profiles expanded"). At

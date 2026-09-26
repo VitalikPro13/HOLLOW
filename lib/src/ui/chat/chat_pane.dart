@@ -69,6 +69,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_side_panel.dart';
 import 'package:hollow/src/ui/call/call_stage.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/call/dm_call_row.dart';
@@ -739,58 +740,65 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
     // Custom-emote pull source for every token and reaction in this DM: the
     // counterpart's devices.
+    final main = ChatDropZone(
+      onFilesDropped: _stageFiles,
+      child: Column(
+        children: [
+          _buildHeader(hollow,
+              isSavedMessages: isSavedMessages,
+              showProfilePanel: showProfilePanel,
+              stageShown: stageShown),
+
+          DmCallRow(peerMaster: widget.peerId),
+
+          if (ref.watch(chatSearchOpenProvider))
+            _buildSearchBar(hollow, isSavedMessages),
+
+          // Pinned above the message list rather than a toast, because the
+          // warning has to survive scrollback and restarts.
+          if (!isSavedMessages) SecurityAlertBanner(peerId: widget.peerId),
+
+          if (!isSavedMessages)
+            IdentityDestroyedBanner(peerId: widget.peerId),
+
+          if (stageShown)
+            Expanded(
+              child: CallStage(source: DmCallStageSource(widget.peerId)),
+            )
+          else
+            ..._buildMessageArea(
+                hollow, messages, typingPeers, profiles, localPeerId),
+        ],
+      ),
+    );
+
+    // Custom-emote pull source for every token and reaction in this DM: the
+    // counterpart's devices.
     return EmoteScope(
       peerHint: widget.peerId,
-      child: Row(
-      children: [
-        Expanded(
-          child: ChatDropZone(
-            onFilesDropped: _stageFiles,
-            child: Column(
-      children: [
-        _buildHeader(hollow,
-            isSavedMessages: isSavedMessages,
-            showProfilePanel: showProfilePanel,
-            stageShown: stageShown),
-
-        DmCallRow(peerMaster: widget.peerId),
-
-        if (ref.watch(chatSearchOpenProvider))
-          _buildSearchBar(hollow, isSavedMessages),
-
-        // Pinned above the message list rather than a toast, because the
-        // warning has to survive scrollback and restarts.
-        if (!isSavedMessages) SecurityAlertBanner(peerId: widget.peerId),
-
-        if (!isSavedMessages)
-          IdentityDestroyedBanner(peerId: widget.peerId),
-
-        if (stageShown)
-          Expanded(
-            child: CallStage(source: DmCallStageSource(widget.peerId)),
-          )
-        else
-          ..._buildMessageArea(hollow, messages, typingPeers, profiles, localPeerId),
-      ],
-          ),
-          ),
-        ),
-        if (stageShown)
-          switch (_stagePanel) {
-            _StagePanel.chat => _StageChatPanel(
+      child: stageShown && _stagePanel == _StagePanel.chat
+          // The same resizable panel as a voice room's and a meeting's chat.
+          ? CallStageWithPanel(
+              stage: main,
+              panel: _StageChatPanel(
                 children: _buildMessageArea(
                     hollow, messages, typingPeers, profiles, localPeerId),
               ),
-            _StagePanel.profile => DmProfilePanel(peerId: widget.peerId),
-            null => const SizedBox.shrink(),
-          }
-        else
-          _DmProfilePanelSlider(
-            visible: showProfilePanel,
-            peerId: widget.peerId,
-          ),
-      ],
-      ),
+            )
+          : Row(
+              children: [
+                Expanded(child: main),
+                if (stageShown)
+                  _stagePanel == _StagePanel.profile
+                      ? DmProfilePanel(peerId: widget.peerId)
+                      : const SizedBox.shrink()
+                else
+                  _DmProfilePanelSlider(
+                    visible: showProfilePanel,
+                    peerId: widget.peerId,
+                  ),
+              ],
+            ),
     );
   }
 
@@ -1819,28 +1827,19 @@ class _StageChatPanel extends StatelessWidget {
   final List<Widget> children;
   const _StageChatPanel({required this.children});
 
-  static const double width = 320;
-
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Container(
-      width: width,
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(left: BorderSide(color: hollow.border)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ChatHeaderBar(
-            leading: Icon(LucideIcons.messageSquare,
-                size: 20, color: hollow.textTertiary),
-            title: 'Chat',
-          ),
-          ...children,
-        ],
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ChatHeaderBar(
+          leading:
+              Icon(LucideIcons.messageSquare, size: 20, color: hollow.textTertiary),
+          title: 'Chat',
+        ),
+        ...children,
+      ],
     );
   }
 }

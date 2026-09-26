@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 
@@ -45,19 +43,15 @@ void showProfileCardPopup({
     return;
   }
 
-  final overlay = Overlay.of(context);
-  late final OverlayEntry entry;
-  var removed = false;
-  void close() {
-    if (removed) return;
-    removed = true;
-    OverlayHosts.unregister(entry);
-    entry.remove();
-    entry.dispose();
-  }
-
-  entry = OverlayEntry(
-    builder: (context) => _ProfileCardOverlay(
+  // A route, not a raw OverlayEntry: a host above the routes would paint over
+  // its own More menu and every dialog it opens.
+  showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Close profile',
+    barrierColor: Colors.transparent,
+    transitionDuration: HollowDurations.fast,
+    pageBuilder: (_, _, _) => _ProfileCardOverlay(
       peerId: peerId,
       nickname: nickname,
       role: role,
@@ -65,12 +59,8 @@ void showProfileCardPopup({
       serverId: serverId,
       anchorOf: anchorOf,
       anchorBottom: anchorBottom,
-      onDismiss: close,
     ),
   );
-
-  overlay.insert(entry);
-  OverlayHosts.register(entry, close);
 }
 
 /// Width of the compact anchored card; call-site anchor offsets derive from it.
@@ -84,7 +74,6 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String? serverId;
   final Offset Function() anchorOf;
   final bool anchorBottom;
-  final VoidCallback onDismiss;
 
   const _ProfileCardOverlay({
     required this.peerId,
@@ -94,7 +83,6 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
     this.serverId,
     required this.anchorOf,
     this.anchorBottom = false,
-    required this.onDismiss,
   });
 
   @override
@@ -102,12 +90,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
       _ProfileCardOverlayState();
 }
 
-class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scaleAnim;
-  late final Animation<double> _fadeAnim;
-
+class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay> {
   /// Seeded at open, re-read from [_ProfileCardOverlay.anchorOf] after the
   /// viewport changes size.
   late Offset _anchor;
@@ -117,24 +100,6 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
   void initState() {
     super.initState();
     _anchor = widget.anchorOf();
-    // A raw OverlayEntry is not a route, so nothing else gives this card an
-    // Escape key, and it would strand with no keyboard way out.
-    HardwareKeyboard.instance.addHandler(_onKey);
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.fast,
-    );
-    final curve = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-    _scaleAnim = Tween<double>(
-      begin: HollowMotion.popoverScale,
-      end: 1.0,
-    ).animate(curve);
-    _fadeAnim = curve;
-    _controller.forward();
   }
 
   @override
@@ -174,37 +139,24 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     });
   }
 
-  bool _onKey(KeyEvent event) {
-    if (event is! KeyDownEvent) return false;
-    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
-    _dismiss();
-    return true;
-  }
-
-  @override
-  void dispose() {
-    HardwareKeyboard.instance.removeHandler(_onKey);
-    _controller.dispose();
-    super.dispose();
-  }
-
-  /// One dismiss only: [onDismiss] removes AND disposes the overlay entry, so a
-  /// second run would tear down an entry that is already gone.
-  bool _dismissing = false;
-
+  /// Pops THIS route by identity: an action may already have opened a dialog
+  /// on top of it, and a bare pop would close that instead.
   void _dismiss() {
-    if (_dismissing) return;
-    // The barrier stops taking clicks as the exit starts, so a click on
-    // whatever sits behind it lands.
-    setState(() => _dismissing = true);
-    _controller.reverseDuration = HollowDurations.exit;
-    _controller.reverse().then((_) => widget.onDismiss());
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive) return;
+    final navigator = Navigator.of(context);
+    if (route.isCurrent) {
+      navigator.pop();
+    } else {
+      navigator.removeRoute(route);
+    }
   }
 
   /// Close the popup instantly and open the full profile dialog.
   void _expand() {
     final navContext = Navigator.of(context, rootNavigator: true).context;
-    widget.onDismiss();
+    _dismiss();
     showProfileDialog(
       navContext,
       peerId: widget.peerId,
@@ -254,60 +206,54 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       }
     }
 
-    return IgnorePointer(
-      ignoring: _dismissing,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: _dismiss,
-              behavior: HitTestBehavior.opaque,
-              child: const SizedBox.expand(),
-            ),
-          ),
-
-          Positioned(
-            left: left,
-            top: top,
-            bottom: bottom,
-            child: FadeTransition(
-              opacity: _fadeAnim,
-              child: ScaleTransition(
-                scale: _scaleAnim,
-                // Grows from the corner at its anchor, which is the top when it
-                // opens downward.
-                alignment: top != null
-                    ? Alignment.topLeft
-                    : Alignment.bottomLeft,
-                child: Material(
-                  color: Colors.transparent,
-                  child: Container(
+    final animation = ModalRoute.of(context)!.animation!;
+    final curve = CurvedAnimation(
+      parent: animation,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
+    );
+    return Stack(
+      children: [
+        Positioned(
+          left: left,
+          top: top,
+          bottom: bottom,
+          child: FadeTransition(
+            opacity: curve,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
+                  .animate(curve),
+              // Grows from the corner at its anchor, which is the top when it
+              // opens downward.
+              alignment: top != null ? Alignment.topLeft : Alignment.bottomLeft,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  width: cardWidth,
+                  decoration: BoxDecoration(
+                    color: hollow.overlay,
+                    borderRadius: BorderRadius.circular(hollow.radiusLg),
+                    border: Border.all(color: hollow.border),
+                    boxShadow: HollowShadows.float,
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: ProfileIdentityColumn(
+                    peerId: widget.peerId,
+                    nickname: widget.nickname,
+                    role: widget.role,
+                    labels: widget.labels,
+                    serverId: widget.serverId,
+                    density: ProfileCardDensity.compact,
                     width: cardWidth,
-                    decoration: BoxDecoration(
-                      color: hollow.overlay,
-                      borderRadius: BorderRadius.circular(hollow.radiusLg),
-                      border: Border.all(color: hollow.border),
-                      boxShadow: HollowShadows.float,
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: ProfileIdentityColumn(
-                      peerId: widget.peerId,
-                      nickname: widget.nickname,
-                      role: widget.role,
-                      labels: widget.labels,
-                      serverId: widget.serverId,
-                      density: ProfileCardDensity.compact,
-                      width: cardWidth,
-                      dismissHost: widget.onDismiss,
-                      onExpand: _expand,
-                    ),
+                    dismissHost: _dismiss,
+                    onExpand: _expand,
                   ),
                 ),
               ),
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

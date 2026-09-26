@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/call/call_side_panel.dart';
 import 'package:hollow/src/ui/call/call_stage.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
@@ -777,20 +778,12 @@ class _CallViewState extends ConsumerState<_CallView> {
             ],
           ),
           Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: _ConferenceCallArea(
-                      conf: conf, meetingName: meetingName),
-                ),
-                if (_panel != null)
-                  _MeetingSidePanel(
-                    conf: conf,
-                    meetingName: meetingName,
-                    panel: _panel!,
-                  ),
-              ],
+            child: CallStageWithPanel(
+              stage:
+                  _ConferenceCallArea(conf: conf, meetingName: meetingName),
+              panel: _panel == null
+                  ? null
+                  : _MeetingSidePanel(conf: conf, panel: _panel!),
             ),
           ),
         ],
@@ -799,33 +792,20 @@ class _CallViewState extends ConsumerState<_CallView> {
   }
 }
 
-/// The meeting's side panel, built like the member panel: chrome, a hairline
-/// on its inner edge, full height.
+/// What the meeting's side panel shows; [CallStageWithPanel] frames and sizes
+/// it.
 class _MeetingSidePanel extends StatelessWidget {
   final ConferenceState conf;
-  final String meetingName;
   final _MeetingPanel panel;
 
-  const _MeetingSidePanel({
-    required this.conf,
-    required this.meetingName,
-    required this.panel,
-  });
-
-  static const double _width = 300;
+  const _MeetingSidePanel({required this.conf, required this.panel});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Container(
-      width: _width,
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(left: BorderSide(color: hollow.border)),
-      ),
-      // The header's Chat and People buttons switch it; its own header names
-      // what it shows, so nothing here repeats them.
-      child: panel == _MeetingPanel.chat
+    // The header's Chat and People buttons switch it; its own header names
+    // what it shows, so nothing here repeats them.
+    return panel == _MeetingPanel.chat
           ? ChannelChatPane(
               // The ONE conference chat, RAM-only under a 'conf:' key.
               serverId: conf.activeServerId,
@@ -845,8 +825,7 @@ class _MeetingSidePanel extends StatelessWidget {
                 ),
                 Expanded(child: _PeoplePanel(conf: conf)),
               ],
-            ),
-    );
+            );
   }
 }
 
