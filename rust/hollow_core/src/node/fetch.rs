@@ -488,7 +488,16 @@ fn try_process_channel_msg(
             };
             *mls_dirty = true;
             let envelope_str = String::from_utf8_lossy(&plaintext);
-            match serde_json::from_str::<MessageEnvelope>(&envelope_str).ok()? {
+            let envelope = serde_json::from_str::<MessageEnvelope>(&envelope_str).ok()?;
+            let state = stored_server_state(db_path, db_passphrase, &server_id);
+            let restricted = |cid: &str| state.as_ref().is_some_and(|s| s.channel_uses_subgroup(cid));
+            if !crate::node::crypto_handler::mls_envelope_fits_group(
+                &envelope, &server_id, channel_id.as_deref(), restricted,
+            ) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED push envelope in {group_key}: it names another server, channel or a DM");
+                return None;
+            }
+            match envelope {
                 MessageEnvelope::ChannelMessage { inner } => {
                     let ChannelMessagePayload {
                         sid, cid, text, ts, sig, pk, mid, reply_to, file_id,
@@ -518,6 +527,9 @@ fn try_process_channel_msg(
                     if fetch_channel_sig_rejected(
                         &sender_master, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref(),
                         &extras,
+                    ) || fetch_post_refused(
+                        state.as_ref()?, &sender_master, &sid, &cid, file_id.is_some(), ts,
+                        db_path, db_passphrase,
                     ) {
                         return None;
                     }
@@ -549,6 +561,16 @@ fn try_process_channel_msg(
             // (members store metadata from the MLS FileHeader instead).
             file_meta: _,
         } => {
+            // Plaintext, so anyone in the room can send one: only a channel that is
+            // public in our own state takes it (guests get no pushes). Meeting chat
+            // is never stored.
+            if crate::node::conference::is_conference_sid(&server_id) {
+                return None;
+            }
+            let state = stored_server_state(db_path, db_passphrase, &server_id)?;
+            if !crate::node::message_ops::public_frame_accepted(Some(&state), false, &server_id, &channel_id) {
+                return None;
+            }
             // Public channels: signed plaintext. The frame author is the sender's
             // DEVICE id but the message is attributed to their MASTER, so resolve
             // and the fetched row lands master-keyed like the live handler's.
@@ -569,6 +591,9 @@ fn try_process_channel_msg(
             if fetch_channel_sig_rejected(
                 &sender_master, &server_id, &channel_id, ts, &text,
                 sig.as_deref(), pk.as_deref(), &extras,
+            ) || fetch_post_refused(
+                &state, &sender_master, &server_id, &channel_id, file_id.is_some(), ts,
+                db_path, db_passphrase,
             ) {
                 return None;
             }
@@ -590,6 +615,51 @@ fn try_process_channel_msg(
         }
         _ => None,
     }
+}
+
+/// Our stored view of a server: the fetch node runs no CRDT of its own.
+fn stored_server_state(
+    db_path: &str,
+    db_passphrase: &str,
+    server_id: &str,
+) -> Option<crate::crdt::server_state::ServerState> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let json = store.load_server_state(server_id).ok()??;
+    serde_json::from_str(&json).ok()
+}
+
+/// The live node's post gate (member, visibility, posting, mute, media-only, slow
+/// mode) for a push-fetched channel post: true = drop.
+#[allow(clippy::too_many_arguments)]
+fn fetch_post_refused(
+    state: &crate::crdt::server_state::ServerState,
+    sender_master: &str,
+    sid: &str,
+    cid: &str,
+    has_file: bool,
+    ts: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if let Some(reason) = crate::node::message_ops::live_channel_post_refusal(
+        state, sender_master, cid, has_file, now_ms,
+    ) {
+        hollow_log!("[HOLLOW-FETCH] DROPPED push channel post from {sender_master} in {sid}/{cid}: {reason}");
+        return true;
+    }
+    let slow = crate::node::message_ops::slow_mode_window_ms(state, sender_master, cid)
+        .is_some_and(|window| {
+            crate::storage::MessageStore::open(db_path, db_passphrase)
+                .is_ok_and(|store| store.channel_sender_has_msg_in_range(sid, cid, sender_master, ts - window, ts))
+        });
+    if slow {
+        hollow_log!("[HOLLOW-FETCH] DROPPED push slow-mode violation from {sender_master} in {cid}");
+    }
+    slow
 }
 
 /// True when a push-fetched channel message must NOT be stored: only a VERIFYING

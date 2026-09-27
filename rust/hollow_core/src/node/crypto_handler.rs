@@ -2621,6 +2621,33 @@ pub(crate) fn send_mls_broadcast(
     Ok(())
 }
 
+/// Whether an envelope decrypted under `server_id`'s group may be acted on;
+/// `group_channel` is the subgroup's channel, `None` for the server-wide group, and
+/// `restricted` says whether a channel uses a subgroup in our state. Decryption
+/// proves only that a member of THAT group sent it, so the envelope must name that
+/// server, a subgroup carries only its own channel, and a restricted channel's
+/// message content arrives only through its subgroup. DM-shaped envelopes never
+/// ride a group.
+pub(crate) fn mls_envelope_fits_group(
+    envelope: &MessageEnvelope,
+    server_id: &str,
+    group_channel: Option<&str>,
+    restricted: impl Fn(&str) -> bool,
+) -> bool {
+    match envelope.place() {
+        EnvelopePlace::Anywhere => true,
+        EnvelopePlace::Direct => false,
+        EnvelopePlace::Server { sid, cid } => {
+            sid == server_id
+                && match (group_channel, cid) {
+                    (Some(group_cid), cid) => cid == Some(group_cid),
+                    (None, Some(cid)) => !(envelope.is_channel_content() && restricted(cid)),
+                    (None, None) => true,
+                }
+        }
+    }
+}
+
 /// MLS-encrypt an envelope and broadcast to peers subscribed to `topic`; others
 /// pick it up when they sync the channel.
 ///
@@ -5643,5 +5670,84 @@ mod tests {
             hits[0].starts_with("crypto_handler.rs::mint_key_package "),
             "the one permitted call is the one inside the wrapper, got {hits:#?}",
         );
+    }
+
+    /// The channel ingest gates are only as good as their callers: a unit test on a
+    /// rule cannot see a receive path that stopped asking. Every MLS receiver binds
+    /// the envelope to its group before acting, every plaintext public arm asks
+    /// `public_frame_accepted`, the Olm fallback runs the shared ingest, and the push
+    /// path applies the live post gate.
+    #[test]
+    fn channel_ingest_gates_stay_wired() {
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let read = |f: &str| std::fs::read_to_string(node.join(f)).expect("read node source");
+        let (swarm, fetch) = (read("swarm.rs"), read("fetch.rs"));
+        let between = |src: &str, from: &str, to: &str| -> String {
+            let start = src.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = src[start..].find(to).unwrap_or_else(|| panic!("missing {to} after {from}"));
+            src[start..start + end].to_string()
+        };
+        for (name, src) in [("swarm.rs", &swarm), ("fetch.rs", &fetch)] {
+            let arm = between(src, "HavenMessage::MlsChannelMessage {", "match envelope {");
+            assert!(arm.contains("mls_envelope_fits_group("), "{name}: MLS envelope not bound to its group");
+        }
+        for kind in [
+            "PublicChannelMessage", "PublicChannelEdit", "PublicLinkPreviewSet",
+            "PublicChannelDelete", "PublicChannelAddReaction", "PublicChannelRemoveReaction",
+        ] {
+            let arm = between(&swarm, &format!("        HavenMessage::{kind} {{"), "=> {");
+            let body = between(&swarm, &arm, "message_ops::handle_envelope_");
+            assert!(body.contains("public_frame_accepted("), "swarm.rs: {kind} skips the public check");
+        }
+        let olm = between(&swarm, "Ok(MessageEnvelope::ChannelMessage { inner }) => {", "Ok(MessageEnvelope::ChannelSyncBatch");
+        assert!(olm.contains("message_ops::handle_envelope_channel_message("), "swarm.rs: the Olm arm has its own ingest again");
+        let public = between(&fetch, "HavenMessage::PublicChannelMessage {", "insert_channel_row(");
+        assert!(public.contains("public_frame_accepted(") && public.contains("fetch_post_refused("));
+        let mls = between(&fetch, "MessageEnvelope::ChannelMessage { inner } => {", "insert_channel_row(");
+        assert!(mls.contains("fetch_post_refused("), "fetch.rs: MLS posts skip the live post gate");
+    }
+
+    /// C2: MLS proves only that a member of THIS group sent an envelope, so it must
+    /// name this group's server, a subgroup carries only its own channel, a
+    /// restricted channel's content comes only through its subgroup, and DMs never
+    /// ride a group. Presence and typing for a restricted channel still ride the
+    /// server-wide group by design.
+    #[test]
+    fn authz_mls_envelope_must_fit_the_group_that_decrypted_it() {
+        let restricted = |cid: &str| cid == "staff";
+        let fits = |env: &MessageEnvelope, sid: &str, group_cid: Option<&str>| {
+            mls_envelope_fits_group(env, sid, group_cid, restricted)
+        };
+        let post = |sid: &str, cid: &str| MessageEnvelope::ChannelMessage {
+            inner: Box::new(ChannelMessagePayload {
+                sid: sid.into(), cid: cid.into(), text: "hi".into(), ts: 1, sig: None, pk: None,
+                mid: Some("m".into()), reply_to: None, file_id: None, link_preview: None,
+                order_us: Some(1_000), album: None,
+            }),
+        };
+
+        assert!(!fits(&post("other-server", "general"), "srv", None), "another server's channel");
+        assert!(!fits(&post("srv", "staff"), "srv", None), "restricted content outside its subgroup");
+        assert!(fits(&post("srv", "staff"), "srv", Some("staff")));
+        assert!(!fits(&post("srv", "general"), "srv", Some("staff")), "a subgroup carries only its channel");
+        assert!(fits(&post("srv", "general"), "srv", None));
+
+        let delete_server = MessageEnvelope::ServerDelete { sid: "srv".into() };
+        assert!(!fits(&delete_server, "conf:meeting", None), "a conference group naming a real server");
+        assert!(fits(&delete_server, "srv", None));
+        assert!(!fits(&delete_server, "srv", Some("staff")), "server-wide traffic in a subgroup");
+
+        let join = |sid: &str| MessageEnvelope::VoiceChannelJoin { sid: sid.into(), cid: "main".into() };
+        assert!(!fits(&join("conf:meeting"), "srv", None), "a meeting joined through a server group");
+        let typing = MessageEnvelope::Typing { sid: "srv".into(), cid: "staff".into() };
+        assert!(fits(&typing, "srv", None), "typing rides the server group by design");
+
+        let dm_edit = MessageEnvelope::EditMessage {
+            mid: "m".into(), text: "x".into(), ts: 1, sig: None, pk: None, sid: None, cid: None,
+        };
+        assert!(!fits(&dm_edit, "srv", None));
+        assert!(!fits(&MessageEnvelope::SessionAck, "srv", None));
+        let chunk = MessageEnvelope::FileChunk { fid: "f".into(), idx: 0, data: String::new() };
+        assert!(fits(&chunk, "srv", None));
     }
 }

@@ -6978,116 +6978,19 @@ async fn handle_incoming_request(
 
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
-                    let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
-                    // Multi-device: this Olm-direct path (MLS-failure fallback plus
-                    // offline replay) authenticates the sender's DEVICE socket, but
-                    // channel messages are SIGNED by and attributed to the sender's
-                    // MASTER, so resolve first or the signature cannot verify.
-                    let sender_master = super::resolver::resolve(peer_str);
-                    // SECURITY: Verify sender is a member of the claimed server.
-                    if let Some(state) = server_states.get(&sid) {
-                        if !state.is_member(&sender_master) {
-                            hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — not a member of server {sid}");
-                            return;
-                        }
-                    } else {
+                    let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
+                    // The Olm fallback (no MLS group yet, offline replay) takes the same ingest
+                    // as MLS, with the sender's DEVICE resolved to the MASTER that signs it.
+                    let Some(state) = server_states.get(&sid) else {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage for unknown server {sid}");
                         return;
-                    }
-
-                    // SECURITY: a LIVE channel message MUST carry a signature that verifies.
-                    // The old `if sig.is_some()` gate was itself the bypass: strip `sig`/`pk`
-                    // and verification was skipped entirely, leaving attribution on the
-                    // relay-reported sender id. `ChannelSyncBatch` backfill applies the same
-                    // rule; the live-enforce split survives only for the moderation trio.
-                    {
-                        // v2 only (0.8.5) — binds the wire's structured fields.
-                        let lp_digest = link_preview.as_ref().map(crypto_handler::link_preview_digest);
-                        let extras = crypto_handler::SignedExtras {
-                            mid: mid.as_deref(),
-                            reply_to: reply_to.as_deref(),
-                            file_id: file_id.as_deref(),
-                            order_us,
-                            lp_digest: lp_digest.as_deref(),
-                            album: album.as_deref(),
-                        };
-                        if !crypto_handler::verify_message_signature_v2(
-                            &sender_master, sig.as_deref(), pk.as_deref(),
-                            "ch", &format!("{sid}:{cid}"), ts, &extras, &msg_text,
-                            &mut PkCache::new(),
-                        ) {
-                            hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — signature verification FAILED");
-                            return;
-                        }
-                    }
-
-                    // SECURITY: enforce the 4,000 byte storage limit, already
-                    // signature-verified above against the RAW text. Char-boundary safe:
-                    // `msg_text[..4000]` PANICKED when byte 4,000 landed inside a multi-byte
-                    // character, aborting the swarm event loop on a remote-controlled string.
-                    let msg_text = clip_text(msg_text);
-
-                    // Multi-device: a message authored by ANY of our own devices is ours.
-                    let is_mine = super::resolver::same_identity(&sender_master, &local_peer_str);
-
-                    // Persist with the sender's timestamp, deduped by message_id. The content
-                    // UNIQUE index is legacy-only now (WHERE message_id IS NULL): it used to
-                    // swallow distinct identical-text messages landing in the same millisecond.
-                    let mut is_new = true;
-                    let mut reply_to_own = false;
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        // Reply-to-ME flag for the mentions-only notification
-                        // gate (#42) — parent row's author vs our identity.
-                        reply_to_own = reply_to.as_deref()
-                            .and_then(|m| store.get_channel_message_sender(m))
-                            .is_some_and(|a| super::resolver::same_identity(&a, &local_peer_str));
-                        let already = mid.as_deref()
-                            .map(|m| store.channel_message_exists(m))
-                            .unwrap_or(false);
-                        if already {
-                            is_new = false;
-                        } else {
-                            match store.insert_channel_message(
-                                &sid, &cid, &sender_master, &msg_text, is_mine, ts,
-                                sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                reply_to.as_deref(), file_id.as_deref(), order_us, album.as_deref(),
-                            ) {
-                                Ok(0) => { is_new = false; } // Duplicate (legacy no-mid row)
-                                Ok(_) => {}
-                                Err(_) => { is_new = false; }
-                            }
-                        }
-                        if is_new {
-                            if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
-                                if let Ok(lp_json) = serde_json::to_string(lp) {
-                                    let _ = store.update_channel_link_preview(message_id, &lp_json);
-                                }
-                            }
-                        }
-                    }
-
-                    // ALWAYS emit. A ChannelSyncBatch racing this live message inserts the row
-                    // first without emitting, and suppressing the live event too left the open
-                    // pane stale. Dart dedups by message_id and skips unread and notifications
-                    // when `duplicate`.
-                    let _ = event_tx
-                        .send(NetworkEvent::ChannelMessageReceived {
-                            server_id: sid,
-                            channel_id: cid,
-                            from_peer: sender_master,
-                            text: msg_text,
-                            timestamp: ts,
-                            message_id: mid.unwrap_or_default(),
-                            reply_to_mid: reply_to.unwrap_or_default(),
-                            link_preview,
-                            signature: sig,
-                            public_key: pk,
-                            album_id: album.map(Box::new),
-                            reply_to_own,
-                            duplicate: !is_new,
-                            is_own: is_mine,
-                        })
-                        .await;
+                    };
+                    message_ops::handle_envelope_channel_message(
+                        event_tx, bundle_keypair, Some(state), local_peer_str,
+                        super::resolver::resolve(peer_str), sid, cid, text, ts,
+                        sig, pk, mid, reply_to, file_id, link_preview, order_us, album,
+                        db_path, db_passphrase,
+                    ).await;
                 }
                 Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
@@ -10637,6 +10540,15 @@ async fn handle_incoming_request(
                                 return; // Not for us — discard silently.
                             }
                         }
+                        let restricted = |cid: &str| {
+                            server_states.get(&server_id).is_some_and(|s| s.channel_uses_subgroup(cid))
+                        };
+                        if !crate::node::crypto_handler::mls_envelope_fits_group(
+                            &envelope, &server_id, msg_channel_id.as_deref(), restricted,
+                        ) {
+                            hollow_log!("[HOLLOW-SECURITY] REJECTED envelope decrypted in {group_key} from leaf {sender_peer_id}: it names another server, channel or a DM");
+                            return;
+                        }
 
                         // Multi-device: the MLS leaf credential is the sender's DEVICE
                         // id, but channel messages, edits and reactions are signed by
@@ -12567,7 +12479,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, file_meta } => {
-            if peer_str == local_peer_str { return; }
+            if peer_str == local_peer_str
+                || !message_ops::public_frame_accepted(
+                    server_states.get(&server_id), guest_rooms.contains(&server_id),
+                    &server_id, &channel_id,
+                )
+            {
+                return;
+            }
             // Multi-device: the relay frame author (`peer_str`) is the sender's DEVICE
             // id, but a public channel message is SIGNED by and must be attributed to
             // their MASTER, so resolve first or the signature cannot verify and the row
@@ -12613,7 +12532,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicChannelEdit { server_id, channel_id, mid, text, ts, sig, pk } => {
-            if peer_str == local_peer_str { return; }
+            if peer_str == local_peer_str
+                || !message_ops::public_frame_accepted(
+                    server_states.get(&server_id), guest_rooms.contains(&server_id),
+                    &server_id, &channel_id,
+                )
+            {
+                return;
+            }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_edit_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
@@ -12624,7 +12550,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicLinkPreviewSet { server_id, channel_id, mid, lp, ts, sig, pk } => {
-            if peer_str == local_peer_str { return; }
+            if peer_str == local_peer_str
+                || !message_ops::public_frame_accepted(
+                    server_states.get(&server_id), guest_rooms.contains(&server_id),
+                    &server_id, &channel_id,
+                )
+            {
+                return;
+            }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_link_preview_set(
                 &event_tx, server_states.get(&server_id), &sender_master, local_peer_str,
@@ -12635,7 +12568,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicChannelDelete { server_id, channel_id, mid, ts, sig, pk } => {
-            if peer_str == local_peer_str { return; }
+            if peer_str == local_peer_str
+                || !message_ops::public_frame_accepted(
+                    server_states.get(&server_id), guest_rooms.contains(&server_id),
+                    &server_id, &channel_id,
+                )
+            {
+                return;
+            }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_delete_message(
                 &event_tx, &bundle_keypair, &sender_master,
@@ -12646,7 +12586,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicChannelAddReaction { server_id, channel_id, mid, emoji, ts, sig, pk } => {
-            if peer_str == local_peer_str { return; }
+            if peer_str == local_peer_str
+                || !message_ops::public_frame_accepted(
+                    server_states.get(&server_id), guest_rooms.contains(&server_id),
+                    &server_id, &channel_id,
+                )
+            {
+                return;
+            }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_add_reaction(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
@@ -12657,7 +12604,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicChannelRemoveReaction { server_id, channel_id, mid, emoji, ts, sig, pk } => {
-            if peer_str == local_peer_str { return; }
+            if peer_str == local_peer_str
+                || !message_ops::public_frame_accepted(
+                    server_states.get(&server_id), guest_rooms.contains(&server_id),
+                    &server_id, &channel_id,
+                )
+            {
+                return;
+            }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_remove_reaction(
                 &event_tx, &bundle_keypair, &sender_master,

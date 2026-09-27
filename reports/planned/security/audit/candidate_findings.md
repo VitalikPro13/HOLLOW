@@ -100,19 +100,19 @@ context before the write. B10 and B11 (ordering and replay) remain.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| C1 | `PublicChannelMessage` is stored for ANY channel: a stranger posts into private or admin-only channels (live and push) | channel:S3, transport:S-09 | High | AGENT |
-| C2 | MLS inner `sid`/`cid` not bound to the decrypting group: a member of any shared group (a conference included) posts into another server or a restricted channel, deletes a real server, joins its voice | channel:S4, server_mls:S-10, transport:S-07, media:S-05 | High | AGENT |
+| C1 | `PublicChannelMessage` is stored for ANY channel: a stranger posts into private or admin-only channels (live and push) | channel:S3, transport:S-09 | High | FIXED HOL-SEC-009 |
+| C2 | MLS inner `sid`/`cid` not bound to the decrypting group: a member of any shared group (a conference included) posts into another server or a restricted channel, deletes a real server, joins its voice | channel:S4, server_mls:S-10, transport:S-07, media:S-05 | High | FIXED HOL-SEC-010 |
 | C3 | `ChannelSyncBatch` accepted unsolicited from anyone, any server, skipping posting gates | channel:S2 | High | Sender half FIXED (decision 2: both arms accept a batch only from a current member who can see the channel, `channel_backfill_allowed_from`, test `authz_channel_backfill_only_from_a_member_who_can_read_it`); author half = candidate E4 (with E1) |
-| C4 | `can_post_in_channel` enforced only on the sender's own client | channel:S5 | Medium | AGENT |
-| C5 | Olm and push channel paths skip mute, slow mode, media-only | channel:S6, transport:S-08 | Medium | AGENT |
+| C4 | `can_post_in_channel` enforced only on the sender's own client | channel:S5 | Medium | FIXED HOL-SEC-009 (posting checked at ingest on every live transport) |
+| C5 | Olm and push channel paths skip mute, slow mode, media-only | channel:S6, transport:S-08 | Medium | FIXED HOL-SEC-009 (Olm runs the shared ingest; push applies the same gate) |
 | C6 | Mute check keyed on the sender-supplied `sid`: omit it to bypass | channel:S7 | Medium | FIXED HOL-SEC-008 (edits, cards, reactions and deletions must name their row's own channel) |
 | C7 | Slow mode judged on the sender's own signed `ts` | channel:S8 | Low | AGENT |
 | C8 | Unsolicited probe responses make a member leak per-author watermarks of restricted channels and suppress its real sync | channel:S9 | Medium | AGENT |
 | C9 | `PublicChannelSyncRequest` serves the text of deleted messages to guests and the relay | channel:S13 | Low | AGENT |
 | C10 | `ChannelNotificationHint` and typing are unauthenticated (fake badges, typing) | channel:S15, S16, transport:S-13 | Low | AGENT |
-| C11 | Text clamp only on two of five paths | channel:S18 | Low | AGENT |
+| C11 | Text clamp only on two of five paths | channel:S18 | Low | CONFIRMED, open: the clamp is 4,000 BYTES but the composer allows 4,000 CHARACTERS, so the DM and push clamps cut long non-Latin messages (and break their signature on re-serve); DECIDED (Vitalik, 2026-09-27): composer stays 4,000 characters; one 64 KiB byte limit in Rust and Dart, the composer refuses past it; receivers DROP oversized messages on every path (live and sync), never clip. Build next session |
 | C12 | A member who cannot see a restricted voice channel still joins it and gets dialed | media:S-04 | Medium | AGENT |
-| C13 | Push path stores `PublicChannelMessage` for conference ids (should be RAM only) | transport:S-10 | Low | AGENT |
+| C13 | Push path stores `PublicChannelMessage` for conference ids (should be RAM only) | transport:S-10 | Low | FIXED HOL-SEC-009 |
 | C14 | 0x09 mention flag set by the sender bypasses "mentions only" | transport:S-11 | Low | AGENT |
 
 ## Class D. MLS credentials and group operations are not authorised (lead L-03)
@@ -244,7 +244,7 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | L2 | A blocked person's never-seen device passes the block check and is then bound to the blocked identity | dm:S-08 | Medium | AGENT |
 | L3 | Blocklist missing on edit, delete, react, link preview, friend accept/reject/remove, typing, status, key exchange, raw fallback, MLS twins | dm:S-19 | Medium | AGENT |
 | L4 | Legacy raw-text fallback shows an unsigned message with no block or revoked check | dm:S-04, transport:S-15 | Medium | AGENT |
-| L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | Cards and reactions FIXED HOL-SEC-008 (MLS drops them); typing AGENT |
+| L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | FIXED HOL-SEC-008 (cards, reactions) and HOL-SEC-010 (typing) |
 | L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | PLAUSIBLE |
 
 ## Class M. Calls

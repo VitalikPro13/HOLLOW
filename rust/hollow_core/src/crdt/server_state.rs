@@ -3554,4 +3554,51 @@ mod tests {
     fn hlc_now() -> u64 {
         crate::crdt::hlc::wall_clock_ms()
     }
+
+    /// C1, C4, C5: every transport judges a LIVE post by OUR state: a current member
+    /// who can see and post in the channel, and is not muted.
+    #[test]
+    fn authz_live_post_needs_a_member_who_can_see_and_post() {
+        let _g = crate::node::resolver::test_lock();
+        let refusal = crate::node::message_ops::live_channel_post_refusal;
+        let mut s = label_gate_fixture();
+        let now = epoch_ms_now();
+        assert_eq!(refusal(&s, "member", "ch", false, now), None);
+        assert!(refusal(&s, "stranger", "ch", false, now).is_some());
+
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "news".into(), name: "news".into(), category: None, channel_type: "text".into(),
+        });
+        s.apply_op(&op).unwrap();
+        let op = s.create_op(CrdtPayload::ChannelPostingChanged {
+            channel_id: "news".into(), posting: "admin".into(),
+        });
+        s.apply_op(&op).unwrap();
+        assert!(refusal(&s, "member", "news", false, now).is_some(), "an admin-only channel");
+        assert_eq!(refusal(&s, "admin", "news", false, now), None);
+
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(), labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(refusal(&s, "member", "ch", false, now).is_some(), "a channel it cannot see");
+        assert_eq!(refusal(&s, "vipper", "ch", false, now), None);
+    }
+
+    /// C1: a plaintext public-channel frame is unencrypted, so anyone in the room can
+    /// send one; it is taken in only for a channel that is public in our own state.
+    #[test]
+    fn authz_public_frame_only_for_a_channel_public_here() {
+        let accepted = crate::node::message_ops::public_frame_accepted;
+        let mut s = label_gate_fixture();
+        assert!(!accepted(Some(&s), false, "s1", "ch"), "a private channel");
+        let op = s.create_op(CrdtPayload::ChannelPublicChanged {
+            channel_id: "ch".into(), is_public: true,
+        });
+        s.apply_op(&op).unwrap();
+        assert!(accepted(Some(&s), false, "s1", "ch"));
+        assert!(!accepted(Some(&s), true, "s1", "missing"), "a channel we do not have");
+        assert!(!accepted(None, false, "s1", "ch"), "a server we neither hold nor view");
+        assert!(accepted(None, true, "s1", "ch"), "the guest preview");
+    }
 }

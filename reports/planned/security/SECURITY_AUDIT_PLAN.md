@@ -55,7 +55,13 @@ into possible holes, so this file itself belongs on the security branch.
   their signer from the row, every live channel change must name its row's own
   channel (which also closes the mute bypass C6), reactions must land where they
   say, and the Olm channel arms run the same handlers as MLS. Class B is done
-  except ordering and replay (B10, B11).
+  except ordering and replay (B10, B11). Then C1/C2 confirmed and FIXED:
+  **HOL-SEC-009** (a stranger with the server id posted into any channel through
+  plaintext public frames; posting rules and the moderation trio now hold on every
+  live transport and push through one gate) and **HOL-SEC-010** (an MLS envelope
+  was never bound to the group that decrypted it). Also closed: C4, C5, C13, L5.
+  Found on the way, not security: the 4,000-byte text clamp cuts composer-legal
+  non-Latin messages (C11, decision for Vitalik).
 - **Next:** verify the candidate classes in the plan's priority order (MLS
   credentials D, CRDT snapshot E1/E2 with the membership record E4, channel
   ingest C1/C2, files H, relay I1/I2); every AGENT-status row must be re-read

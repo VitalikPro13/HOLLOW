@@ -2611,10 +2611,41 @@ fn channel_sig_rejected(
     false
 }
 
-/// Receive-side moderation trio for one LIVE channel message: true = drop, so a
-/// modified client cannot bypass what receivers refuse to store. Sync backfill
-/// intentionally skips these gates, because history may legitimately predate a
-/// mute or slow-mode change. Async: the slow-mode check reads the store off-loop.
+/// Why a LIVE post by `sender` (a MASTER) into `cid` must be dropped, judged by OUR
+/// state, or `None`: the sender must be a current member who can see and post in
+/// that channel, not muted, with a file where the channel is media-only. Every
+/// transport asks, so a modified client cannot pick the one that skips a rule. Sync
+/// backfill never does: history may predate a role, mute or channel change.
+pub(crate) fn live_channel_post_refusal(
+    state: &ServerState,
+    sender: &str,
+    cid: &str,
+    has_file: bool,
+    now_ms: u64,
+) -> Option<&'static str> {
+    if !state.is_member(sender) {
+        Some("not a member")
+    } else if !state.can_see_channel(sender, cid) {
+        Some("cannot see the channel")
+    } else if !state.can_post_in_channel_at(sender, cid, now_ms) {
+        Some("may not post in the channel")
+    } else if state.is_muted(sender, now_ms) {
+        Some("muted")
+    } else if state.is_channel_media_only(cid) && !has_file {
+        Some("text in a media-only channel")
+    } else {
+        None
+    }
+}
+
+/// The slow-mode window in ms that `sender` is held to in `cid`, if any.
+pub(crate) fn slow_mode_window_ms(state: &ServerState, sender: &str, cid: &str) -> Option<i64> {
+    let slow = state.channel_slow_mode(cid);
+    (slow > 0 && !state.bypasses_slow_mode(sender)).then_some(slow as i64 * 1000)
+}
+
+/// Receive-side gate for one LIVE channel message: true = drop. Async: the
+/// slow-mode check reads the store off-loop.
 #[allow(clippy::too_many_arguments)]
 async fn live_channel_moderation_drop(
     state: &ServerState,
@@ -2630,33 +2661,47 @@ async fn live_channel_moderation_drop(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    if state.is_muted(sender_peer_id, now_ms) {
-        hollow_log!("[HOLLOW-MOD] DROPPED channel message from muted member {sender_peer_id} in {sid}");
+    if let Some(reason) = live_channel_post_refusal(state, sender_peer_id, cid, has_file, now_ms) {
+        hollow_log!("[HOLLOW-MOD] DROPPED channel message from {sender_peer_id} in {sid}/{cid}: {reason}");
         return true;
     }
-    if state.is_channel_media_only(cid) && !has_file {
-        hollow_log!("[HOLLOW-MOD] DROPPED text-only message from {sender_peer_id} in media-only channel {cid}");
-        return true;
-    }
-    let slow = state.channel_slow_mode(cid);
-    if slow > 0 && !state.bypasses_slow_mode(sender_peer_id) {
+    if let Some(window_ms) = slow_mode_window_ms(state, sender_peer_id, cid) {
         // Open and query on the blocking pool with owned captures: the store lives
         // entirely inside the closure. Open failure = allow, as before.
-        let window_start = ts - (slow as i64) * 1000;
         let (sid_o, cid_o) = (sid.to_string(), cid.to_string());
         let sender = sender_peer_id.to_string();
         let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
         let violation = tokio::task::spawn_blocking(move || {
             crate::storage::MessageStore::open(&path, &pass)
-                .map(|store| store.channel_sender_has_msg_in_range(&sid_o, &cid_o, &sender, window_start, ts))
+                .map(|store| store.channel_sender_has_msg_in_range(&sid_o, &cid_o, &sender, ts - window_ms, ts))
                 .unwrap_or(false)
         }).await.unwrap_or(false);
         if violation {
-            hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (window {slow}s)");
+            hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid}");
             return true;
         }
     }
     false
+}
+
+/// Whether a PLAINTEXT public-channel frame for `sid`/`cid` may be taken in at all.
+/// A member takes one only for a channel that is public in its own state (the frame
+/// is unencrypted, so anyone in the room can send one); a node with no state for the
+/// server only while it is viewing that server as a guest.
+pub(crate) fn public_frame_accepted(
+    state: Option<&ServerState>,
+    viewing_as_guest: bool,
+    sid: &str,
+    cid: &str,
+) -> bool {
+    let ok = match state {
+        Some(state) => state.is_channel_public(cid),
+        None => viewing_as_guest,
+    };
+    if !ok {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED public-channel frame for {sid}/{cid}: not a public channel here");
+    }
+    ok
 }
 
 /// LIVE-ingest mute gate shared by the edit and add-reaction envelope handlers:
@@ -3056,6 +3101,10 @@ pub(crate) async fn handle_envelope_add_reaction(
         return;
     }
     let (Some(s_id), Some(c_id)) = (sid, cid) else { return };
+    if server_state.is_some_and(|s| !s.is_member(peer_str)) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED reaction from {peer_str}: not a member of {s_id}");
+        return;
+    }
     // Moderation (LIVE ingest only): drop reactions from muted members,
     // mirroring the new-message ingest gate; reaction REMOVALS stay allowed.
     if live_muted_ingest_drop(server_state, peer_str, "reaction") {
@@ -3982,5 +4031,57 @@ mod tests {
         let (s, c) = named(Some((sid, cid)));
         handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "hello again".into(), 5_000, sig, pk, s, c, &path, &pass).await;
         assert_eq!(text(), "hello again");
+    }
+
+    /// C1, C4, C5 at handler level: the Olm, MLS and public arms all run this ingest
+    /// with our state, so a validly signed post from a stranger, or into a channel the
+    /// member may not post in, is never stored.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_live_channel_post_is_judged_by_our_state() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv-c", "C", 171);
+        let (member, stranger, us) = (kp(181), kp(182), kp(183));
+        for id in [member.peer_id(), us.peer_id()] {
+            let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberAdded {
+                peer_id: id, display_name: "m".into(),
+            });
+            state.apply_op(&op).unwrap();
+        }
+        for (cid, posting) in [("general", "everyone"), ("news", "admin")] {
+            let op = state.create_op(crate::crdt::operations::CrdtPayload::ChannelAdded {
+                channel_id: cid.into(), name: cid.into(), category: None, channel_type: "text".into(),
+            });
+            state.apply_op(&op).unwrap();
+            let op = state.create_op(crate::crdt::operations::CrdtPayload::ChannelPostingChanged {
+                channel_id: cid.into(), posting: posting.into(),
+            });
+            state.apply_op(&op).unwrap();
+        }
+        let (tx, _rx) = mpsc::channel(16);
+        let local = us.peer_id();
+        for (k, cid, mid) in [
+            (&stranger, "general", "from-stranger"),
+            (&member, "news", "into-admin-only"),
+            (&member, "general", "fine"),
+        ] {
+            let extras = SignedExtras {
+                mid: Some(mid), reply_to: None, file_id: None, order_us: Some(1_000_000),
+                lp_digest: None, album: None,
+            };
+            let (sig, pk) = sign_message_versioned(
+                k, &pk_b64(k), "ch", &format!("srv-c:{cid}"), &k.peer_id(), 1_000, &extras, "hello",
+            );
+            handle_envelope_channel_message(
+                &tx, k, Some(&state), &local, k.peer_id(), "srv-c".into(), cid.into(),
+                "hello".into(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None,
+                &path, &pass,
+            ).await;
+        }
+        let store = open(&path, &pass);
+        assert!(!store.channel_message_exists("from-stranger"));
+        assert!(!store.channel_message_exists("into-admin-only"));
+        assert!(store.channel_message_exists("fine"));
     }
 }

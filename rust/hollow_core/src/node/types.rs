@@ -3856,6 +3856,110 @@ impl MessageEnvelope {
             _ => None,
         }
     }
+
+    /// Where this envelope says it belongs. Exhaustive on purpose: a new variant
+    /// must decide whether an MLS group may carry it.
+    pub(crate) fn place(&self) -> EnvelopePlace<'_> {
+        use EnvelopePlace::{Anywhere, Direct, Server};
+        match self {
+            Self::DirectMessage { .. }
+            | Self::DmSyncBatch { .. }
+            | Self::DmSiblingSyncBatch { .. }
+            | Self::SessionAck
+            | Self::DestroyIdentityOrder { .. }
+            | Self::CallSignal { .. }
+            | Self::FwdStreamRegister { .. }
+            | Self::FwdStreamAuth { .. }
+            | Self::FwdStreamUnregister { .. }
+            | Self::FwdIngestOffer { .. }
+            | Self::FwdIngestAnswer { .. }
+            | Self::FwdAttach { .. }
+            | Self::FwdDetach { .. }
+            | Self::FwdEgressOffer { .. }
+            | Self::FwdEgressAnswer { .. }
+            | Self::FwdError { .. } => Direct,
+            Self::ProfileUpdate { .. } | Self::FileChunk { .. } => Anywhere,
+            Self::ChannelMessage { inner } => Server { sid: &inner.sid, cid: Some(&inner.cid) },
+            Self::ShardStore { inner } => Server { sid: &inner.sid, cid: Some(&inner.cid) },
+            Self::FileHeader { inner } => match &inner.sid {
+                Some(sid) => Server { sid, cid: inner.cid.as_deref() },
+                None => Direct,
+            },
+            Self::EditMessage { sid, cid, .. }
+            | Self::LinkPreviewSet { sid, cid, .. }
+            | Self::DeleteMessage { sid, cid, .. }
+            | Self::AddReaction { sid, cid, .. }
+            | Self::RemoveReaction { sid, cid, .. } => match sid {
+                Some(sid) => Server { sid, cid: cid.as_deref() },
+                None => Direct,
+            },
+            Self::CrdtOp { sid, .. }
+            | Self::ServerDelete { sid }
+            | Self::MemberKick { sid }
+            | Self::SyncReq { sid, .. }
+            | Self::SyncResp { sid, .. } => Server { sid, cid: None },
+            Self::ChannelSyncBatch { sid, cid, .. }
+            | Self::ShardChunk { sid, cid, .. }
+            | Self::ShardStoreAck { sid, cid, .. }
+            | Self::ShardDelete { sid, cid }
+            | Self::ShardRequest { sid, cid, .. }
+            | Self::ShardResponse { sid, cid, .. }
+            | Self::ShardResponseChunk { sid, cid, .. }
+            | Self::ShardProbe { sid, cid, .. }
+            | Self::ShardProbeResponse { sid, cid, .. }
+            | Self::VaultManifestBroadcast { sid, cid, .. }
+            | Self::ShardMigrate { sid, cid, .. }
+            | Self::Typing { sid, cid }
+            | Self::ChannelSyncReq { sid, cid, .. }
+            | Self::ChannelProbe { sid, cid, .. }
+            | Self::ChannelProbeResp { sid, cid, .. }
+            | Self::VoiceChannelJoin { sid, cid }
+            | Self::VoiceChannelLeave { sid, cid }
+            | Self::VoiceChannelSdpOffer { sid, cid, .. }
+            | Self::VoiceChannelSdpAnswer { sid, cid, .. }
+            | Self::VoiceChannelAudioState { sid, cid, .. }
+            | Self::VoiceChannelIce { sid, cid, .. }
+            | Self::VoiceChannelScreenOffer { sid, cid, .. }
+            | Self::VoiceChannelScreenAnswer { sid, cid, .. }
+            | Self::VoiceChannelScreenIce { sid, cid, .. }
+            | Self::VoiceChannelScreenState { sid, cid, .. }
+            | Self::VoiceChannelScreenWatch { sid, cid, .. }
+            | Self::VoiceChannelScreenAssign { sid, cid, .. }
+            | Self::VoiceChannelScreenFeedState { sid, cid, .. }
+            | Self::VoiceChannelRenegOffer { sid, cid, .. }
+            | Self::VoiceChannelRenegAnswer { sid, cid, .. }
+            | Self::VoiceChannelLegRestart { sid, cid, .. }
+            | Self::VoiceChannelCameraState { sid, cid, .. }
+            | Self::VoiceChannelRecordingState { sid, cid, .. }
+            | Self::BroadcastMeta { sid, cid, .. } => Server { sid, cid: Some(cid) },
+        }
+    }
+
+    /// Message content, which a restricted channel carries only in its own subgroup.
+    /// Presence, typing, voice and vault traffic ride the server-wide group by design.
+    pub(crate) fn is_channel_content(&self) -> bool {
+        matches!(
+            self,
+            Self::ChannelMessage { .. }
+                | Self::ChannelSyncBatch { .. }
+                | Self::EditMessage { .. }
+                | Self::LinkPreviewSet { .. }
+                | Self::DeleteMessage { .. }
+                | Self::AddReaction { .. }
+                | Self::RemoveReaction { .. }
+                | Self::FileHeader { .. }
+        )
+    }
+}
+
+/// See [`MessageEnvelope::place`].
+pub(crate) enum EnvelopePlace<'a> {
+    /// Identity-level, fine in any group or session.
+    Anywhere,
+    /// One-to-one by contract, never valid inside an MLS group.
+    Direct,
+    /// Server traffic; `cid` is set for channel-scoped kinds.
+    Server { sid: &'a str, cid: Option<&'a str> },
 }
 
 /// State for reassembling a chunked vault shard from multiple ShardChunk messages.
