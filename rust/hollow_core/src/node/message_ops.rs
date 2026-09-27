@@ -2482,6 +2482,7 @@ pub(crate) async fn handle_envelope_channel_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     server_state: Option<&ServerState>,
+    slow_mode_clock: &mut SlowModeClock,
     local_peer: &str,
     sender_peer_id: String,
     sid: String,
@@ -2533,7 +2534,8 @@ pub(crate) async fn handle_envelope_channel_message(
     // channel's rules — see `live_channel_moderation_drop`.
     if let Some(state) = server_state {
         if live_channel_moderation_drop(
-            state, &sender_peer_id, &sid, &cid, file_id.is_some(), ts, db_path, db_passphrase,
+            state, slow_mode_clock, &sender_peer_id, &sid, &cid, mid.as_deref(),
+            file_id.is_some(), ts, db_path, db_passphrase,
         ).await {
             return;
         }
@@ -2638,6 +2640,14 @@ pub(crate) fn live_channel_post_refusal(
     }
 }
 
+/// When each sender's last FRESH post in a slow-mode channel reached us, by our
+/// own clock, keyed (server, channel, sender master), with its message id so a
+/// second copy of the same post is not a violation. A post dated inside the
+/// window is fresh; an older one is a replay (relay ring, reconnect) and is judged
+/// by its signed `ts` against stored history instead.
+#[derive(Default)]
+pub(crate) struct SlowModeClock(HashMap<(String, String, String), (std::time::Instant, Option<String>)>);
+
 /// The slow-mode window in ms that `sender` is held to in `cid`, if any.
 pub(crate) fn slow_mode_window_ms(state: &ServerState, sender: &str, cid: &str) -> Option<i64> {
     let slow = state.channel_slow_mode(cid);
@@ -2649,9 +2659,11 @@ pub(crate) fn slow_mode_window_ms(state: &ServerState, sender: &str, cid: &str) 
 #[allow(clippy::too_many_arguments)]
 async fn live_channel_moderation_drop(
     state: &ServerState,
+    slow_mode_clock: &mut SlowModeClock,
     sender_peer_id: &str,
     sid: &str,
     cid: &str,
+    mid: Option<&str>,
     has_file: bool,
     ts: i64,
     db_path: &str,
@@ -2666,6 +2678,15 @@ async fn live_channel_moderation_drop(
         return true;
     }
     if let Some(window_ms) = slow_mode_window_ms(state, sender_peer_id, cid) {
+        let key = (sid.to_string(), cid.to_string(), sender_peer_id.to_string());
+        let fresh = ts >= now_ms as i64 - window_ms;
+        let window = std::time::Duration::from_millis(window_ms as u64);
+        if fresh && slow_mode_clock.0.get(&key).is_some_and(|(at, last_mid)| {
+            at.elapsed() < window && (mid.is_none() || last_mid.as_deref() != mid)
+        }) {
+            hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (by our clock)");
+            return true;
+        }
         // Open and query on the blocking pool with owned captures: the store lives
         // entirely inside the closure. Open failure = allow, as before.
         let (sid_o, cid_o) = (sid.to_string(), cid.to_string());
@@ -2679,6 +2700,9 @@ async fn live_channel_moderation_drop(
         if violation {
             hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid}");
             return true;
+        }
+        if fresh {
+            slow_mode_clock.0.insert(key, (std::time::Instant::now(), mid.map(str::to_owned)));
         }
     }
     false
@@ -4089,7 +4113,7 @@ mod tests {
                 k, &pk_b64(k), "ch", &format!("srv-c:{cid}"), &k.peer_id(), 1_000, &extras, "hello",
             );
             handle_envelope_channel_message(
-                &tx, k, Some(&state), &local, k.peer_id(), "srv-c".into(), cid.into(),
+                &tx, k, Some(&state), &mut SlowModeClock::default(), &local, k.peer_id(), "srv-c".into(), cid.into(),
                 "hello".into(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None,
                 &path, &pass,
             ).await;
@@ -4098,6 +4122,46 @@ mod tests {
         assert!(!store.channel_message_exists("from-stranger"));
         assert!(!store.channel_message_exists("into-admin-only"));
         assert!(store.channel_message_exists("fine"));
+    }
+
+    /// C7: slow mode judges a fresh post by our own clock, so spacing future stamps
+    /// no longer gets a burst through, while a post replayed from the relay ring
+    /// long after it was written still lands, and so does a second copy of one.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn slow_mode_judges_fresh_posts_by_our_clock() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv-f", "F", 211);
+        let (bob, us) = (kp(214), kp(215));
+        let (b, a) = (bob.peer_id(), us.peer_id());
+        for op in [
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into() },
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: a.clone(), display_name: "a".into() },
+            crate::crdt::operations::CrdtPayload::ChannelAdded {
+                channel_id: "general".into(), name: "general".into(), category: None, channel_type: "text".into(),
+            },
+            crate::crdt::operations::CrdtPayload::ChannelSlowModeChanged { channel_id: "general".into(), seconds: 60 },
+        ] {
+            let op = state.create_op(op);
+            state.apply_op(&op).unwrap();
+        }
+        let (tx, _rx) = mpsc::channel(16);
+        let mut clock = SlowModeClock::default();
+        let now = crate::node::types::now_ms();
+        for (mid, ts) in [("first", now), ("spaced", now + 61_000), ("first", now), ("replayed", now - 600_000)] {
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(ts * 1000), ..SignedExtras::default() };
+            let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "ch", "srv-f:general", &b, ts, &extras, mid);
+            handle_envelope_channel_message(
+                &tx, &us, Some(&state), &mut clock, &a, b.clone(), "srv-f".into(), "general".into(),
+                mid.into(), ts, sig, pk, Some(mid.into()), None, None, None, Some(ts * 1000), None,
+                &path, &pass,
+            ).await;
+        }
+        let store = open(&path, &pass);
+        assert!(store.channel_message_exists("first"));
+        assert!(!store.channel_message_exists("spaced"), "a second fresh post inside the window, by our clock");
+        assert!(store.channel_message_exists("replayed"), "an old post replayed later is judged by its own stamp");
     }
 
     /// C11: a body over the size limit is dropped whole on the live post, live edit
@@ -4110,7 +4174,7 @@ mod tests {
         let _g = crate::node::resolver::test_lock();
         let (_tmp, path, pass) = file_db();
         let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv-d", "D", 191);
-        let (bob, us) = (kp(192), kp(193));
+        let (bob, us) = (kp(194), kp(195));
         let (b, a) = (bob.peer_id(), us.peer_id());
         for op in [
             crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into() },
@@ -4131,7 +4195,7 @@ mod tests {
             let extras = SignedExtras { mid: Some(mid), order_us: Some(1_000_000), ..SignedExtras::default() };
             let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "ch", "srv-d:general", &b, 1_000, &extras, text);
             handle_envelope_channel_message(
-                &tx, &us, Some(&state), &a, b.clone(), "srv-d".into(), "general".into(),
+                &tx, &us, Some(&state), &mut SlowModeClock::default(), &a, b.clone(), "srv-d".into(), "general".into(),
                 text.clone(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None,
                 &path, &pass,
             ).await;

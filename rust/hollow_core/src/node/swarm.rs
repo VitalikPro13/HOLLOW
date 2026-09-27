@@ -1157,6 +1157,7 @@ async fn run_event_loop(
     // Channel sync dedup: tracks (server_id:channel_id) → last sync request time.
     // Prevents the same channel from being sync-requested multiple times in quick succession.
     let mut channel_sync_sent: HashMap<String, std::time::Instant> = HashMap::new();
+    let mut slow_mode_clock = message_ops::SlowModeClock::default();
 
     // Guest sync: rooms joined as a non-member for browsing public channels.
     let mut guest_rooms: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2941,6 +2942,7 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &ws_room_peers,
                                 &webrtc_peers, &mut pending_webrtc_sends,
                                 &mut channel_sync_sent,
+                                &mut slow_mode_clock,
                                 &mut gossip_overlays,
                                 &mut voice_channel_participants,
                                 &mut voice_channel_gossip_mode,
@@ -4909,6 +4911,7 @@ async fn run_event_loop(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &webrtc_peers, &mut pending_webrtc_sends,
                                         &mut channel_sync_sent,
+                                        &mut slow_mode_clock,
                                         &mut gossip_overlays,
                                         &mut voice_channel_participants,
                                         &mut voice_channel_gossip_mode,
@@ -6474,6 +6477,7 @@ async fn handle_incoming_request(
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
+    slow_mode_clock: &mut message_ops::SlowModeClock,
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
@@ -6984,7 +6988,7 @@ async fn handle_incoming_request(
                         return;
                     };
                     message_ops::handle_envelope_channel_message(
-                        event_tx, bundle_keypair, Some(state), local_peer_str,
+                        event_tx, bundle_keypair, Some(state), slow_mode_clock, local_peer_str,
                         super::resolver::resolve(peer_str), sid, cid, text, ts,
                         sig, pk, mid, reply_to, file_id, link_preview, order_us, album,
                         db_path, db_passphrase,
@@ -10423,7 +10427,7 @@ async fn handle_incoming_request(
                                 let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
                                 let mod_state = server_states.get(&sid);
                                 message_ops::handle_envelope_channel_message(
-                                    event_tx, bundle_keypair, mod_state, &local_peer,
+                                    event_tx, bundle_keypair, mod_state, slow_mode_clock, &local_peer,
                                     sender_master.clone(), sid, cid, text, ts,
                                     sig, pk, mid, reply_to, file_id, link_preview, order_us, album,
                                     db_path, db_passphrase,
@@ -12357,7 +12361,7 @@ async fn handle_incoming_request(
             // a local ts*1000 default would store a row whose signature fails on re-serve.
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
-                &event_tx, &bundle_keypair, server_states.get(&server_id), &local_peer_str,
+                &event_tx, &bundle_keypair, server_states.get(&server_id), slow_mode_clock, &local_peer_str,
                 sender_master.clone(),
                 server_id.clone(), channel_id.clone(), text, ts, sig, pk,
                 Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us, album.map(|a| *a),

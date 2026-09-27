@@ -65,8 +65,10 @@ into possible holes, so this file itself belongs on the security branch.
 - **Session 5 (2026-09-27):** C11 built (**HOL-SEC-011**): one 64 KiB message
   limit in Rust and Dart, every receive path drops a longer body whole inside
   signature verification, nothing clips any more, and the composer and edit
-  fields stop at it. Class C closed except C7 (decided: a future bound plus our
-  own clock for slow mode, to build) and C14 (moves to class K):
+  fields stop at it. Class C closed except C14 (moves to class K):
+  **HOL-SEC-018** (C7, decided and built: a message dated more than 10 minutes
+  past our clock is refused everywhere, slow mode judges fresh posts by our own
+  clock),
   **HOL-SEC-012** (the dead channel probes leaked per-author watermarks to anyone
   and stalled sync; deleted), **HOL-SEC-013** (an unparseable Olm payload was
   shown as an unsigned DM; L4), **HOL-SEC-014** (guests were served deleted

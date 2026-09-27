@@ -259,8 +259,9 @@ pub(crate) fn sign_message_versioned(
 ///
 /// There is deliberately no v1 fallback: it would be a downgrade oracle, since
 /// the attacker rather than the sender picks which payload is checked. A
-/// malformed album fails, and so does a body over [`MAX_MESSAGE_BYTES`], which
-/// makes this the one place every signed receive path enforces the limit.
+/// malformed album fails, and so do a body over [`MAX_MESSAGE_BYTES`] and a stamp
+/// past [`message_ts_fits`], which makes this the one place every signed receive
+/// path enforces both.
 /// Reuses `pk_cache` across a batch; a missing signature returns false.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_message_signature_v2(
@@ -279,6 +280,10 @@ pub(crate) fn verify_message_signature_v2(
     }
     if !message_body_fits(text) {
         hollow_log!("[HOLLOW-SECURITY] Dropped a {msg_type} message of {} bytes, over the {MAX_MESSAGE_BYTES}-byte limit", text.len());
+        return false;
+    }
+    if !message_ts_fits(ts) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a {msg_type} message dated {ts}, more than {MAX_FUTURE_SKEW_MS} ms past our clock");
         return false;
     }
     let payload = message_signing_payload_v2(msg_type, context, sender_peer_str, ts, extras, text);
@@ -1779,6 +1784,17 @@ pub(crate) fn message_body_fits(text: &str) -> bool {
     text.len() <= MAX_MESSAGE_BYTES
 }
 
+/// How far past our clock a message may be dated. Relay auth already holds every
+/// connected client to 60 s, so only a forged stamp gets near it.
+pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
+
+/// True when `ts` is not dated past our clock by more than [`MAX_FUTURE_SKEW_MS`].
+/// A future-dated message sorts below every later one until its time comes, and
+/// spacing future stamps was a way round slow mode.
+pub(crate) fn message_ts_fits(ts: i64) -> bool {
+    ts <= super::types::now_ms().saturating_add(MAX_FUTURE_SKEW_MS)
+}
+
 /// The longest prefix of `s` that is at most `max` bytes and ends on a character
 /// boundary. The ONE way to cut a remote string: a byte slice through a multi-byte
 /// character panics, and on the event loop that panic takes the node down.
@@ -1917,6 +1933,8 @@ pub(crate) enum BackfillSig {
     Forged,
     /// The body is over [`MAX_MESSAGE_BYTES`]. Refused whatever it carries.
     Oversized,
+    /// Dated past [`message_ts_fits`]. Refused whatever it carries.
+    FutureDated,
 }
 
 impl BackfillSig {
@@ -1925,7 +1943,7 @@ impl BackfillSig {
     pub(crate) fn is_acceptable(self) -> bool {
         match self {
             BackfillSig::Valid => true,
-            BackfillSig::Forged | BackfillSig::Oversized => false,
+            BackfillSig::Forged | BackfillSig::Oversized | BackfillSig::FutureDated => false,
             BackfillSig::Absent => !REQUIRE_SIGNED_BACKFILL,
         }
     }
@@ -1937,6 +1955,7 @@ impl BackfillSig {
             BackfillSig::Absent => "NO signature (pre-signing history, or stripped in transit)",
             BackfillSig::Forged => "signature present but INVALID",
             BackfillSig::Oversized => "body over the message size limit",
+            BackfillSig::FutureDated => "dated more than 10 minutes past our clock",
             BackfillSig::Valid => "accepted",
         }
     }
@@ -1967,6 +1986,9 @@ pub(crate) fn check_backfill_signature(
 ) -> BackfillSig {
     if !message_body_fits(text) {
         return BackfillSig::Oversized;
+    }
+    if !message_ts_fits(ts) || edited_at.is_some_and(|e| !message_ts_fits(e)) {
+        return BackfillSig::FutureDated;
     }
     if sig_b64.is_none() && pk_b64.is_none() {
         return BackfillSig::Absent;
@@ -5810,6 +5832,35 @@ mod tests {
         assert!(!fits(&MessageEnvelope::SessionAck, "srv", None));
         let chunk = MessageEnvelope::FileChunk { fid: "f".into(), idx: 0, data: String::new() };
         assert!(fits(&chunk, "srv", None));
+    }
+
+    /// C7: a message dated more than ten minutes past our clock never verifies, so
+    /// nobody can pin a post below everything that follows it.
+    #[test]
+    fn message_dated_past_our_clock_never_verifies() {
+        let a = kp(32);
+        let (a_id, a_pk) = (a.peer_id(), pk_b64(&a));
+        let extras = SignedExtras { mid: Some("m"), ..SignedExtras::default() };
+        let now = super::super::types::now_ms();
+        let check = |ts: i64, edited_at: Option<i64>| {
+            let signed = edited_at.unwrap_or(ts);
+            let (sig, pk) = sign_message_versioned(&a, &a_pk, "ch", "s:c", &a_id, signed, &extras, "hi");
+            let live = verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "ch", "s:c", signed, &extras, "hi", &mut PkCache::new(),
+            );
+            let synced = check_backfill_signature(
+                &a_id, "ch", "s:c", ts, edited_at, &extras, "hi", sig.as_deref(), pk.as_deref(), &mut PkCache::new(),
+            );
+            (live, synced)
+        };
+        assert_eq!(check(now + 60_000, None), (true, BackfillSig::Valid));
+        assert_eq!(check(now + MAX_FUTURE_SKEW_MS + 60_000, None), (false, BackfillSig::FutureDated));
+        assert_eq!(
+            check(now + MAX_FUTURE_SKEW_MS + 60_000, Some(now)).1,
+            BackfillSig::FutureDated,
+            "an honest-looking edit stamp does not carry a future-dated row",
+        );
+        assert!(!BackfillSig::FutureDated.is_acceptable());
     }
 
     /// C11: a body over the protocol limit never verifies, live or backfilled, so
