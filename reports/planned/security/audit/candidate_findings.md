@@ -88,7 +88,7 @@ the signer authored the ROW it lands on, or that the row is in the conversation
 or channel the item names. Class kill (done, HOL-SEC-004 and HOL-SEC-008): every
 remote change to an existing row goes through `message_ops::change_may_touch_row`,
 which compares the row's author (device collapsed to master) and the row's
-context before the write. B10 and B11 (ordering and replay) remain.
+context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-039.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
@@ -101,8 +101,8 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | B7 | DM `LinkPreviewSet` grafts a card onto any received row and swaps its signature | dm:S-14 | Medium | FIXED HOL-SEC-008 |
 | B8 | Push path promotes any `[file:..]` row by id to the attacker's caption and signature | dm:S-17, transport:S-03 | Medium | FIXED HOL-SEC-008 |
 | B9 | File metadata owner guard is fed the item's claimed sender, so a sync responder relabels any file card | dm:S-16, files:F1-5, channel:S14 | Medium | Sync half FIXED HOL-SEC-004 (blob bound to the signed `file_id`, owner = verified author); live half CONFIRMED sound (the live FileHeader guard takes the transport sender), the bytes around it are H1/H2 |
-| B10 | Edits carry no `edited_at` ordering: a replayed older plaintext edit reverts text | channel:S11 | Low | AGENT |
-| B11 | Replayed reaction add resurrects a removed reaction (`reaction_removals` ignored) | channel:S10 | Low | AGENT |
+| B10 | Edits carry no `edited_at` ordering: a replayed older plaintext edit reverts text | channel:S11 | Low | FIXED HOL-SEC-039: an edit applies only when newer than the row's last edit |
+| B11 | Replayed reaction add resurrects a removed reaction (`reaction_removals` ignored) | channel:S10 | Low | FIXED HOL-SEC-039: every removal is recorded, and an add signed no later than a recorded removal is refused |
 
 ## Class C. Channel content is not checked against membership, channel or group
 
@@ -121,7 +121,7 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | C11 | Text clamp only on two of five paths | channel:S18 | Low | FIXED HOL-SEC-011: one 64 KiB byte limit in Rust and Dart; every receive path (live, push, sync, edits, meeting chat) drops a longer body whole inside `verify_message_signature_v2` / `check_backfill_signature` (verdict `Oversized`), nothing clips; the sender refuses at the FFI and the composer and edit fields at input. Relay unchanged (rings byte-bounded, senders never clipped) |
 | C12 | A member who cannot see a restricted voice channel still joins it and gets dialed | media:S-04 | Medium | FIXED HOL-SEC-016: both voice join paths ask `voice_join_refusal` (member, voice channel, can see it) |
 | C13 | Push path stores `PublicChannelMessage` for conference ids (should be RAM only) | transport:S-10 | Low | FIXED HOL-SEC-009 |
-| C14 | 0x09 mention flag set by the sender bypasses "mentions only" | transport:S-11 | Low | CONFIRMED (read in session 5): the phone trusts the flag even with the decrypted text in hand (push_notification_service.dart `_postChannelWakeBanners`). Fix with class K: the woken device judges the mention from the decrypted messages (Rust fetch returns a per-message "mentions me"), iOS NSE the same; with nothing decrypted a mentions-only channel shows nothing; the relay flag stays a wake hint only |
+| C14 | 0x09 mention flag set by the sender bypasses "mentions only" | transport:S-11 | Low | FIXED HOL-SEC-035: the fetch judges each post's mention itself (`post_mentions_member`, the sender's own rule) and applies the local level; the flag only wakes; no fallback for a mentions-only channel; the iOS extension no longer claims a mention |
 
 ## Class D. MLS credentials and group operations are not authorised (lead L-03)
 
@@ -165,11 +165,11 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | F1 | A foreign device list claims another identity's MASTER id (`speaks_for` treats an unbound id as free): friendship with that master moves to the attacker, and at next boot its server membership and role fold into the attacker | identity:S1 | Critical? | FIXED HOL-SEC-006 |
 | F2 | A foreign list "revokes" a legacy (device == master) contact or any unbound device: DMs dropped, Olm session deleted, MLS leaf removal queued | identity:S2 | High | Legacy (device == master) half FIXED HOL-SEC-006; unbound-device half = F6 (co-signatures, ID-1) |
 | F3 | A revoked device signs a higher list and revokes the real ones (they wipe) | identity:S3 | Critical | KNOWN (AR-02, design ID-1); the comment at crypto_handler.rs:879 overclaims |
-| F4 | A revoked sibling re-enters through the sibling proof (resolver re-bound before the merge refuses it) and gets friends, servers, DM backfill | identity:S4 | High | AGENT |
-| F5 | Revoked devices resolve to themselves, so they pass the key-exchange and HOL-SEC-003 device check | dm:S-18 | High | AGENT |
+| F4 | A revoked sibling re-enters through the sibling proof (resolver re-bound before the merge refuses it) and gets friends, servers, DM backfill | identity:S4 | High | FIXED HOL-SEC-032 (`sibling_proof_refused` first in `on_verified_sibling`) |
+| F5 | Revoked devices resolve to themselves, so they pass the key-exchange and HOL-SEC-003 device check | dm:S-18 | High | FIXED HOL-SEC-032 (enforced revocations recorded in `revoked_devices`, warmed at every start; key exchange refuses a revoked device) |
 | F6 | First-come squatting of device ids we have not met yet | identity:S13 | Medium | PLAUSIBLE |
-| F7 | `FriendRequest`/`FriendReject`/`ServerJoinRequest` drop `newly_revoked` (no Olm/MLS enforcement) and attribute to `list.master_peer_id` even when the binding was refused | identity parity notes | Medium | AGENT |
-| F8 | Destroy-notice replay loop after an identity reappears; any list raises a false "reappeared" alert | identity:S10 | Low | AGENT |
+| F7 | `FriendRequest`/`FriendReject`/`ServerJoinRequest` drop `newly_revoked` (no Olm/MLS enforcement) and attribute to `list.master_peer_id` even when the binding was refused | identity parity notes | Medium | FIXED HOL-SEC-033 (`carried_list_master` after ingest; all three arms enforce the revocations) |
+| F8 | Destroy-notice replay loop after an identity reappears; any list raises a false "reappeared" alert | identity:S10 | Low | FIXED HOL-SEC-034 (a never-cleared floor for friend notices; only a never-seen device counts as the return) |
 
 ## Class G. Remote panics (a frame kills the node's event loop)
 
@@ -229,13 +229,13 @@ context before the write. B10 and B11 (ordering and replay) remain.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| J1 | Relay presence alone triggers KeyRequests, then an ungated WebRTC dial to strangers exposes our IP | relay:14 | Medium | PLAUSIBLE |
-| J2 | A non-member room joiner becomes a gossip neighbour and receives plaintext CRDT ops | relay:12, transport:S-14 | Medium | AGENT |
-| J3 | Plaintext `VoiceChannelJoin` re-announce goes to any joiner of the server room | relay:13 | Low | AGENT |
-| J4 | Push payload `server` makes a backgrounded Android node join any room | transport:S-12 | Medium | AGENT |
-| J5 | Forwarder id from the relay is the only one an "Always relay calls" viewer accepts: the relay can name a member device and expose the viewer's address | media:S-12 | Low | PLAUSIBLE |
-| J6 | `PeerExchange` from a gossip neighbour inserts arbitrary peer ids | dm:S-23 | Low | PLAUSIBLE |
-| J7 | Nickname `master_id` chosen by the claimer becomes the friend-request target | relay:23 | Low | AGENT (by design) |
+| J1 | Relay presence alone triggers KeyRequests, then an ungated WebRTC dial to strangers exposes our IP | relay:14 | Medium | FIXED HOL-SEC-040 (`data_channel_peer_allowed` on the dial and on inbound offers: own devices, friends, shared-server members) |
+| J2 | A non-member room joiner becomes a gossip neighbour and receives plaintext CRDT ops | relay:12, transport:S-14 | Medium | FIXED HOL-SEC-040 (overlay takes CRDT members only) |
+| J3 | Plaintext `VoiceChannelJoin` re-announce goes to any joiner of the server room | relay:13 | Low | FIXED HOL-SEC-040 (only to a member who can see the channel) |
+| J4 | Push payload `server` makes a backgrounded Android node join any room | transport:S-12 | Medium | FIXED HOL-SEC-035 (Dart drops a wake for a server we do not hold; the fetch node and the live-node nudge refuse it) |
+| J5 | Forwarder id from the relay is the only one an "Always relay calls" viewer accepts: the relay can name a member device and expose the viewer's address | media:S-12 | Low | CONFIRMED (read in session 7); class A design: the forwarder id needs a binding the relay cannot forge |
+| J6 | `PeerExchange` from a gossip neighbour inserts arbitrary peer ids | dm:S-23 | Low | FIXED HOL-SEC-040 (members only) |
+| J7 | Nickname `master_id` chosen by the claimer becomes the friend-request target | relay:23 | Low | CONFIRMED (read in session 7); class A design: a master-signed binding in the claim, checked by the looker-up |
 | J8 | Channel sync requests ride plaintext by design (MLS-epoch resilience) with per-author watermarks and the gap digest: the relay learns who posts in which channel and when, restricted channels included | sync_handler::channel_sync_request, swarm.rs reconnect fan-out | Medium (privacy, C-24) | CONFIRMED (read in session 5); move into Olm with class A |
 | J9 | `ChannelNotificationHint` is plaintext to the whole server room: the relay and anyone with the server id learn that a channel had a post, which member names it mentioned and whether it pinged everyone, restricted channels included; the relay can forge a hint or typing in a member's name | message_ops.rs hint broadcast, swarm.rs hint arm | Medium (privacy, C-18, C-24) | CONFIRMED (read in session 5); move into MLS (subgroup for restricted channels) with class A |
 
@@ -243,36 +243,36 @@ context before the write. B10 and B11 (ordering and replay) remain.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| K1 | The push fetch node and the iOS NSE never load the block list: blocked senders' DMs are stored and shown | transport:S-01 | Medium | AGENT |
-| K2 | A key change first seen through push never raises the alert | transport:S-02 | Low | PLAUSIBLE |
-| K3 | Anyone who knows a device id can make the relay wake that phone (10 s debounce, 30 an hour); when the fetch finds nothing decryptable the app shows a fallback "new message" banner naming the sender's shortened id, so a stranger puts up to 30 visible banners an hour on the phone | relay:A-22a, push_notification_service.dart `_showDmFallbackIfNeeded` | Low | CONFIRMED (read in session 6). Fix idea: the fallback banner only for a sender we know (friend, sibling, a member of a shared server); nothing for a stranger's empty wake; check the iOS NSE path too |
+| K1 | The push fetch node and the iOS NSE never load the block list: blocked senders' DMs are stored and shown | transport:S-01 | Medium | FIXED HOL-SEC-035 (`warm_from_store` loads the block list in every process; blocked members' posts never become banners; iOS hints leave blocked friends out) |
+| K2 | A key change first seen through push never raises the alert | transport:S-02 | Low | FIXED HOL-SEC-035 (`pin_olm_identity_key` on the fetch path) |
+| K3 | Anyone who knows a device id can make the relay wake that phone; an empty wake showed a fallback banner naming the sender | relay:A-22a | Low | FIXED HOL-SEC-035 on Android (`push_sender_known`); iOS residual: the APNs alert shows before the extension runs, needs Apple's filtering entitlement (decision for Vitalik) |
 
 ## Class L. Friends, blocklist, DM edges
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| L1 | `FriendAccept` with no row and no tombstone creates an accepted friend; on a pending-incoming row it accepts without consent | dm:S-05 | High | AGENT |
-| L2 | A blocked person's never-seen device passes the block check and is then bound to the blocked identity | dm:S-08 | Medium | AGENT |
-| L3 | Blocklist missing on edit, delete, react, link preview, friend accept/reject/remove, typing, status, key exchange, raw fallback, MLS twins | dm:S-19 | Medium | AGENT |
+| L1 | `FriendAccept` with no row and no tombstone creates an accepted friend; on a pending-incoming row it accepts without consent | dm:S-05 | High | FIXED HOL-SEC-036 (an accept lands only on our pending outgoing row; it carries the accepter's list; siblings learn through `share_friend_with_siblings`) |
+| L2 | A blocked person's never-seen device passes the block check and is then bound to the blocked identity | dm:S-08 | Medium | FIXED HOL-SEC-036 (block checked again after the list binds) |
+| L3 | Blocklist missing on edit, delete, react, link preview, friend accept/reject/remove, typing, status, key exchange, raw fallback, MLS twins | dm:S-19 | Medium | FIXED HOL-SEC-036 for edits, cards, deletions, reactions and accepts (the rest: typing already gated, reject/remove/status harmless, key exchange opens nothing, raw fallback gone) |
 | L4 | Legacy raw-text fallback shows an unsigned message with no block or revoked check | dm:S-04, transport:S-15 | Medium | FIXED HOL-SEC-013: an unparseable decrypted payload is dropped, as on the push path |
 | L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | FIXED HOL-SEC-008 (cards, reactions) and HOL-SEC-010 (typing) |
-| L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | PLAUSIBLE |
+| L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | ACCEPTED AR-09 (2026-09-27); a replay rule broke honest session setup and was reverted |
 
 ## Class M. Calls
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| M1 | Dart binds call signals by `call_id` only (from `Random()`, not `Random.secure()`): end, answer or re-point someone else's call | media:S-02 | Medium | PLAUSIBLE |
-| M2 | Only the blocklist gates ringing (no relationship gate) | media:S-03 | Policy | PLAUSIBLE |
-| M3 | The origin guard also accepts origin == receiver on screen_assign / feed_state | media:S-09 | Low | AGENT (hardening) |
+| M1 | Dart binds call signals by `call_id` only (from `Random()`, not `Random.secure()`): end, answer or re-point someone else's call | media:S-02 | Medium | FIXED HOL-SEC-037 (sender must be the live call's peer; secure call ids; `audio_state` needs its call id) |
+| M2 | Only the blocklist gates ringing (no relationship gate) | media:S-03 | Policy | FIXED HOL-SEC-037 (decided 2026-09-27: only an accepted friend or our own device rings us; `call_invite_allowed`) |
+| M3 | The origin guard also accepts origin == receiver on screen_assign / feed_state | media:S-09 | Low | FIXED HOL-SEC-037 (assign from the originator only; feed report must name our stream) |
 
 ## Class N. Profiles
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| N1 | Plaintext `ProfileUpdate` stores avatar bytes without comparing them to the signed hash; banner, showcase, frame, animation unsigned | identity:S11 | Medium | AGENT |
-| N2 | `saved` is true when the SQL guard refused a stale profile, so a replayed old profile still rewrites the member display name | identity:S12 | Low | AGENT |
-| N3 | Profile fields clipped to 64/96/256 BYTES against 32/48/128 CHARACTER UI limits: emoji or CJK names cut, and a cut after the signature check breaks the relayed profile (variant of HOL-SEC-011) | swarm.rs ProfileUpdate arm | Low | CONFIRMED (clip read), signature interplay unverified |
+| N1 | Plaintext `ProfileUpdate` stores avatar bytes without comparing them to the signed hash; banner, showcase, frame, animation unsigned | identity:S11 | Medium | Avatar half FIXED HOL-SEC-038; unsigned fields = class A design |
+| N2 | `saved` is true when the SQL guard refused a stale profile, so a replayed old profile still rewrites the member display name | identity:S12 | Low | FIXED HOL-SEC-038 (also stopped a refused profile's avatar clear) |
+| N3 | Profile fields clipped in bytes against character UI limits; a cut breaks the signature (variant of HOL-SEC-011) | swarm.rs ProfileUpdate arm | Low | FIXED HOL-SEC-038 (one limit, 4 bytes per character, refused whole everywhere, editor stops at it) |
 
 ## Class O. Device linking (beyond HOL-SEC-002)
 

@@ -20,9 +20,8 @@ fn links() -> &'static RwLock<HashMap<String, String>> {
     LINKS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Device peer_ids seen REVOKED in a signed tombstone, kept process-global so
-/// the DM/typing receive path can DROP a just-revoked device that is still alive
-/// and talking. Cleared on `clear_all`; our own running device id is never here.
+/// Device peer_ids whose signed tombstone we enforced, warmed from the store at
+/// boot. Cleared on `clear_all`; our own running device id is never here.
 static REVOKED: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
 
 fn revoked() -> &'static RwLock<std::collections::HashSet<String>> {
@@ -93,6 +92,21 @@ pub(crate) fn warm_from_links(pairs: &[(String, String)]) {
     }
 }
 
+/// Warm every process-global trust set from the store: device links, enforced
+/// revocations and the block list. Every process that judges inbound frames (the
+/// main node, the push fetch node, the iOS extension) runs this first.
+pub(crate) fn warm_from_store(store: &crate::storage::MessageStore) {
+    if let Ok(links) = store.get_all_device_links() {
+        warm_from_links(&links);
+    }
+    if let Ok(revoked) = store.get_all_revoked_devices() {
+        mark_revoked(&revoked);
+    }
+    if let Ok(blocked) = store.load_blocked_peers() {
+        super::blocklist::warm(&blocked);
+    }
+}
+
 /// Snapshot all known (device, master) links for the FFI attribution layer. A
 /// single-device install yields just self-mappings, or nothing.
 pub(crate) fn all_links() -> Vec<(String, String)> {
@@ -138,8 +152,8 @@ pub(crate) fn forget_many(device_peer_ids: &[String]) {
     }
 }
 
-/// Mark device ids revoked so the DM/typing receive path drops a just-revoked
-/// device that is still alive (phantom-chat guard).
+/// Mark device ids revoked for this process: DMs, typing, key exchange and the
+/// sibling proof refuse them. Persist through `record_revoked_devices` as well.
 pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
     if let Ok(mut set) = revoked().write() {
         for d in device_peer_ids {

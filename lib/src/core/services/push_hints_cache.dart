@@ -25,6 +25,10 @@ class PushHintsCache {
   /// Coalesce bursts of profile/friend events into one cache write.
   static Timer? _debounce;
 
+  /// The friend ids of the last write, so a block change can rewrite without
+  /// its caller knowing the friend list.
+  static List<String> _lastIds = const [];
+
   /// Resolves the iOS App Group container path via the native MethodChannel.
   /// Null on non-iOS or when the App Group is not configured.
   static Future<String?> _appGroupDir() async {
@@ -51,10 +55,23 @@ class PushHintsCache {
     });
   }
 
+  /// Rewrite from the last friend list, after a block or unblock.
+  static void rewriteLast() => scheduleWrite(_lastIds);
+
   /// Rewrite the shared push-hints cache immediately. iOS-only.
   static Future<void> writeNow(List<String> friendPeerIds) async {
+    _lastIds = friendPeerIds;
     final dir = await _appGroupDir();
     if (dir == null) return;
+
+    // A hint makes the extension name the sender and fetch; a blocked friend's
+    // wake must stay the generic banner, never "Name: Sent you a message".
+    var blocked = const <String>{};
+    try {
+      blocked = (await storage_api.loadBlockedPeers()).toSet();
+    } catch (e) {
+      debugPrint('[HOLLOW-PUSHHINTS] loadBlockedPeers failed: $e');
+    }
 
     final base = Directory('$dir/push_hints');
     if (!base.existsSync()) base.createSync(recursive: true);
@@ -78,6 +95,7 @@ class PushHintsCache {
     final keep = <String>{}; // avatar files to retain this pass
 
     for (final peerId in friendPeerIds) {
+      if (blocked.contains(peerId)) continue;
       try {
         final profile = await storage_api.getProfileLight(peerId: peerId);
         final name = (profile != null && profile.displayName.isNotEmpty)

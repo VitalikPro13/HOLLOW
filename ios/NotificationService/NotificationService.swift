@@ -140,7 +140,6 @@ class NotificationService: UNNotificationServiceExtension {
     let info = request.content.userInfo
     let server = info["server"] as? String ?? ""
     let channel = info["channel"] as? String ?? ""
-    let mention = (info["mention"] as? String) == "1"
     let sender = info["sender"] as? String ?? ""
 
     // Thread by server so iOS groups one server's channel banners natively;
@@ -150,7 +149,10 @@ class NotificationService: UNNotificationServiceExtension {
       content.threadIdentifier = server
     }
     content.title = "Hollow"
-    content.body = mention ? "You were mentioned" : "New channel messages"
+    // The push's mention flag is the SENDER's claim. Only the posts decrypted
+    // below may say who was mentioned, and Rust already dropped the ones a
+    // mentions-only channel should not show.
+    content.body = "New channel messages"
 
     guard
       !server.isEmpty,

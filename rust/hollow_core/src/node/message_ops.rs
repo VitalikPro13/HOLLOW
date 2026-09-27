@@ -1240,6 +1240,19 @@ fn queue_offline_channel_push(
     }
 }
 
+/// The receiver's own reading of whether a channel post mentions `member`, with
+/// the rule the sender uses for its push flag. A woken device judges by this,
+/// never by the flag.
+pub(crate) fn post_mentions_member(
+    server: &ServerState,
+    member: &str,
+    text: &str,
+    reply_author: Option<&str>,
+) -> bool {
+    let (has_everyone, mentioned_names) = channel_mention_meta(text);
+    member_is_mentioned(server, member, has_everyone, reply_author, &mentioned_names)
+}
+
 /// Mention flag per MEMBER (master) for the channel push: @everyone, a reply to
 /// their message, or their display name / nickname mentioned.
 fn member_is_mentioned(
@@ -1663,6 +1676,10 @@ pub(crate) fn live_dm_change(
 ) -> Option<LiveDmChange> {
     let convo = super::resolver::resolve(&store.get_dm_message_peer(mid)?);
     let from_sibling = super::resolver::same_identity(sender, local_master);
+    // A blocked identity's edits, cards and deletions are dropped like its messages.
+    if !from_sibling && super::blocklist::is_blocked(sender) {
+        return None;
+    }
     let named = if from_sibling { convo.clone() } else { super::resolver::resolve(sender) };
     if !change_may_touch_row(store, &RowScope::Dm { convo: &named, is_mine: from_sibling }, Some(mid)) {
         return None;
@@ -1703,7 +1720,7 @@ pub(crate) fn dm_reaction_target_ok(
 ) -> bool {
     let ok = store.get_dm_message_peer(mid).is_some_and(|peer| {
         super::resolver::same_identity(reactor, local_master)
-            || super::resolver::same_identity(&peer, reactor)
+            || (super::resolver::same_identity(&peer, reactor) && !super::blocklist::is_blocked(reactor))
     });
     if !ok {
         hollow_log!("[HOLLOW-SECURITY] REJECTED DM reaction on {mid} from {reactor}: not a row of that conversation");
@@ -4020,6 +4037,32 @@ mod tests {
         assert!(dm_reaction_target_ok(&store, "b1", &b, &a));
         assert!(dm_reaction_target_ok(&store, "a1", &b, &a));
         assert!(dm_reaction_target_ok(&store, "b1", &a, &a), "our sibling");
+    }
+
+    /// HOL-SEC-036 (L3). A block dropped new DMs, but a blocked friend's edits,
+    /// cards, deletions and reactions on the rows already in our DMs still landed.
+    #[test]
+    fn authz_a_blocked_friend_changes_nothing_in_our_dms() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::blocklist::clear_for_test();
+        let store = mem_store();
+        let (a, b) = (kp(144).peer_id(), kp(145).peer_id());
+        store.insert(&b, "from bob", false, 1_000, None, None, Some("b1"), None, None, None, None).unwrap();
+        store.insert(&b, "to bob", true, 1_100, None, None, Some("a1"), None, None, None, None).unwrap();
+        assert!(live_dm_change(&store, "b1", &b, &a).is_some());
+        assert!(dm_reaction_target_ok(&store, "b1", &b, &a));
+
+        crate::node::blocklist::block(&b);
+        assert!(
+            live_dm_change(&store, "b1", &b, &a).is_none(),
+            "HOL-SEC-036: a blocked friend edited, carded or deleted a row in our DMs",
+        );
+        assert!(
+            !dm_reaction_target_ok(&store, "b1", &b, &a),
+            "HOL-SEC-036: a blocked friend reacted in our DMs",
+        );
+        assert!(live_dm_change(&store, "a1", &a, &a).is_some(), "our own sibling is never blocked");
+        crate::node::blocklist::clear_for_test();
     }
 
     /// A live channel edit, deletion, card or reaction must name the channel its

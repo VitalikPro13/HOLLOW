@@ -195,6 +195,12 @@ fn on_verified_sibling(
     db_passphrase: &str,
     peer_id: &str,
 ) {
+    // Every revoked device still holds the master key, so the proof alone would
+    // re-bind it and hand it our friends, servers and DM history (HOL-SEC-032).
+    if super::crypto_handler::sibling_proof_refused(local_peer_str, peer_id, db_path, db_passphrase) {
+        hollow_log!("[HOLLOW-REVOKE] Refused sibling convergence with revoked device {peer_id}");
+        return;
+    }
     let own_inbox = format!("inbox:{}", local_peer_str);
     super::resolver::update(peer_id, local_peer_str);
 
@@ -778,9 +784,7 @@ async fn run_event_loop(
     // misattributed. A no-op self-mapping on a pre-multi-device install.
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-            if let Ok(links) = store.get_all_device_links() {
-                super::resolver::warm_from_links(&links);
-            }
+            super::resolver::warm_from_store(&store);
             // Always UNION this running device into the self-seed. A freshly LINKED sibling
             // imported the SOURCE device's list, which does not contain our brand-new device
             // id, so without this our own id resolves to itself rather than to the master
@@ -792,13 +796,14 @@ async fn run_event_loop(
                         devs.push(device_peer_id.clone());
                     }
                     super::resolver::seed_self(&master_peer_str, &devs);
+                    // Our own tombstones predate the revoked_devices table on older installs.
+                    let revoked: Vec<String> = list.revoked.iter()
+                        .filter(|r| **r != device_peer_id)
+                        .cloned()
+                        .collect();
+                    super::resolver::mark_revoked(&revoked);
                 }
                 _ => super::resolver::seed_self(&master_peer_str, &[device_peer_id.clone()]),
-            }
-            // Warm the block list alongside the resolver — the ingest guards
-            // must see persisted blocks before the first message arrives.
-            if let Ok(blocked) = store.load_blocked_peers() {
-                super::blocklist::warm(&blocked);
             }
         }
     }
@@ -2586,6 +2591,7 @@ async fn run_event_loop(
                         voice_handler::handle_webrtc_send_signal(
                             peer_id, signal_type, payload, conn_id,
                             &ws_cmd_tx, &ws_room_peers,
+                            &server_states, &local_peer_str, &db_path, &db_passphrase,
                         );
                     }
                     NodeCommand::WebRtcTransferComplete { transfer_id, temp_path, sender_peer_id, kind, shard_index, chunk_index } => {
@@ -3409,6 +3415,13 @@ async fn run_event_loop(
                                 let Some(colon) = vc_key.find(':') else { continue };
                                 let (vc_sid, vc_cid) = (&vc_key[..colon], &vc_key[colon + 1..]);
                                 if vc_sid != room { continue; }
+                                // Anyone with the server id can join its room; only someone
+                                // who could see this voice channel learns we sit in it (J3).
+                                if server_states.get(&room).is_some_and(|s| {
+                                    !s.is_member(&peer_id) || !s.can_see_channel(&peer_id, vc_cid)
+                                }) {
+                                    continue;
+                                }
                                 hollow_log!("[HOLLOW-VC] Re-announcing our presence in {vc_cid} to {peer_id} (rejoined the room)");
                                 // The room is KNOWN here, so send into it directly
                                 // rather than through `ws_room_for_peer` (first-match
@@ -3427,13 +3440,15 @@ async fn run_event_loop(
                             // relay reports US under our DEVICE id, which differs from local_peer_str (the
                             // master). Exclude both, or the node key-exchanges and WebRTCs with its OWN
                             // device presence, an endless MAC-mismatch re-key.
-                            if peer_id != local_peer_str && peer_id != device_peer_id {
-                                if let Some(overlay) = gossip_overlays.get_mut(&room) {
-                                    if let Some(new_neighbor) = overlay.add_known_peer(&peer_id) {
-                                        hollow_log!("[HOLLOW-GOSSIP] New neighbor {new_neighbor} joined server {room}");
-                                        let _ = event_tx.send(NetworkEvent::GossipConnect { peer_id: new_neighbor }).await;
-                                    }
-                                }
+                            // Only a member of the server: anyone with its id can join the
+                            // room, and a neighbour gets a data channel and the op flood (J2).
+                            let is_member = server_states.get(&room).is_some_and(|s| s.is_member(&peer_id));
+                            if peer_id != local_peer_str && peer_id != device_peer_id && is_member
+                                && let Some(overlay) = gossip_overlays.get_mut(&room)
+                                && let Some(new_neighbor) = overlay.add_known_peer(&peer_id)
+                            {
+                                hollow_log!("[HOLLOW-GOSSIP] New neighbor {new_neighbor} joined server {room}");
+                                let _ = event_tx.send(NetworkEvent::GossipConnect { peer_id: new_neighbor }).await;
                             }
 
                             if !is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
@@ -3529,7 +3544,8 @@ async fn run_event_loop(
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {joined_master}), (re)sending FriendAccept");
                                         social::send_friend_accept(
-                                            &ws_cmd_tx, &local_peer_str, &joined_master, &peer_id, stamp,
+                                            &ws_cmd_tx, &local_peer_str, &master_keypair, &device_peer_id,
+                                            &joined_master, &peer_id, stamp, &db_path, &db_passphrase,
                                         );
                                     }
                                 }
@@ -3961,7 +3977,7 @@ async fn run_event_loop(
                                 let overlay = gossip_overlays.entry(room.clone())
                                     .or_insert_with(|| super::gossip::GossipOverlay::new(room.clone()));
                                 for pid in &peers {
-                                    if pid != &local_peer && pid.as_str() != device_peer_id {
+                                    if pid != &local_peer && pid.as_str() != device_peer_id && state.is_member(pid) {
                                         overlay.add_known_peer(pid);
                                     }
                                 }
@@ -4341,7 +4357,8 @@ async fn run_event_loop(
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {joined_master}), (re)sending FriendAccept");
                                         social::send_friend_accept(
-                                            &ws_cmd_tx, &local_peer_str, &joined_master, pid_str, stamp,
+                                            &ws_cmd_tx, &local_peer_str, &master_keypair, &device_peer_id,
+                                            &joined_master, pid_str, stamp, &db_path, &db_passphrase,
                                         );
                                     }
                                 }
@@ -8366,7 +8383,7 @@ async fn handle_incoming_request(
                 // sender is authenticated; the plaintext Call* arms below reject instead.
                 Ok(MessageEnvelope::CallSignal { signal }) => {
                     voice_handler::handle_call_signal_message(
-                        peer_str, master_peer_str, *signal, event_tx,
+                        peer_str, master_peer_str, *signal, event_tx, db_path, db_passphrase,
                     ).await;
                 }
 
@@ -8473,7 +8490,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, feed_target, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_assign(
                         voice_channel_participants, event_tx,
-                        peer_str.to_string(), sid, cid, origin, forwarder, feed_target, &local_peer_str,
+                        peer_str.to_string(), sid, cid, origin, forwarder, feed_target,
                     ).await;
                 }
                 Ok(MessageEnvelope::VoiceChannelScreenFeedState { sid, cid, origin, forwarder, up, .. }) => {
@@ -9101,12 +9118,20 @@ async fn handle_incoming_request(
                     }
                     // Ingest through the SAME path every other carried list uses,
                     // so the resolver, the device store and every later send agree.
-                    let _ = crypto_handler::ingest_device_list(
+                    let outcome = crypto_handler::ingest_device_list(
                         event_tx, master_peer_str, device_peer_id, master_keypair,
                         peer_str, ws_cmd_tx, ws_room_peers,
                         device_list.clone(), db_path, db_passphrase,
                     ).await;
-                    list.master_peer_id.clone()
+                    enforce_device_revocations(
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                        local_peer_str, ws_room_peers, pending_mls_removals,
+                    );
+                    let Some(master) = crypto_handler::carried_list_master(list, peer_str) else {
+                        hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: its list did not bind the sender (revoked or claimed elsewhere)");
+                        return;
+                    };
+                    master
                 }
                 // A pre-parked-joins client: all we have is the resolver, which
                 // works whenever the two have actually met. Byte-for-byte the
@@ -10497,7 +10522,6 @@ async fn handle_incoming_request(
                                 voice_handler::handle_envelope_voice_channel_screen_assign(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, origin, forwarder, feed_target,
-                                    local_peer_str,
                                 ).await;
                             }
 
@@ -11208,11 +11232,25 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-FRIENDS] Dropping FriendRequest from {peer_str}: carried device list rejected ({reason})");
                     return;
                 }
-                let _ = crypto_handler::ingest_device_list(
+                let outcome = crypto_handler::ingest_device_list(
                     event_tx, master_peer_str, device_peer_id, master_keypair,
                     peer_str, ws_cmd_tx, ws_room_peers,
                     device_list.clone(), db_path, db_passphrase,
                 ).await;
+                enforce_device_revocations(
+                    &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                    local_peer_str, ws_room_peers, pending_mls_removals,
+                );
+                // The carried bundle and profile below are keyed by the list's master.
+                if crypto_handler::carried_list_master(list, peer_str).is_none() {
+                    hollow_log!("[HOLLOW-FRIENDS] Dropping FriendRequest from {peer_str}: its list did not bind the sender (revoked or claimed elsewhere)");
+                    return;
+                }
+                // A blocked identity's never-seen device resolves to itself above and
+                // is bound to its master only now.
+                if super::blocklist::is_blocked(peer_str) {
+                    return;
+                }
             }
 
             let req_master_early = super::resolver::resolve(&peer_str);
@@ -11414,53 +11452,77 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::FriendAccept { requested_at } => {
-
-            // Update our outgoing request to accepted, keyed by the friend's MASTER.
-            // The accepter's `peer_str` may be a device id, so resolve it and migrate
-            // any pending row stranded under that device id.
-            let master = super::resolver::resolve(&peer_str);
-            {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    if master != peer_str {
-                        let _ = store.migrate_friend_to_master(peer_str, &master);
-                    }
-                    // A DECLINE IS STICKY, and an accept is the other way it used to
-                    // come undone. `pending_friend_accepts` is re-seeded from every
-                    // accepted friend at startup and re-fires on the peer's next
-                    // appearance, so an accept can arrive well AFTER we refused this
-                    // person. Overwriting the tombstone made the pair friends behind
-                    // the user's back. A re-add clears a tombstone; an accept never does.
-                    if store.get_friend_status(&master).ok().flatten().as_deref()
-                        == Some("declined")
+        HavenMessage::FriendAccept { requested_at, device_list } => {
+            // ATTRIBUTION, as on FriendReject: a carried list makes it cryptographic,
+            // so a cold resolver cannot file the accept under a bare device id.
+            let master = match device_list.as_ref() {
+                Some(list) => {
+                    if !crypto_handler::verify_device_list(list)
+                        || !crypto_handler::device_list_binds_sender(list, peer_str)
                     {
-                        hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: we declined {master}");
+                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendAccept from {peer_str}: carried device list rejected");
                         return;
                     }
-                    // An accept answers a request of ours. With a row, a stamp older than
-                    // it is a relay-parked or mailbox-replayed copy, not consent for the
-                    // re-add (a bare stamp is a pre-0.11.1 sender and passes). With no row
-                    // after a removal, every copy is stale, stamped or not.
-                    match store.get_friend_row(&master).ok().flatten() {
-                        Some((_, _, stored)) => {
-                            if let Some(stamp) = requested_at && stamp < stored {
-                                hollow_log!("[HOLLOW-FRIENDS] Ignoring stale FriendAccept from {peer_str}: answers request {stamp}, current is {stored}");
-                                return;
-                            }
-                        }
-                        None => {
-                            if store.load_setting(&social::removed_key(&master)).ok().flatten().is_some() {
-                                hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: no open request for {master} since we removed them");
-                                return;
-                            }
-                        }
-                    }
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    let _ = store.save_friend(&master, "accepted", "", now);
+                    let outcome = crypto_handler::ingest_device_list(
+                        event_tx, master_peer_str, device_peer_id, master_keypair,
+                        peer_str, ws_cmd_tx, ws_room_peers,
+                        device_list.clone(), db_path, db_passphrase,
+                    ).await;
+                    enforce_device_revocations(
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                        local_peer_str, ws_room_peers, pending_mls_removals,
+                    );
+                    let Some(master) = crypto_handler::carried_list_master(list, peer_str) else {
+                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendAccept from {peer_str}: its list did not bind the sender");
+                        return;
+                    };
+                    master
                 }
+                None => super::resolver::resolve(peer_str),
+            };
+            if super::blocklist::is_blocked(peer_str) {
+                return;
+            }
+            let was_pending;
+            {
+                let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+                    return;
+                };
+                if master != peer_str {
+                    let _ = store.migrate_friend_to_master(peer_str, &master);
+                }
+                // An accept answers a request WE sent, so it lands only on our own
+                // pending outgoing row, or re-confirms an accepted one. With no row a
+                // stranger befriended us by sending one, and on an incoming request it
+                // accepted in our name (L1). A decline, a removal and a tombstone stay
+                // as they are. Our siblings learn an accept through the sibling share
+                // below, never from a row-less accept. A stamp older than the row is a
+                // relay-parked or replayed copy; a bare one is a pre-0.11.1 sender.
+                match store.get_friend_row(&master).ok().flatten() {
+                    Some((status, direction, stored))
+                        if (status == "pending" && direction == "outgoing") || status == "accepted" =>
+                    {
+                        if let Some(stamp) = requested_at && stamp < stored {
+                            hollow_log!("[HOLLOW-FRIENDS] Ignoring stale FriendAccept from {peer_str}: answers request {stamp}, current is {stored}");
+                            return;
+                        }
+                        was_pending = status == "pending";
+                    }
+                    row => {
+                        hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: no request of ours for {master} (row {row:?})");
+                        return;
+                    }
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let _ = store.save_friend(&master, "accepted", "", now);
+            }
+            if was_pending {
+                social::share_friend_with_siblings(
+                    ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, db_path, db_passphrase,
+                );
             }
 
             hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
@@ -11516,12 +11578,20 @@ async fn handle_incoming_request(
                     // Ingest through the SAME path the FriendRequest arm uses, so the
                     // resolver, the device store and the DM room key all agree afterwards:
                     // an accept or DM that follows must not compute a different room.
-                    let _ = crypto_handler::ingest_device_list(
+                    let outcome = crypto_handler::ingest_device_list(
                         event_tx, master_peer_str, device_peer_id, master_keypair,
                         peer_str, ws_cmd_tx, ws_room_peers,
                         device_list.clone(), db_path, db_passphrase,
                     ).await;
-                    list.master_peer_id.clone()
+                    enforce_device_revocations(
+                        &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                        local_peer_str, ws_room_peers, pending_mls_removals,
+                    );
+                    let Some(master) = crypto_handler::carried_list_master(list, peer_str) else {
+                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendReject from {peer_str}: its list did not bind the sender (revoked or claimed elsewhere)");
+                        return;
+                    };
+                    master
                 }
                 // A pre-carried-list client: all we have is the resolver, which
                 // works whenever the two have actually met.
@@ -11650,9 +11720,9 @@ async fn handle_incoming_request(
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 // Existing friends (any status) so we don't clobber a relationship
                 // we already track or re-add a removed one within the same session.
-                let existing: std::collections::HashSet<String> = store
+                let existing: HashMap<String, String> = store
                     .load_friends(None)
-                    .map(|rows| rows.into_iter().map(|(pid, ..)| pid).collect())
+                    .map(|rows| rows.into_iter().map(|(pid, status, ..)| (pid, status)).collect())
                     .unwrap_or_default();
 
                 for entry in &friends {
@@ -11664,7 +11734,10 @@ async fn handle_incoming_request(
                     // already sends masters, but resolve defensively so a device-keyed entry
                     // from an older one still lands canonical and dedups against our row.
                     let fmaster = super::resolver::resolve(&entry.peer_id);
-                    if existing.contains(&fmaster) || existing.contains(&entry.peer_id) {
+                    // Our sibling's accept is our own consent, so it settles a pending
+                    // request here; any other row we hold stays ours.
+                    let held = existing.get(&fmaster).or_else(|| existing.get(&entry.peer_id));
+                    if held.is_some_and(|s| s != "pending" || entry.status != "accepted") {
                         continue;
                     }
                     // v1 shares only accepted friends; persist as accepted.
@@ -12597,12 +12670,10 @@ async fn handle_incoming_request(
                 }
             }
 
-            // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
-            // Slightly above UI limits (32/48/128) as a safety backstop.
-            let display_name = crypto_handler::clip_bytes(&display_name, 64).to_string();
-            let status = crypto_handler::clip_bytes(&status, 96).to_string();
-            let about_me = crypto_handler::clip_bytes(&about_me, 256).to_string();
-            let twitch_username = crypto_handler::clip_bytes(&twitch_username, 64).to_string();
+            if social::profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED profile from {peer_str}: a field exceeds its limit");
+                return;
+            }
 
             // Decode avatar/banner from base64.
             // Empty string = no change (None). "CLEAR" = clear (Some(empty)). Otherwise = base64 data.
@@ -12920,12 +12991,12 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-SECURITY] BLOCKED RtcOffer — size {} exceeds limit from {peer_str}", sdp.len());
                 return;
             }
-            // BLOCK GUARD: a blocked identity can't open a data channel to us.
-            // Guarding the OFFER kills the connection at initiation; the other
-            // Rtc/Call signals are inert without one. Siblings exempt.
-            if !super::resolver::same_identity(peer_str, master_peer_str)
-                && super::blocklist::is_blocked(peer_str)
-            {
+            // Guarding the OFFER kills the connection at initiation; the other Rtc
+            // signals are inert without one. Blocked and unknown peers get none.
+            if !voice_handler::data_channel_peer_allowed(
+                server_states, master_peer_str, peer_str, db_path, db_passphrase,
+            ) {
+                hollow_log!("[HOLLOW-SECURITY] Dropped RtcOffer from {peer_str}: no friendship or shared server");
                 return;
             }
             hollow_log!("[HOLLOW-WEBRTC] RtcOffer from {peer_str} conn={conn_id}");
@@ -13097,8 +13168,10 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-SECURITY] BLOCKED PeerExchange from non-neighbor {peer_str} for server {server_id}");
                     return;
                 }
+                // A neighbour's list names only members of this server (J6).
+                let state = server_states.get(&server_id);
                 for p in &peers {
-                    if p != local_peer_str {
+                    if p != local_peer_str && state.is_some_and(|s| s.is_member(p)) {
                         overlay.known_peers.insert(p.clone());
                         overlay.peer_scores
                             .entry(p.clone())
@@ -13285,3 +13358,60 @@ async fn handle_incoming_request(
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+
+    /// HOL-SEC-032. A revoked device still holds the master key, so it answers the
+    /// sibling proof. The proof re-bound it before anything read our tombstones,
+    /// then handed it our friends, servers and DM history.
+    #[test]
+    fn authz_a_revoked_sibling_is_not_re_bound_by_the_proof() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let master = NativeKeypair::from_secret_bytes(&[0x01; 32]);
+        let master_id = master.peer_id();
+        let local_device = NativeKeypair::from_secret_bytes(&[0x02; 32]).peer_id();
+        let revoked = NativeKeypair::from_secret_bytes(&[0x03; 32]).peer_id();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sibling.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        {
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            let list = crypto_handler::build_signed_device_list(
+                &master, 2, vec![local_device.clone()], vec![revoked.clone()],
+            );
+            let json = serde_json::to_string(&list).unwrap();
+            store.save_device_list(&master_id, &json, list.version, &list.devices, 0).unwrap();
+            store.save_friend("friend", "accepted", "outgoing", 1).unwrap();
+        }
+        super::super::resolver::seed_self(&master_id, std::slice::from_ref(&local_device));
+        let (ws_cmd_tx, mut ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::from([(
+            format!("inbox:{master_id}"),
+            std::collections::HashSet::from([local_device.clone(), revoked.clone()]),
+        )]);
+        let mut snapshot_asked = std::collections::HashSet::new();
+
+        on_verified_sibling(
+            &ws_cmd_tx, &rooms, &master, &local_device, &master_id, &HashMap::new(),
+            &mut snapshot_asked, false, &db, &pass, &revoked,
+        );
+
+        assert_ne!(
+            super::super::resolver::resolve(&revoked),
+            master_id,
+            "HOL-SEC-032: the proof re-bound a revoked device to our master",
+        );
+        assert!(
+            ws_cmd_rx.try_recv().is_err(),
+            "HOL-SEC-032: a revoked device was sent our state",
+        );
+        super::super::resolver::clear_all();
+    }
+}

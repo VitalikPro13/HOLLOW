@@ -8,6 +8,13 @@ import 'package:flutter/widgets.dart';
 /// longer message whole, so nothing Hollow sends may exceed it.
 const int kMaxMessageBytes = 64 * 1024;
 
+/// Profile text ceilings in UTF-8 bytes, four per character of the editor's
+/// 32/48/128-character limits. Rust's `PROFILE_*_MAX_BYTES` are the same numbers:
+/// receivers refuse a longer profile whole.
+const int kProfileNameMaxBytes = 128;
+const int kProfileStatusMaxBytes = 192;
+const int kProfileAboutMaxBytes = 512;
+
 /// The UTF-8 size of [text], without encoding it.
 int utf8ByteLength(String text) {
   var bytes = 0;
@@ -32,15 +39,19 @@ int utf8RuneLength(int rune) => rune < 0x80
 /// the ceiling does not land and a paste keeps its head. [measure] is the wire
 /// size of a text (the composer counts an emote as its full token).
 class MessageByteLimitFormatter extends TextInputFormatter {
-  MessageByteLimitFormatter({this.measure = utf8ByteLength});
+  MessageByteLimitFormatter(
+      {this.measure = utf8ByteLength, this.maxBytes = kMaxMessageBytes});
 
   final int Function(String text) measure;
+
+  /// The ceiling; a profile field passes its own `kProfile*MaxBytes`.
+  final int maxBytes;
 
   @override
   TextEditingValue formatEditUpdate(
       TextEditingValue oldValue, TextEditingValue newValue) {
     final newBytes = measure(newValue.text);
-    if (newBytes <= kMaxMessageBytes || newBytes <= measure(oldValue.text)) {
+    if (newBytes <= maxBytes || newBytes <= measure(oldValue.text)) {
       return newValue;
     }
     final before = oldValue.text.characters.toList();
@@ -57,7 +68,7 @@ class MessageByteLimitFormatter extends TextInputFormatter {
     }
     final prefix = after.take(head).join();
     final suffix = after.skip(after.length - tail).join();
-    var budget = kMaxMessageBytes - measure(prefix) - measure(suffix);
+    var budget = maxBytes - measure(prefix) - measure(suffix);
     final kept = StringBuffer();
     for (final char in after.sublist(head, after.length - tail)) {
       final size = measure(char);

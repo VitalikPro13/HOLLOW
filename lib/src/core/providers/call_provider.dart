@@ -1638,8 +1638,16 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   /// Master dispatcher for incoming call signals from Rust events.
+  ///
+  /// Every signal but an invite belongs to the live call, so it must come from
+  /// that call's peer: the call id alone let anyone who learned it end, answer
+  /// or re-point someone else's call (M1).
   Future<void> handleCallSignal(
       String peerId, String signalType, String payload) async {
+    if (signalType != 'invite' && !_fromCallPeer(peerId)) {
+      debugPrint('[HOLLOW-CALL] Dropped $signalType from $peerId: not the peer of the live call');
+      return;
+    }
     try {
       switch (signalType) {
         case 'invite':
@@ -2149,8 +2157,7 @@ class CallNotifier extends Notifier<CallState> {
 
   void _handleAudioState(String peerId, String payload) {
     final json = jsonDecode(payload) as Map<String, dynamic>;
-    final callId = json['call_id'] as String?;
-    if (callId != null && state.callId != callId) return;
+    if (json['call_id'] != state.callId) return;
 
     state = state.copyWith(
       remoteMuted: json['muted'] as bool? ?? false,
@@ -2401,8 +2408,18 @@ class CallNotifier extends Notifier<CallState> {
     state = const CallState();
   }
 
+  /// Whether [peerId] (device or master) is the same person as the live call's
+  /// peer. The stored peer is a master for an outgoing call and may be a device
+  /// for an incoming one, so both sides collapse to the identity.
+  bool _fromCallPeer(String peerId) {
+    final callPeer = state.peerId;
+    if (callPeer == null) return false;
+    final links = ref.read(deviceLinkProvider);
+    return links.identityOf(callPeer) == links.identityOf(peerId);
+  }
+
   String _generateCallId() {
-    final r = Random();
+    final r = Random.secure();
     return List.generate(
             16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
         .join();

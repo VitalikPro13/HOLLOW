@@ -722,6 +722,8 @@ impl MessageStore {
                 signature  TEXT,
                 public_key TEXT
             )"),
+            ("reaction_removals index",
+             "CREATE INDEX IF NOT EXISTS idx_reaction_removals_msg_id ON reaction_removals (message_id)"),
             // Friends + app settings (key-value, general purpose).
             ("friends table",
              "CREATE TABLE IF NOT EXISTS friends (
@@ -1091,6 +1093,15 @@ impl MessageStore {
 
         ddl(conn, "device_links index",
             "CREATE INDEX IF NOT EXISTS idx_device_links_master ON device_links (master_peer_id)")?;
+
+        // Devices whose revocation we ENFORCED (their master held them). A revoked id
+        // resolves to itself once forgotten, so without this row it looks like a
+        // stranger after a restart and passes key exchange and the sibling proof.
+        ddl(conn, "revoked_devices table",
+            "CREATE TABLE IF NOT EXISTS revoked_devices (
+                device_peer_id TEXT PRIMARY KEY,
+                master_peer_id TEXT NOT NULL
+            )")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
         // synced or master-signed — each device names its own view of the device set.
@@ -2797,6 +2808,33 @@ impl MessageStore {
         collect_rows(rows, "device_link")
     }
 
+    /// Record devices whose revocation this node enforced. Never removed: a
+    /// relinked device comes back under a fresh id.
+    pub fn record_revoked_devices(&self, master_peer_id: &str, devices: &[String]) -> Result<(), String> {
+        for dev in devices {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO revoked_devices (device_peer_id, master_peer_id)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![dev, master_peer_id],
+                )
+                .map_err(|e| format!("Failed to record revoked device: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Every device id recorded by [`Self::record_revoked_devices`].
+    pub fn get_all_revoked_devices(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT device_peer_id FROM revoked_devices")
+            .map_err(|e| format!("Failed to prepare get_all_revoked_devices: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query revoked_devices: {e}"))?;
+        collect_rows(rows, "revoked_device")
+    }
+
     /// Wipe ALL persisted device lists and links. A testing aid: union-merge never
     /// removes a device id, so repeated wipe-and-reimport cycles accumulate ghosts in
     /// our own published list. Production cleanup of one device is revocation.
@@ -2873,7 +2911,7 @@ impl MessageStore {
         banner_anim: Option<&str>,
         // Support credentials, same three states; the array must ALREADY be sanitized.
         support_creds: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let profile_sig = proof.map(|p| p.sig);
         let profile_pk = proof.map(|p| p.pk);
         let profile_avatar_hash = proof.map(|p| p.avatar_hash);
@@ -2885,7 +2923,7 @@ impl MessageStore {
         let assets_val: Option<&[u8]> = showcase_assets.and_then(|b| if b.is_empty() { None } else { Some(b) });
         let assets_is_clear = showcase_assets.is_some() && showcase_assets.unwrap().is_empty();
 
-        self.conn
+        let written = self.conn
             .execute(
                 "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13, COALESCE(?14, ''), COALESCE(?15, ''), COALESCE(?16, ''), COALESCE(?17, ''))
@@ -2912,6 +2950,10 @@ impl MessageStore {
                 params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
+        // The freshness WHERE refused a stale profile: its clears must not land either.
+        if written == 0 {
+            return Ok(false);
+        }
 
         // Explicitly clear avatar/banner if requested (COALESCE can't set NULL).
         if avatar_is_clear {
@@ -2932,7 +2974,7 @@ impl MessageStore {
                 params![peer_id],
             ).map_err(|e| format!("Failed to clear showcase assets: {e}"))?;
         }
-        Ok(())
+        Ok(true)
     }
 
 
@@ -3197,21 +3239,29 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        let row: Option<(String, Option<String>, Option<String>, i64)> = self
+        // text, signature, public key, previous timestamp, last edit
+        type EditRow = (String, Option<String>, Option<String>, i64, Option<i64>);
+        let row: Option<EditRow> = self
             .conn
             .query_row(
-                &format!("SELECT text, signature, public_key, COALESCE(edited_at, timestamp) FROM {table} WHERE message_id = ?1"),
+                &format!("SELECT text, signature, public_key, COALESCE(edited_at, timestamp), edited_at FROM {table} WHERE message_id = ?1"),
                 params![message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .ok();
 
-        let Some((old_text, prev_sig, prev_pk, prev_ts)) = row else {
+        let Some((old_text, prev_sig, prev_pk, prev_ts, prev_edit)) = row else {
             return Ok(false); // Message not found.
         };
 
         if old_text == new_text {
             return Ok(false); // No change.
+        }
+        // Every edit is signed with its own time, so an older one replayed (the
+        // relay holds every plaintext copy, sync serves stale ones) would put back
+        // text its author already replaced (B10).
+        if prev_edit.is_some_and(|prev| edited_at <= prev) {
+            return Ok(false);
         }
 
         self.conn.execute_batch("BEGIN").map_err(|e| format!("BEGIN: {e}"))?;
@@ -3502,6 +3552,20 @@ impl MessageStore {
         if count >= 3 {
             return Ok(false); // Limit reached.
         }
+        // An add signed no later than its reactor's own removal is a replay or a
+        // reordered copy, and would bring back a reaction they took away (B11).
+        let removed_after: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM reaction_removals
+                  WHERE message_id = ?1 AND emoji = ?2 AND peer_id = ?3 AND removed_at >= ?4)",
+                params![message_id, emoji, peer_id, added_at],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if removed_after {
+            return Ok(false);
+        }
 
         let rows = self
             .conn
@@ -3532,16 +3596,15 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to remove reaction: {e}"))?;
 
-        if rows > 0 {
-            // Record removal evidence (Rat Files).
-            self.conn
-                .execute(
-                    "INSERT INTO reaction_removals (message_id, emoji, peer_id, removed_at, signature, public_key)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![message_id, emoji, peer_id, removed_at, signature, public_key],
-                )
-                .map_err(|e| format!("Failed to insert reaction removal record: {e}"))?;
-        }
+        // Record removal evidence (Rat Files), and the floor `add_reaction` checks,
+        // even when the add has not arrived yet: a relay could deliver it second.
+        self.conn
+            .execute(
+                "INSERT INTO reaction_removals (message_id, emoji, peer_id, removed_at, signature, public_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![message_id, emoji, peer_id, removed_at, signature, public_key],
+            )
+            .map_err(|e| format!("Failed to insert reaction removal record: {e}"))?;
 
         Ok(rows > 0)
     }
@@ -6317,6 +6380,46 @@ mod tests {
     /// `requested_at` must ADVANCE while a row is pending and FREEZE on every other
     /// status, so the declined tombstone keeps the baseline a re-add has to beat and an
     /// accepted friendship keeps when it was asked for.
+    /// HOL-SEC-039 (B10). Each edit is signed with its own time, and a replayed
+    /// older one put back text its author had already replaced.
+    #[test]
+    fn authz_an_older_edit_never_reverts_a_newer_one() {
+        let store = mem_store();
+        store.insert("peer", "v1", false, 1_000, None, None, Some("m1"), None, None, None, None).unwrap();
+        assert!(store.edit_dm_message("m1", "v2", 2_000, None, None).unwrap());
+        assert!(store.edit_dm_message("m1", "v3", 3_000, None, None).unwrap());
+        assert!(
+            !store.edit_dm_message("m1", "v2", 2_000, None, None).unwrap(),
+            "HOL-SEC-039: a replayed older edit was applied",
+        );
+        assert_eq!(store.get_dm_message_sig_row("m1").unwrap().text, "v3");
+        assert!(store.edit_dm_message("m1", "v4", 4_000, None, None).unwrap());
+    }
+
+    /// HOL-SEC-039 (B11). A reaction removal left nothing an add was checked
+    /// against, so a replayed or reordered add brought the reaction back.
+    #[test]
+    fn authz_a_removed_reaction_stays_removed() {
+        let store = mem_store();
+        let has = |s: &MessageStore| {
+            s.load_reactions_for_messages(&["m1".to_string()])
+                .unwrap()
+                .get("m1")
+                .is_some_and(|r| !r.is_empty())
+        };
+        assert!(store.add_reaction("m1", "👍", "bob", 1_000, None, None).unwrap());
+        store.remove_reaction("m1", "👍", "bob", 2_000, None, None).unwrap();
+        assert!(!store.add_reaction("m1", "👍", "bob", 1_000, None, None).unwrap());
+        assert!(!has(&store), "HOL-SEC-039: a replayed add resurrected a removed reaction");
+
+        let reordered = mem_store();
+        reordered.remove_reaction("m1", "👍", "bob", 2_000, None, None).unwrap();
+        reordered.add_reaction("m1", "👍", "bob", 1_000, None, None).unwrap();
+        assert!(!has(&reordered), "HOL-SEC-039: an add delivered after its removal landed");
+
+        assert!(store.add_reaction("m1", "👍", "bob", 3_000, None, None).unwrap(), "a later re-add counts");
+    }
+
     #[test]
     fn save_friend_advances_requested_at_for_pending_only() {
         let peer = "12D3KooWfriend";

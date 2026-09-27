@@ -36,6 +36,9 @@ pub(crate) struct FetchedDm {
     pub server_id: Option<String>,
     /// Set for channel messages (channel wake): the channel this message belongs to.
     pub channel_id: Option<String>,
+    /// Channel posts only: WE read a mention of us in the decrypted text. The
+    /// sender's push flag is never trusted for this.
+    pub mentions_me: bool,
 }
 
 /// Run a one-shot fetch: connect invisibly, join one room, collect messages.
@@ -63,6 +66,14 @@ pub(crate) async fn run_fetch(
     db_passphrase: &str,
 ) -> Result<Vec<FetchedDm>, String> {
     let relay_url = format!("wss://{relay_domain}/ws");
+    // The push payload names the server; one we are not a member of is never
+    // joined, or the payload steers our socket into any room (J4).
+    if let Some(sid) = server_room
+        && stored_server_state(db_path, db_passphrase, sid).is_none_or(|s| !s.members.contains_key(local_master))
+    {
+        hollow_log!("[HOLLOW-FETCH] Channel wake for a server we are not a member of, nothing fetched");
+        return Ok(Vec::new());
+    }
     let room = fetch_room_code(server_room, local_master, sender_peer_id);
 
     // AUTO-DOWNLOAD GATE (#41): this headless process never receives Dart's
@@ -143,7 +154,10 @@ pub(crate) async fn run_fetch(
         }
     }
 
-    let merged = merge_fetched_messages(messages);
+    let mut merged = merge_fetched_messages(messages);
+    if server_room.is_some() {
+        merged = filter_by_notification_level(merged, db_path, db_passphrase);
+    }
 
     hollow_log!("[HOLLOW-FETCH] Fetch complete, returning {} messages", merged.len());
     Ok(merged)
@@ -342,7 +356,7 @@ fn handle_binary_frame(
     if let Some((from, payload)) = parsed {
         if server_room.is_some() {
             if let Some(entry) = try_process_channel_msg(
-                &from, &payload, mls, mls_dirty, db_path, db_passphrase,
+                &from, &payload, mls, mls_dirty, db_path, db_passphrase, local_master,
             ) {
                 messages.push(entry);
             }
@@ -463,6 +477,7 @@ fn try_process_channel_msg(
     mls_dirty: &mut bool,
     db_path: &str,
     db_passphrase: &str,
+    local_master: &str,
 ) -> Option<FetchedDm> {
     let haven: HavenMessage = serde_json::from_str(data).ok()?;
 
@@ -538,7 +553,10 @@ fn try_process_channel_msg(
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
                         file_id.as_deref(), order_us, album.as_deref(), link_preview.as_ref(),
                     );
-                    Some(FetchedDm {
+                    let mentions_me = fetched_post_mentions(
+                        state.as_ref()?, local_master, &text, reply_to.as_deref(), db_path, db_passphrase,
+                    );
+                    banner_worthy(&sender_master).then_some(FetchedDm {
                         from_peer: sender_master,
                         text,
                         timestamp: ts,
@@ -546,6 +564,7 @@ fn try_process_channel_msg(
                         image_path: None,
                         server_id: Some(sid),
                         channel_id: Some(cid),
+                        mentions_me,
                     })
                 }
                 // Edits/deletes/reactions while offline are reconciled by the
@@ -601,7 +620,10 @@ fn try_process_channel_msg(
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
                 file_id.as_deref(), order_us, album.as_deref().map(String::as_str), link_preview.as_ref(),
             );
-            Some(FetchedDm {
+            let mentions_me = fetched_post_mentions(
+                &state, local_master, &text, reply_to.as_deref(), db_path, db_passphrase,
+            );
+            banner_worthy(&sender_master).then_some(FetchedDm {
                 from_peer: sender_master,
                 text,
                 timestamp: ts,
@@ -609,9 +631,107 @@ fn try_process_channel_msg(
                 image_path: None,
                 server_id: Some(server_id),
                 channel_id: Some(channel_id),
+                mentions_me,
             })
         }
         _ => None,
+    }
+}
+
+/// Whether a push wake's sender may be named in a content-free fallback banner.
+/// Anyone who knows our device id can make the relay wake us, so an empty wake
+/// from a stranger, a blocked or a revoked device shows nothing (K3). A channel
+/// wake needs a member of that server, a DM wake a friend, one of our own
+/// devices, or someone we share a server with. The trust sets must be warm.
+pub(crate) fn push_sender_known(
+    store: &crate::storage::MessageStore,
+    local_master: &str,
+    sender: &str,
+    server_id: Option<&str>,
+) -> bool {
+    if crate::node::blocklist::is_blocked(sender) || crate::node::resolver::is_revoked(sender) {
+        return false;
+    }
+    let master = crate::node::resolver::resolve(sender);
+    let both_members = |json: &str| {
+        serde_json::from_str::<crate::crdt::server_state::ServerState>(json).is_ok_and(|s| {
+            !s.is_deleted() && s.members.contains_key(&master) && s.members.contains_key(local_master)
+        })
+    };
+    if let Some(sid) = server_id {
+        return store.load_server_state(sid).ok().flatten().is_some_and(|j| both_members(&j));
+    }
+    master == local_master
+        || store.get_friend_status(&master).ok().flatten().as_deref() == Some("accepted")
+        || store.load_all_servers().is_ok_and(|all| all.iter().any(|(_, j)| both_members(j)))
+}
+
+/// A blocked member's post is stored like the live node stores it, where the UI
+/// hides it, but it never becomes a banner.
+fn banner_worthy(sender_master: &str) -> bool {
+    !crate::node::blocklist::is_blocked(sender_master)
+}
+
+/// Our own reading of a fetched post: does it mention us.
+fn fetched_post_mentions(
+    state: &crate::crdt::server_state::ServerState,
+    local_master: &str,
+    text: &str,
+    reply_to: Option<&str>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let reply_author = reply_to.and_then(|m| {
+        crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()?
+            .get_channel_message_sender(m)
+    });
+    crate::node::message_ops::post_mentions_member(state, local_master, text, reply_author.as_deref())
+}
+
+/// The channel wake's banners follow OUR per-channel level, judged on the
+/// decrypted posts: "nothing" drops a channel, "mentions" keeps only posts that
+/// mention us. The relay's mention flag decided only whether to wake us.
+fn filter_by_notification_level(
+    messages: Vec<FetchedDm>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Vec<FetchedDm> {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return Vec::new();
+    };
+    let mut levels: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+    messages
+        .into_iter()
+        .filter(|m| {
+            let (Some(sid), Some(cid)) = (&m.server_id, &m.channel_id) else { return true };
+            let level = levels
+                .entry((sid.clone(), cid.clone()))
+                .or_insert_with(|| channel_notification_level(&store, sid, cid));
+            match level.as_str() {
+                "nothing" => false,
+                "mentions" => m.mentions_me,
+                _ => true,
+            }
+        })
+        .collect()
+}
+
+/// Effective local level: the channel's own setting, else the server default,
+/// else "all".
+pub(crate) fn channel_notification_level(
+    store: &crate::storage::MessageStore,
+    server_id: &str,
+    channel_id: &str,
+) -> String {
+    let own = store.load_setting(&format!("notif:{server_id}:{channel_id}")).unwrap_or(None);
+    match own.as_deref() {
+        Some("all") | Some("mentions") | Some("nothing") => own.unwrap_or_default(),
+        _ => store
+            .load_setting(&format!("notif:{server_id}"))
+            .unwrap_or(None)
+            .filter(|v| v == "mentions" || v == "nothing")
+            .unwrap_or_else(|| "all".to_string()),
     }
 }
 
@@ -802,6 +922,15 @@ fn try_decrypt_dm(
                 identity_sig.as_deref(), identity_pk.as_deref(),
                 &ciphertext, olm, crypto_store,
             )?;
+            // The app loads this session later and never sees the PreKey, so the
+            // key-change notice is recorded here or not at all.
+            if let (0, Some(key), Ok(store)) = (
+                message_type,
+                identity_key.as_deref(),
+                crate::storage::MessageStore::open(db_path, db_passphrase),
+            ) {
+                crate::node::security_alerts::pin_olm_identity_key(&store, local_master, &convo, from, key);
+            }
 
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
@@ -988,6 +1117,7 @@ fn handle_direct_message(
         image_path: None,
         server_id: None,
         channel_id: None,
+        mentions_me: false,
     })
 }
 
@@ -1167,6 +1297,7 @@ fn handle_edit_message(
         image_path: None,
         server_id: None,
         channel_id: None,
+        mentions_me: false,
     })
 }
 
@@ -1221,6 +1352,7 @@ fn handle_file_header(
                 image_path: None,
                 server_id: None,
                 channel_id: None,
+                mentions_me: false,
             });
         }
     }
@@ -1265,6 +1397,7 @@ fn handle_file_header(
                     image_path: Some(disk_str),
                     server_id: None,
                     channel_id: None,
+                    mentions_me: false,
                 });
             }
         }
@@ -1464,6 +1597,217 @@ mod tests {
             None, None, None, &path, &pass,
         );
         assert_eq!(text("f1"), "the photo");
+    }
+
+    fn temp_store() -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("push.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::open(&path, &pass).unwrap();
+        (tmp, path, pass)
+    }
+
+    fn server_with(sid: &str, members: &[(&str, &str)]) -> crate::crdt::server_state::ServerState {
+        let mut state = crate::crdt::server_state::ServerState::new(sid.into(), "s".into(), members[0].0.into());
+        for (id, name) in members {
+            state.members.insert((*id).into(), crate::crdt::server_state::MemberInfo {
+                peer_id: (*id).into(),
+                display_name: (*name).into(),
+            });
+        }
+        state
+    }
+
+    /// HOL-SEC-035 (K1). The push fetch node and the iOS extension are fresh
+    /// processes that never loaded the block list, so a blocked sender's DM was
+    /// stored and shown by the push path while the app dropped it.
+    #[test]
+    fn authz_a_fresh_push_process_knows_our_blocks() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let bob = kp(171).peer_id();
+        store.block_peer(&bob).unwrap();
+
+        crate::node::resolver::warm_from_store(&store);
+        assert!(
+            crate::node::blocklist::is_blocked(&bob),
+            "HOL-SEC-035: a fresh push process did not know the block list",
+        );
+        assert!(!banner_worthy(&bob), "a blocked member's post never becomes a banner");
+
+        let src = |f: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f))
+                .unwrap()
+                .replace("\r\n", "\n")
+        };
+        let fetch_node = src("src/api/network.rs");
+        let start = fetch_node.find("pub fn start_fetch_node(").unwrap();
+        assert!(fetch_node[start..].split("\n}\n").next().unwrap().contains("warm_from_store("));
+        let nse = src("src/push_enrich.rs");
+        let start = nse.find("fn fetch_and_decrypt(").unwrap();
+        assert!(nse[start..].split("\n}\n").next().unwrap().contains("warm_from_store("));
+        crate::node::blocklist::clear_for_test();
+        crate::node::resolver::clear_all();
+    }
+
+    /// HOL-SEC-035 (K2). A session first built by the push path was loaded by the
+    /// app later, so the PreKey that carried a changed key was never seen by the
+    /// live pin and the key change never raised its notice.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_key_change_first_seen_by_push_is_recorded() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let (alice, bob) = (kp(172), kp(173));
+        let (a, b) = (alice.peer_id(), bob.peer_id());
+        crate::storage::MessageStore::open(&path, &pass).unwrap().set_olm_key_pin(&b, "an older key").unwrap();
+
+        let mut alice_olm = OlmManager::new();
+        let otk = alice_olm.generate_one_time_key();
+        let mut bob_olm = OlmManager::new();
+        crate::node::crypto_handler::bind_olm_identity(&mut bob_olm, &bob);
+        bob_olm.create_outbound_session(&a, &alice_olm.identity_key_base64(), &otk).unwrap();
+        let extras = SignedExtras { mid: Some("k2"), order_us: Some(1_000_000), ..SignedExtras::default() };
+        let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "dm", &a, &b, 1_000, &extras, "hi");
+        let envelope = serde_json::to_string(&MessageEnvelope::DirectMessage {
+            inner: Box::new(DirectMessagePayload {
+                text: "hi".into(), ts: 1_000, sig, pk, mid: Some("k2".into()), reply_to: None,
+                file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+            }),
+        })
+        .unwrap();
+        let (message_type, ciphertext) = bob_olm.encrypt(&a, envelope.as_bytes()).unwrap();
+        assert_eq!(message_type, 0, "the first message is a PreKey");
+        let frame = serde_json::to_string(
+            &crate::node::crypto_handler::encrypted_frame(&bob_olm, message_type, &ciphertext),
+        )
+        .unwrap();
+
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        assert!(try_decrypt_dm(&b, &frame, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_some());
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        assert!(
+            store.get_security_alerts().unwrap().iter().any(|al| {
+                al.kind == crate::node::security_alerts::KIND_KEY_CHANGED && al.peer_id == b
+            }),
+            "HOL-SEC-035: a key change first seen by the push path raised no notice",
+        );
+        assert_eq!(store.get_olm_key_pin(&b).unwrap(), Some(bob_olm.identity_key_base64()));
+        crate::node::resolver::clear_all();
+    }
+
+    /// HOL-SEC-035 (K3). Anyone who knows a device id can make the relay wake it,
+    /// and an empty wake used to put up a banner naming the sender.
+    #[test]
+    fn authz_an_empty_wake_names_only_a_sender_we_know() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let me = kp(174).peer_id();
+        let (friend, member, stranger, blocked) =
+            (kp(175).peer_id(), kp(176).peer_id(), kp(177).peer_id(), kp(178).peer_id());
+        store.save_friend(&friend, "accepted", "outgoing", 1).unwrap();
+        store.save_friend(&blocked, "accepted", "outgoing", 1).unwrap();
+        let state = server_with("srv-k3", &[(&me, "me"), (&member, "m")]);
+        store.save_server_state("srv-k3", &serde_json::to_string(&state).unwrap()).unwrap();
+        store.block_peer(&blocked).unwrap();
+        crate::node::resolver::warm_from_store(&store);
+
+        assert!(push_sender_known(&store, &me, &friend, None));
+        assert!(push_sender_known(&store, &me, &member, None), "we share a server");
+        assert!(push_sender_known(&store, &me, &member, Some("srv-k3")));
+        assert!(!push_sender_known(&store, &me, &stranger, None), "HOL-SEC-035: a stranger's wake named them");
+        assert!(!push_sender_known(&store, &me, &friend, Some("srv-k3")), "a channel wake needs a member");
+        assert!(!push_sender_known(&store, &me, &blocked, None));
+
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lib/src/core/services/push_notification_service.dart"),
+        )
+        .unwrap()
+        .replace("\r\n", "\n");
+        for fallback in ["Future<void> _showDmFallbackIfNeeded(", "Future<void> _showChannelWakeFallback({"] {
+            let start = src.find(fallback).unwrap();
+            assert!(
+                src[start..].split("\n}\n").next().unwrap().contains("_pushSenderKnown("),
+                "{fallback} names a sender nobody vouched for",
+            );
+        }
+        crate::node::blocklist::clear_for_test();
+        crate::node::resolver::clear_all();
+    }
+
+    /// HOL-SEC-035 (C14). The relay flag "mentions you" is set by the sender, and a
+    /// mentions-only channel showed every post of a wake whose flag was set. The
+    /// woken device now judges each post's mention itself.
+    #[test]
+    fn authz_a_mentions_only_channel_shows_only_mentions_we_read() {
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let me = kp(179).peer_id();
+        let other = kp(180).peer_id();
+        let state = server_with("srv-c14", &[(&me, "Alice"), (&other, "Bob")]);
+        store.save_server_state("srv-c14", &serde_json::to_string(&state).unwrap()).unwrap();
+        store.save_setting("notif:srv-c14:quiet", "mentions").unwrap();
+        store.save_setting("notif:srv-c14:muted", "nothing").unwrap();
+        let post = |cid: &str, mid: &str, text: &str| FetchedDm {
+            from_peer: other.clone(),
+            text: text.into(),
+            timestamp: 1,
+            message_id: mid.into(),
+            image_path: None,
+            server_id: Some("srv-c14".into()),
+            channel_id: Some(cid.into()),
+            mentions_me: fetched_post_mentions(&state, &me, text, None, &path, &pass),
+        };
+        let kept: Vec<String> = filter_by_notification_level(
+            vec![
+                post("quiet", "q1", "spam for everyone who reads the banner"),
+                post("quiet", "q2", "@Alice look at this"),
+                post("quiet", "q3", "@everyone meeting"),
+                post("muted", "m1", "@Alice even here"),
+                post("open", "o1", "plain chatter"),
+            ],
+            &path,
+            &pass,
+        )
+        .into_iter()
+        .map(|m| m.message_id)
+        .collect();
+        assert_eq!(
+            kept,
+            vec!["q2", "q3", "o1"],
+            "HOL-SEC-035: a mentions-only channel showed a post that does not mention us",
+        );
+    }
+
+    /// J4. The push payload names the server room, and a server we are not a
+    /// member of must never be joined on its say-so.
+    #[tokio::test]
+    async fn a_channel_wake_for_a_server_we_do_not_hold_joins_nothing() {
+        let (_tmp, path, pass) = temp_store();
+        let me = kp(181);
+        let mut olm = OlmManager::new();
+        let mut mls = None;
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let proto = me.to_protobuf_encoding().unwrap();
+        let fetched = run_fetch(
+            "127.0.0.1:9", &me.peer_id(), &me.peer_id(), &proto, &pk_b64(&me), None,
+            &kp(182).peer_id(), Some("a-server-we-never-joined"), Duration::from_secs(2),
+            &mut olm, &mut mls, &crypto_store, &path, &pass,
+        )
+        .await;
+        assert!(
+            matches!(fetched.as_deref(), Ok([])),
+            "a wake for a foreign server tried to connect: {:?}",
+            fetched.err(),
+        );
     }
 
     /// C11 on the push path: a DM is stored exactly as signed or not at all. The

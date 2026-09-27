@@ -330,7 +330,7 @@ void main() {
     tester,
   ) async {
     await _pump(tester, role: 'member');
-    expect(find.text('Only admins can change this.'), findsOneWidget);
+    expect(find.text('Only the owner can change this.'), findsOneWidget);
     await tester.ensureVisible(find.text('Files'));
     await tester.tap(find.text('Files'));
     await tester.pumpAndSettle();

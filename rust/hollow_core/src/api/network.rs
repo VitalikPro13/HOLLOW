@@ -2597,9 +2597,7 @@ pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> 
     };
     // The push `sender` is a relay-attested DEVICE id while profiles are keyed by
     // MASTER, so warm the resolver from DB links and resolve device to master.
-    if let Ok(links) = store.get_all_device_links() {
-        node::resolver::warm_from_links(&links);
-    }
+    node::resolver::warm_from_store(&store);
     let master = node::resolver::resolve(&peer_id);
     let profile = store.load_profile_light(&master)?;
     match profile {
@@ -2617,6 +2615,26 @@ pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> 
             Ok(None)
         }
     }
+}
+
+/// Whether a push wake from `peer_id` may name its sender in a content-free
+/// fallback banner: false for a stranger, a blocked or revoked device, and for a
+/// channel wake from anyone who is not a member of `server_id`. `None` when the
+/// identity is locked and nothing can be judged.
+#[frb]
+pub fn push_sender_known(peer_id: String, server_id: Option<String>) -> Option<bool> {
+    crate::log::init();
+    let Ok(Some(id)) = identity::load_existing_identity() else {
+        return None;
+    };
+    let proto = id.keypair.to_protobuf_encoding().ok()?;
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+    let db_path = crate::identity::data_dir()
+        .ok()
+        .and_then(|d| d.join("messages.db").to_str().map(str::to_string))?;
+    let store = MessageStore::open(&db_path, &passphrase).ok()?;
+    node::resolver::warm_from_store(&store);
+    Some(node::fetch::push_sender_known(&store, &id.keypair.peer_id(), &peer_id, server_id.as_deref()))
 }
 
 /// A message fetched during background push processing (Tier 2).
@@ -2673,6 +2691,20 @@ pub fn nudge_live_dm_fetch(sender_peer_id: String) -> Result<bool, String> {
 #[frb]
 pub fn nudge_live_room_join(room_code: String) -> Result<bool, String> {
     crate::log::init();
+    // The push payload names the room. Joining one we are not a member of would
+    // run the whole presence cascade (profile, key exchange) with whoever is in it.
+    let local_master = match identity::load_existing_identity()? {
+        Some(id) => id.peer_id,
+        None => return Ok(false),
+    };
+    let member = open_local_store()?
+        .load_server_state(&room_code)?
+        .and_then(|j| serde_json::from_str::<crate::crdt::server_state::ServerState>(&j).ok())
+        .is_some_and(|s| s.members.contains_key(&local_master));
+    if !member {
+        hollow_log!("[HOLLOW-PUSH] nudge_live_room_join: not a member of the pushed server, ignored");
+        return Ok(true);
+    }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let Some(state) = guard.as_ref() else {
@@ -2781,9 +2813,7 @@ pub fn start_fetch_node(
     // Warm the resolver from persisted device links so run_fetch can map both device
     // ids back to their masters for the MASTER-paired DM room and conversation key.
     if let Ok(store) = MessageStore::open(&db_path, &passphrase) {
-        if let Ok(links) = store.get_all_device_links() {
-            node::resolver::warm_from_links(&links);
-        }
+        node::resolver::warm_from_store(&store);
     }
     // Ensure our own device→master mapping exists even if no links row yet.
     node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
@@ -2969,8 +2999,9 @@ pub struct PushChannelMeta {
 }
 
 /// Resolve server + channel names and the effective local notification level
-/// directly from SQLCipher (no running node). Returns None when the server is
-/// unknown locally or identity is locked.
+/// directly from SQLCipher (no running node). None means a server we do not
+/// hold, which the push handler drops; a locked identity is an error instead,
+/// since nothing about the server can be judged.
 #[frb]
 pub fn get_push_channel_meta(
     server_id: String,
@@ -2979,7 +3010,7 @@ pub fn get_push_channel_meta(
     crate::log::init();
     let id = match identity::load_existing_identity() {
         Ok(Some(id)) => id,
-        _ => return Ok(None),
+        _ => return Err("identity unavailable".to_string()),
     };
     let proto = id
         .keypair
@@ -2994,13 +3025,7 @@ pub fn get_push_channel_meta(
         .ok_or("Invalid path encoding")?
         .to_string();
 
-    let store = match MessageStore::open(&db_path, &passphrase) {
-        Ok(s) => s,
-        Err(e) => {
-            hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: DB open failed ({e})");
-            return Ok(None);
-        }
-    };
+    let store = MessageStore::open(&db_path, &passphrase)?;
 
     let Some(state_json) = store.load_server_state(&server_id)? else {
         hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: unknown server {server_id}");
@@ -3016,18 +3041,11 @@ pub fn get_push_channel_meta(
         .map(|c| c.name.clone())
         .unwrap_or_default();
 
-    // Effective local level: channel override, then server default, then "all".
-    let override_val = store
-        .load_setting(&format!("notif:{server_id}:{channel_id}"))
-        .unwrap_or(None);
-    let notif_level = match override_val.as_deref() {
-        Some("all") | Some("mentions") | Some("nothing") => override_val.unwrap(),
-        _ => store
-            .load_setting(&format!("notif:{server_id}"))
-            .unwrap_or(None)
-            .filter(|v| v == "mentions" || v == "nothing")
-            .unwrap_or_else(|| "all".to_string()),
-    };
+    if !state.members.contains_key(&id.keypair.peer_id()) {
+        hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: not a member of {server_id}");
+        return Ok(None);
+    }
+    let notif_level = node::fetch::channel_notification_level(&store, &server_id, &channel_id);
 
     Ok(Some(PushChannelMeta {
         server_name,
@@ -3165,6 +3183,10 @@ pub fn update_profile(
     banner_anim: Option<String>,
     support_creds: Option<String>,
 ) -> Result<(), String> {
+    // Every receiver refuses a profile over these whole, so it would go nowhere.
+    if node::social::profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
+        return Err("Your name, status or About me is too long".to_string());
+    }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();

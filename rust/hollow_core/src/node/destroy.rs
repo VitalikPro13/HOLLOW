@@ -50,6 +50,12 @@ fn destroyed_key(master: &str) -> String {
     format!("identity_destroyed:{master}")
 }
 
+/// The newest friend order ever applied for `master`. Unlike the banner stamp it
+/// is never cleared, so an order replayed after the identity came back stays old.
+fn destroy_floor_key(master: &str) -> String {
+    format!("identity_destroy_floor:{master}")
+}
+
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -172,9 +178,12 @@ async fn apply_friend_order(
         hollow_log!("[HOLLOW-DESTROY] Ignored a destruction order for an identity we do not know");
         return;
     }
-    if identity_destroyed_at(&store, &master).is_some_and(|prev| order.issued_at_ms <= prev) {
+    let floor = read_i64(&store, &destroy_floor_key(&master))
+        .max(identity_destroyed_at(&store, &master).unwrap_or(0));
+    if order.issued_at_ms <= floor {
         return;
     }
+    let _ = store.save_setting(&destroy_floor_key(&master), &order.issued_at_ms.to_string());
     let _ = store.save_setting(&destroyed_key(&master), &order.issued_at_ms.to_string());
     let _ = store.remove_peer_verified(&master);
     hollow_log!("[HOLLOW-DESTROY] Friend identity {master} reported destroyed");
@@ -184,7 +193,8 @@ async fn apply_friend_order(
     }).await;
 }
 
-/// The mnemonic recreated a destroyed identity. Warn, and clear the banner.
+/// The mnemonic recreated a destroyed identity: a device list naming a device we
+/// had never seen for it. Warn, and clear the banner.
 pub(crate) async fn note_identity_reappeared(
     event_tx: &mpsc::Sender<NetworkEvent>,
     db_path: &str,
@@ -527,6 +537,41 @@ mod tests {
             None,
             "nothing about an order in flight may be persisted",
         );
+    }
+
+    /// HOL-SEC-034. Clearing the banner on reappearance erased the stamp, so the old
+    /// order, which every notified friend and the relay hold, applied again: banner
+    /// back and verified flag gone, as often as anyone replayed it.
+    #[tokio::test]
+    async fn authz_a_friend_destroy_order_applies_once_even_after_the_identity_returns() {
+        let (_dir, path, pass) = temp_db();
+        let friend = NativeKeypair::from_secret_bytes(&[0x66u8; 32]);
+        let master = friend.peer_id();
+        let store = || MessageStore::open(&path, &pass).unwrap();
+        store().save_friend(&master, "accepted", "outgoing", 1).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(16);
+
+        let order = build_destroy_identity(&friend, 7_000, Vec::new(), true);
+        apply_friend_order(&event_tx, &order, &path, &pass).await;
+        assert_eq!(identity_destroyed_at(&store(), &master), Some(7_000));
+        note_identity_reappeared(&event_tx, &path, &pass, &master).await;
+        assert_eq!(identity_destroyed_at(&store(), &master), None);
+
+        store().set_peer_verified(&master).unwrap();
+        apply_friend_order(&event_tx, &order, &path, &pass).await;
+        assert_eq!(
+            identity_destroyed_at(&store(), &master),
+            None,
+            "HOL-SEC-034: a replayed destroy order raised the banner again",
+        );
+        assert!(
+            store().is_peer_verified(&master).unwrap(),
+            "HOL-SEC-034: a replayed destroy order removed the verified flag",
+        );
+
+        let newer = build_destroy_identity(&friend, 8_000, Vec::new(), true);
+        apply_friend_order(&event_tx, &newer, &path, &pass).await;
+        assert_eq!(identity_destroyed_at(&store(), &master), Some(8_000));
     }
 
     #[test]

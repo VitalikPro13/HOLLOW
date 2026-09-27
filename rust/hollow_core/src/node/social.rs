@@ -209,14 +209,9 @@ pub(crate) fn store_carried_profile(
         );
         return None;
     }
-    // Length limits mirror the ProfileRelay ingest EXACTLY, checked BEFORE any
-    // clamp so we verify the string the signer actually signed. Over-long =
-    // dropped, never truncated (a genuine client is bounded by the same limits).
-    if profile.display_name.len() > 64
-        || profile.status.len() > 96
-        || profile.about_me.len() > 256
-        || profile.twitch_username.len() > 64
-    {
+    if profile_text_oversized(
+        &profile.display_name, &profile.status, &profile.about_me, &profile.twitch_username,
+    ) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED carried profile for {source_master} — field exceeds its limit");
         return None;
     }
@@ -267,7 +262,7 @@ pub(crate) fn store_carried_profile(
         None,
         None,
     ) {
-        Ok(()) => {
+        Ok(_) => {
             hollow_log!("[HOLLOW-FRIENDS] Stored carried profile for {source_master} from friend request");
             Some(source_master)
         }
@@ -361,24 +356,60 @@ pub(crate) fn send_friend_reject(
     hollow_log!("[HOLLOW-FRIENDS] Sent friend reject for request {requested_at} to {master} (live devices + inbox:{master})");
 }
 
-/// Builds the accept for the request stamped `requested_at`; 0 means no row was
-/// found and the accept goes out bare, as a pre-0.11.1 client would send it.
-pub(crate) fn friend_accept_msg(requested_at: i64) -> HavenMessage {
-    HavenMessage::FriendAccept { requested_at: (requested_at > 0).then_some(requested_at) }
+/// Builds the accept for the request stamped `requested_at` (0 = no row, sent bare),
+/// carrying our own signed device list.
+pub(crate) fn friend_accept_msg(requested_at: i64, device_list: Option<SignedDeviceList>) -> HavenMessage {
+    HavenMessage::FriendAccept {
+        requested_at: (requested_at > 0).then_some(requested_at),
+        device_list,
+    }
 }
 
 /// Sends an accept to `device` inside the deterministic DM room. A copy for a device
 /// that is not there yet parks under that room at the relay, never under a room the
 /// device already left, where it would replay on an unrelated later join.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_friend_accept(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     master: &str,
     device: &str,
     requested_at: i64,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let dm_room = dm_room_code(local_peer_str, master);
-    send_message_to_peer_in_room(ws_cmd_tx, &dm_room, device, friend_accept_msg(requested_at));
+    let list = super::crypto_handler::build_local_device_list(
+        master_keypair, device_peer_id, db_path, db_passphrase,
+    );
+    send_message_to_peer_in_room(ws_cmd_tx, &dm_room, device, friend_accept_msg(requested_at, list));
+}
+
+/// Tell our own online devices that `master` is now an accepted friend. An accept
+/// reaches only the device that sent the request, and a sibling no longer takes a
+/// row-less accept on its own (L1).
+pub(crate) fn share_friend_with_siblings(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    master: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Some((status, direction, requested_at)) = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.get_friend_row(master).ok().flatten())
+    else {
+        return;
+    };
+    let msg = HavenMessage::FriendListSync {
+        friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at }],
+    };
+    let Ok(data) = serde_json::to_vec(&msg) else { return };
+    super::sync_handler::fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, data);
 }
 
 /// True when `master` is an accepted friend on disk. A queued accept for anyone else
@@ -624,6 +655,9 @@ pub(crate) async fn handle_accept_friend_request(
                 .unwrap_or(0);
         }
     }
+    share_friend_with_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, db_path, db_passphrase,
+    );
 
     // Send acceptance. The send must target a DEVICE, since the bare master
     // authenticates as no socket. The target set comes from the original id, every
@@ -636,6 +670,9 @@ pub(crate) async fn handle_accept_friend_request(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: dm_room.clone(),
     });
+    let own_list = super::crypto_handler::build_local_device_list(
+        master_keypair, device_peer_id, db_path, db_passphrase,
+    );
 
     // -- Async friending: establish the Olm session from the CARRIED bundle. --
     //
@@ -686,7 +723,7 @@ pub(crate) async fn handle_accept_friend_request(
                         // room so the relay buffers it for an absent requester (a
                         // first-match room lookup finds nothing when they are gone).
                         send_message_to_peer_in_room(
-                            ws_cmd_tx, &dm_room, &device, friend_accept_msg(answered_at),
+                            ws_cmd_tx, &dm_room, &device, friend_accept_msg(answered_at, own_list.clone()),
                         );
                         if olm.has_session(&device) {
                             hollow_log!("[HOLLOW-FRIENDS] Carried bundle from {device}: session already exists, skipping bootstrap");
@@ -724,7 +761,7 @@ pub(crate) async fn handle_accept_friend_request(
     // room, which can be a re-add long after a removal.
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     for t in &targets {
-        send_message_to_peer_in_room(ws_cmd_tx, &dm_room, t, friend_accept_msg(answered_at));
+        send_message_to_peer_in_room(ws_cmd_tx, &dm_room, t, friend_accept_msg(answered_at, own_list.clone()));
     }
     // ALWAYS queue the acceptance for redelivery, keyed by the requester's MASTER.
     // The requester's device can race the accept: it delivers the request, leaves
@@ -1248,6 +1285,24 @@ pub(crate) async fn handle_update_profile(
 /// `display_name` against a populated stored profile SKIPS the write. Returns the
 /// master key it was (or would be) stored under, plus whether a save happened.
 #[allow(clippy::too_many_arguments)]
+/// Byte ceilings for the signed profile text: four bytes for each character of the
+/// UI's 32/48/128-character limits, so every name the editor allows fits. The
+/// same numbers live in Dart (`message_limits.dart`).
+pub(crate) const PROFILE_NAME_MAX_BYTES: usize = 128;
+pub(crate) const PROFILE_STATUS_MAX_BYTES: usize = 192;
+pub(crate) const PROFILE_ABOUT_MAX_BYTES: usize = 512;
+pub(crate) const PROFILE_TWITCH_MAX_BYTES: usize = 64;
+
+/// True when any signed profile field is over its ceiling. The whole profile is
+/// then refused on every path, never cut: a cut field no longer matches its
+/// signature, so every copy relayed from it fails too (N3).
+pub(crate) fn profile_text_oversized(display_name: &str, status: &str, about_me: &str, twitch_username: &str) -> bool {
+    display_name.len() > PROFILE_NAME_MAX_BYTES
+        || status.len() > PROFILE_STATUS_MAX_BYTES
+        || about_me.len() > PROFILE_ABOUT_MAX_BYTES
+        || twitch_username.len() > PROFILE_TWITCH_MAX_BYTES
+}
+
 /// Receive gate for a peer's profile still (PROFILE-1). The ONE validator, on
 /// every path that stores avatar or banner bytes somebody else sent us.
 ///
@@ -1348,16 +1403,30 @@ pub(crate) fn save_incoming_profile(
     let banner_bytes = gated_profile_image(
         &master, "banner", super::image_convert::PROFILE_BANNER_RECV_MAX_BYTES, banner_bytes,
     );
-    if let Err(e) = db.save_profile(
+    // The avatar is the one blob the signature covers, by hash. Bytes that do not
+    // hash to it are someone else's picture (the relay can rewrite a plaintext
+    // full profile in flight), so they are dropped and the stored still kept (N1).
+    let avatar_bytes = avatar_bytes.filter(|b| {
+        let matches = b.is_empty() || profile_blob_hash(Some(b)) == proof.avatar_hash;
+        if !matches {
+            hollow_log!("[HOLLOW-SECURITY] DROPPED avatar for {master}: the bytes do not match the signed hash");
+        }
+        matches
+    });
+    match db.save_profile(
         &master, display_name, status, about_me, updated_at,
         avatar_bytes, banner_bytes, twitch_username, showcase_board,
         showcase_assets, Some(proof), avatar_frame, avatar_anim, banner_anim,
         support_creds.as_deref(),
     ) {
-        hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
-        return (master, false);
+        // A profile older than the stored one is not saved, and nothing downstream
+        // (the member display names) may act on it as if it were (N2).
+        Ok(written) => (master, written),
+        Err(e) => {
+            hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
+            (master, false)
+        }
     }
-    (master, true)
 }
 
 /// Masters we have already complained about once, so a stripped field on a
@@ -1876,6 +1945,10 @@ pub(crate) async fn handle_envelope_profile_update(
         &sender_peer_id, ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
     ).await;
     let newly_revoked = outcome.newly_revoked;
+    if profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED profile from {sender_peer_id}: a field exceeds its limit");
+        return newly_revoked;
+    }
 
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).
     let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
@@ -2025,12 +2098,7 @@ pub(crate) async fn handle_profile_relay(
     // anyone's display name and avatar by claiming updated_at = i64::MAX. Only
     // the subject's own signature makes the claim credible.
     //
-    // Fields are checked EXACTLY as received, before any clamping: verifying a
-    // clamped copy checks a string the signer never signed. Over-long fields are
-    // therefore REJECTED rather than truncated.
-    if display_name.len() > 64 || status.len() > 96
-        || about_me.len() > 256 || twitch_username.len() > 64
-    {
+    if profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source_peer_id} — field exceeds its limit");
         return;
     }
@@ -2121,8 +2189,8 @@ pub(crate) async fn handle_profile_relay(
 #[cfg(test)]
 mod tests {
     use super::{
-        gated_profile_image, sanitize_incoming_frame, save_incoming_profile,
-        valid_avatar_frame_id,
+        gated_profile_image, profile_blob_hash, profile_text_oversized, sanitize_incoming_frame,
+        save_incoming_profile, valid_avatar_frame_id, PROFILE_ABOUT_MAX_BYTES,
     };
     use base64::Engine as _;
     use crate::identity::native_identity::NativeKeypair;
@@ -2279,6 +2347,72 @@ mod tests {
             .is_some(),
             "the same bytes are inside the banner cap",
         );
+    }
+
+    /// HOL-SEC-038 (N1, N2). The avatar is signed by hash only, and a plaintext
+    /// full profile carried bytes that were never compared with it. A profile the
+    /// freshness rule refused still reported itself saved (so member names followed
+    /// a replay) and still ran its avatar clear.
+    #[test]
+    fn authz_an_incoming_profile_keeps_only_what_its_owner_signed() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("n1.db").to_str().unwrap().to_string();
+        let pass = "ef".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let master = NativeKeypair::from_secret_bytes(&[0x4e; 32]).peer_id();
+        let (real, forged) = (small_png(), png_declaring(64, 64));
+        let real_hash = profile_blob_hash(Some(&real));
+        let save = |updated_at: i64, avatar: Option<&[u8]>| {
+            let proof = crate::storage::ProfileProof { sig: "s", pk: "p", avatar_hash: &real_hash };
+            save_incoming_profile(
+                &master, "Anon", "", "", updated_at, avatar, None, "", None, None, Some(proof),
+                None, None, None, None, None, &db, &pass,
+            )
+            .1
+        };
+        let stored_avatar = || {
+            crate::storage::MessageStore::open(&db, &pass).unwrap().load_avatar(&master).unwrap()
+        };
+
+        assert!(save(10 * 86_400_000, Some(&forged)));
+        assert_eq!(stored_avatar(), None, "HOL-SEC-038: bytes that miss the signed hash were stored");
+        assert!(save(10 * 86_400_000, Some(&real)));
+        assert_eq!(stored_avatar(), Some(real.clone()));
+
+        assert!(
+            !save(5 * 86_400_000, Some(&[])),
+            "HOL-SEC-038: a profile the freshness rule refused reported itself saved",
+        );
+        assert_eq!(stored_avatar(), Some(real), "HOL-SEC-038: a refused stale profile cleared the avatar");
+        crate::node::resolver::clear_all();
+    }
+
+    /// HOL-SEC-038 (N3). The fields were cut at 64/96/256 bytes before the
+    /// signature check, below the editor's 32/48/128 characters, so a CJK or emoji
+    /// name failed verification everywhere; the MLS path had no limit at all.
+    #[test]
+    fn authz_profile_text_is_refused_whole_at_one_limit() {
+        let cjk_name = "名".repeat(32);
+        let emoji_name = "🙂".repeat(32);
+        let emoji_about = "🙂".repeat(128);
+        assert!(!profile_text_oversized(&cjk_name, "", "", ""), "a 32-character CJK name fits");
+        assert!(!profile_text_oversized(&emoji_name, &"🙂".repeat(48), &emoji_about, ""));
+        assert!(profile_text_oversized(&"🙂".repeat(33), "", "", ""));
+        assert!(profile_text_oversized("", "", &"a".repeat(PROFILE_ABOUT_MAX_BYTES + 1), ""));
+
+        let src = |f: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f))
+                .unwrap()
+                .replace("\r\n", "\n")
+        };
+        let swarm = src("src/node/swarm.rs");
+        assert!(!swarm.contains("clip_bytes(&display_name"), "HOL-SEC-038: a profile field is clipped again");
+        let social = src("src/node/social.rs");
+        let mls = social.find("pub(crate) async fn handle_envelope_profile_update(").unwrap();
+        let mls_body = &social[mls..mls + social[mls..].find("\n}\n").unwrap()];
+        assert!(mls_body.contains("profile_text_oversized("), "the MLS profile path has no limit");
     }
 
     /// A throwaway store, a master keypair, and the mark that master has already

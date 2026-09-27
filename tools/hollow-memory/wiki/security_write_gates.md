@@ -410,6 +410,24 @@ mobile App Lock re-unlock looks like. The local erase always runs.
 | Relay topic rings; guest sockets | `ring_evict.h`, binary dispatch, `handle_direct` | A full ring drops the oldest frame of whoever holds most; guests may not send 0x07 or JSON `direct`. HOL-SEC-030 |
 | Relay device-list marks | `snapshot_codec.h` v3 | Survive a restart. HOL-SEC-031 |
 
+
+## 15. Revocation, push parity, friends, calls, profiles, reach (security audit session 7, 2026-09-27)
+
+| Write | Site | Gate |
+|---|---|---|
+| Resolver bind + sibling share after a sibling proof | `swarm::on_verified_sibling` | `crypto_handler::sibling_proof_refused` FIRST: a device in our own list's tombstones or recorded revoked is neither bound nor sent anything. HOL-SEC-032 |
+| Olm session from a key exchange | `key_exchange_device_unauthorized` | Refuses a revoked device. Enforced revocations are recorded (`revoked_devices` table, `enforce_revocation`) and `resolver::warm_from_store` loads them, with the block list and device links, in EVERY process that judges frames (main, push fetch, iOS extension). HOL-SEC-032, -035 |
+| Attribution of a carried device list (join request, friend request, decline, accept) | `crypto_handler::carried_list_master` after `ingest_device_list` | The list's master only when ingest bound the sender; the ingest's `newly_revoked` is enforced on every arm. HOL-SEC-033 |
+| Friend destroy notice; "identity reappeared" | `destroy::apply_friend_order`, `ingest_device_list` | A notice must beat a never-cleared floor stamp; only a list adding a never-seen device clears the banner. HOL-SEC-034 |
+| Push fetch: DM rows, channel rows, banners | `fetch.rs` | Blocks warm; a PreKey pins the Olm key (`pin_olm_identity_key`); mentions judged from our own decryption, per-channel level applied in `run_fetch`; a wake for a server we are not in fetches nothing; fallback banners only for `push_sender_known`. HOL-SEC-035 |
+| Friend row on `FriendAccept` | `swarm.rs` FriendAccept arm | Lands only on our pending outgoing row (or re-confirms accepted); siblings learn through `social::share_friend_with_siblings`, and `FriendListSync` upgrades only a pending row. HOL-SEC-036 |
+| DM edit, card, delete, reaction from a blocked person | `message_ops::live_dm_change`, `dm_reaction_target_ok` | Dropped. The friend request arm re-checks the block after the carried list binds. HOL-SEC-036 |
+| 1:1 call state | `voice_handler::call_invite_allowed`; Dart `CallNotifier.handleCallSignal` | Only an accepted friend or our own device rings us; every other signal must come from the live call's peer (identity-collapsed); secure call ids. HOL-SEC-037 |
+| Share assignment / feed report | `voice_handler` screen_assign, screen_feed_state | Assignment only from the stream's originator; a feed report must name our own stream. HOL-SEC-037 |
+| Profile row | `social::save_incoming_profile`, `MessageStore::save_profile` | Avatar bytes must hash to the signed hash; a stale profile writes nothing (clears included) and reports unsaved; text over `PROFILE_*_MAX_BYTES` refused whole on every path. HOL-SEC-038 |
+| Message edit; reaction add | `edit_message_in`, `add_reaction` | An edit must be newer than the row's last edit; an add signed no later than a recorded removal is refused (every removal recorded). HOL-SEC-039 |
+| General data channel; gossip overlay; voice re-announce | `voice_handler::data_channel_peer_allowed`, swarm gossip feeds | Dial and answer only own devices, friends, shared-server members; the overlay takes CRDT members only; voice presence only to a member who can see the channel. HOL-SEC-040 |
+
 ---
 
 ## Related

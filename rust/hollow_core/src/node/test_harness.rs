@@ -9721,6 +9721,75 @@ async fn readd_while_online_requires_fresh_consent() {
 /// recreate a friendship after its removal nor flip the request that follows the
 /// removal. An accept with no stamp is a pre-0.11.1 client and stays honoured while a
 /// request of ours is open.
+/// HOL-SEC-036 (L1). An accept answers a request WE sent. One from a stranger we
+/// never asked created an accepted friend, and one sent after the stranger's own
+/// request accepted that request in our name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_a_friend_accept_lands_only_on_a_request_we_sent() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 33;
+    const A_DEV: u8 = 34;
+    const M_MASTER: u8 = 35;
+    const M_DEV: u8 = 36;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let m = spawn_node_with_friends(&relay, M_MASTER, M_DEV, &[]).await;
+    let (a_dev, m_dev) = (a.device_id.clone(), m.device_id.clone());
+    assert!(
+        wait_until(10, async || {
+            let on = relay.online_devices();
+            on.contains(&a_dev) && on.contains(&m_dev)
+        })
+        .await,
+        "both nodes must be connected"
+    );
+    let dm_room = super::types::dm_room_code(&a_master, &m_master);
+    let accept = br#"{"type":"friend_accept","requested_at":9999999999999}"#.to_vec();
+
+    relay.inject_direct(&dm_room, &m_dev, &a_dev, accept.clone());
+    relay.inject_direct(&dm_room, &m_dev, &a_dev, br#"{"type":"friend_accept"}"#.to_vec());
+    assert!(
+        !wait_until(3, async || friend_row(&a, &m_master).is_some()).await,
+        "HOL-SEC-036: an accept nobody asked for made a friend, A row {:?}",
+        friend_row(&a, &m_master)
+    );
+
+    m.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: a_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+        })
+        .await,
+        "A must receive M's request"
+    );
+    relay.inject_direct(&dm_room, &m_dev, &a_dev, accept);
+    assert!(
+        !wait_until(3, async || {
+            friend_row(&a, &m_master).is_some_and(|(s, _)| s == "accepted")
+        })
+        .await,
+        "HOL-SEC-036: M accepted its own request in A's name, A row {:?}",
+        friend_row(&a, &m_master)
+    );
+    assert_eq!(
+        friend_row(&a, &m_master),
+        Some(("pending".to_string(), "incoming".to_string())),
+        "the request is still A's to answer",
+    );
+    drop(a);
+    drop(m);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn stale_friend_accept_replayed_after_readd_is_dropped() {
@@ -24157,13 +24226,21 @@ async fn destroy_friend_announce_flips_verified_and_banner() {
     );
 
     // The mnemonic can rebuild the identity, and it comes back with the SAME safety
-    // number. A re-announce carries B's device list, which is where the warning is.
+    // number on a NEW device, whose list is where the warning is. The old device's
+    // list is public, so its coming back online proves nothing (HOL-SEC-034).
     relay.set_online(&b.device_id, false);
     assert!(
         wait_until(15, async || !relay.online_devices().contains(&b.device_id)).await,
         "B must drop off before it reappears",
     );
     relay.set_online(&b.device_id, true);
+    assert!(
+        !wait_until(3, async || a.identity_destroyed_at(&b_master).is_none()).await,
+        "the old device announcing its old list is not the identity coming back",
+    );
+    drop(b);
+    const B_RESTORED: u8 = 232;
+    let b = spawn_node_with_friends(&relay, B_MASTER, B_RESTORED, &[&a_master]).await;
     assert!(
         wait_until(30, async || a
             .security_alerts()

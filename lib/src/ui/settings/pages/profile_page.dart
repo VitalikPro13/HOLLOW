@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_limits.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
@@ -140,6 +141,9 @@ class _ProfileEditor extends ConsumerWidget {
           controller: draft.displayName,
           hintText: 'Enter a display name',
           maxLength: 32,
+          inputFormatters: [
+            MessageByteLimitFormatter(maxBytes: kProfileNameMaxBytes),
+          ],
         ),
         const SizedBox(height: HollowSpacing.md),
         const SettingsFieldLabel(label: 'Status'),
@@ -148,6 +152,9 @@ class _ProfileEditor extends ConsumerWidget {
           controller: draft.status,
           hintText: 'What are you up to?',
           maxLength: 48,
+          inputFormatters: [
+            MessageByteLimitFormatter(maxBytes: kProfileStatusMaxBytes),
+          ],
         ),
         const SizedBox(height: HollowSpacing.md),
         const SettingsFieldLabel(label: 'About me'),
@@ -156,6 +163,9 @@ class _ProfileEditor extends ConsumerWidget {
           controller: draft.aboutMe,
           maxLines: 3,
           maxLength: 128,
+          inputFormatters: [
+            MessageByteLimitFormatter(maxBytes: kProfileAboutMaxBytes),
+          ],
         ),
       ],
     );

@@ -1872,6 +1872,10 @@ pub(crate) enum HavenMessage {
         /// stay honoured.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         requested_at: Option<i64>,
+        /// The accepter's own master-signed device list, so the requester can tell
+        /// whose accept this is with a cold resolver (as on `FriendReject`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_list: Option<SignedDeviceList>,
     },
 
     #[serde(rename = "friend_reject")]

@@ -593,6 +593,11 @@ pub(crate) fn verify_key_exchange(
 /// allowed through: first contact, where `sender_device` IS the out-of-band
 /// master. Rests on [`device_list_binds_sender`] for a set attackers cannot write.
 pub(crate) fn key_exchange_device_unauthorized(sender_device: &str) -> bool {
+    // A revoked device resolves to itself once forgotten, which would read as
+    // first contact.
+    if super::resolver::is_revoked(sender_device) {
+        return true;
+    }
     let master = super::resolver::resolve(sender_device);
     if master == sender_device {
         // Unknown device, or a single-device peer: nothing to cross-check.
@@ -882,6 +887,16 @@ pub(crate) fn device_list_binds_sender(list: &SignedDeviceList, sender_peer_id: 
         || list.devices.iter().any(|d| d == sender_peer_id)
 }
 
+/// The master a carried list speaks for, read AFTER [`ingest_device_list`]: `None`
+/// unless ingest really bound the delivering device to it. A list names who
+/// signed it; only the binding says the sender is that person, so a revoked
+/// device replaying an older list is refused here rather than taken as its master.
+pub(crate) fn carried_list_master(list: &SignedDeviceList, sender_peer_id: &str) -> Option<String> {
+    let bound = sender_peer_id == list.master_peer_id
+        || super::resolver::resolve(sender_peer_id) == list.master_peer_id;
+    (bound && !super::resolver::is_revoked(sender_peer_id)).then(|| list.master_peer_id.clone())
+}
+
 /// `true` = this list is EXACTLY "the deliverer revoked itself and changed nothing
 /// else", the one shape [`device_list_binds_sender`] must let through.
 ///
@@ -1102,9 +1117,7 @@ pub(crate) fn revoke_own_device(
         return None;
     }
     super::resolver::forget(target_device);
-    // Phantom-chat guard on the revoker too: drop any lingering DMs/typing from the
-    // device we just revoked until it self-nukes / disconnects.
-    super::resolver::mark_revoked(std::slice::from_ref(&target_device.to_string()));
+    enforce_revocation(&store, &signed.master_peer_id, std::slice::from_ref(&target_device.to_string()));
     super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
     hollow_log!(
         "[HOLLOW-REVOKE] Revoked own device {target_device} → list now {} devices, {} revoked (v{})",
@@ -1172,7 +1185,7 @@ pub(crate) fn revoke_all_other_devices(
     for d in &to_revoke {
         super::resolver::forget(d);
     }
-    super::resolver::mark_revoked(&to_revoke);
+    enforce_revocation(&store, &signed.master_peer_id, &to_revoke);
     super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
     hollow_log!(
         "[HOLLOW-REVOKE] Reset device list: revoked {} sibling(s) → sole device (v{})",
@@ -1277,6 +1290,37 @@ pub(crate) fn verify_destroy_identity(order: &DestroyIdentity) -> bool {
     );
     NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
         .unwrap_or(false)
+}
+
+/// Refuse `devices` for this process and record them, so the refusal survives a
+/// restart: DMs, typing, key exchange and the sibling proof all drop them.
+fn enforce_revocation(store: &crate::storage::MessageStore, master_peer_id: &str, devices: &[String]) {
+    super::resolver::mark_revoked(devices);
+    if let Err(e) = store.record_revoked_devices(master_peer_id, devices) {
+        hollow_log!("[HOLLOW-REVOKE] Failed to record revoked devices: {e}");
+    }
+}
+
+/// True when a device that proved it holds our master key is one we revoked. The
+/// key alone never re-admits it: our own list's tombstones and the recorded marks
+/// both refuse it, the list covering revocations older than the marks table.
+pub(crate) fn sibling_proof_refused(
+    local_master_peer_id: &str,
+    sibling_device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    if super::resolver::is_revoked(sibling_device_peer_id) {
+        return true;
+    }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return true;
+    };
+    store
+        .load_device_list(local_master_peer_id)
+        .ok()
+        .flatten()
+        .is_some_and(|list| list.revoked.iter().any(|r| r == sibling_device_peer_id))
 }
 
 /// Union a single sibling device id into OUR OWN master-signed device list.
@@ -1400,13 +1444,6 @@ pub(crate) async fn ingest_device_list(
         );
         return IngestOutcome::default();
     }
-    // ANY later list from an identity we were told was destroyed is the mnemonic
-    // bringing it back, an UNCHANGED one included: the same safety number returns on
-    // keys the person may no longer control, so the banner clears and a warning goes
-    // up. Ahead of the no-change early return below, which is the common shape.
-    super::destroy::note_identity_reappeared(
-        event_tx, db_path, db_passphrase, &list.master_peer_id,
-    ).await;
     let (prev_devices, prev_revoked, prev_version): (Vec<String>, Vec<String>, u64) =
         match stored_list.as_ref() {
             Some(cur) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
@@ -1459,10 +1496,8 @@ pub(crate) async fn ingest_device_list(
         })
         .cloned()
         .collect();
-    // Phantom-chat guard: mark every revoked id of this master so inbound DMs and
-    // typing from a still-alive revoked device are dropped until it self-nukes.
     if !enforced.is_empty() {
-        super::resolver::mark_revoked(&enforced);
+        enforce_revocation(&store, &list.master_peer_id, &enforced);
     }
     let newly_revoked: Vec<String> = enforced
         .iter()
@@ -1498,6 +1533,13 @@ pub(crate) async fn ingest_device_list(
     let revoked_changed = new_revoked.len() != prev_revoked.len();
     let nothing_new = added == 0 && !removed_any && !revoked_changed
         && list.version <= prev_version;
+    // A destroyed identity comes back from the mnemonic on a device we have never
+    // seen. Any list we already hold is public and replayable, so it proves nothing.
+    if added > 0 {
+        super::destroy::note_identity_reappeared(
+            event_tx, db_path, db_passphrase, &list.master_peer_id,
+        ).await;
+    }
     if nothing_new {
         // Redundant on the Rust side, but STILL re-warm the resolver AND emit
         // DeviceListUpdated: Dart's device-link cache warms ONCE at startup and races
@@ -1663,10 +1705,8 @@ async fn ingest_sibling_device_list(
     merged_revoked.retain(|r| r != local_device_peer_id);
     merged_revoked.sort();
     merged_revoked.dedup();
-    // Phantom-chat guard: mark revoked ids so inbound DMs/typing from a still-alive
-    // revoked sibling are dropped until it self-nukes / disconnects.
     if !merged_revoked.is_empty() {
-        super::resolver::mark_revoked(&merged_revoked);
+        enforce_revocation(&store, local_master_peer_id, &merged_revoked);
     }
     let is_revoked = |id: &str| merged_revoked.iter().any(|r| r == id);
     let newly_revoked: Vec<String> = merged_revoked
@@ -4728,15 +4768,15 @@ mod tests {
         // A bare FriendAccept keeps the old wire shape both ways, and the stamp a
         // new client adds is ignored by the unit variant old clients still parse.
         assert_eq!(
-            serde_json::to_string(&HavenMessage::FriendAccept { requested_at: None }).unwrap(),
+            serde_json::to_string(&HavenMessage::FriendAccept { requested_at: None, device_list: None }).unwrap(),
             r#"{"type":"friend_accept"}"#,
         );
         assert!(matches!(
             serde_json::from_str::<HavenMessage>(r#"{"type":"friend_accept"}"#).unwrap(),
-            HavenMessage::FriendAccept { requested_at: None },
+            HavenMessage::FriendAccept { requested_at: None, device_list: None },
         ));
         assert_eq!(
-            serde_json::to_string(&HavenMessage::FriendAccept { requested_at: Some(7) }).unwrap(),
+            serde_json::to_string(&HavenMessage::FriendAccept { requested_at: Some(7), device_list: None }).unwrap(),
             r#"{"type":"friend_accept","requested_at":7}"#,
         );
         #[derive(serde::Deserialize)]
@@ -5212,6 +5252,196 @@ mod tests {
         );
         assert_eq!(super::super::resolver::resolve(&mallory_device), mallory.peer_id());
 
+        super::super::resolver::clear_all();
+    }
+
+    /// HOL-SEC-032. The resolver forgets a revoked device, so it resolved to itself
+    /// and read as first contact: after a restart nothing remembered the revocation,
+    /// and the device passed key exchange and the sibling proof again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_revoked_device_stays_refused_after_a_restart() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let local_master = kp(0x01);
+        let local_master_id = local_master.peer_id();
+        let local_device = kp(0x02).peer_id();
+        let own_sibling = kp(0x03).peer_id();
+        super::super::resolver::seed_self(
+            &local_master_id, &[local_device.clone(), own_sibling.clone()],
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("revoked.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+        let bob = kp(0x60);
+        let bob_kept = kp(0x61).peer_id();
+        let bob_revoked = kp(0x62).peer_id();
+        for list in [
+            build_signed_device_list(&bob, 1, vec![bob_kept.clone(), bob_revoked.clone()], Vec::new()),
+            build_signed_device_list(&bob, 2, vec![bob_kept.clone()], vec![bob_revoked.clone()]),
+        ] {
+            ingest_device_list(
+                &event_tx, &local_master_id, &local_device, &local_master,
+                &bob_kept, &ws_cmd_tx, &rooms, Some(list), &db, &pass,
+            )
+            .await;
+        }
+        assert!(
+            revoke_own_device(&local_master, &local_device, &own_sibling, &db, &pass).is_some(),
+            "our own sibling is revoked",
+        );
+        assert!(key_exchange_device_unauthorized(&bob_revoked));
+        assert!(key_exchange_device_unauthorized(&own_sibling));
+
+        super::super::resolver::clear_all();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        super::super::resolver::warm_from_store(&store);
+        assert!(
+            key_exchange_device_unauthorized(&bob_revoked),
+            "HOL-SEC-032: a friend's revoked device passed key exchange after a restart",
+        );
+        assert!(
+            key_exchange_device_unauthorized(&own_sibling),
+            "HOL-SEC-032: our own revoked sibling passed key exchange after a restart",
+        );
+        assert!(!key_exchange_device_unauthorized(&bob_kept));
+        assert!(sibling_proof_refused(&local_master_id, &own_sibling, &db, &pass));
+        assert!(!sibling_proof_refused(&local_master_id, &local_device, &db, &pass));
+
+        super::super::resolver::clear_all();
+    }
+
+    /// HOL-SEC-033. A join request, friend request or decline carries a device list
+    /// and was attributed to that list's master even when ingest refused to bind
+    /// the sender, which a revoked device replaying an older list gets refused.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_carried_list_attributes_only_a_bound_sender() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let bob = kp(0x60);
+        let bob_kept = kp(0x61).peer_id();
+        let bob_revoked = kp(0x62).peer_id();
+        let before = build_signed_device_list(&bob, 1, vec![bob_kept.clone(), bob_revoked.clone()], Vec::new());
+        let after = build_signed_device_list(&bob, 2, vec![bob_kept.clone()], vec![bob_revoked.clone()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("carried.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (list, sender) in [(&before, &bob_kept), (&after, &bob_kept), (&before, &bob_revoked)] {
+            ingest_device_list(
+                &event_tx, &kp(0x01).peer_id(), &kp(0x02).peer_id(), &kp(0x01),
+                sender, &ws_cmd_tx, &rooms, Some(list.clone()), &db, &pass,
+            )
+            .await;
+        }
+
+        assert!(
+            device_list_binds_sender(&before, &bob_revoked),
+            "the arms' own pre-check passes the older list",
+        );
+        assert_eq!(
+            carried_list_master(&before, &bob_revoked),
+            None,
+            "HOL-SEC-033: a revoked device replaying an older list was taken as its master",
+        );
+        assert_eq!(carried_list_master(&after, &bob_kept), Some(bob.peer_id()));
+
+        let swarm = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"),
+        )
+        .unwrap()
+        .replace("\r\n", "\n");
+        for (arm, next) in [
+            ("HavenMessage::ServerJoinRequest {", "let resolution_key"),
+            ("HavenMessage::FriendRequest {", "let req_master_early"),
+            ("HavenMessage::FriendReject {", "let Ok(store)"),
+        ] {
+            let start = swarm.find(arm).unwrap_or_else(|| panic!("missing {arm}"));
+            let body = &swarm[start..start + swarm[start..].find(next).unwrap()];
+            assert!(
+                body.contains("carried_list_master(") && body.contains("enforce_device_revocations("),
+                "{arm} attributes a carried list without the binding or drops its revocations",
+            );
+            // L2: the list binds a never-seen device to its master only in ingest, so
+            // the block check must run again after it.
+            if arm == "HavenMessage::FriendRequest {" {
+                let ingest = body.find("ingest_device_list(").unwrap();
+                assert!(
+                    body[ingest..].contains("blocklist::is_blocked(peer_str)"),
+                    "HOL-SEC-036: a blocked identity's never-seen device passes the block check",
+                );
+            }
+        }
+        super::super::resolver::clear_all();
+    }
+
+    /// HOL-SEC-034. Any bound list from an identity reported destroyed cleared the
+    /// banner and raised "identity reappeared", a replayed copy of a list we already
+    /// held included. Only a device we have never seen for it is the mnemonic's return.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_only_a_new_device_means_a_destroyed_identity_returned() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let bob = kp(0x60);
+        let bob_old = kp(0x61).peer_id();
+        let bob_new = kp(0x63).peer_id();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("reappear.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        let ingest = |list: SignedDeviceList, sender: String| {
+            let (event_tx, ws_cmd_tx, rooms, db, pass) =
+                (event_tx.clone(), ws_cmd_tx.clone(), rooms.clone(), db.clone(), pass.clone());
+            async move {
+                ingest_device_list(
+                    &event_tx, &kp(0x01).peer_id(), &kp(0x02).peer_id(), &kp(0x01),
+                    &sender, &ws_cmd_tx, &rooms, Some(list), &db, &pass,
+                )
+                .await
+            }
+        };
+        let old = build_signed_device_list(&bob, 1, vec![bob_old.clone()], Vec::new());
+        ingest(old.clone(), bob_old.clone()).await;
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        store.save_setting(&format!("identity_destroyed:{}", bob.peer_id()), "7000").unwrap();
+        let reappeared = || {
+            store.get_security_alerts().unwrap().iter().any(|a| {
+                a.kind == super::super::security_alerts::KIND_IDENTITY_REAPPEARED
+                    && a.peer_id == bob.peer_id()
+            })
+        };
+
+        ingest(old.clone(), bob_old.clone()).await;
+        assert_eq!(
+            super::super::destroy::identity_destroyed_at(&store, &bob.peer_id()),
+            Some(7_000),
+            "HOL-SEC-034: a replayed list cleared the destroyed banner",
+        );
+        assert!(!reappeared(), "HOL-SEC-034: a replayed list raised 'identity reappeared'");
+
+        let restored = build_signed_device_list(&bob, 1, vec![bob_new.clone()], Vec::new());
+        ingest(restored, bob_new.clone()).await;
+        assert_eq!(super::super::destroy::identity_destroyed_at(&store, &bob.peer_id()), None);
+        assert!(reappeared(), "a new device after a destroy is the identity coming back");
         super::super::resolver::clear_all();
     }
 

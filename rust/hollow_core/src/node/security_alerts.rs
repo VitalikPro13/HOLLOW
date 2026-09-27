@@ -143,36 +143,69 @@ pub(crate) async fn note_olm_identity_key(
     device_peer_id: &str,
     identity_key: &str,
 ) {
-    if master_peer_id == local_master_peer_id || identity_key.is_empty() {
-        return;
-    }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return;
     };
+    let Some(created_at) = pin_olm_identity_key(
+        &store, local_master_peer_id, master_peer_id, device_peer_id, identity_key,
+    ) else {
+        return;
+    };
+    drop(store);
+    let _ = event_tx
+        .send(NetworkEvent::SecurityAlert {
+            peer_id: master_peer_id.to_string(),
+            kind: KIND_KEY_CHANGED.to_string(),
+            detail: device_peer_id.to_string(),
+            created_at,
+        })
+        .await;
+}
+
+/// The store half of [`note_olm_identity_key`], for processes with no event
+/// channel (the push fetch node, the iOS extension): the app shows the recorded
+/// alert on its next start. Returns the new alert's timestamp.
+pub(crate) fn pin_olm_identity_key(
+    store: &crate::storage::MessageStore,
+    local_master_peer_id: &str,
+    master_peer_id: &str,
+    device_peer_id: &str,
+    identity_key: &str,
+) -> Option<i64> {
+    if master_peer_id == local_master_peer_id || identity_key.is_empty() {
+        return None;
+    }
     let previous = match store.get_olm_key_pin(device_peer_id) {
         Ok(p) => p,
         Err(e) => {
             hollow_log!("[HOLLOW-SECURITY] Failed to read olm key pin: {e}");
-            return;
+            return None;
         }
     };
     match previous {
         // Unchanged — the overwhelmingly common path. No write, no event.
-        Some(ref pinned) if pinned == identity_key => {}
+        Some(ref pinned) if pinned == identity_key => None,
         Some(_) => {
             // Move the pin forward FIRST: if the alert write fails we still
             // must not re-warn about the same change on every reconnect.
             let _ = store.set_olm_key_pin(device_peer_id, identity_key);
-            drop(store);
-            record(
-                event_tx, db_path, db_passphrase, master_peer_id, KIND_KEY_CHANGED,
-                device_peer_id,
-            )
-            .await;
+            let created_at = now_ms();
+            match store.record_security_alert(master_peer_id, KIND_KEY_CHANGED, device_peer_id, created_at) {
+                Ok(true) => {
+                    hollow_log!("[HOLLOW-SECURITY] Alert for {master_peer_id}: {KIND_KEY_CHANGED} ({device_peer_id})");
+                    Some(created_at)
+                }
+                Ok(false) => None,
+                Err(e) => {
+                    hollow_log!("[HOLLOW-SECURITY] Failed to record alert: {e}");
+                    None
+                }
+            }
         }
         // First exchange with this device — establish the pin silently.
         None => {
             let _ = store.set_olm_key_pin(device_peer_id, identity_key);
+            None
         }
     }
 }

@@ -101,17 +101,34 @@ into possible holes, so this file itself belongs on the security branch.
   official relay the same day (decision 4). Accepted: AR-05..AR-08 (H20, H21,
   I9, the report half of I12). The push half of I12 turned out to be visible
   (a fallback banner) and is open as K3.
-- **Next (session 7, xhigh):** rerun the suite, then the smaller classes: F4,
-  F5, F7, F8 (revoked devices), K1, K2, K3 with C14 (push parity), L1, L2, L3,
-  L6, M1..M3, N1..N3, J1..J7 triage, B10, B11. Then the four DESIGN
-  sessions, each at xhigh with harness tests: class D (MLS credential binding,
-  who may commit and Welcome), class E (pinned owner + signed membership record
-  E1/E2/E4; tombstoned HLC sets E3/E5/E15; author and target rules E6..E9,
-  E11, E12), class A with J8/J9 (plaintext control messages into Olm/MLS; also
-  I4..I6, A17, and a signed content hash for files, the variant left by
-  HOL-SEC-022/023), ID-1 with HOL-SEC-002 (also I3, I8, F3, F6). The relay
-  traffic measurement waits for phase G. Every AGENT-status row must be
-  re-read before it counts.
+- **Session 7 (2026-09-27):** the smaller classes closed, every row re-read,
+  each fix with a test that fails on the old rule. **HOL-SEC-032** (a revoked
+  device re-entered through the sibling proof, and every revocation was lost at
+  restart: now recorded and warmed), **HOL-SEC-033** (a carried device list was
+  taken as its master without the binding), **HOL-SEC-034** (a destroy notice
+  replayed after the identity returned; any list counted as the return),
+  **HOL-SEC-035** (push parity: blocks, key-change notices, mentions judged from
+  our own decryption, fallback banners only for known senders, no join of a
+  server we do not hold; also J4), **HOL-SEC-036** (a stranger befriended us with
+  an accept or accepted its own request in our name; block gaps L2/L3),
+  **HOL-SEC-037** (call signals bound by call id alone; a share re-pointed by any
+  participant), **HOL-SEC-038** (profile avatar bytes vs signed hash, stale
+  profiles counted as saved, byte limits under the character limits),
+  **HOL-SEC-039** (edit and reaction replay), **HOL-SEC-040** (room presence
+  alone opened a data channel, a gossip seat and our voice presence). L6 was
+  built and reverted (honest same-second KeyRequests look like replays). Moved to
+  the class A design: J5, J7, the unsigned profile fields of N1. Vitalik's
+  decisions: M2, only friends and our own devices ring us (built into
+  HOL-SEC-037); L6 accepted as AR-09. Open: the iOS notification filtering
+  entitlement (K3 residual).
+- **Next:** the four DESIGN sessions, each at xhigh with harness tests: class D
+  (MLS credential binding, who may commit and Welcome), class E (pinned owner +
+  signed membership record E1/E2/E4; tombstoned HLC sets E3/E5/E15; author and
+  target rules E6..E9, E11, E12), class A with J8/J9 (plaintext control messages
+  into Olm/MLS; also I4..I6, A17, J5, J7, the unsigned profile fields, and a
+  signed content hash for files, the variant left by HOL-SEC-022/023), ID-1 with
+  HOL-SEC-002 (also I3, I8, F3, F6). The relay traffic measurement waits for
+  phase G.
 
 ---
 

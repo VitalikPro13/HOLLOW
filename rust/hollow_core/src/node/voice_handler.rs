@@ -47,8 +47,38 @@ pub(crate) fn handle_webrtc_peer_disconnected(
     }
 }
 
+/// Whether we open, or answer, a general data channel with `peer`: our own
+/// device, an accepted friend, or someone we share a server with. Its ICE
+/// candidates carry our addresses, so a stranger who merely got into a room with
+/// us (our inbox is open to anyone) never gets one (J1). Share links keep their
+/// own lane and are not gated here.
+pub(crate) fn data_channel_peer_allowed(
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    if super::resolver::same_identity(peer, local_master) {
+        return true;
+    }
+    if super::blocklist::is_blocked(peer) {
+        return false;
+    }
+    if server_states.values().any(|s| !s.is_deleted() && s.is_member(peer) && s.is_member(local_master)) {
+        return true;
+    }
+    let master = super::resolver::resolve(peer);
+    crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.get_friend_status(&master).ok().flatten())
+        .as_deref()
+        == Some("accepted")
+}
+
 // ── WebRtcSendSignal ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_webrtc_send_signal(
     peer_id: String,
     signal_type: String,
@@ -56,7 +86,17 @@ pub(crate) fn handle_webrtc_send_signal(
     conn_id: String,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
+    if signal_type == "offer"
+        && !data_channel_peer_allowed(server_states, local_master, &peer_id, db_path, db_passphrase)
+    {
+        hollow_log!("[HOLLOW-WEBRTC] Not dialling {peer_id}: no friendship or shared server");
+        return;
+    }
     let msg = match signal_type.as_str() {
         "offer" => HavenMessage::RtcOffer { sdp: payload, conn_id },
         "answer" => HavenMessage::RtcAnswer { sdp: payload, conn_id },
@@ -374,11 +414,31 @@ fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessa
 /// `peer_str` is the sender DEVICE the Olm session authenticated. `signal` is
 /// WHITELISTED again on the way out: anything but the 17 `Call*` variants inside a
 /// `CallSignal` envelope is smuggling another message type past its own gate.
+/// Whether `peer` may ring us: our own device, or an accepted friend who is not
+/// blocked. The app only offers calls between friends, so this holds a modified
+/// client to the same rule.
+fn call_invite_allowed(local_master: &str, peer: &str, db_path: &str, db_passphrase: &str) -> bool {
+    if super::resolver::same_identity(peer, local_master) {
+        return true;
+    }
+    if super::blocklist::is_blocked(peer) {
+        return false;
+    }
+    let master = super::resolver::resolve(peer);
+    crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.get_friend_status(&master).ok().flatten())
+        .as_deref()
+        == Some("accepted")
+}
+
 pub(crate) async fn handle_call_signal_message(
     peer_str: &str,
     master_peer_str: &str,
     signal: HavenMessage,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     // One emit helper so every arm below is just its payload shape.
     macro_rules! emit {
@@ -393,11 +453,11 @@ pub(crate) async fn handle_call_signal_message(
 
     match signal {
         HavenMessage::CallInvite { call_id, video, sframe_key } => {
-            // BLOCK GUARD: a blocked identity can't ring us. Dropping the
-            // invite kills the whole call flow (no ringing UI, no accept path).
-            if !super::resolver::same_identity(peer_str, master_peer_str)
-                && super::blocklist::is_blocked(peer_str)
-            {
+            // Only an accepted friend or our own device rings us; anyone else,
+            // a blocked friend included, is dropped here, which kills the whole
+            // call flow (M2). Strangers talk in voice channels.
+            if !call_invite_allowed(master_peer_str, peer_str, db_path, db_passphrase) {
+                hollow_log!("[HOLLOW-CALL] Dropped CallInvite from {peer_str}: not a friend");
                 return;
             }
             // SECURITY (Phase 6.25): Don't log sframe_key length/presence.
@@ -1881,9 +1941,9 @@ pub(crate) async fn handle_envelope_voice_channel_screen_watch(
 }
 
 /// Sharer to viewer forwarder assignment. The same participant gate as every VC
-/// signal, plus the origin spoof guard in its offer-direction form: the origin must
-/// name the authenticated sender assigning viewers to ITS OWN stream, or it could
-/// steer a viewer to attach to a stream attributed to a victim.
+/// signal, plus an origin that names the authenticated sender assigning viewers to
+/// ITS OWN stream, or it could steer a viewer to attach to a stream attributed to
+/// a victim.
 pub(crate) async fn handle_envelope_voice_channel_screen_assign(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1893,19 +1953,19 @@ pub(crate) async fn handle_envelope_voice_channel_screen_assign(
     origin: Box<StreamOrigin>,
     forwarder: String,
     feed_target: String,
-    local_peer_str: &str,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen assign from non-participant {sender_peer_id} in {cid}");
         return;
     }
-    let origin_opt = Some(origin);
-    if !inbound_origin_ok(&origin_opt, &sender_peer_id, local_peer_str) {
+    // Only the originator assigns viewers to its stream. The shared guard's "or
+    // ourselves" arm let any participant re-point our view of our own sibling's
+    // share at a forwarder it chose (M3).
+    if !super::resolver::same_identity(&origin.peer, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen assign from {sender_peer_id} — spoofed origin");
         return;
     }
-    let origin = origin_opt.expect("guarded above");
     let payload = serde_json::json!({
         "origin": origin_json_value(&origin),
         "forwarder": forwarder,
@@ -1940,12 +2000,10 @@ pub(crate) async fn handle_envelope_voice_channel_screen_feed_state(
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC feed state from non-participant {sender_peer_id} in {cid}");
         return;
     }
-    let origin_opt = Some(origin);
-    if !inbound_origin_ok(&origin_opt, &sender_peer_id, local_peer_str) {
-        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC feed state from {sender_peer_id} — spoofed origin");
+    if !super::resolver::same_identity(&origin.peer, local_peer_str) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC feed state from {sender_peer_id} — it names a stream that is not ours");
         return;
     }
-    let origin = origin_opt.expect("guarded above");
     let payload = serde_json::json!({
         "origin": origin_json_value(&origin),
         "forwarder": forwarder,
@@ -1998,4 +2056,157 @@ pub(crate) async fn handle_envelope_voice_channel_recording_state(
         signal_type: if recording { "recording_start" } else { "recording_stop" }.to_string(),
         payload,
     }).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin(peer: &str) -> Box<StreamOrigin> {
+        Box::new(StreamOrigin { peer: peer.into(), kind: "screen".into(), stream: "abcd1234".into() })
+    }
+
+    /// HOL-SEC-040 (J1, J2, J3, J6). Anyone who joined a room with us (our inbox is
+    /// open to anyone, a server room to anyone with its id) got a data channel from
+    /// us, whose ICE candidates carry our addresses, and a non-member became a
+    /// gossip neighbour and learned which voice channel we sat in.
+    #[test]
+    fn authz_room_presence_alone_opens_no_channel_to_us() {
+        let _g = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        super::super::blocklist::clear_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("j1.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (me, sibling, friend, member, stranger, blocked) =
+            ("me", "me-dev", "friend", "member", "stranger", "blocked-member");
+        super::super::resolver::seed_self(me, &[sibling.to_string()]);
+        {
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            store.save_friend(friend, "accepted", "outgoing", 1).unwrap();
+        }
+        let mut state = ServerState::new("srv".into(), "s".into(), me.into());
+        for id in [member, blocked] {
+            state.members.insert(id.into(), crate::crdt::server_state::MemberInfo {
+                peer_id: id.into(), display_name: id.into(),
+            });
+        }
+        let states = HashMap::from([("srv".to_string(), state)]);
+        super::super::blocklist::block(blocked);
+        let allowed = |p: &str| data_channel_peer_allowed(&states, me, p, &db, &pass);
+
+        assert!(allowed(sibling) && allowed(friend) && allowed(member));
+        assert!(!allowed(stranger), "HOL-SEC-040: a stranger in one of our rooms got a data channel");
+        assert!(!allowed(blocked));
+
+        let swarm = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"),
+        )
+        .unwrap()
+        .replace("\r\n", "\n");
+        let rtc = swarm.find("        HavenMessage::RtcOffer { sdp, conn_id } => {").unwrap();
+        assert!(swarm[rtc..rtc + 1200].contains("data_channel_peer_allowed("), "an inbound offer skips the gate");
+        let exchange = swarm.find("HavenMessage::PeerExchange { server_id, peers } => {").unwrap();
+        assert!(swarm[exchange..exchange + 1500].contains("is_member(p)"), "J6: a neighbour's list names non-members");
+        assert_eq!(
+            swarm.matches("overlay.add_known_peer(").count(),
+            2,
+            "a new gossip feed must gate on membership like the two below",
+        );
+        let joined = swarm.find("let Some(new_neighbor) = overlay.add_known_peer(&peer_id)").unwrap();
+        assert!(swarm[joined - 500..joined].contains("is_member(&peer_id)"), "J2: a room joiner becomes a neighbour");
+        let listed = swarm.find("overlay.add_known_peer(pid);").unwrap();
+        assert!(swarm[listed - 200..listed].contains("state.is_member(pid)"), "J2: a listed room peer becomes a neighbour");
+        let reannounce = swarm.find("Re-announcing our presence in {vc_cid}").unwrap();
+        assert!(swarm[reannounce - 700..reannounce].contains("can_see_channel(&peer_id, vc_cid)"), "J3");
+        let send = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/voice_handler.rs"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        let dial = send.find("pub(crate) fn handle_webrtc_send_signal(").unwrap();
+        assert!(send[dial..dial + 1200].contains("data_channel_peer_allowed("), "an outbound dial skips the gate");
+        super::super::blocklist::clear_for_test();
+        super::super::resolver::clear_all();
+    }
+
+    /// HOL-SEC-037 (M2). The app only calls friends, but anyone with an Olm session
+    /// (a stranger who shared a room with us) could make a modified client ring us.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_only_a_friend_or_our_own_device_rings_us() {
+        let _g = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        super::super::blocklist::clear_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("m2.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let (me, sibling, friend, stranger, blocked) = ("me", "me-dev", "friend", "stranger", "blocked");
+        super::super::resolver::seed_self(me, &[sibling.to_string()]);
+        {
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            store.save_friend(friend, "accepted", "outgoing", 1).unwrap();
+            store.save_friend(blocked, "accepted", "outgoing", 1).unwrap();
+        }
+        super::super::blocklist::block(blocked);
+        let (tx, mut rx) = mpsc::channel::<NetworkEvent>(8);
+        let invite = || HavenMessage::CallInvite {
+            call_id: "c1".into(), video: false, sframe_key: "k".into(),
+        };
+        let mut rings = |from: &'static str| {
+            let (tx, db, pass) = (tx.clone(), db.clone(), pass.clone());
+            async move {
+                handle_call_signal_message(from, me, invite(), &tx, &db, &pass).await;
+            }
+        };
+        rings(stranger).await;
+        assert!(rx.try_recv().is_err(), "HOL-SEC-037: a stranger rang us");
+        rings(blocked).await;
+        assert!(rx.try_recv().is_err(), "a blocked friend rang us");
+        rings(friend).await;
+        assert!(rx.try_recv().is_ok(), "a friend rings");
+        rings(sibling).await;
+        assert!(rx.try_recv().is_ok(), "our own device rings");
+        super::super::blocklist::clear_for_test();
+        super::super::resolver::clear_all();
+    }
+
+    /// HOL-SEC-037 (M3). The origin guard also took an origin naming ourselves, so
+    /// any participant could assign viewers to our own sibling's share and point
+    /// our view of it at a forwarder of its choosing.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_share_is_assigned_by_its_originator_and_reported_to_its_owner() {
+        let _g = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let (me, sibling, mallory) = ("me-master", "me-sibling", "mallory");
+        super::super::resolver::seed_self(me, &[sibling.to_string()]);
+        let participants = HashMap::from([(
+            "s:c".to_string(),
+            std::collections::HashSet::from([mallory.to_string(), sibling.to_string()]),
+        )]);
+        let (tx, mut rx) = mpsc::channel::<NetworkEvent>(8);
+        let assign = |from: &str, of: &str| {
+            handle_envelope_voice_channel_screen_assign(
+                &participants, &tx, from.into(), "s".into(), "c".into(), origin(of),
+                "fwd".into(), String::new(),
+            )
+        };
+        assign(mallory, sibling).await;
+        assert!(rx.try_recv().is_err(), "HOL-SEC-037: a participant assigned viewers to our sibling's share");
+        assign(sibling, sibling).await;
+        assert!(rx.try_recv().is_ok(), "the originator assigns its own viewers");
+
+        let report = |of: &str| {
+            handle_envelope_voice_channel_screen_feed_state(
+                &participants, &tx, mallory.into(), "s".into(), "c".into(), origin(of),
+                "fwd".into(), true, me,
+            )
+        };
+        report(mallory).await;
+        assert!(rx.try_recv().is_err(), "a feeder reports on OUR stream, to us");
+        report(sibling).await;
+        assert!(rx.try_recv().is_ok());
+        super::super::resolver::clear_all();
+    }
 }

@@ -68,6 +68,9 @@ Future<RedeemOutcome> redeemCode({required String code}) =>
 /// row from a sibling, which carry no names and no redeem date. Removed items are
 /// left out. The announce cap is NOT applied here: that cap is about what rides a
 /// light profile announce, and a holder of four marks is holding four.
+///
+/// The verified Twitch account is left out too: it is not a mark anyone bought,
+/// and Connections' Disconnect is the one control over it.
 Future<List<OwnSupportCred>> listOwnSupportCreds() =>
     RustLib.instance.api.crateApiShopListOwnSupportCreds();
 

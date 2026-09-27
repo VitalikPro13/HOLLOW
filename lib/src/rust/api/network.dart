@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `refuse_oversized_message`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`, `ProxyConfig`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
@@ -476,6 +476,16 @@ Future<void> declineLinkPush({required String targetPeer}) =>
 Future<PushProfile?> getPushProfile({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkGetPushProfile(peerId: peerId);
 
+/// Whether a push wake from `peer_id` may name its sender in a content-free
+/// fallback banner: false for a stranger, a blocked or revoked device, and for a
+/// channel wake from anyone who is not a member of `server_id`. `None` when the
+/// identity is locked and nothing can be judged.
+Future<bool?> pushSenderKnown({required String peerId, String? serverId}) =>
+    RustLib.instance.api.crateApiNetworkPushSenderKnown(
+      peerId: peerId,
+      serverId: serverId,
+    );
+
 /// Nudge the LIVE full node to (re)join the DM room for `sender_peer_id` so the
 /// relay replays that room's buffered offline DMs.
 ///
@@ -564,8 +574,9 @@ Future<void> setOfflineInbox({
 );
 
 /// Resolve server + channel names and the effective local notification level
-/// directly from SQLCipher (no running node). Returns None when the server is
-/// unknown locally or identity is locked.
+/// directly from SQLCipher (no running node). None means a server we do not
+/// hold, which the push handler drops; a locked identity is an error instead,
+/// since nothing about the server can be judged.
 Future<PushChannelMeta?> getPushChannelMeta({
   required String serverId,
   required String channelId,

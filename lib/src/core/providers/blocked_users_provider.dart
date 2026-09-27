@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Set of blocked MASTER peer_ids, mirrored from the Rust block list.
@@ -34,6 +35,7 @@ class BlockedUsersNotifier extends Notifier<Set<String>> {
       state = state.where((id) => id != masterId).toSet();
       rethrow;
     }
+    PushHintsCache.rewriteLast();
   }
 
   /// Unblock a previously blocked identity. Optimistic, reverts on error.
@@ -46,6 +48,7 @@ class BlockedUsersNotifier extends Notifier<Set<String>> {
       state = {...state, masterId};
       rethrow;
     }
+    PushHintsCache.rewriteLast();
   }
 
   bool isBlocked(String masterId) => state.contains(masterId);

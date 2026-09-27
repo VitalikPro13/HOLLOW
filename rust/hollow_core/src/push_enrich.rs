@@ -141,9 +141,7 @@ fn fetch_and_decrypt(
     // Warm the resolver from persisted device links so the MASTER-paired DM room
     // + conversation key resolve correctly (single-device → self-map no-op).
     if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-        if let Ok(links) = store.get_all_device_links() {
-            crate::node::resolver::warm_from_links(&links);
-        }
+        crate::node::resolver::warm_from_store(&store);
     }
     crate::node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
 

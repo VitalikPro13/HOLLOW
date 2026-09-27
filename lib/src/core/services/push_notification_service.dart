@@ -359,7 +359,7 @@ Future<void> handlePushWake(Map<String, dynamic> data) async {
   }
 
   await _showDmFallbackIfNeeded(
-      contentShown, personKey, displayName, avatarBytes);
+      contentShown, sender, personKey, displayName, avatarBytes);
 
   await _pushLog('Handler complete');
 }
@@ -527,9 +527,22 @@ Future<bool> _fetchAndShowDmContent(String sender, String personKey,
 /// same push, and a second entry would break the single-banner guarantee; the
 /// message still synced to the DB via the fetch. Android has no NSE, so the
 /// background handler is the only banner source and must post the fallback.
-Future<void> _showDmFallbackIfNeeded(bool contentShown, String personKey,
-    String displayName, Uint8List? avatarBytes) async {
+///
+/// Anyone who knows this device's id can make the relay wake it, so a wake that
+/// yielded nothing names its sender only when Rust knows them (K3). A locked
+/// identity cannot judge, so it gets the generic banner, which names nobody.
+Future<void> _showDmFallbackIfNeeded(bool contentShown, String sender,
+    String personKey, String displayName, Uint8List? avatarBytes) async {
   if (contentShown) return;
+  final known = await _pushSenderKnown(sender, null);
+  if (known == false) {
+    await _pushLog('Empty wake from an unknown sender, no banner');
+    return;
+  }
+  if (known == null) {
+    if (!Platform.isIOS) await _showGenericNotification();
+    return;
+  }
   if (!Platform.isIOS) {
     await _showNotification(
       sender: personKey,
@@ -540,6 +553,19 @@ Future<void> _showDmFallbackIfNeeded(bool contentShown, String personKey,
     await _pushLog('Fallback notification shown: $displayName');
   } else {
     await _pushLog('iOS: no content — leaving NSE banner as-is (no double post)');
+  }
+}
+
+/// Whether Rust would name [sender] in a fallback banner: not blocked or
+/// revoked, and a friend, our own device or a member of [server]. Null when
+/// nothing can be judged (a locked identity, Rust unavailable).
+Future<bool?> _pushSenderKnown(String sender, String? server) async {
+  if (sender.isEmpty) return false;
+  try {
+    return await network_api.pushSenderKnown(peerId: sender, serverId: server);
+  } catch (e) {
+    await _pushLog('pushSenderKnown FAILED: $e');
+    return null;
   }
 }
 
@@ -689,9 +715,17 @@ Future<void> _handleChannelWake(Map<String, dynamic> data) async {
   String channelName = '';
   String notifLevel = 'all';
   if (rustReady) {
-    (serverName, channelName, notifLevel) =
-        await _loadChannelWakeMeta(server, channel);
+    final meta = await _loadChannelWakeMeta(server, channel);
+    // The payload names the server; one we do not hold is never joined or
+    // fetched, and nothing is shown for it.
+    if (meta == null) {
+      await _pushLog('channel_wake: not a server we hold — dropped');
+      return;
+    }
+    (serverName, channelName, notifLevel) = meta;
   }
+  // The sender's mention flag may skip work (a mentions-only channel with no
+  // mention claimed), never add a banner: Rust judges mentions on the posts.
   if (notifLevel == 'nothing' || (notifLevel == 'mentions' && !mention)) {
     // Muted locally, so the relay-side prefs were stale. An Android data push
     // is invisible unless we post, and the iOS NSE applies the same check on
@@ -726,43 +760,38 @@ Future<void> _handleChannelWake(Map<String, dynamic> data) async {
     serverName: serverName,
     channelName: channelName,
     notifLevel: notifLevel,
-    mention: mention,
     rustReady: rustReady,
     profileNames: profileNames,
   );
 
-  if (!posted) {
+  // A mentions-only channel shows only mentions we read ourselves, and an empty
+  // wake has nothing to read.
+  if (!posted && notifLevel == 'all') {
     await _showChannelWakeFallback(
       sender: sender,
       server: server,
       channel: channel,
       serverName: serverName,
       channelName: channelName,
-      mention: mention,
       profileNames: profileNames,
     );
   }
 }
 
 /// Resolve (serverName, channelName, notifLevel) for the wake's triggering
-/// channel from SQLCipher; defaults ('', '', 'all') on failure.
-Future<(String, String, String)> _loadChannelWakeMeta(
+/// channel from SQLCipher: null for a server we do not hold, defaults
+/// ('', '', 'all') when the lookup itself fails.
+Future<(String, String, String)?> _loadChannelWakeMeta(
     String server, String channel) async {
-  String serverName = '';
-  String channelName = '';
-  String notifLevel = 'all';
   try {
     final meta = await network_api.getPushChannelMeta(
         serverId: server, channelId: channel);
-    if (meta != null) {
-      serverName = meta.serverName;
-      channelName = meta.channelName;
-      notifLevel = meta.notifLevel;
-    }
+    if (meta == null) return null;
+    return (meta.serverName, meta.channelName, meta.notifLevel);
   } catch (e) {
     await _pushLog('getPushChannelMeta FAILED: $e');
+    return ('', '', 'all');
   }
-  return (serverName, channelName, notifLevel);
 }
 
 /// Android with the full node still registered: the fetch node cannot start,
@@ -879,7 +908,6 @@ Future<bool> _postChannelWakeBanners({
   required String serverName,
   required String channelName,
   required String notifLevel,
-  required bool mention,
   required bool rustReady,
   required Map<String, String> profileNames,
 }) async {
@@ -887,12 +915,11 @@ Future<bool> _postChannelWakeBanners({
   for (final entry in byChannel.entries) {
     final cid = entry.key;
 
-    // The push's mention flag applies only to the channel that triggered it;
-    // other channels require level "all".
+    // Rust already applied each channel's level to the posts it decrypted,
+    // judging mentions itself; this only honours a level changed since.
     final (chName, level) = await _channelWakeBannerMeta(
         server, cid, channel, channelName, notifLevel, rustReady);
     if (level == 'nothing') continue;
-    if (level == 'mentions' && !(mention && cid == channel)) continue;
 
     final batch = <MapEntry<String, String>>[];
     for (final m in entry.value) {
@@ -922,35 +949,35 @@ Future<bool> _postChannelWakeBanners({
 
 /// Fallback with no decrypted content (fetch failed, stale MLS epoch, an
 /// Olm-legacy server). iOS leaves the NSE banner standing; Android is the only
-/// banner source, so it posts a name-only line.
+/// banner source, so it posts a name-only line, and only for a sender who is a
+/// member of the server (K3). With nothing read it never claims a mention.
 Future<void> _showChannelWakeFallback({
   required String sender,
   required String server,
   required String channel,
   required String serverName,
   required String channelName,
-  required bool mention,
   required Map<String, String> profileNames,
 }) async {
   if (Platform.isIOS) {
     await _pushLog('channel_wake: no content — leaving NSE banner as-is');
     return;
   }
-  final senderName =
-      sender.isEmpty ? '' : await _channelWakeNameOf(sender, profileNames);
+  final known = await _pushSenderKnown(sender, server);
+  if (known == false) {
+    await _pushLog('channel_wake: empty wake from a non-member, no banner');
+    return;
+  }
+  final senderName = known == true
+      ? await _channelWakeNameOf(sender, profileNames)
+      : '';
   await _showChannelNotification(
     server: server,
     channel: channel,
     title: channelName.isNotEmpty
         ? '${serverName.isNotEmpty ? serverName : 'Server'} • #$channelName'
         : (serverName.isNotEmpty ? serverName : 'Hollow'),
-    body: mention
-        ? (senderName.isEmpty
-            ? 'You were mentioned'
-            : '$senderName mentioned you')
-        : (senderName.isEmpty
-            ? 'New messages'
-            : '$senderName sent a message'),
+    body: senderName.isEmpty ? 'New messages' : '$senderName sent a message',
   );
   await _pushLog('channel_wake: fallback notification shown');
 }
