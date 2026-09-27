@@ -428,6 +428,23 @@ mobile App Lock re-unlock looks like. The local erase always runs.
 | Message edit; reaction add | `edit_message_in`, `add_reaction` | An edit must be newer than the row's last edit; an add signed no later than a recorded removal is refused (every removal recorded). HOL-SEC-039 |
 | General data channel; gossip overlay; voice re-announce | `voice_handler::data_channel_peer_allowed`, swarm gossip feeds | Dial and answer only own devices, friends, shared-server members; the overlay takes CRDT members only; voice presence only to a member who can see the channel. HOL-SEC-040 |
 
+
+## 16. MLS group state: leaves, commits, Welcomes, failures (design D, security audit session 8, 2026-09-27)
+
+Design: `reports/planned/security/audit/design_D_mls_authority.md`. The rules live in
+`node/mls_authority.rs`; the staging lives in `crypto/mls_manager.rs`.
+
+| Write | Where | Gate |
+|---|---|---|
+| A leaf's identity | `mls_manager::classify_leaf` | Bound only when the leaf's signature key is the device key its id encodes AND the credential `hl1:{device}:{master}:{sig}` carries the master's signature over `hollow-mls-leaf:{master}:{device}`. Everything else is unbound: its messages are ignored, it never enters a tree, and we never encrypt or commit from our own unbound leaf. HOL-SEC-041 |
+| Seat a KeyPackage (live, parked join, meeting knock) | swarm `MlsKeyPackage` arm, parked-join arm, `conference::handle_join_request` | The package must be bound to the device the frame came from (parked: and to the joiner's master); its certified master must be a current, unbanned member who can see a subgroup's channel. HOL-SEC-041 |
+| Merge a received commit (live or catch-up) | `crypto_handler::handle_mls_commit_frame` -> `MlsManager::process_commit_judged` -> `mls_authority::commit_verdict` | Staged, judged, then merged. Refused: non-member sender, foreign proposals, unbound or identity-changing leaves, an unbound committer other than a pure rebind, a revoked add, a meeting committer other than the pinned host. Held (retried each batch tick, 60 s): unknown committer or added member, removal of a current member unless the same commit re-adds that device. HOL-SEC-042 |
+| Our own commits | swarm MLS batch timer -> `mls_authority::plan_membership` -> `MlsManager::commit_membership` | Same rules applied before committing; one commit per group per tick; a current member's leaf leaves only with its re-add. HOL-SEC-042 |
+| Install a Welcome | swarm `MlsWelcome` arm, batch retry -> `join_from_welcome_judged` -> `welcome_verdict` | Staged with `replace_old_group`; refused for another group id, any unbound or revoked leaf, a leaf that is not ours, or replacing a held group unasked (`asked_for_leaf`: our push, eviction grace, own join, or an answered request FROM THAT SENDER); held for a non-member or banned sender or leaf. A meeting needs our pending knock and pins its sender as the only committer. HOL-SEC-043 |
+| Mint a KeyPackage for a requester | swarm `MlsKeyPackageRequest` arm | Our server only (no meeting, no pending join), requester a current member, subgroup only if we qualify, once per group per 10 s, and while we hold a leaf only for `crypto_handler::may_repair_our_leaf` (owner, our catch-up responder, subgroup coordinator). HOL-SEC-043 |
+| Drop a group | everywhere | Only on an authenticated event (an accepted commit that evicts us, an accepted Welcome) or our own CRDT state. Decrypt and commit failures never drop: garbage is ignored, anything else probes; probes carry `epoch_auth_digest`, and the answering member repairs a same-epoch fork. HOL-SEC-044 |
+| Voice signaling decrypted from a group | swarm MLS arm, `VoiceChannel*` | Dropped unless the encrypting leaf is the relay-stamped device. HOL-SEC-045 |
+
 ---
 
 ## Related

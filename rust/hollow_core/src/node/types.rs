@@ -1682,12 +1682,17 @@ pub(crate) enum HavenMessage {
     /// 0x03 room broadcast and every recovery trigger keys on `has_group`, so a
     /// member that missed join-churn commits sits on a stale SFrame key until the
     /// escalated heal. Plaintext by the sync rule: the prober's MLS is stale.
+    ///
+    /// `epoch_auth` is a digest of the prober's epoch authenticator: at an equal
+    /// epoch a different digest means the prober holds a fork.
     #[serde(rename = "mls_epoch_probe")]
     MlsEpochProbe {
         server_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
         epoch: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch_auth: Option<String>,
     },
 
     /// Replay of missed MLS commit frames to ONE stale member, in ascending epoch
@@ -4525,14 +4530,16 @@ mod epoch_catchup_wire_tests {
             server_id: "srv1".into(),
             channel_id: None,
             epoch: 4,
+            epoch_auth: Some("ab12".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"type":"mls_epoch_probe","server_id":"srv1","epoch":4}"#);
+        assert_eq!(json, r#"{"type":"mls_epoch_probe","server_id":"srv1","epoch":4,"epoch_auth":"ab12"}"#);
         match serde_json::from_str::<HavenMessage>(&json).unwrap() {
-            HavenMessage::MlsEpochProbe { server_id, channel_id, epoch } => {
+            HavenMessage::MlsEpochProbe { server_id, channel_id, epoch, epoch_auth } => {
                 assert_eq!(server_id, "srv1");
                 assert!(channel_id.is_none());
                 assert_eq!(epoch, 4);
+                assert_eq!(epoch_auth.as_deref(), Some("ab12"));
             }
             other => panic!("unexpected variant: {other:?}"),
         }

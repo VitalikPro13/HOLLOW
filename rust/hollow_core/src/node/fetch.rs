@@ -523,10 +523,9 @@ fn try_process_channel_msg(
                     if crate::node::conference::is_conference_sid(&sid) {
                         return None;
                     }
-                    // The MLS leaf credential is the sender's DEVICE id, but the
-                    // message is signed by and attributed to the MASTER, so the
-                    // fetched row is master-keyed like the live handler's.
-                    let sender_master = crate::node::resolver::resolve(&sender);
+                    // The leaf proves the sender's master: the message is signed by
+                    // and attributed to it, so the row is master-keyed like the live one.
+                    let sender_master = sender.master.clone();
                     // Reject a present-but-invalid signature (defence in depth
                     // behind MLS group membership) — see fetch_channel_sig_rejected.
                     let lp_digest = link_preview.as_ref()

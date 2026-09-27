@@ -121,14 +121,30 @@ into possible holes, so this file itself belongs on the security branch.
   decisions: M2, only friends and our own devices ring us (built into
   HOL-SEC-037); L6 accepted as AR-09. Open: the iOS notification filtering
   entitlement (K3 residual).
-- **Next:** the four DESIGN sessions, each at xhigh with harness tests: class D
-  (MLS credential binding, who may commit and Welcome), class E (pinned owner +
-  signed membership record E1/E2/E4; tombstoned HLC sets E3/E5/E15; author and
-  target rules E6..E9, E11, E12), class A with J8/J9 (plaintext control messages
-  into Olm/MLS; also I4..I6, A17, J5, J7, the unsigned profile fields, and a
-  signed content hash for files, the variant left by HOL-SEC-022/023), ID-1 with
-  HOL-SEC-002 (also I3, I8, F3, F6). The relay traffic measurement waits for
-  phase G.
+- **Session 8 (2026-09-27): design D, MLS leaf identity and group authority**
+  (`audit/design_D_mls_authority.md`, rules in `node/mls_authority.rs`). A leaf
+  is signed by its device key and carries the master's certificate, so every
+  receiver proves who holds it from the leaf alone: **HOL-SEC-041** (Critical:
+  the relay could seat itself in any group, a member could appear as anyone;
+  closes D1, D6, D10 and the relay halves of D7 and HOL-SEC-017). Every commit
+  and Welcome is staged and judged before it changes anything: **HOL-SEC-042**
+  (commits evicting members or adding outsiders), **HOL-SEC-043** (a Welcome
+  from anyone replaced a live group; KeyPackages on demand, D3, D5). No failure
+  drops a group any more, forks are found by an epoch-authenticator digest in
+  the probe and repaired: **HOL-SEC-044** (D4). **HOL-SEC-045** (voice signaling
+  over MLS credited to the relay's sender, D9). A leaf repair is now one commit.
+  Existing groups rebind in place. Vitalik's decisions: a Welcome from any
+  member if we asked for it; re-key in place rather than re-form. D8 closed at
+  the MLS layer, its `MemberAdded` half stays E7.
+- **Next:** the three remaining DESIGN sessions, each at xhigh with harness
+  tests: class E (pinned owner + signed membership record E1/E2/E4; tombstoned
+  HLC sets E3/E5/E15; author and target rules E6..E9, E11, E12), class A with
+  J8/J9 (plaintext control messages into Olm/MLS; also I4..I6, A17, J5, J7, the
+  unsigned profile fields, a signed content hash for files, the variant left by
+  HOL-SEC-022/023, and from design D: signed epoch probes (S-20) and meeting
+  host pinning with the lobby frames (S-26, S-29..S-32)), ID-1 with HOL-SEC-002
+  (also I3, I8, F3, F6, and the stolen-device leaf certificates of HOL-SEC-041).
+  The relay traffic measurement waits for phase G.
 
 ---
 
@@ -600,7 +616,14 @@ of frames, room joins and distinct targets, anonymous counters only, the way
 the 44k-connection baseline was measured), and only on those numbers decide a
 circuit breaker for clearly inhuman behaviour (close the connection, never drop
 single frames; short escalating IP cooldowns, never week-long bans that hit
-shared carrier addresses). It revisits AR-01, AR-06 and AR-07. `WHITEPAPER.md` security claims re-checked against `claims.md`. A
+shared carrier addresses). It revisits AR-01, AR-06 and AR-07. Also in G, only
+after Vitalik confirms Apple approved it: the iOS push work behind the
+Notification Service Extension filtering entitlement (requested 2026-09-27,
+the K3 residual). Add `com.apple.developer.usernotifications.filtering` to the
+extension's entitlements, regenerate its profile, and have the extension show
+nothing (an empty `UNNotificationContent`) for a stranger's or blocked sender's
+wake and for a fetch that leaves nothing to show, with `push_enrich` returning
+the verdict. `WHITEPAPER.md` security claims re-checked against `claims.md`. A
 report in the professional format (`SECURITY_AUDIT_2026_10.md` or whenever it
 lands): executive summary, scope with commit, method, coverage and
 non-findings, findings table, maturity scorecard. Release, merge, push,

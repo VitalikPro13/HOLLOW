@@ -2550,21 +2550,21 @@ pub(crate) fn reconcile_subgroups_for_server(
             hollow_log!("[HOLLOW-MLS] reconcile: created subgroup {group_key}");
         }
 
-        // REMOVALS: existing leaves whose master is gone or no longer qualifies.
-        for leaf in mls.group_members(&group_key) {
-            if super::resolver::same_identity(&leaf, local_peer) { continue; } // never self
-            let leaf_master = super::resolver::resolve(&leaf);
-            let still_ok = server.is_member(&leaf_master) && server.can_see_channel(&leaf_master, &cid);
-            if !still_ok {
-                hollow_log!("[HOLLOW-MLS] reconcile: queue remove {leaf} from {group_key} (master no longer qualifies)");
-                pending_mls_removals.entry(group_key.clone()).or_default().push(leaf);
-            }
+        // REMOVALS: leaves whose certified master is gone or no longer qualifies, and
+        // leaves that prove no identity at all.
+        let leaves = mls.group_leaves(&group_key);
+        let rules = super::mls_authority::GroupRules::Server { state: server, channel: Some(&cid) };
+        for leaf in super::mls_authority::stale_leaves(&leaves, local_peer, &rules) {
+            hollow_log!("[HOLLOW-MLS] reconcile: queue remove {leaf} from {group_key} (no longer qualifies)");
+            pending_mls_removals.entry(group_key.clone()).or_default().push(leaf);
         }
 
-        // ADDITIONS: online qualifying members with no leaf yet. We cannot add without
-        // their KeyPackage, so pull it; dedup against this round's queue.
-        let current_leaf_masters: std::collections::HashSet<String> = mls.group_members(&group_key)
-            .iter().map(|l| super::resolver::resolve(l)).collect();
+        // ADDITIONS: online qualifying members with no bound leaf yet. We cannot add
+        // without their KeyPackage, so pull it; dedup against this round's queue.
+        let current_leaf_masters: std::collections::HashSet<String> = leaves
+            .iter()
+            .filter_map(|l| l.bound().map(|b| b.master.clone()))
+            .collect();
         let already_queued: std::collections::HashSet<String> = pending_mls_key_packages
             .get(&group_key)
             .map(|v| v.iter().map(|(p, _)| super::resolver::resolve(p)).collect())
@@ -3073,29 +3073,31 @@ pub(crate) enum CommitApplyOutcome {
     /// merged-then-evicted with no recovery owed (a kick or a ban).
     Applied,
     /// Processed and merged, and the commit removed OUR OWN leaf while we are
-    /// still a member: a remove + re-add whose Welcome is on its way. The group is
-    /// dropped and the throttle stamped, and the caller holds the Welcome grace.
+    /// still a member: a repair whose Welcome is on its way. The group is dropped
+    /// and the throttle stamped, and the caller holds the Welcome grace.
     Evicted,
     /// Skipped: we're already at/past the frame's epoch.
     Skipped,
     /// We don't hold this group — nothing to do.
     NoGroup,
-    /// Processing failed; the drop-group + re-bootstrap recovery may have run.
+    /// Kept for a retry: our CRDT view may be behind the committer's.
+    Held,
+    /// Breaks a rule outright; discarded.
+    Refused,
+    /// Did not process. The group stays as it was and an epoch probe asks whether
+    /// we are behind: anyone can send a frame that fails.
     Failed,
 }
 
-/// How long an evicted device waits for the re-add's Welcome before asking for
-/// a leaf itself.
-///
-/// A remove + re-add is TWO commits from one batch tick and the removal goes
-/// out first, so the evicted device sees itself removed a moment before the
-/// Welcome that puts it back. Asking then mints a third KeyPackage, which the
-/// next tick turns into another remove + re-add. Two batch intervals plus slack.
+/// How long an evicted device waits for the repair's Welcome before asking for a
+/// leaf itself. The removal can reach it a moment before the Welcome that puts it
+/// back, and asking then mints a KeyPackage the next tick turns into another
+/// repair. Two batch intervals plus slack.
 pub(crate) const MLS_WELCOME_GRACE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Apply one MlsCommit frame. Shared by the `MlsCommit` broadcast arm and the
 /// `MlsCommitCatchup` replay loop so both get identical validation and recovery
-/// BY CONSTRUCTION.
+/// BY CONSTRUCTION. `frame_sender` is the device the relay says sent the frame.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_mls_commit_frame(
     mls_mgr: &mut MlsManager,
@@ -3104,8 +3106,10 @@ pub(crate) async fn handle_mls_commit_frame(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_peer_str: &str,
+    frame_sender: &str,
     server_id: &str,
     commit_b64: &str,
     channel_id: &Option<String>,
@@ -3123,8 +3127,7 @@ pub(crate) async fn handle_mls_commit_frame(
         return CommitApplyOutcome::NoGroup;
     }
     // Epoch guard: commits arrive as a room broadcast, so they also reach fresh
-    // joiners already at the post-commit epoch and duplicate deliveries. Skip
-    // rather than erroring into the costly drop-group + re-bootstrap below.
+    // joiners already at the post-commit epoch and duplicate deliveries.
     let already_applied = wire_epoch
         .is_some_and(|we| mls_mgr.epoch(&group_key).is_ok_and(|own| own >= we));
     if already_applied {
@@ -3140,98 +3143,191 @@ pub(crate) async fn handle_mls_commit_frame(
         }
     };
 
-    match mls_mgr.process_commit(&group_key, &commit_bytes) {
-        Ok(()) => {
-            persist_mls_state(mls_mgr, crypto_store);
-            hollow_log!("[HOLLOW-MLS] Processed commit for {group_key}");
-
+    let meeting_host = mls_mgr.pinned_committer(&group_key).map(str::to_string);
+    let judged = mls_mgr.process_commit_judged(&group_key, &commit_bytes, |facts| {
+        super::mls_authority::judge_commit(
+            server_states, server_id, channel_id.as_deref(), meeting_host.as_deref(), facts,
+        )
+    });
+    match judged {
+        Ok(crate::crypto::Verdict::Accept) => {
             // Feed the catch-up ring: whoever missed this broadcast can be
             // served the exact frame later (join-order SFrame race fix).
             let cached_epoch = wire_epoch.or_else(|| mls_mgr.epoch(&group_key).ok());
             if let Some(cached_epoch) = cached_epoch {
                 mls_mgr.cache_commit(&group_key, cached_epoch, commit_b64.to_string());
             }
-
-            // EVICTION CHECK: a commit that removed OUR OWN leaf merges cleanly but leaves
-            // the group INACTIVE, so export and encrypt fail forever while has_group stays
-            // true, silently wedging SFrame. Still a CRDT member means a heal-driven
-            // remove + re-add, so drop the dead group and let the Welcome re-key us.
-            if !mls_mgr.is_active(&group_key) {
-                hollow_log!("[HOLLOW-MLS] Commit EVICTED us from {group_key} — dropping inactive group");
-                mls_mgr.remove_group(&group_key);
-                persist_mls_state(mls_mgr, crypto_store);
-                let still_member = server_states.get(server_id).is_some_and(|s| {
-                    s.members.keys().any(|m| super::resolver::same_identity(m, local_peer_str))
-                });
-                if !still_member {
-                    // A kick or a ban. There is no Welcome coming and we are not
-                    // entitled to one; the dropped group is the whole response.
-                    return CommitApplyOutcome::Applied;
-                }
-                // A remove + re-add. The removal commit always arrives BEFORE the Welcome, so
-                // asking for a leaf here answers a question already being answered and restarts
-                // the loop. Stamp the throttle WITHOUT sending, which alone silences the
-                // message-triggered, PeerJoined and RoomMembers opportunistic sends.
-                mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
-                hollow_log!(
-                    "[HOLLOW-MLS] Commit evicted us from {group_key}; holding {}s for a Welcome before re-bootstrapping",
-                    MLS_WELCOME_GRACE.as_secs(),
+            after_commit_merged(
+                mls_mgr, crypto_store, server_states, mls_bootstrap_requested, event_tx,
+                local_peer_str, server_id, &group_key, channel_id,
+            ).await
+        }
+        Ok(crate::crypto::Verdict::Hold(reason)) => {
+            // Processing spent the commit's key, so persist the ratchet as for any receive.
+            persist_mls_state(mls_mgr, crypto_store);
+            hollow_log!("[HOLLOW-MLS] Holding commit for {group_key} from {frame_sender}: {reason}");
+            if let Some(state) = server_states.get(server_id)
+                && let Ok(sv) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state))
+            {
+                // The committer's view is ahead of ours: pull its ops so the batch
+                // tick's retry can pass. No epoch hint, we already hold its commit.
+                send_message_to_peer(
+                    ws_cmd_tx, ws_room_peers, frame_sender,
+                    HavenMessage::SyncRequest {
+                        server_id: server_id.to_string(),
+                        state_vector_json: sv,
+                        mls_epoch: None,
+                    },
                 );
-                return CommitApplyOutcome::Evicted;
             }
+            CommitApplyOutcome::Held
+        }
+        Ok(crate::crypto::Verdict::Refuse(reason)) => {
+            persist_mls_state(mls_mgr, crypto_store);
+            hollow_log!("[HOLLOW-SECURITY] REFUSED commit for {group_key} from {frame_sender}: {reason}");
+            CommitApplyOutcome::Refused
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-MLS] Failed to process commit for {group_key} from {frame_sender}: {e}");
+            if let Some(state) = server_states.get(server_id) {
+                send_epoch_probe(
+                    mls_mgr, ws_cmd_tx, ws_room_peers, state, server_id,
+                    channel_id.as_deref(), local_peer_str, epoch_hint_cooldown,
+                );
+            }
+            CommitApplyOutcome::Failed
+        }
+    }
+}
 
-            // Emit epoch change for SFrame key rotation. For a subgroup
-            // (restricted voice channel), route it to that channel's cryptor.
+/// Everything owed after a received commit merged: persist, and either handle our
+/// own eviction or emit the new epoch's SFrame key.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn after_commit_merged(
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    local_peer_str: &str,
+    server_id: &str,
+    group_key: &str,
+    channel_id: &Option<String>,
+) -> CommitApplyOutcome {
+    persist_mls_state(mls_mgr, crypto_store);
+    hollow_log!("[HOLLOW-MLS] Processed commit for {group_key}");
+
+    // EVICTION CHECK: a commit that removed OUR OWN leaf merges cleanly but leaves
+    // the group INACTIVE, so export and encrypt fail forever while has_group stays
+    // true, silently wedging SFrame. Still a CRDT member means a repair, so drop the
+    // dead group and let the Welcome re-key us.
+    if !mls_mgr.is_active(group_key) {
+        hollow_log!("[HOLLOW-MLS] Commit EVICTED us from {group_key} — dropping inactive group");
+        mls_mgr.remove_group(group_key);
+        persist_mls_state(mls_mgr, crypto_store);
+        let still_member = server_states.get(server_id).is_some_and(|s| {
+            s.members.keys().any(|m| super::resolver::same_identity(m, local_peer_str))
+        });
+        if !still_member {
+            // A kick or a ban. There is no Welcome coming and we are not
+            // entitled to one; the dropped group is the whole response.
+            return CommitApplyOutcome::Applied;
+        }
+        // A repair. Its Welcome is on its way, so asking for a leaf here answers a
+        // question already being answered and restarts the loop. Stamp the throttle
+        // WITHOUT sending, which alone silences the opportunistic sends.
+        mls_bootstrap_requested.insert(group_key.to_string(), std::time::Instant::now());
+        hollow_log!(
+            "[HOLLOW-MLS] Commit evicted us from {group_key}; holding {}s for a Welcome before re-bootstrapping",
+            MLS_WELCOME_GRACE.as_secs(),
+        );
+        return CommitApplyOutcome::Evicted;
+    }
+
+    // Emit epoch change for SFrame key rotation. For a subgroup
+    // (restricted voice channel), route it to that channel's cryptor.
+    if let Ok(sframe_key) = mls_mgr.export_secret(group_key, "sframe", b"", 32) {
+        let epoch = mls_mgr.epoch(group_key).unwrap_or(0);
+        let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
+            server_id: server_id.to_string(), epoch, sframe_key,
+            channel_id: channel_id.clone(),
+        }).await;
+    }
+    CommitApplyOutcome::Applied
+}
+
+/// Rebind our own leaf wherever it still predates bound leaves. As the group
+/// authority we rebind in place, one commit cached for catch-up; otherwise we hand
+/// the authority a fresh KeyPackage and its repair replaces our leaf. Throttled per
+/// group by the bootstrap stamp, which also makes the repair's Welcome asked-for.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rebind_unbound_leaves(
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    local_peer_str: &str,
+) {
+    for group_key in mls_mgr.unbound_own_groups() {
+        if mls_bootstrap_requested
+            .get(&group_key)
+            .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)
+        {
+            continue;
+        }
+        let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
+        let Some(state) = server_states.get(&server_id) else { continue };
+        let authority = group_authority(state, channel_id.as_deref(), local_peer_str, ws_room_peers);
+        let we_are_authority =
+            authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
+
+        if we_are_authority && mls_mgr.can_rebind_in_place(&group_key) {
+            let commit = match mls_mgr.rebind_own_leaf(&group_key) {
+                Ok(commit) => commit,
+                Err(e) => {
+                    hollow_log!("[HOLLOW-MLS] Rebinding our leaf in {group_key} failed: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = mls_mgr.merge_pending_commit(&group_key) {
+                hollow_log!("[HOLLOW-MLS] Merging our rebind in {group_key} failed: {e}");
+                continue;
+            }
+            mls_mgr.drop_unused_legacy();
+            persist_mls_state(mls_mgr, crypto_store);
             if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                 let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                 let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
-                    server_id: server_id.to_string(), epoch, sframe_key,
+                    server_id: server_id.clone(), epoch, sframe_key,
                     channel_id: channel_id.clone(),
                 }).await;
             }
-            CommitApplyOutcome::Applied
+            let epoch = mls_mgr.epoch(&group_key).ok();
+            let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit);
+            broadcast_mls_commit(mls_mgr, ws_cmd_tx, &server_id, channel_id.clone(), commit_b64, epoch);
+            hollow_log!("[HOLLOW-MLS] Rebound our leaf in {group_key} in place");
+            continue;
         }
-        Err(e) => {
-            hollow_log!("[HOLLOW-MLS] Failed to process commit for {group_key}: {e}");
 
-            // Commit processing failed, so our group state is stale: drop it and ask for a
-            // re-bootstrap (server group from the owner, subgroup from its coordinator).
-            if mls_bootstrap_requested.get(&group_key).is_none_or(|t| t.elapsed() >= super::swarm::MLS_BOOTSTRAP_TIMEOUT) {
-                hollow_log!("[HOLLOW-MLS] Dropping stale MLS group and requesting re-bootstrap for {group_key}");
-                mls_mgr.remove_group(&group_key);
-                persist_mls_state(mls_mgr, crypto_store);
-
-                if let Some(state) = server_states.get(server_id) {
-                    let local_peer = local_peer_str.to_string();
-                    let target: Option<String> = match channel_id {
-                        Some(cid) => elect_subgroup_coordinator(
-                            state, cid, &local_peer, ws_room_peers,
-                        ).filter(|c| c != &local_peer),
-                        None => state.members_list().into_iter()
-                            .find(|m| m.peer_id != local_peer
-                                && state.roles.get(&m.peer_id)
-                                    .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                    .unwrap_or(false))
-                            .map(|m| m.peer_id.clone()),
-                    };
-                    if let Some(target) = target
-                        && let Ok(kp_bytes) = mint_key_package(mls_mgr, crypto_store)
-                    {
-                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
-                            server_id: server_id.to_string(),
-                            key_package: kp_b64,
-                            channel_id: channel_id.clone(),
-                        }).unwrap_or_default();
-                        let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data);
-                        if sent > 0 {
-                            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
-                            hollow_log!("[HOLLOW-MLS] Sent re-bootstrap KeyPackage to {target} ({sent} device(s)) for {group_key}");
-                        }
-                    }
-                }
-            }
-            CommitApplyOutcome::Failed
+        let target = if we_are_authority {
+            epoch_catchup_responder(state, channel_id.as_deref(), local_peer_str, ws_room_peers, local_peer_str)
+        } else {
+            authority
+        };
+        let Some(target) = target else { continue };
+        let Ok(kp_bytes) = mint_key_package(mls_mgr, crypto_store) else { continue };
+        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+            server_id: server_id.clone(),
+            key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+            channel_id: channel_id.clone(),
+        })
+        .unwrap_or_default();
+        if send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data) > 0 {
+            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+            hollow_log!("[HOLLOW-MLS] Asked {target} to repair our unbound leaf in {group_key}");
         }
     }
 }
@@ -3267,6 +3363,24 @@ fn group_authority(
             elect_coordinator(&members, local_peer, ws_room_peers)
         }
     }
+}
+
+/// Whether `requester` may repair our leaf in a group we hold: the owner, the member
+/// our own election names to answer our catch-up, or the subgroup's coordinator. A
+/// KeyPackage handed to anyone else could Welcome us into a group of their making.
+pub(crate) fn may_repair_our_leaf(
+    state: &crate::crdt::server_state::ServerState,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    requester: &str,
+) -> bool {
+    let is_owner = state.roles.get(requester)
+        .is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner);
+    let named = |elected: Option<String>| elected.is_some_and(|e| super::resolver::same_identity(&e, requester));
+    is_owner
+        || named(epoch_catchup_responder(state, channel_id, local_peer, ws_room_peers, local_peer))
+        || channel_id.is_some_and(|cid| named(elect_subgroup_coordinator(state, cid, local_peer, ws_room_peers)))
 }
 
 /// Who answers an epoch catch-up for a group, given that `behind` is the peer
@@ -3318,21 +3432,25 @@ fn epoch_catchup_responder(
 /// to fail a decrypt.
 ///
 ///  * theirs < ours and WE are the responder: serve `MlsCommitCatchup` from the
-///    commit cache, falling back to remove + re-add when it cannot bridge.
+///    commit cache, falling back to a repair when it cannot bridge.
+///  * equal, but their epoch digest differs from ours: they hold a fork, repair.
 ///  * theirs > ours: probe the authority ourselves. Non-destructive BY DESIGN,
 ///    because an unauthenticated plaintext hint must never make us drop a group.
-///  * equal / no group / conference / non-member: no-op.
+///  * otherwise, or no group / conference / non-member: no-op.
+///
+/// A repair only asks the member for a fresh KeyPackage; the removal of its old
+/// leaf rides the same commit as the re-add, which receivers require.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_epoch_hint(
     mls_mgr: &mut MlsManager,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
-    pending_mls_removals: &mut HashMap<String, Vec<String>>,
     epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     server_id: &str,
     channel_id: Option<&str>,
     their_epoch: u64,
+    their_epoch_auth: Option<&str>,
     from_peer: &str,
     local_peer_str: &str,
     // True when this arrived as an `MlsEpochProbe` addressed to us, so we answer it
@@ -3370,7 +3488,9 @@ pub(crate) fn handle_epoch_hint(
         return;
     }
 
-    if their_epoch < own_epoch {
+    let forked = their_epoch == own_epoch
+        && their_epoch_auth.is_some_and(|theirs| mls_mgr.epoch_auth_digest(&group_key).as_deref() != Some(theirs));
+    if their_epoch < own_epoch || forked {
         // ONE responder, no room-wide echo, elected with the peer that is behind
         // excluded so a stale AUTHORITY still gets an answer. A direct probe skips it.
         let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, from_peer);
@@ -3386,7 +3506,8 @@ pub(crate) fn handle_epoch_hint(
         }
         epoch_hint_cooldown.insert(cd_key, std::time::Instant::now());
 
-        match mls_mgr.cached_commits_after(&group_key, their_epoch, own_epoch) {
+        let catchup = if forked { None } else { mls_mgr.cached_commits_after(&group_key, their_epoch, own_epoch) };
+        match catchup {
             Some(commits) => {
                 hollow_log!(
                     "[HOLLOW-MLS] Serving commit catch-up to {from_peer} for {group_key}: {} commit(s), epochs {}..={}",
@@ -3402,17 +3523,12 @@ pub(crate) fn handle_epoch_hint(
                 );
             }
             None => {
-                // Cache cannot bridge: fall back to the repair that queues a remove of
-                // their leaves and pulls a fresh KeyPackage, re-adding them by Welcome.
+                // A fork, or the cache cannot bridge: repair them. Their fresh
+                // KeyPackage replaces their leaf in one commit and its Welcome
+                // carries them to our epoch.
                 hollow_log!(
-                    "[HOLLOW-MLS] Epoch hint from {from_peer} for {group_key} (theirs {their_epoch} < ours {own_epoch}) — cache can't bridge, queueing remove+re-add"
+                    "[HOLLOW-MLS] Epoch hint from {from_peer} for {group_key} (theirs {their_epoch}, ours {own_epoch}, forked {forked}) — requesting a KeyPackage to repair"
                 );
-                let leaves = mls_mgr.group_members(&group_key);
-                for leaf in &leaves {
-                    if super::resolver::same_identity(leaf, &from_master) {
-                        pending_mls_removals.entry(group_key.clone()).or_default().push(leaf.clone());
-                    }
-                }
                 send_message_to_peer(
                     ws_cmd_tx, ws_room_peers, from_peer,
                     HavenMessage::MlsKeyPackageRequest {
@@ -3470,6 +3586,7 @@ pub(crate) fn send_epoch_probe(
         server_id: server_id.to_string(),
         channel_id: channel_id.map(|c| c.to_string()),
         epoch: own_epoch,
+        epoch_auth: mls_mgr.epoch_auth_digest(&group_key),
     }).unwrap_or_default();
     let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &authority, data);
     if sent > 0 {
@@ -5997,10 +6114,9 @@ mod tests {
         assert!(mls.contains("fetch_post_refused("), "fetch.rs: MLS posts skip the live post gate");
     }
 
-    /// D1, D7 (member half): a KeyPackage is seated only under the credential of
-    /// the device that sent it, on the live, parked-join and meeting paths. The relay
-    /// can still name another sender; binding the credential to a device key is
-    /// the class D design.
+    /// D1, D7, D10: a KeyPackage is seated only when its leaf is bound to the device
+    /// that sent it, on the live, parked-join and meeting paths. The binding is the
+    /// device key itself, so not even the relay can name another sender.
     #[test]
     fn authz_key_package_must_name_its_sending_device() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs");
@@ -6011,14 +6127,14 @@ mod tests {
             swarm[start..start + end].to_string()
         };
         let live = arm("HavenMessage::MlsKeyPackage { server_id, key_package, channel_id: kp_channel_id } => {", "pending_mls_key_packages");
-        assert!(live.contains("key_package_identity(") && live.contains("id == peer_str"), "live KeyPackage arm");
+        assert!(live.contains("key_package_identity(") && live.contains("id.device == peer_str"), "live KeyPackage arm");
         let parked = arm("if parked && let Some(kp_b64) = key_package.as_ref() {", "pending_mls_key_packages");
-        assert!(parked.contains("key_package_identity(") && parked.contains("id != peer_str"), "parked-join KeyPackage");
+        assert!(parked.contains("key_package_identity(") && parked.contains("id.device != peer_str"), "parked-join KeyPackage");
         let conf = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/conference.rs"))
             .expect("read conference.rs");
         let knock = &conf[conf.find("if super::blocklist::is_blocked(sender_peer)").expect("knock handler")..];
         let knock = &knock[..knock.find("host_state.pending.insert(").expect("waiting room")];
-        assert!(knock.contains("key_package_identity(") && knock.contains("id == sender_peer"), "meeting knock");
+        assert!(knock.contains("key_package_identity(") && knock.contains("id.device == sender_peer"), "meeting knock");
     }
 
     /// L4: the live node shows a DM only after its signature verified. A decrypted

@@ -833,10 +833,10 @@ async fn export_and_emit_sframe(
 /// `MlsEpochChanged` on the Dart side), or request a bootstrap when we hold no
 /// group at all.
 ///
-/// Escalated (Dart applies a 60s cooldown) converges a genuinely forked group: if
-/// we are NOT the authority, drop our group and re-bootstrap from it; if we ARE,
-/// queue a remove and re-add of the failing peer's leaves. Conferences only ever
-/// re-emit, because dropping the conf group drops our admission to the call.
+/// Escalated (Dart applies a 60s cooldown) converges a genuinely forked group by a
+/// repair: if we are NOT the authority, we hand it a fresh KeyPackage and keep our
+/// group until its Welcome replaces it; if we ARE, we ask the failing peer for one.
+/// Conferences only ever re-emit, because the conf group IS our admission.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_voice_sframe_heal(
     server_id: String,
@@ -847,7 +847,6 @@ pub(crate) async fn handle_voice_sframe_heal(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server_states: &HashMap<String, ServerState>,
-    pending_mls_removals: &mut HashMap<String, Vec<String>>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     crypto_store: &CryptoStore,
@@ -933,38 +932,24 @@ pub(crate) async fn handle_voice_sframe_heal(
         .is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
 
     if we_are_authority {
-        // Remove and re-add the failing peer's leaves. The removal commit rotates
-        // the key for everyone; the peer converges via the re-add Welcome, or via
-        // its own commit-fail drop-and-rebootstrap when its group is forked.
+        // Repair the failing peer: each fresh KeyPackage it answers with replaces
+        // that device's leaf in one commit, and the Welcome brings it to our epoch.
         let peer_master = super::resolver::resolve(&peer_id);
-        let leaves = mls_mgr.group_members(&group_key);
-        let mut queued = 0usize;
-        for leaf in &leaves {
-            if super::resolver::same_identity(leaf, &peer_master) {
-                pending_mls_removals.entry(group_key.clone()).or_default().push(leaf.clone());
-                queued += 1;
-            }
-        }
-        // Fresh KeyPackage so the batch timer can re-add them (answered only
-        // when the peer is group-less, i.e. mid-recovery — harmless otherwise).
         let data = serde_json::to_vec(&HavenMessage::MlsKeyPackageRequest {
             server_id: server_id.clone(),
             channel_id: emit_cid,
         }).unwrap_or_default();
         send_raw_to_identity(ws_cmd_tx, ws_room_peers, &peer_master, data);
-        hollow_log!("[HOLLOW-VC-SFRAME] HEAL (authority): queued {queued} leaf removal(s) of {peer_master} from {group_key} + requested fresh KeyPackage");
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL (authority): requested a KeyPackage from {peer_master} to repair its leaf in {group_key}");
     } else if let Some(authority) = authority {
-        // Defer to the authority's view of the group: drop ours and get a
-        // fresh Welcome at their epoch. Cooldown-guarded — group surgery.
+        // Defer to the authority's view of the group: ask it for a repair and keep
+        // our group until the repair's Welcome replaces it. Cooldown-guarded.
         if mls_bootstrap_requested.get(&group_key)
             .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)
         {
-            hollow_log!("[HOLLOW-VC-SFRAME] HEAL: re-bootstrap for {group_key} already in flight");
+            hollow_log!("[HOLLOW-VC-SFRAME] HEAL: repair for {group_key} already in flight");
             return;
         }
-        hollow_log!("[HOLLOW-VC-SFRAME] HEAL: dropping {group_key} and re-bootstrapping from {authority}");
-        mls_mgr.remove_group(&group_key);
-        super::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
         match super::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
             Ok(kp_bytes) => {
                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
@@ -976,6 +961,7 @@ pub(crate) async fn handle_voice_sframe_heal(
                 let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &authority, data);
                 if sent > 0 {
                     mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                    hollow_log!("[HOLLOW-VC-SFRAME] HEAL: asked {authority} to repair our leaf in {group_key}");
                 }
             }
             Err(e) => hollow_log!("[HOLLOW-VC-SFRAME] HEAL: KeyPackage gen failed: {e}"),

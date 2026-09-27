@@ -61,6 +61,9 @@ struct RelayInner {
     /// returns DROPPED with no error to the sender), the loss mode behind the
     /// join-order MLS epoch race: the victim looks perfectly healthy to everyone.
     broadcast_deaf: HashSet<String>,
+    /// (sender, target) pairs whose direct frames the relay swallows: it keeps what
+    /// it read (recording still sees it) and delivers nothing.
+    swallowed_directs: HashSet<(String, String)>,
     /// Devices whose outgoing `profile_update` frames get their `support_creds`
     /// rewritten to `""` and their signature removed, IN FLIGHT. This is the attack
     /// `support_creds_sig` exists for: the plaintext fallback is a JSON body the relay
@@ -474,6 +477,11 @@ impl MockRelay {
         }
     }
 
+    /// Make the relay swallow every direct frame from one device to another.
+    pub(crate) fn swallow_direct(&self, from: &str, target: &str) {
+        self.inner.lock().unwrap().swallowed_directs.insert((from.to_string(), target.to_string()));
+    }
+
     pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
         let mut inner = self.inner.lock().unwrap();
         if deaf {
@@ -858,6 +866,9 @@ impl RelayInner {
     /// Deliver (or buffer) a direct frame. Returns 1 if it was delivered to a
     /// live socket, 0 if buffered offline (no egress now).
     fn deliver_direct(&mut self, room: &str, from: &str, target: &str, data: Vec<u8>, direct: bool) -> u64 {
+        if self.swallowed_directs.contains(&(from.to_string(), target.to_string())) {
+            return 0;
+        }
         let online = self.conns.get(target).map(|c| c.online).unwrap_or(false);
         if online && self.peer_in_room(room, target) {
             if let Some(conn) = self.conns.get(target) {
@@ -2277,8 +2288,8 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
             Ok(super::types::HavenMessage::MlsChannelMessage { .. }))
     }).expect("recorded MLS ciphertext");
     let epoch = j.mls_epoch(&server_id).await;
-    // ABSENCE proof: the replays must span more than MLS_DECRYPT_FAIL_WINDOW without
-    // any eviction, and "nothing happened" has no signal to poll (counted in BUDGET_MS).
+    // ABSENCE proof: replays spread over several seconds must not evict anyone, and
+    // "nothing happened" has no signal to poll (counted in BUDGET_MS).
     for _ in 0..4 {
         relay.inject(&server_id, &o.device_id, &j.device_id, frame.clone());
         sleep_ms(2100).await;
@@ -18909,11 +18920,12 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
     assert_eq!(m.mls_epoch(&server_id).await, Some(2), "M is at the same epoch");
     assert_eq!(j.mls_epoch(&server_id).await, Some(2), "J is at the same epoch");
 
-    // --- And a LEAF REPAIR costs exactly two: one remove, one re-add. ---
+    // --- And a LEAF REPAIR costs exactly one commit: the removal and the re-add. ---
     //
-    // The removal commit reaches J BEFORE the Welcome that puts it back, because phase 1
-    // goes out ahead of phase 2. Asking for a leaf on seeing that removal is what turned
-    // one repair into a treadmill, so J holds the eviction for a short grace instead.
+    // Receivers accept removing a current member's leaf only alongside a re-add of the
+    // same device, so both ride one commit. That commit can still reach J before the
+    // Welcome, and asking for a leaf on seeing it is what turned one repair into a
+    // treadmill, so J holds the eviction for a short grace instead.
     let request = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackageRequest {
         server_id: server_id.clone(),
         channel_id: None,
@@ -18923,10 +18935,10 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
 
     let epoch = expect_quiet_group(&[&o, &m, &j], &server_id, 60).await;
     assert_eq!(
-        epoch, 4,
-        "a leaf repair is one removal and one add: epoch 2 -> 3 -> 4. Higher \
-         means the evicted device asked for another leaf instead of waiting for \
-         the Welcome that was already on its way.",
+        epoch, 3,
+        "a leaf repair is one commit that removes and re-adds: epoch 2 -> 3. \
+         Higher means the evicted device asked for another leaf instead of \
+         waiting for the Welcome that was already on its way.",
     );
     assert_eq!(
         key_packages_sent(&j.device_id), 2,
@@ -21294,7 +21306,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-09-23: the three #90 gap and buffered-copy tests added three spawn staggers (3.6 s).
     // 2026-09-26: the HOL-SEC-003 hostile-relay test added one spawn stagger (1.2 s),
     // and the HOL-SEC-007 test one absence proof (0.5 s).
-    const BUDGET_MS: u64 = 625_900;
+    // 2026-09-27: the design D tests added absence proofs (a KeyPackage nobody seats,
+    // commits nobody merges, requests nobody answers, a Welcome nobody installs), the
+    // garbage spacing past the old failure window, and the persisted-MLS poll (13.3 s).
+    const BUDGET_MS: u64 = 639_200;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -24319,4 +24334,419 @@ async fn friend_liveness_check_is_device_keyed() {
     // The relay answered "online", so A re-joined the DM room it already sat in.
     assert!(relay.room_devices(&dm_room).contains(&a.device_id));
     drop(b);
+}
+
+// ── Design D: MLS leaf identity and group authority ───────────────────────────
+//
+// A leaf's key is its device key and its credential carries the master's certificate,
+// so no one, the relay included, seats a leaf in another device's name. Every commit and
+// Welcome is judged before it changes anything, and no frame that fails ever drops a
+// group. The hostile member below holds its REAL keys: its MLS state is loaded from
+// its own database, so everything it signs verifies.
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn frame(msg: &super::types::HavenMessage) -> Vec<u8> {
+    serde_json::to_vec(msg).unwrap()
+}
+
+fn keys(tag: u8) -> NativeKeypair {
+    NativeKeypair::from_secret_bytes(&seed_bytes(tag))
+}
+
+/// `node`'s MLS state as it persisted it, holding its real device and master keys.
+async fn hostile_mls_copy(node: &TestNode, tag: u8, group_key: &str) -> crate::crypto::MlsManager {
+    let live = node.mls_epoch(group_key).await;
+    for _ in 0..50 {
+        let store = crate::storage::MessageStore::open(&node.db_path, &node.passphrase).expect("open store");
+        if let Ok(Some((signer, cred, storage))) = store.load_mls_identity()
+            && let Ok(mut copy) = crate::crypto::MlsManager::from_persisted(
+                &signer, &cred, storage.as_deref(), &[group_key.to_string()],
+            )
+            && copy.epoch(group_key).ok() == live
+        {
+            copy.adopt_device_identity(&keys(tag), &keys(tag));
+            return copy;
+        }
+        sleep_ms(100).await;
+    }
+    panic!("{}'s persisted MLS state never caught up with its live epoch {live:?}", node.device_id);
+}
+
+/// The KeyPackages `device` put on the wire for `server_id`, oldest first.
+fn recorded_key_packages(relay: &MockRelay, device: &str, server_id: &str) -> Vec<Vec<u8>> {
+    use base64::Engine as _;
+    relay
+        .recorded_frames(device)
+        .iter()
+        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(f) {
+            Ok(super::types::HavenMessage::MlsKeyPackage { server_id: sid, key_package, .. }) if sid == server_id => {
+                base64::engine::general_purpose::STANDARD.decode(key_package).ok()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The group, as each node holds it, must be exactly `epoch` and `members`.
+async fn expect_group_unchanged(nodes: &[&TestNode], server_id: &str, epoch: u64, members: &[String], why: &str) {
+    for n in nodes {
+        assert_eq!(n.mls_epoch(server_id).await, Some(epoch), "{why}: {} moved off epoch {epoch}", n.device_id);
+        assert_eq!(n.mls_members_checked(server_id).await.as_deref(), Some(members), "{why}: {}'s leaves changed", n.device_id);
+    }
+}
+
+/// `receiver` still reads `sender`'s channel posts in `server_id`'s #general.
+async fn expect_channel_post_arrives(sender: &TestNode, receiver: &mut TestNode, server_id: &str, text: &str) {
+    drain_events(receiver);
+    sender
+        .cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.to_string(),
+            channel_id: general_channel_of(server_id),
+            text: text.to_string(),
+            message_id: format!("mid-{text}"),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(receiver, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text: t, .. } if t == text)
+    })
+    .await;
+    assert!(got, "{} must still read {}'s post {text:?}", receiver.device_id, sender.device_id);
+}
+
+/// D1, D10 (relay half of HOL-SEC-017): the relay speaks for a member device with a
+/// KeyPackage of its own, once under the device's bare id and once with the device's
+/// real certificate copied over another key. Neither is seated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_no_one_seats_a_leaf_in_another_devices_name() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, v, c, server_id) = setup_epoch_race_trio(&relay, 150, 151, 152).await;
+    let epoch = o.mls_epoch(&server_id).await.unwrap();
+    let members = o.mls_members_checked(&server_id).await.unwrap();
+
+    let bare = crate::crypto::MlsManager::new_legacy(&v.device_id).key_package_claiming(&v.device_id);
+    let v_certificate = crate::crypto::MlsManager::new(&keys(151), &keys(151)).unwrap().own_credential_text();
+    let copied = crate::crypto::MlsManager::new(&keys(160), &keys(160)).unwrap().key_package_claiming(&v_certificate);
+    for kp in [bare, copied] {
+        relay.inject_direct(&server_id, &v.device_id, &o.device_id, frame(&super::types::HavenMessage::MlsKeyPackage {
+            server_id: server_id.clone(),
+            key_package: b64(&kp),
+            channel_id: None,
+        }));
+    }
+    // ABSENCE: nothing to poll for "not seated"; two batch ticks (BUDGET_MS).
+    sleep_ms(4500).await;
+    expect_group_unchanged(&[&o, &v, &c], &server_id, epoch, &members, "a forged KeyPackage").await;
+}
+
+/// D2: a member with its real keys commits the eviction of another member, then the
+/// addition of an outsider. Every receiver holds both; nothing changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_cannot_evict_a_member_or_add_an_outsider() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, v, c, server_id) = setup_epoch_race_trio(&relay, 153, 154, 155).await;
+    let epoch = o.mls_epoch(&server_id).await.unwrap();
+    let members = o.mls_members_checked(&server_id).await.unwrap();
+
+    let mut hostile = hostile_mls_copy(&c, 155, &server_id).await;
+    let evict = hostile.commit_membership(&server_id, std::slice::from_ref(&v.device_id), &[]).unwrap();
+    let mut hostile = hostile_mls_copy(&c, 155, &server_id).await;
+    let outsider = crate::crypto::MlsManager::new(&keys(170), &keys(170)).unwrap();
+    let outsider_kp = outsider.key_package_claiming(&outsider.own_credential_text());
+    let admit = hostile
+        .commit_membership(&server_id, &[], &[(keys(170).peer_id(), outsider_kp)])
+        .unwrap();
+    for commit in [evict.commit, admit.commit] {
+        let f = frame(&super::types::HavenMessage::MlsCommit {
+            server_id: server_id.clone(),
+            commit: b64(&commit),
+            channel_id: None,
+            epoch: Some(epoch + 1),
+        });
+        relay.inject_direct(&server_id, &c.device_id, &o.device_id, f.clone());
+        relay.inject_direct(&server_id, &c.device_id, &v.device_id, f);
+    }
+    // ABSENCE: held commits are retried every tick; two ticks must change nothing.
+    sleep_ms(4500).await;
+    expect_group_unchanged(&[&o, &v], &server_id, epoch, &members, "a member's rogue commit").await;
+    let mut v = v;
+    expect_channel_post_arrives(&o, &mut v, &server_id, "still one group").await;
+    drain_events(&mut o);
+}
+
+/// D3, D5: a member that may not repair us gets no KeyPackage, and when the relay
+/// spoofs the owner to extract one, a Welcome built on it by anyone but the owner
+/// still cannot replace our group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_welcome_never_replaces_a_group_unasked() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 156, 157, 158).await;
+    let epoch = v.mls_epoch(&server_id).await.unwrap();
+    let members = v.mls_members_checked(&server_id).await.unwrap();
+    relay.set_recording(&v.device_id, true);
+    let request = frame(&super::types::HavenMessage::MlsKeyPackageRequest {
+        server_id: server_id.clone(),
+        channel_id: None,
+    });
+
+    // The member C asks V for a KeyPackage: V holds a leaf and C may not repair it.
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, request.clone());
+    // ABSENCE: a refused request leaves nothing to poll for (BUDGET_MS).
+    sleep_ms(1000).await;
+    assert!(recorded_key_packages(&relay, &v.device_id, &server_id).is_empty(),
+        "a member that may not repair V's leaf got a KeyPackage");
+
+    // The relay asks in the owner's name and keeps the answer to itself.
+    relay.swallow_direct(&v.device_id, &o.device_id);
+    relay.inject_direct(&server_id, &o.device_id, &v.device_id, request);
+    assert!(
+        wait_until(5, async || !recorded_key_packages(&relay, &v.device_id, &server_id).is_empty()).await,
+        "V answers the owner",
+    );
+    let stolen = recorded_key_packages(&relay, &v.device_id, &server_id).remove(0);
+
+    // C builds its own group under the server's id around that KeyPackage.
+    let mut substitute = crate::crypto::MlsManager::new(&keys(158), &keys(158)).unwrap();
+    substitute.create_group(&server_id).unwrap();
+    let (_, welcome) = substitute.add_member(&server_id, &stolen).unwrap();
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&super::types::HavenMessage::MlsWelcome {
+        server_id: server_id.clone(),
+        welcome: b64(&welcome),
+        channel_id: None,
+    }));
+    // ABSENCE: a refused Welcome leaves nothing to poll for (BUDGET_MS).
+    sleep_ms(1000).await;
+    expect_group_unchanged(&[&v], &server_id, epoch, &members, "an unasked Welcome").await;
+    expect_channel_post_arrives(&o, &mut v, &server_id, "not partitioned").await;
+}
+
+/// D5: a stranger gets no KeyPackage; the owner, who may repair us, does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_key_package_requests_need_a_member_who_may_repair() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, v, _c, server_id) = setup_epoch_race_trio(&relay, 159, 161, 162).await;
+    let stranger = spawn_node_on(&relay, 163, 164).await;
+    relay.set_recording(&v.device_id, true);
+    let request = frame(&super::types::HavenMessage::MlsKeyPackageRequest {
+        server_id: server_id.clone(),
+        channel_id: None,
+    });
+
+    relay.inject_direct(&server_id, &stranger.device_id, &v.device_id, request.clone());
+    // ABSENCE: a refused request leaves nothing to poll for (BUDGET_MS).
+    sleep_ms(1000).await;
+    assert!(recorded_key_packages(&relay, &v.device_id, &server_id).is_empty(),
+        "a stranger got a KeyPackage");
+
+    relay.inject_direct(&server_id, &o.device_id, &v.device_id, request);
+    assert!(
+        wait_until(5, async || recorded_key_packages(&relay, &v.device_id, &server_id).len() == 1).await,
+        "the owner may repair V's leaf and gets exactly one KeyPackage",
+    );
+}
+
+/// D4: frames that fail, from anyone in the room, never drop a group: a garbage and
+/// an epoch-less commit, a garbage Welcome, a garbage catch-up frame at our next
+/// epoch, and garbage ciphertext spread past the old three-failure window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_garbage_mls_frames_never_drop_a_group() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 165, 166, 167).await;
+    let epoch = v.mls_epoch(&server_id).await.unwrap();
+    let members = v.mls_members_checked(&server_id).await.unwrap();
+    let garbage = b64(&[0u8; 48]);
+    use super::types::HavenMessage;
+
+    for msg in [
+        HavenMessage::MlsCommit { server_id: server_id.clone(), commit: garbage.clone(), channel_id: None, epoch: None },
+        HavenMessage::MlsWelcome { server_id: server_id.clone(), welcome: garbage.clone(), channel_id: None },
+    ] {
+        relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&msg));
+    }
+    relay.inject_direct(&server_id, &o.device_id, &v.device_id, frame(&HavenMessage::MlsCommitCatchup {
+        server_id: server_id.clone(),
+        channel_id: None,
+        commits: vec![(epoch + 1, garbage.clone())],
+    }));
+    for _ in 0..4 {
+        relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&HavenMessage::MlsChannelMessage {
+            server_id: server_id.clone(),
+            body: garbage.clone(),
+            channel_id: None,
+        }));
+        // Spread past the old three-second failure window: the spacing IS the test.
+        sleep_ms(1200).await;
+    }
+    expect_group_unchanged(&[&v, &o], &server_id, epoch, &members, "garbage MLS frames").await;
+    expect_channel_post_arrives(&o, &mut v, &server_id, "group intact").await;
+}
+
+/// D9: the relay re-attributes a member's MLS-encrypted voice join to another member.
+/// The leaf that encrypted it is not the claimed sender, so nobody joins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_voice_frames_over_mls_come_from_their_leaf() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, v, c, server_id) = setup_epoch_race_trio(&relay, 168, 169, 171).await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "Voice Lounge".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    assert!(wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev
+            && channel_type == "voice"
+        {
+            voice_cid = Some(channel_id.clone());
+            return true;
+        }
+        false
+    })
+    .await, "voice channel must be created");
+    let voice_cid = voice_cid.unwrap();
+    assert!(
+        wait_until(10, async || {
+            v.live_server_state(&server_id).await.is_some_and(|s| s.channels.contains_key(&voice_cid))
+        })
+        .await,
+        "V learns the voice channel",
+    );
+
+    // O misses V's join; the relay keeps the MLS copy and replays it as C's.
+    relay.set_broadcast_deaf(&o.device_id, true);
+    relay.set_recording(&v.device_id, true);
+    v.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin { server_id: server_id.clone(), channel_id: voice_cid.clone() })
+        .await
+        .unwrap();
+    let mls_frames_of_v = || -> Vec<Vec<u8>> {
+        relay
+            .recorded_frames(&v.device_id)
+            .into_iter()
+            .filter(|f| matches!(
+                serde_json::from_slice::<super::types::HavenMessage>(f),
+                Ok(super::types::HavenMessage::MlsChannelMessage { .. })
+            ))
+            .collect()
+    };
+    assert!(wait_until(5, async || !mls_frames_of_v().is_empty()).await, "V's join rides MLS");
+    relay.set_broadcast_deaf(&o.device_id, false);
+    let mls_frames = mls_frames_of_v();
+    drain_events(&mut o);
+    for f in mls_frames {
+        relay.inject_direct(&server_id, &c.device_id, &o.device_id, f);
+    }
+    let c_joined = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { peer_id, .. } if *peer_id == c.device_id)
+    })
+    .await;
+    assert!(!c_joined, "a voice join encrypted by V's leaf was taken as C's");
+}
+
+/// D4 without the drop: a member that merged a commit nobody else saw holds a fork at
+/// the same epoch. Its probe carries its epoch digest, the owner sees the fork and
+/// repairs it, and the member reads the group again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_same_epoch_fork_heals_through_the_probe() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut v, mut c, server_id) = setup_epoch_race_trio(&relay, 172, 173, 174).await;
+    let epoch = o.mls_epoch(&server_id).await.unwrap();
+
+    // Only V sees a valid self-update from C's leaf: V is now one commit off.
+    let mut hostile = hostile_mls_copy(&c, 174, &server_id).await;
+    let fork = hostile.self_update_commit(&server_id);
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&super::types::HavenMessage::MlsCommit {
+        server_id: server_id.clone(),
+        commit: b64(&fork),
+        channel_id: None,
+        epoch: Some(epoch + 1),
+    }));
+    assert!(
+        wait_until(5, async || v.mls_epoch(&server_id).await == Some(epoch + 1)).await,
+        "V merged the commit only it saw",
+    );
+    // The real group moves to the same epoch number: C asks the owner to repair its leaf.
+    c.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: o.device_id.clone(),
+            escalate: true,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || o.mls_epoch(&server_id).await == Some(epoch + 1)).await,
+        "the owner committed the repair",
+    );
+    drain_events(&mut c);
+
+    // Owner posts until V, having probed with its digest and been repaired, reads it.
+    let mut healed = false;
+    for round in 0..6 {
+        drain_events(&mut v);
+        let text = format!("after the fork {round}");
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general_channel_of(&server_id),
+                text: text.clone(),
+                message_id: format!("fork-{round}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        if wait_event(&mut v, std::time::Duration::from_secs(5), |ev| {
+            matches!(ev, NetworkEvent::ChannelMessageReceived { text: t, .. } if *t == text)
+        })
+        .await
+            && v.mls_epoch(&server_id).await == o.mls_epoch(&server_id).await
+        {
+            healed = true;
+            break;
+        }
+    }
+    assert!(healed, "the forked member was repaired and reads the owner again");
+    drain_events(&mut o);
 }

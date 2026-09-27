@@ -89,6 +89,14 @@ fn note_pending_knock(conf_id: &str, display_name: String, avatar_hash: String, 
     }
 }
 
+/// Whether we are knocking on this meeting, so its Welcome was asked for.
+pub(crate) fn has_pending_knock(conf_id: &str) -> bool {
+    PENDING_KNOCKS
+        .lock()
+        .ok()
+        .is_some_and(|g| g.as_ref().is_some_and(|map| map.contains_key(conf_id)))
+}
+
 /// Clear a knock once it resolved (admitted / denied / left / meeting ended).
 pub(crate) fn clear_pending_knock(conf_id: &str) {
     if let Ok(mut g) = PENDING_KNOCKS.lock() {
@@ -307,15 +315,16 @@ pub(crate) async fn handle_inbound_join_request(
         hollow_log!("[HOLLOW-CONF] Dropped join request from blocked peer for {conf_id}");
         return;
     }
-    // Chat is attributed by the leaf credential, so the knocker is seated only
-    // under its own device id, never as the host or another participant (D7).
+    // Chat is attributed by the leaf, so the knocker is seated only under a leaf
+    // bound to its own device: never as the host or another participant, and the
+    // relay cannot swap in a KeyPackage of its own (D7).
     let names_sender = base64::engine::general_purpose::STANDARD
         .decode(&key_package_b64)
         .ok()
         .and_then(|kp| MlsManager::key_package_identity(&kp).ok())
-        .is_some_and(|id| id == sender_peer);
+        .is_some_and(|leaf| leaf.bound().is_some_and(|id| id.device == sender_peer));
     if !names_sender {
-        hollow_log!("[HOLLOW-SECURITY] Dropped a join request for {conf_id} from {sender_peer}: its KeyPackage names another device");
+        hollow_log!("[HOLLOW-SECURITY] Dropped a join request for {conf_id} from {sender_peer}: its KeyPackage is not bound to that device");
         return;
     }
 
@@ -525,7 +534,6 @@ pub(crate) async fn handle_inbound_chat(
     mls: &mut Option<MlsManager>,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    sender_peer: &str,
     conf_id: String,
     body_b64: String,
 ) {
@@ -536,10 +544,9 @@ pub(crate) async fn handle_inbound_chat(
         Ok(b) => b,
         Err(_) => return,
     };
-    // decrypt returns (plaintext, MLS leaf credential). Attribute chat by the
-    // CREDENTIAL: it is authenticated per message, so one room member cannot spoof
-    // another's lines. It is a DEVICE id, and Dart collapses it for display.
-    let (plaintext, credential) = match mls_mgr.decrypt(&sid, &ciphertext) {
+    // Chat is attributed by the sending leaf, which proves its device, so one room
+    // member cannot put words in another's mouth. Dart collapses the device for display.
+    let (plaintext, sender) = match mls_mgr.decrypt(&sid, &ciphertext) {
         Ok(p) => p,
         Err(e) => {
             hollow_log!("[HOLLOW-CONF] Chat decrypt failed for {conf_id}: {e}");
@@ -552,9 +559,8 @@ pub(crate) async fn handle_inbound_chat(
     let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let timestamp = parsed.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
     if text.is_empty() || !super::crypto_handler::message_body_fits(&text) { return; }
-    let sender = if credential.is_empty() { sender_peer.to_string() } else { credential };
     let _ = event_tx.send(NetworkEvent::ConferenceChatMessage {
-        conf_id, sender_peer_id: sender, text, timestamp,
+        conf_id, sender_peer_id: sender.device, text, timestamp,
     }).await;
 }
 
