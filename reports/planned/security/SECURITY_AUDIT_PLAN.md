@@ -151,8 +151,23 @@ into possible holes, so this file itself belongs on the security branch.
   registers folded onto the owner), **HOL-SEC-052** (Low: moderation edges,
   ownership). Vitalik's decisions: the owner is fixed; older servers keep joining
   on trust until their owner updates; invite links pin the owner; any member admits
-  with the gates re-checked. Proposed accepted risks AR-10..AR-12 (residuals R1..R3).
-- **Next:** the two remaining DESIGN sessions, each at xhigh with harness tests:
+  with the gates re-checked. Accepted risks AR-10..AR-12 (residuals R1..R3).
+- **Session 10 (2026-09-27): design A, every frame names its sender**
+  (`audit/design_A_frame_authority.md`, `node/frame_auth.rs`, inventories in
+  `audit/design_A_inventory/`). Every relay frame is sealed by its sending device and
+  bound to its room and recipient; replay is judged per message type in one
+  exhaustive list. **HOL-SEC-053** (Critical: the relay-stamped sender decided every
+  plaintext frame, including a server delete the owner's own device would sign),
+  **HOL-SEC-054** (held-back and replayed frames; also closes AR-09), **HOL-SEC-055**
+  (op log to any holder of a server id), **HOL-SEC-056** (a sibling announce reopened
+  a held server to any member's snapshot), **HOL-SEC-057** (full profiles to anyone),
+  **HOL-SEC-058** (share audio from any data channel), **HOL-SEC-059** (the push node
+  cleared every parked destroy order). Vitalik's decisions 13-16: everything in class
+  A lands in 0.12, C-24 in full, file content commitments, meeting host pinning.
+- **Next:** session 11 closes design A's open decisions (design section 5: all of
+  C-24, the file commitment, meetings, the relay, the smaller items, the web viewer's
+  sealing); then ID-1 with HOL-SEC-002. Older note follows.
+- **Before session 10:** the two remaining DESIGN sessions, each at xhigh with harness tests:
   class A with J8/J9 (plaintext control messages into Olm/MLS; also I4..I6, A17,
   J5, J7, the unsigned profile fields, a signed content hash for files, the variant
   left by HOL-SEC-022/023, signed epoch probes (S-20), meeting host pinning with the
@@ -785,6 +800,22 @@ Taken 2026-09-26, third round (phase B, see `audit/candidate_findings.md`):
 10. Device-list entries get device co-signatures, designed inside ID-1.
 11. Relay fixes deploy before the 0.12 client release, the pre-auth crash first.
 12. The unused `hollow_push_decrypt` export is deleted.
+
+Taken 2026-09-27, session 10 (design A, `audit/design_A_frame_authority.md` section 5):
+
+13. EVERYTHING in class A lands in 0.12, done properly, with no compatibility
+    shims: old clients simply update ("cleaner is better"; a half fix now backfires
+    later). That means all of claim C-24 (A-D1 option a): every control message that
+    reveals profiles, contact lists, device ownership, server structure or activity
+    moves into Olm or MLS, and the structural leaks too (DM room names from a
+    secret, the `~join` ring, file ids).
+14. Files carry a signed content commitment in 0.12 (A-D2): the author signs size,
+    SHA-256, name and extension inside the message signature, checked on every
+    completion path.
+15. Meetings pin their host (A-D3): self-certifying meeting ids, Welcomes and lobby
+    frames only from that host, a knock proof bound to the knocker.
+16. The relay items (A-D4) and the smaller items (A-D5) are fixed too, all before
+    ID-1.
 
 ## 8a. Identity authority design ID-1 (agreed 2026-09-26)
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
-use super::crypto_handler::{peer_is_reachable, send_message_to_peer, send_raw_to_peer};
+use super::crypto_handler::{peer_is_reachable, send_raw_to_peer};
 use super::types::*;
 
 /// Handle a WebRTC broadcast received from a gossip neighbor.
@@ -144,12 +144,10 @@ pub(crate) async fn handle_gossip_rotation(
     }
 }
 
-/// Handle gossip broadcast dedup eviction timer tick.
-/// Evicts stale broadcasts and falls back to direct request for timed-out relays.
+/// Handle gossip broadcast dedup eviction timer tick. A timed-out relay is logged,
+/// never chased.
 pub(crate) fn handle_gossip_eviction(
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) {
     for overlay in gossip_overlays.values_mut() {
         // Check for timed-out pending relays — file didn't arrive via gossip.
@@ -157,17 +155,9 @@ pub(crate) fn handle_gossip_eviction(
         for file_id in &timed_out {
             if let Some(relay) = overlay.pending_relays.get(file_id) {
                 hollow_log!(
-                    "[HOLLOW-GOSSIP] Broadcast timeout for file {} (bid={}) — requesting directly from origin {}",
+                    "[HOLLOW-GOSSIP] Broadcast timeout for file {} (bid={}) from origin {}",
                     file_id, relay.broadcast_id, relay.origin
                 );
-                // Fall back: request the file from the origin via normal FileRequest.
-                if peer_is_reachable(ws_room_peers, &relay.origin) {
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        &relay.origin,
-                        HavenMessage::FileProbe { file_id: file_id.clone() },
-                    );
-                }
             }
         }
         overlay.evict_stale_broadcasts();

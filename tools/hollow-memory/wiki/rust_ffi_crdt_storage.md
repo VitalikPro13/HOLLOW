@@ -53,7 +53,7 @@ Signature: `fn delete_server(server_id: String) -> Result<(), String>`. Sends `N
 Signature: `fn join_server(server_id: String, twitch_proof_json: Option<String>) -> Result<(), String>`. Sends `NodeCommand::JoinServer { server_id, twitch_proof_json }`. Connects to the server's signaling room and requests membership from existing members. The optional `twitch_proof_json` carries Twitch OAuth proof for servers requiring Twitch verification.
 
 ### crdt.rs:leave_server()
-Signature: `fn leave_server(server_id: String) -> Result<(), String>`. Sends `NodeCommand::LeaveServer { server_id }`. The local user is removed from the server. Owner cannot leave -- must delete or transfer ownership first.
+Signature: `fn leave_server(server_id: String) -> Result<(), String>`. Sends `NodeCommand::LeaveServer { server_id }`. The local user is removed from the server. Owner cannot leave, only delete (the owner is fixed; there is no transfer).
 
 ### Pending server joins (rung 1, 2026-08-29)
 

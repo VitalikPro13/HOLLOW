@@ -308,7 +308,7 @@ fn on_verified_sibling(
     for (sid, st) in server_states.iter() {
         if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
         let announce = serde_json::to_vec(
-            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
+            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner() },
         ).unwrap_or_default();
         if !announce.is_empty() {
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
@@ -568,6 +568,8 @@ async fn run_event_loop(
     let master_keypair = bundle_keypair.clone();
     let master_peer_str = local_peer_str.clone();
     crypto_handler::bind_olm_identity(&mut olm, &device_keypair);
+    let ws_cmd_tx = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx);
+    let mut frame_replays = super::frame_auth::ReplayGuard::default();
 
     // Decrypt-failure cooldown per peer: prevents session thrashing when many
     // in-flight chunks fail decrypt at once (a 340 MB file is 1360 chunks).
@@ -2968,6 +2970,7 @@ async fn run_event_loop(
                                 &mut peer_auto_dl,
                                 fwd_bridge,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
+                                super::frame_auth::now_ms(),
                             ).await;
                         }
                     }
@@ -4397,7 +4400,25 @@ async fn run_event_loop(
                             }
                         }
                     }
-                    WsEvent::BinaryDirect { room: _, from, data } => {
+                    WsEvent::BinaryDirect { room, from, data } => {
+                        // Stream chunks are live and sealed like every frame; a repeated
+                        // chunk only fails the file's own integrity check, so they skip
+                        // the replay guard a fast transfer would outgrow.
+                        let now_ms = super::frame_auth::now_ms();
+                        let delivery = super::frame_auth::Delivery::Direct { device: &device_peer_id, master: &local_peer_str };
+                        let data = match super::frame_auth::open(&data, &from, &room, delivery, now_ms) {
+                            Ok(opened) if from != device_peer_id && !super::frame_auth::is_stale(opened.ts_ms, now_ms) => {
+                                opened.body.to_vec()
+                            }
+                            Ok(_) => {
+                                hollow_log!("[HOLLOW-SECURITY] Dropped a stale or self-stamped stream chunk from {from} in {room}");
+                                continue;
+                            }
+                            Err(refusal) => {
+                                hollow_log!("[HOLLOW-SECURITY] Dropped a stream chunk from {from} in {room}: {refusal:?}");
+                                continue;
+                            }
+                        };
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
                             &mut pending_ws_transfers, &from, &data,
                         ) {
@@ -4573,10 +4594,32 @@ async fn run_event_loop(
                             }
                         }
                     }
-                    WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data } => {
-                        // Route incoming WS messages through the same handler as libp2p. A frame that
-                        // dies here must SAY so with the sender tagged: these payloads are always
-                        // HavenMessage JSON (binary chunks ride 0x02), so a failure here is abnormal.
+                    ws_frame @ (WsEvent::Message { .. } | WsEvent::DirectMessage { .. }) => {
+                        let direct = matches!(ws_frame, WsEvent::DirectMessage { .. });
+                        let (WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data }) = ws_frame else {
+                            continue;
+                        };
+                        // The relay never hands a device its own frames; one that does is
+                        // echoing a genuine seal back to us.
+                        if from == device_peer_id {
+                            hollow_log!("[HOLLOW-SECURITY] Dropped a frame stamped with our own device in {room}");
+                            continue;
+                        }
+                        let now_ms = super::frame_auth::now_ms();
+                        let delivery = if direct {
+                            super::frame_auth::Delivery::Direct { device: &device_peer_id, master: &local_peer_str }
+                        } else {
+                            super::frame_auth::Delivery::Room
+                        };
+                        let (frame_ts, frame_nonce, data) = match super::frame_auth::open(&data, &from, &room, delivery, now_ms) {
+                            Ok(opened) => (opened.ts_ms, opened.nonce, opened.body.to_vec()),
+                            Err(refusal) => {
+                                hollow_log!("[HOLLOW-SECURITY] Dropped a frame from {from} in {room}: {refusal:?}");
+                                continue;
+                            }
+                        };
+                        // A frame that dies here must SAY so with the sender tagged: these
+                        // payloads are always HavenMessage JSON (binary chunks ride 0x02).
                         let frame_len = data.len();
                         let utf8 = String::from_utf8(data);
                         if utf8.is_err() {
@@ -4610,6 +4653,13 @@ async fn run_event_loop(
                                         hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {from} — dropping message");
                                         continue;
                                     }
+                                    if msg.live_only()
+                                        && (super::frame_auth::is_stale(frame_ts, now_ms)
+                                            || !frame_replays.first_sight(&from, frame_nonce, frame_ts, now_ms))
+                                    {
+                                        hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live frame from {from} in {room}");
+                                        continue;
+                                    }
 
                                     // ── Recovery pool message interception ──
                                     // Handle recovery messages directly (plaintext, no Olm/MLS).
@@ -4618,7 +4668,6 @@ async fn run_event_loop(
                                         | HavenMessage::RecoveryWelcome { .. }
                                         | HavenMessage::RecoveryTransferPlan { .. }
                                         | HavenMessage::RecoveryShardReceived { .. }
-                                        | HavenMessage::RecoveryStatus { .. }
                                         | HavenMessage::RecoveryStop
                                     );
                                     if is_recovery {
@@ -4736,18 +4785,6 @@ async fn run_event_loop(
                                                         content_id,
                                                         shard_index,
                                                     }).await;
-                                                }
-                                                HavenMessage::RecoveryStatus { status_json } => {
-                                                    if let Ok(status) = serde_json::from_str::<crate::node::recovery_pool::PoolStatus>(&status_json) {
-                                                        let _ = event_tx.send(NetworkEvent::RecoveryPoolStatus {
-                                                            server_id: pool.server_id.clone(),
-                                                            total_files: status.total_files,
-                                                            reconstructable: status.reconstructable,
-                                                            partial: status.partial,
-                                                            no_shards: status.no_shards,
-                                                            progress_pct: status.progress_pct,
-                                                        }).await;
-                                                    }
                                                 }
                                                 HavenMessage::RecoveryStop => {
                                                     hollow_log!("[RECOVERY-POOL] Pool stopped by {from}");
@@ -4944,6 +4981,7 @@ async fn run_event_loop(
                                         &mut peer_auto_dl,
                                         fwd_bridge,
                                         msg,
+                                        frame_ts,
                                     ).await;
                             } else {
                                 hollow_log!("[HOLLOW-WS] Failed to parse HavenMessage from {from} in {room}");
@@ -5226,6 +5264,7 @@ async fn run_event_loop(
 
             _ = rebootstrap_timer.tick() => {
                 arm_started = Some(("timer", "rebootstrap", std::time::Instant::now()));
+                frame_replays.prune(super::frame_auth::now_ms());
                 // Primary peer discovery rides the LIVE WS connection, with no fresh TLS
                 // handshake. The HTTP bootstrap below is a non-fatal legacy fallback; its
                 // failures are logged quietly and never surfaced.
@@ -5770,7 +5809,7 @@ async fn run_event_loop(
             // -- Gossip broadcast dedup eviction timer (60s) --
             _ = gossip_eviction_timer.tick() => {
                 arm_started = Some(("timer", "gossip_eviction", std::time::Instant::now()));
-                super::gossip_relay::handle_gossip_eviction(&mut gossip_overlays, &ws_cmd_tx, &ws_room_peers);
+                super::gossip_relay::handle_gossip_eviction(&mut gossip_overlays);
             }
 
             // -- Gossip peer exchange timer (2 minutes) --
@@ -6684,6 +6723,8 @@ async fn handle_incoming_request(
     peer_auto_dl: &mut HashMap<String, u32>,
     fwd_bridge: FwdBridge<'_>,
     request: HavenMessage,
+    // When the sender sealed the frame: what carried signals are judged fresh by.
+    frame_ts_ms: i64,
 ) {
 
     match request {
@@ -6876,6 +6917,10 @@ async fn handle_incoming_request(
                     return;
                 }
             };
+            if olm.already_decrypted(peer_str, &ciphertext) {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a repeated Olm frame from {peer_str}");
+                return;
+            }
 
             let plaintext = if message_type == 0 {
                 let their_identity = match &identity_key {
@@ -7143,6 +7188,7 @@ async fn handle_incoming_request(
                 }
             };
 
+            olm.note_decrypted(peer_str, &ciphertext);
             // Persist only session ratchet after decrypt (account unchanged).
             persist_olm_session(olm, crypto_store, &peer_str);
 
@@ -7156,7 +7202,15 @@ async fn handle_incoming_request(
                 return;
             }
 
-            match serde_json::from_str::<MessageEnvelope>(&text) {
+            let envelope = serde_json::from_str::<MessageEnvelope>(&text);
+            if let Ok(env) = &envelope
+                && env.live_only()
+                && super::frame_auth::is_stale(frame_ts_ms, super::frame_auth::now_ms())
+            {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a live signal from {peer_str} that arrived too late");
+                return;
+            }
+            match envelope {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
                     let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
                     // The Olm fallback (no MLS group yet, offline replay) takes the same ingest
@@ -8817,10 +8871,15 @@ async fn handle_incoming_request(
         HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch } => {
             hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
 
-
-            if let Some(state) = server_states.get(&server_id) {
+            // The op log is the whole server (names, roles, bans, restricted channels), so
+            // only a member gets it. A tombstone has no members left: anyone asking gets
+            // just the owner's deletion op, all a reconnecting former member needs.
+            if let Some(state) = server_states.get(&server_id).filter(|s| s.is_member(peer_str) || s.is_deleted()) {
                 if let Ok(their_vector) = serde_json::from_str::<StateVector>(&state_vector_json) {
-                    let delta = crdt_sync::compute_delta(&state.op_log, &their_vector);
+                    let mut delta = crdt_sync::compute_delta(&state.op_log, &their_vector);
+                    if !state.is_member(peer_str) {
+                        delta.retain(|op| matches!(op.payload, CrdtPayload::ServerDeleted { .. }));
+                    }
                     if !delta.is_empty() {
                         if let Ok(ops_json) = serde_json::to_string(&delta) {
                             hollow_log!("[HOLLOW-CRDT] Sending {} delta ops to {peer_str}", delta.len());
@@ -9316,6 +9375,15 @@ async fn handle_incoming_request(
                 None => super::resolver::resolve(&peer_str),
             };
             let resolution_key = format!("{server_id}|{member_master}");
+            // A request sealed before the joiner last left was answered in an earlier
+            // membership; a ring or relay handing it back must not re-admit them. No clock
+            // slack: a voluntary leave is stamped by the joiner's own clock.
+            if server_states.get(&server_id).and_then(|s| s.left_at(&member_master))
+                .is_some_and(|left| frame_ts_ms.max(0) as u64 <= left)
+            {
+                hollow_log!("[HOLLOW-SECURITY] Ignored a join request from {peer_str} for {server_id} sealed before the joiner left");
+                return;
+            }
 
             if let Some(state) = server_states.get_mut(&server_id) {
                 // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices,
@@ -9790,6 +9858,12 @@ async fn handle_incoming_request(
                 return;
             }
 
+            // A resolution cannot answer an ask made after it was sealed: a far-future
+            // stamp would freeze every later ask of that joiner.
+            if requested_at > frame_ts_ms.saturating_add(super::frame_auth::LIVE_SKEW_MS) {
+                hollow_log!("[HOLLOW-SECURITY] Ignoring ServerJoinResolved from {peer_str} naming an ask after its own seal");
+                return;
+            }
             // Max-wins: an older copy replayed out of the ring must never undo a
             // newer answer.
             let key = format!("{server_id}|{joiner_master}");
@@ -9823,7 +9897,7 @@ async fn handle_incoming_request(
             // relay buffers it for an absent joiner and replays it on that
             // device's next join, which is normally the user asking AGAIN. A copy
             // naming an older ask must not touch the newer one.
-            if requested_at != 0 && requested_at != pending.requested_at {
+            if requested_at != pending.requested_at {
                 hollow_log!("[HOLLOW-CRDT] Ignoring a rejection for {server_id} that names ask {requested_at}, ours is {}", pending.requested_at);
                 return;
             }
@@ -9832,50 +9906,6 @@ async fn handle_incoming_request(
                 mls, crypto_store, server_id, reason,
             ).await;
         }
-        HavenMessage::ServerDeleteBroadcast { server_id } => {
-            hollow_log!("[HOLLOW-CRDT] ServerDeleteBroadcast from {peer_str} for server {server_id}");
-            
-
-            // SECURITY: Verify sender is the server Owner before deleting.
-            if let Some(state) = server_states.get(&server_id) {
-                let sender_role = state.get_role(&peer_str);
-                if sender_role != crate::crdt::operations::MemberRole::Owner {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED ServerDeleteBroadcast from non-owner {peer_str} (role: {:?}) for server {server_id}", sender_role);
-                    return;
-                }
-            } else {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED ServerDeleteBroadcast for unknown server {server_id}");
-                return;
-            }
-
-            // Legacy one-shot path (a pre-tombstone peer may still send this). Convert
-            // it to a TOMBSTONE rather than hard-delete: synthesize the owner's
-            // ServerDeleted op locally, apply and persist it, and keep the shell.
-            if let Some(state) = server_states.get_mut(&server_id) {
-                if !state.is_deleted() {
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
-                    let _ = state.apply_op(&op);
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        let _ = store.insert_crdt_op(&op);
-                        if let Ok(json) = serde_json::to_string(&*state) {
-                            let _ = store.save_server_state(&server_id, &json);
-                        }
-                    }
-                    if let Some(mls_mgr) = mls {
-                        mls_mgr.remove_group(&server_id);
-                        persist_mls_state(mls_mgr, crypto_store);
-                    }
-                    let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                        server_id,
-                    }).await;
-                }
-            }
-        }
-
         HavenMessage::MemberKickBroadcast { server_id } => {
             hollow_log!("[HOLLOW-CRDT] MemberKickBroadcast from {peer_str} — kicked from server {server_id}");
             
@@ -9895,12 +9925,15 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-SECURITY] REJECTED MemberKickBroadcast from {peer_str} — does not outrank us ({:?} vs {:?})", sender_role, our_role);
                     return;
                 }
+                if super::sync_handler::kick_predates_membership(state, &local_peer, frame_ts_ms) {
+                    hollow_log!("[HOLLOW-SECURITY] Ignored a kick from {peer_str} sealed before we joined {server_id}");
+                    return;
+                }
             } else {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED MemberKickBroadcast for unknown server {server_id}");
                 return;
             }
 
-            // Same cleanup as ServerDeleteBroadcast — remove ourselves from this server.
             if server_states.remove(&server_id).is_some() {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.delete_server_state(&server_id);
@@ -10092,14 +10125,6 @@ async fn handle_incoming_request(
                 }
             }
         }
-        HavenMessage::PeerDisconnecting => {
-            hollow_log!("[HOLLOW-SWARM] Peer {peer_str} is disconnecting gracefully");
-
-            let _ = event_tx.send(NetworkEvent::PeerDisconnected {
-                peer_id: peer_str.to_string(),
-            }).await;
-        }
-
         HavenMessage::SiblingProveRequest { nonce } => {
             // A peer in OUR inbox is challenging us to prove we are its sibling. We
             // sign `hollow-sibling:{our_master}:{our_device}:{nonce}` with the MASTER
@@ -10148,7 +10173,7 @@ async fn handle_incoming_request(
             );
         }
 
-        HavenMessage::SiblingServerAnnounce { server_id } => {
+        HavenMessage::SiblingServerAnnounce { server_id, owner } => {
             // Multi-device: one of OUR OWN devices created a server and is telling us
             // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
             // a stranger can't pull us into a server this way.
@@ -10161,24 +10186,27 @@ async fn handle_incoming_request(
             if pending_server_joins.contains_key(&server_id) {
                 return;
             }
-            // A tombstoned server we still hold the shell of → ignore (deletion
-            // reconciles via the grow-only CRDT path, not a re-join).
+            // A server we hold only needs the list refresh `ServerJoined` drives in Dart
+            // (a ServerUpdated nudge proved unreliable); presence sync converges its ops.
+            // A pending join here would let any member's snapshot replace our state. A
+            // tombstoned shell reconciles through the CRDT path, never a re-join.
             if let Some(state) = server_states.get(&server_id) {
-                if state.is_deleted() { return; }
+                if !state.is_deleted() {
+                    let _ = event_tx.send(NetworkEvent::ServerJoined {
+                        server_id: server_id.clone(),
+                        name: state.name().to_string(),
+                    }).await;
+                }
+                return;
             }
-            // ALWAYS run the inline join flow, even for a server we already hold. The
-            // flow ends in NetworkEvent::ServerJoined and Dart's `onServerCreated`,
-            // which unconditionally inserts the server into serverListProvider; a
-            // weaker ServerUpdated nudge proved unreliable at refreshing the list. For a
-            // server we hold, the responder's same-identity fast path just re-serves the
-            // snapshot and ops, and MLS is not re-keyed: we keep our existing leaf.
-            hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; running join flow (have_it={})", server_states.contains_key(&server_id));
+            hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; running join flow");
             // Lightweight inline join (mirrors handle_join_server): join the rooms and
             // send a ServerJoinRequest to the announcer, which same-identity fast-paths
             // us. The receiver's gates are `!is_sibling`, so no proof and NSFW pre-confirmed.
             pending_server_joins.insert(server_id.clone(), PendingJoin {
                 twitch_proof_json: None,
                 nsfw_confirmed: true,
+                owner_pin: owner,
                 ..Default::default()
             });
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
@@ -10289,6 +10317,11 @@ async fn handle_incoming_request(
                                 return;
                             }
                         };
+
+                        if envelope.live_only() && super::frame_auth::is_stale(frame_ts_ms, super::frame_auth::now_ms()) {
+                            hollow_log!("[HOLLOW-SECURITY] Dropped a live signal in {group_key} from leaf {sender_peer_id} that arrived too late");
+                            return;
+                        }
 
                         // Target filtering: if this envelope has a target and it's not us, discard.
                         // The ratchet already advanced by decrypting — that's the point.
@@ -10492,7 +10525,7 @@ async fn handle_incoming_request(
                                 // Kick author permission check is by MASTER identity.
                                 sync_handler::handle_envelope_member_kick(
                                     server_states, mls, bundle_keypair, event_tx,
-                                    &local_peer, &sender_master, sid,
+                                    &local_peer, &sender_master, sid, frame_ts_ms,
                                     crypto_store, crdt_store,
                                 ).await;
                             }
@@ -11614,6 +11647,11 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-FRIENDS] Ignoring stale FriendAccept from {peer_str}: answers request {stamp}, current is {stored}");
                             return;
                         }
+                        // Sealed before our current request existed, whatever it names.
+                        if status == "pending" && frame_ts_ms.saturating_add(super::frame_auth::LIVE_SKEW_MS) < stored {
+                            hollow_log!("[HOLLOW-SECURITY] Ignoring a FriendAccept from {peer_str} sealed before our request");
+                            return;
+                        }
                         was_pending = status == "pending";
                     }
                     row => {
@@ -11768,16 +11806,20 @@ async fn handle_incoming_request(
             // MASTER on our side, so resolve or the DELETE misses and the removal is
             // asymmetric. Delete both keys for any legacy device-stranded row.
             let master = super::resolver::resolve(&peer_str);
-            hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
-
+            let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+            // A removal sealed before this friendship began belongs to an earlier one,
+            // held back or replayed by the relay.
+            if let Ok(Some((_, _, since))) = store.get_friend_row(&master)
+                && frame_ts_ms + super::frame_auth::LIVE_SKEW_MS < since
             {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.save_setting(&social::removed_key(&master), "1");
-                    let _ = store.remove_friend(&master);
-                    if master != peer_str {
-                        let _ = store.remove_friend(&peer_str);
-                    }
-                }
+                hollow_log!("[HOLLOW-SECURITY] Ignored a removal from {peer_str} older than the friendship");
+                return;
+            }
+            hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
+            let _ = store.save_setting(&social::removed_key(&master), "1");
+            let _ = store.remove_friend(&master);
+            if master != peer_str {
+                let _ = store.remove_friend(&peer_str);
             }
 
             // CRITICAL: clear our OWN queued accept and request for this person. A
@@ -12060,7 +12102,7 @@ async fn handle_incoming_request(
             for (sid, st) in server_states.iter() {
                 if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
                 let announce = serde_json::to_vec(
-                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
+                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner() },
                 ).unwrap_or_default();
                 if !announce.is_empty() {
                     super::crypto_handler::send_raw_to_peer(ws_cmd_tx, ws_room_peers, peer_str, announce);
@@ -13291,6 +13333,10 @@ async fn handle_incoming_request(
 
         // -- Profile request --
         HavenMessage::ProfileRequest => {
+            if !social::profile_request_allowed(server_states, master_peer_str, peer_str, db_path, db_passphrase) {
+                hollow_log!("[HOLLOW-SECURITY] Ignored a ProfileRequest from {peer_str}: no relationship");
+                return;
+            }
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");
             // FULL send — this is the pull half of the light-announce protocol.
             social::send_own_profile_full_to_peer(
@@ -13317,6 +13363,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::ProfileRequestFor { target_peer_id } => {
+            // Only about someone the asker shares a server with, and only from a member.
+            let shared = server_states.values().any(|s| {
+                !s.is_deleted() && s.is_member(peer_str) && s.is_member(master_peer_str) && s.is_member(&target_peer_id)
+            });
+            if !shared || super::blocklist::is_blocked(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] Ignored a ProfileRequestFor from {peer_str}: no server shared with its target");
+                return;
+            }
             hollow_log!("[HOLLOW-PROFILE] ProfileRequestFor {target_peer_id} from {peer_str}");
             social::handle_profile_request_for(
                 ws_cmd_tx, ws_room_peers,

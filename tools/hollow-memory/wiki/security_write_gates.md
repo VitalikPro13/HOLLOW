@@ -464,6 +464,29 @@ Design: `reports/planned/security/audit/design_E_crdt_authority.md`. The fold li
 | Moderation edges and ownership | `op_allowed`, `role_change_allowed`, `kick_allowed`, `lifts_register`; authoring via `author_checked` | Unban/unmute need the setter's rank; nickname-class edits of others only over lower ranks; role permissions only admin/moderator/member and only bits held; nothing makes anyone Owner or touches the Owner; our own ops go through the same predicate. HOL-SEC-052 |
 | Backfilled channel posts | both `ChannelSyncBatch` arms -> `crypto_handler::backfill_author_allowed` | The author (master) must have been a member at the post's time per `member_record` (10 min slack); legacy-anchored servers are not judged until their checkpoint. HOL-SEC-048 |
 
+## 18. Every relay frame names its sender (design A, security audit session 10, 2026-09-27)
+
+Design: `reports/planned/security/audit/design_A_frame_authority.md`. The seal lives in
+`node/frame_auth.rs`; the replay classes are `HavenMessage::live_only` and
+`MessageEnvelope::live_only` in `node/types.rs` (exhaustive, a new variant must pick).
+
+| Write | Where | Gate |
+|---|---|---|
+| Any frame on the relay (0x03, 0x07, 0x04, image directs, 0x09, 0x02) | `frame_auth::spawn_sealer` (send), swarm Message/DirectMessage and BinaryDirect arms, `fetch.rs`, `forwarder/signaling.rs` (receive) | Sealed by the sending DEVICE over room, route (`*` or the target device/master), ms stamp, nonce and the body's hash; opened against the key inlined in `from`; wrong room/route/delivery, our own device as `from`, or a stamp over 300 s ahead is refused; unsealed is refused (the forwarder answers in kind until 0.12). HOL-SEC-053 |
+| Live-only frames | swarm arm after the rate limit | Older than 300 s, or a nonce this sender already used inside the window (`ReplayGuard`), is dropped. Stream chunks: fresh only. HOL-SEC-054 |
+| Signals inside Olm or MLS (calls, voice, forwarder, typing, sync requests) | Olm and MLS envelope dispatch | Judged by the carrying frame's seal time. HOL-SEC-054 |
+| A repeated Olm frame | `OlmManager::already_decrypted` before any teardown | The session's last 512 decrypted ciphertext digests; a repeat is dropped unread. HOL-SEC-054 |
+| Late-deliverable frames | FriendRemove, FriendAccept, MemberKickBroadcast (+MLS), ServerJoinRequest, ServerJoinRejected, ServerJoinResolved arms | Bounded by the seal time: removal vs the friendship's stamp, accept vs our request, kick vs `member_since`, join vs `left_at` (no slack), rejection = the exact pending ask, resolution never after its own seal. HOL-SEC-054 |
+| The op log | SyncRequest arm | Only to a current member; a tombstone serves anyone only its `ServerDeleted` op. HOL-SEC-055 |
+| A pending join from a sibling | SiblingServerAnnounce arm | Never for a held server (UI refresh only); pinned to the announcing device's anchor owner (`owner` field). HOL-SEC-056 |
+| Our full profile | ProfileRequest / ProfileRequestFor arms, `social::profile_request_allowed` | Own devices, friends, co-members, people we asked; a relayed profile only about someone the asker shares a server with. HOL-SEC-057 |
+| Share-audio output | Dart `onScreenAudioReceived` (call + voice providers) | Only the call's peer while we watch its share / a sharer we asked to watch. HOL-SEC-058 |
+| Parked destroy orders | `fetch::handle_kill_frame` | A junk or refused order is acked by its own stamp; bare ack only after a wipe. HOL-SEC-059 |
+
+Decided for session 11 (plan items 13-16): all of C-24 into Olm/MLS in 0.12 (structural
+leaks included), a signed file content commitment, meeting host pinning, the relay and
+smaller items (design section 5).
+
 ---
 
 ## Related

@@ -124,10 +124,7 @@ pub(crate) async fn run_fetch(
                     // The identity is gone; there is nothing left to fetch into.
                     break;
                 }
-                handle_text_frame(
-                    &text, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
-                    &mut messages,
-                );
+                handle_text_frame(&text);
             }
             Message::Binary(data) => {
                 handle_binary_frame(
@@ -251,10 +248,19 @@ async fn handle_kill_frame(
         return false;
     }
     let blob = value.get("blob").and_then(|v| v.as_str()).unwrap_or("");
+    // A bare ack clears every order parked for this device, so it follows only a
+    // wipe; turning one away names that one, or a junk deposit takes a genuine
+    // order down with it.
     let ack = serde_json::json!({ "type": "kill_ack" }).to_string();
+    let ack_this = match value.get("issued_at_ms").and_then(|v| v.as_i64()) {
+        Some(stamp) => serde_json::json!({ "type": "kill_ack", "issued_at_ms": stamp }).to_string(),
+        None => String::new(),
+    };
 
     let Some(order) = crate::node::destroy::decode_kill_blob(blob) else {
-        let _ = write.send(Message::Text(ack.into())).await;
+        if !ack_this.is_empty() {
+            let _ = write.send(Message::Text(ack_this.into())).await;
+        }
         return false;
     };
     match crate::node::destroy::judge_own_order(
@@ -270,7 +276,9 @@ async fn handle_kill_frame(
         }
         crate::node::destroy::Verdict::RejectPermanent(reason) => {
             hollow_log!("[HOLLOW-DESTROY] Fetch node refused a destruction order: {reason}");
-            let _ = write.send(Message::Text(ack.into())).await;
+            if !ack_this.is_empty() {
+                let _ = write.send(Message::Text(ack_this.into())).await;
+            }
             false
         }
         crate::node::destroy::Verdict::RejectTransient(reason) => {
@@ -280,16 +288,7 @@ async fn handle_kill_frame(
     }
 }
 
-fn handle_text_frame(
-    text: &str,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    db_path: &str,
-    db_passphrase: &str,
-    peer_id: &str,
-    local_master: &str,
-    messages: &mut Vec<FetchedDm>,
-) {
+fn handle_text_frame(text: &str) {
     if let Ok(server_msg) = serde_json::from_str::<serde_json::Value>(text) {
         let msg_type = server_msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match msg_type {
@@ -298,24 +297,6 @@ fn handle_text_frame(
             }
             "peer_joined" => {
                 // Sender came online in the room — messages may follow.
-            }
-            "direct" | "msg" => {
-                // Legacy text-direct fallback; real DMs arrive as 0x06 below.
-                let from = server_msg
-                    .get("from")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let data = server_msg
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                if let Some(dm) = try_decrypt_dm(
-                    from, data, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
-                ) {
-                    persist_olm_session(olm, crypto_store, from);
-                    messages.push(dm);
-                }
             }
             _ => {}
         }
@@ -344,16 +325,30 @@ fn handle_binary_frame(
     // A DM wake only cares about 0x06 (Olm ciphertext). A channel wake reads
     // channel payloads from all three: the buffered 0x09 fan-out replays as
     // 0x06, while messages sent live during the window arrive as 0x05/0x08.
-    let parsed: Option<(String, String)> = if data.len() > 3 {
-        match data[0] {
-            0x06 | 0x05 => parse_direct_frame(&data[1..]),
-            0x08 => parse_topic_frame(&data[1..]),
-            _ => None,
-        }
-    } else {
-        None
+    let parsed = match data.first() {
+        Some(0x06) => split_relay_frame(&data[1..], false).map(|f| (true, f)),
+        Some(0x05) => split_relay_frame(&data[1..], false).map(|f| (false, f)),
+        Some(0x08) => split_relay_frame(&data[1..], true).map(|f| (false, f)),
+        _ => None,
     };
-    if let Some((from, payload)) = parsed {
+    let payload = parsed.and_then(|(direct, (room, from, frame))| {
+        if from == peer_id {
+            return None;
+        }
+        let delivery = if direct {
+            crate::node::frame_auth::Delivery::Direct { device: peer_id, master: local_master }
+        } else {
+            crate::node::frame_auth::Delivery::Room
+        };
+        match crate::node::frame_auth::open(frame, &from, &room, delivery, crate::node::frame_auth::now_ms()) {
+            Ok(opened) => Some((from, String::from_utf8_lossy(opened.body).to_string())),
+            Err(refusal) => {
+                hollow_log!("[HOLLOW-FETCH] Dropped a frame from {from}: {refusal:?}");
+                None
+            }
+        }
+    });
+    if let Some((from, payload)) = payload {
         if server_room.is_some() {
             if let Some(entry) = try_process_channel_msg(
                 &from, &payload, mls, mls_dirty, db_path, db_passphrase, local_master,
@@ -434,35 +429,19 @@ fn merge_duplicate_entry(existing: &mut FetchedDm, m: FetchedDm) {
     existing.image_path = img;
 }
 
-/// Parse the body of a relay direct/broadcast frame (after the type byte):
-///   [room\0][sender\0][payload]
-/// Returns (sender_peer_id, payload). The room code is not needed: one room.
-fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
+/// Split a relay frame body (after its type byte) into `(room, sender, payload)`:
+/// `[room\0][sender\0][payload]`, or `[room\0][topic\0][sender\0][payload]` for a topic.
+fn split_relay_frame(body: &[u8], topic: bool) -> Option<(String, String, &[u8])> {
     let room_end = body.iter().position(|&b| b == 0)?;
-    let after_room = &body[room_end + 1..];
-    let sender_end = after_room.iter().position(|&b| b == 0)?;
-    let sender = String::from_utf8_lossy(&after_room[..sender_end]).to_string();
-    let payload = &after_room[sender_end + 1..];
-    let payload_str = String::from_utf8_lossy(payload).to_string();
-    Some((sender, payload_str))
-}
-
-/// Parse the body of a relay topic-broadcast frame (after the 0x08 type byte):
-///   [room\0][topic\0][sender\0][payload]
-/// Returns (sender_peer_id, payload_as_utf8_string).
-fn parse_topic_frame(body: &[u8]) -> Option<(String, String)> {
-    let room_end = body.iter().position(|&b| b == 0)?;
-    let after_room = &body[room_end + 1..];
-    let topic_end = after_room.iter().position(|&b| b == 0)?;
-    parse_direct_frame_tail(&after_room[topic_end + 1..])
-}
-
-/// [sender\0][payload] tail shared by topic frames.
-fn parse_direct_frame_tail(body: &[u8]) -> Option<(String, String)> {
-    let sender_end = body.iter().position(|&b| b == 0)?;
-    let sender = String::from_utf8_lossy(&body[..sender_end]).to_string();
-    let payload = String::from_utf8_lossy(&body[sender_end + 1..]).to_string();
-    Some((sender, payload))
+    let room = String::from_utf8_lossy(&body[..room_end]).to_string();
+    let mut rest = &body[room_end + 1..];
+    if topic {
+        let topic_end = rest.iter().position(|&b| b == 0)?;
+        rest = &rest[topic_end + 1..];
+    }
+    let sender_end = rest.iter().position(|&b| b == 0)?;
+    let sender = String::from_utf8_lossy(&rest[..sender_end]).to_string();
+    Some((room, sender, &rest[sender_end + 1..]))
 }
 
 /// Process a channel-wake payload: an MLS-encrypted or public channel message.
@@ -1520,6 +1499,21 @@ mod tests {
 
     fn kp(seed: u8) -> NativeKeypair {
         NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    #[tokio::test]
+    async fn a_junk_kill_deposit_is_acked_alone() {
+        let mut sink: Vec<Message> = Vec::new();
+        let junk = serde_json::json!({ "type": "kill_signal", "blob": "not-an-order", "issued_at_ms": 42 }).to_string();
+        let wiped = handle_kill_frame(&junk, &mut sink, "device", "master", "no-db", "no-pass").await;
+        assert!(!wiped);
+        let sent: Vec<String> = sink
+            .into_iter()
+            .filter_map(|m| if let Message::Text(t) = m { Some(t.to_string()) } else { None })
+            .collect();
+        assert_eq!(sent.len(), 1, "one ack, for the junk signal only: {sent:?}");
+        let ack: serde_json::Value = serde_json::from_str(&sent[0]).unwrap();
+        assert_eq!(ack["issued_at_ms"], 42, "a bare ack would clear every order parked for us");
     }
 
     fn pk_b64(k: &NativeKeypair) -> String {

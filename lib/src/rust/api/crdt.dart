@@ -564,7 +564,7 @@ int defaultRolePermissions({required String role}) =>
     RustLib.instance.api.crateApiCrdtDefaultRolePermissions(role: role);
 
 /// Leave a server. The local user is removed from the server.
-/// Owner cannot leave — must delete or transfer ownership first.
+/// The owner cannot leave, only delete the server.
 Future<void> leaveServer({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtLeaveServer(serverId: serverId);
 

@@ -78,6 +78,9 @@ struct RelayInner {
     /// later (a captured older announce is a replay, not a forgery).
     recording: HashSet<String>,
     recorded: Vec<(String, Vec<u8>)>,
+    /// device_peer_id -> its keypair, so a test can put a frame on the wire as that
+    /// device (sealed with its own key), exactly as the device itself would.
+    keys: HashMap<String, NativeKeypair>,
     /// (querying device, queried ids) for every `check_peers`: what a node ASKS the
     /// relay, which the reply alone cannot show.
     check_peers_log: Vec<(String, Vec<String>)>,
@@ -140,8 +143,16 @@ pub(crate) struct MockRelay {
 }
 
 impl MockRelay {
+    /// Knows the key of every `seed_bytes` identity a test can mint, so a frame put on
+    /// the wire as one of them is sealed by it, as that peer itself would seal it.
     pub(crate) fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(RelayInner::default())) }
+        let keys = (0..=u8::MAX)
+            .map(|tag| {
+                let kp = NativeKeypair::from_secret_bytes(&seed_bytes(tag));
+                (kp.peer_id(), kp)
+            })
+            .collect();
+        Self { inner: Arc::new(Mutex::new(RelayInner { keys, ..RelayInner::default() })) }
     }
 
     /// Register a freshly-spawned node: take ownership of its outbound command
@@ -168,6 +179,11 @@ impl MockRelay {
         // Tell the node it's connected (mirrors WsEvent::Connected on real auth).
         let _ = event_tx.send(WsEvent::Connected);
         self.deliver_kill_signal(&peer_id);
+    }
+
+    /// Remember a device's keypair, so injected frames can be sealed as that device.
+    pub(crate) fn register_key(&self, device: &NativeKeypair) {
+        self.inner.lock().unwrap().keys.insert(device.peer_id(), device.clone());
     }
 
     /// The relay hands a parked order over immediately after `auth_ok`, before any
@@ -247,7 +263,7 @@ impl MockRelay {
         inner
             .offline
             .get(target)
-            .map(|v| v.iter().map(|m| m.data.clone()).collect())
+            .map(|v| v.iter().map(|m| super::frame_auth::unchecked_body(&m.data).to_vec()).collect())
             .unwrap_or_default()
     }
 
@@ -268,8 +284,36 @@ impl MockRelay {
     #[allow(dead_code)]
     pub(crate) fn inject_direct(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
         let inner = self.inner.lock().unwrap();
+        let data = inner.sealed_as(from, room, target, data);
         if let Some(conn) = inner.conns.get(target) {
             let _ = conn.event_tx.send(WsEvent::DirectMessage {
+                room: room.to_string(),
+                from: from.to_string(),
+                data,
+            });
+        }
+    }
+
+    /// Deliver `data` to `target` as a direct frame stamped `from`, byte for byte: what a
+    /// relay can do with no key at all (an unsealed frame, or one sealed by someone else).
+    #[allow(dead_code)]
+    pub(crate) fn inject_raw_direct(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get(target) {
+            let _ = conn.event_tx.send(WsEvent::DirectMessage {
+                room: room.to_string(),
+                from: from.to_string(),
+                data,
+            });
+        }
+    }
+
+    /// [`Self::inject_raw_direct`] delivered as a room broadcast.
+    #[allow(dead_code)]
+    pub(crate) fn inject_raw(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get(target) {
+            let _ = conn.event_tx.send(WsEvent::Message {
                 room: room.to_string(),
                 from: from.to_string(),
                 data,
@@ -281,6 +325,7 @@ impl MockRelay {
     #[allow(dead_code)]
     pub(crate) fn inject_binary(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
         let inner = self.inner.lock().unwrap();
+        let data = inner.sealed_as(from, room, target, data);
         if let Some(conn) = inner.conns.get(target) {
             let _ = conn.event_tx.send(WsEvent::BinaryDirect {
                 room: room.to_string(),
@@ -368,7 +413,11 @@ impl MockRelay {
         inner
             .topic_buffers
             .get(&(room.to_string(), topic.to_string()))
-            .cloned()
+            .map(|ring| {
+                ring.iter()
+                    .map(|(from, data)| (from.clone(), super::frame_auth::unchecked_body(data).to_vec()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -390,6 +439,7 @@ impl MockRelay {
     #[allow(dead_code)]
     pub(crate) fn inject_topic(&self, room: &str, topic: &str, from: &str, data: Vec<u8>) {
         let mut inner = self.inner.lock().unwrap();
+        let data = inner.sealed_as(from, room, super::frame_auth::ROUTE_ROOM, data);
         inner
             .topic_buffers
             .entry((room.to_string(), topic.to_string()))
@@ -468,6 +518,7 @@ impl MockRelay {
     /// A replay: the bytes are whatever the test captured, unchanged.
     pub(crate) fn inject(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
         let inner = self.inner.lock().unwrap();
+        let data = inner.sealed_as(from, room, super::frame_auth::ROUTE_ROOM, data);
         if let Some(conn) = inner.conns.get(target).filter(|c| c.online) {
             let _ = conn.event_tx.send(WsEvent::Message {
                 room: room.to_string(),
@@ -594,7 +645,7 @@ impl MockRelay {
             }
             WsCommand::SendToRoom { room_code, data } => {
                 if let Some(m) = inner.meter.as_mut() { m.send_to_room_cmds += 1; }
-                let data = inner.on_the_wire(from, data);
+                let data = inner.on_the_wire(from, &room_code, super::frame_auth::ROUTE_ROOM, data);
                 let n = data.len() as u64;
                 let delivered = inner.broadcast_data_except(&room_code, from, WsEvent::Message {
                     room: room_code.clone(),
@@ -610,7 +661,7 @@ impl MockRelay {
             WsCommand::SendDirect { room_code, target_peer, data }
             | WsCommand::SendDirectImage { room_code, target_peer, data } => {
                 if let Some(m) = inner.meter.as_mut() { m.send_direct_cmds += 1; }
-                let data = inner.on_the_wire(from, data);
+                let data = inner.on_the_wire(from, &room_code, &target_peer, data);
                 let n = data.len() as u64;
                 let delivered = inner.deliver_direct(&room_code, from, &target_peer, data, true);
                 if let Some(m) = inner.meter.as_mut() {
@@ -635,7 +686,7 @@ impl MockRelay {
                 }
             }
             WsCommand::SendToRoomTopic { room_code, topic, data } => {
-                let data = inner.on_the_wire(from, data);
+                let data = inner.on_the_wire(from, &room_code, super::frame_auth::ROUTE_ROOM, data);
                 // Tee into the channel's ring buffer when registered (relay
                 // offline catch-up), mirroring the real relay.
                 let key = (room_code.clone(), topic.clone());
@@ -796,7 +847,7 @@ impl RelayInner {
     ///
     /// The only rewrite modelled is the `support_creds` strip, the one the field
     /// signature defends against: every receiver honours `""` as an explicit clear.
-    fn on_the_wire(&mut self, from: &str, data: Vec<u8>) -> Vec<u8> {
+    fn on_the_wire(&mut self, from: &str, room: &str, route: &str, data: Vec<u8>) -> Vec<u8> {
         if self.recording.contains(from) {
             self.recorded.push((from.to_string(), data.clone()));
         }
@@ -805,7 +856,9 @@ impl RelayInner {
         if !strip && !unsign {
             return data;
         }
-        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&data) else {
+        // The edit keeps a valid seal only because the mock holds the sender's key; a
+        // real relay's edit breaks the seal, so this reaches the field signature beneath.
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(&data)) else {
             return data;
         };
         let Some(obj) = value.as_object_mut() else { return data };
@@ -816,7 +869,23 @@ impl RelayInner {
             obj.insert("support_creds".to_string(), serde_json::Value::String(String::new()));
         }
         obj.remove("support_creds_sig");
-        serde_json::to_vec(&value).unwrap_or(data)
+        let Ok(body) = serde_json::to_vec(&value) else { return data };
+        match self.keys.get(from) {
+            Some(kp) => super::frame_auth::seal(kp, room, route, &body),
+            None => body,
+        }
+    }
+
+    /// `data` as `from` would put it on the wire: already sealed frames (a capture)
+    /// pass unchanged, a bare body is sealed with `from`'s key when the relay knows it.
+    fn sealed_as(&self, from: &str, room: &str, route: &str, data: Vec<u8>) -> Vec<u8> {
+        if data.starts_with(&super::frame_auth::MAGIC) {
+            return data;
+        }
+        match self.keys.get(from) {
+            Some(kp) => super::frame_auth::seal(kp, room, route, &data),
+            None => data,
+        }
     }
 
     fn peer_in_room(&self, room: &str, peer: &str) -> bool {
@@ -1610,6 +1679,7 @@ async fn spawn_node_full(
     .expect("spawn_node_mock");
 
     let device_id = device.peer_id();
+    relay.register_key(&device);
     relay.register(device_id.clone(), ws_cmd_rx, ws_event_tx);
 
     TestNode {
@@ -1685,6 +1755,7 @@ async fn spawn_node_on_db(
     .expect("spawn_node_mock");
 
     let device_id = device.peer_id();
+    relay.register_key(&device);
     relay.register(device_id.clone(), ws_cmd_rx, ws_event_tx);
 
     TestNode {
@@ -2289,7 +2360,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     assert!(!row.is_mine, "received message is not is_mine on the joiner");
 
     let frame = relay.recorded_frames(&o.device_id).into_iter().find(|frame| {
-        matches!(serde_json::from_slice::<super::types::HavenMessage>(frame),
+        matches!(serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(frame)),
             Ok(super::types::HavenMessage::MlsChannelMessage { .. }))
     }).expect("recorded MLS ciphertext");
     let epoch = j.mls_epoch(&server_id).await;
@@ -3304,7 +3375,7 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
     // The handshake left a signed KeyRequest on the wire. Whoever sent it is the
     // device the relay will impersonate; whoever it was addressed to is the victim.
     let key_request_to = |frame: &Vec<u8>| -> Option<String> {
-        match serde_json::from_slice::<HavenMessage>(frame) {
+        match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(frame)) {
             Ok(HavenMessage::KeyRequest { to: Some(to), .. }) => Some(to),
             _ => None,
         }
@@ -3325,17 +3396,20 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
         .expect("the handshake must have put a signed KeyRequest on the wire");
     let victim_node = if victim == a.device_id { &mut a } else { &mut b };
 
-    // Replayed inside its 300 s window, the request makes the victim publish a fresh
-    // one-time key in a KeyBundle. The impersonated device already holds a session
-    // and ignores that bundle, so the key stays unused. Replayed until it lands,
-    // since the handshake may have armed the victim's 5 s re-key cooldown.
+    // The request makes the victim publish a fresh one-time key in a KeyBundle. The
+    // impersonated device already holds a session and ignores that bundle, so the key
+    // stays unused. The frame layer now refuses a replay of the captured frame
+    // (`authz_a_live_frame_is_taken_once_and_only_while_fresh`); its body is resealed
+    // here, a power only the harness has, so the test still reaches the PreKey gate.
+    // Sent until it lands, since the handshake may have armed the 5 s re-key cooldown.
+    let request = super::frame_auth::unchecked_body(&request).to_vec();
     let seen = relay.recorded_frames(&victim).len();
     let mut bundle = None;
     wait_until(15, async || {
         relay.inject_direct(&dm_room, &impersonated, &victim, request.clone());
         for frame in relay.recorded_frames(&victim).into_iter().skip(seen) {
             if let Ok(HavenMessage::KeyBundle { identity_key, one_time_key, to: Some(to), .. }) =
-                serde_json::from_slice::<HavenMessage>(&frame)
+                serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&frame))
             {
                 if to == impersonated {
                     bundle = Some((identity_key, one_time_key));
@@ -3346,7 +3420,7 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
         false
     })
     .await;
-    let (victim_ik, victim_otk) = bundle.expect("the replayed KeyRequest must draw a KeyBundle");
+    let (victim_ik, victim_otk) = bundle.expect("the KeyRequest must draw a KeyBundle");
 
     // The relay's own Olm account opens a session on that key and speaks first, as
     // the impersonated device, with a call invite carrying a media key it chose.
@@ -3425,7 +3499,7 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
         let frames = relay.recorded_frames(&victim);
         for frame in frames.iter().skip(tried) {
             let Ok(HavenMessage::Encrypted { message_type, body, .. }) =
-                serde_json::from_slice::<HavenMessage>(frame)
+                serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(frame))
             else {
                 continue;
             };
@@ -9847,7 +9921,7 @@ async fn stale_friend_accept_replayed_after_readd_is_dropped() {
         friend_row(n, m).map(|(s, _)| s) == Some("accepted".to_string())
     };
     let is_accept = |f: &Vec<u8>| {
-        std::str::from_utf8(f).map(|s| s.contains("\"friend_accept\"")).unwrap_or(false)
+        std::str::from_utf8(super::frame_auth::unchecked_body(f)).map(|s| s.contains("\"friend_accept\"")).unwrap_or(false)
     };
 
     a.cmd_tx
@@ -16675,7 +16749,9 @@ impl RawSocket {
                 return out;
             }
             match tokio::time::timeout(remaining, self.event_rx.recv()).await {
-                Ok(Some(WsEvent::DirectMessage { data, .. })) => out.push(data),
+                Ok(Some(WsEvent::DirectMessage { data, .. })) => {
+                    out.push(super::frame_auth::unchecked_body(&data).to_vec())
+                }
                 Ok(Some(_)) => {}
                 _ => return out,
             }
@@ -18915,7 +18991,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
             .iter()
             .filter(|f| {
                 matches!(
-                    serde_json::from_slice::<super::types::HavenMessage>(f),
+                    serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(f)),
                     Ok(super::types::HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. })
                         if *sid == server_id
                 )
@@ -21359,7 +21435,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // garbage spacing past the old failure window, and the persisted-MLS poll (13.3 s).
     // 2026-09-27: the design E admission test added one absence proof, admissions
     // nobody applies (1.5 s).
-    const BUDGET_MS: u64 = 640_700;
+    // 2026-09-27: the design A frame tests added one spawn stagger and one absence
+    // proof, a KeyRequest the relay must never see (2.7 s).
+    const BUDGET_MS: u64 = 643_400;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -21772,7 +21850,7 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
         .recorded_frames(&v_dev)
         .into_iter()
         .filter(|data| {
-            serde_json::from_slice::<serde_json::Value>(data)
+            serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(data))
                 .ok()
                 .and_then(|val| {
                     let obj = val.as_object()?.clone();
@@ -22092,7 +22170,7 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
         .recorded_frames(&a.device_id)
         .into_iter()
         .filter(|data| {
-            serde_json::from_slice::<serde_json::Value>(data)
+            serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(data))
                 .ok()
                 .and_then(|v| {
                     let obj = v.as_object()?.clone();
@@ -22667,7 +22745,7 @@ fn frames_of_type(relay: &MockRelay, device: &str, kind: &str) -> Vec<serde_json
     relay
         .recorded_frames(device)
         .into_iter()
-        .filter_map(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
+        .filter_map(|d| serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(&d)).ok())
         .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some(kind))
         .collect()
 }
@@ -24436,7 +24514,7 @@ fn recorded_key_packages(relay: &MockRelay, device: &str, server_id: &str) -> Ve
     relay
         .recorded_frames(device)
         .iter()
-        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(f) {
+        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(f)) {
             Ok(super::types::HavenMessage::MlsKeyPackage { server_id: sid, key_package, .. }) if sid == server_id => {
                 base64::engine::general_purpose::STANDARD.decode(key_package).ok()
             }
@@ -24714,7 +24792,7 @@ async fn authz_voice_frames_over_mls_come_from_their_leaf() {
             .recorded_frames(&v.device_id)
             .into_iter()
             .filter(|f| matches!(
-                serde_json::from_slice::<super::types::HavenMessage>(f),
+                serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(f)),
                 Ok(super::types::HavenMessage::MlsChannelMessage { .. })
             ))
             .collect()
@@ -24924,10 +25002,12 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
     let relay = MockRelay::new();
     let (o, m, x, server_id) = three_member_server(&relay, 184, 185, 186).await;
     let (banned, open, closed) = (keys(187).peer_id(), keys(188).peer_id(), keys(189).peer_id());
+    // One author never stamps two ops with one clock, so neither may the forger.
+    let clock = std::sync::atomic::AtomicU64::new(0);
     let admit = |who: &str| crdt_broadcast_frame(&server_id, &forge_crdt_op(
         &server_id, &m.master_id,
         crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: who.into(), display_name: "z".into(), follow: None },
-        0, Some(&m.master_kp),
+        clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed), Some(&m.master_kp),
     ));
     let deliver = |f: Vec<u8>| for target in [&o, &x] {
         relay.inject(&server_id, &m.device_id, &target.device_id, f.clone());
@@ -25070,4 +25150,496 @@ async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
     assert!(state.is_member(&ids[1]) && state.is_member(&ids[2]));
     assert_eq!(state.name(), "Old Server");
     drop((o, b));
+}
+
+// ---------------------------------------------------------------------------
+// Design A: every frame names its sender (`frame_auth`). The relay stamps `from`;
+// these tests use only what a relay can do with frames it forwards.
+// ---------------------------------------------------------------------------
+
+/// Two friends with a live Olm session and both devices in their DM room.
+async fn friend_pair(relay: &MockRelay, a_tag: u8, b_tag: u8) -> (TestNode, TestNode) {
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(a_tag)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(b_tag)).peer_id();
+    let a = spawn_node_with_friends(relay, a_tag, a_tag, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let b = spawn_node_with_friends(relay, b_tag, b_tag, &[&a_master]).await;
+    expect_dm_pair_ready(relay, &a, &b, 20).await;
+    (a, b)
+}
+
+fn is_friend(node: &TestNode, master: &str) -> bool {
+    friend_row(node, master).is_some_and(|(status, _)| status == "accepted")
+}
+
+fn removal() -> Vec<u8> {
+    serde_json::to_vec(&super::types::HavenMessage::FriendRemove).unwrap()
+}
+
+/// Wait until `to` has handled every frame delivered to it so far: frames reach a node
+/// in order, so once a typing frame sealed by `from_tag` shows, all before it are done.
+async fn flush_frames(relay: &MockRelay, room: &str, from_tag: u8, to: &mut TestNode) {
+    let from = NativeKeypair::from_secret_bytes(&seed_bytes(from_tag));
+    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
+        server_id: String::new(),
+        channel_id: String::new(),
+    })
+    .unwrap();
+    drain_events(to);
+    relay.inject_raw_direct(room, &from.peer_id(), &to.device_id, super::frame_auth::seal(&from, room, &to.device_id, &typing));
+    assert!(
+        wait_event(to, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::TypingStarted { .. })).await,
+        "the barrier frame must arrive"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_the_relay_cannot_send_a_frame_in_a_members_name() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 181, 182).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+
+    // Unsealed, and sealed by a key the relay holds: both in A's name.
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, removal());
+    let relay_key = NativeKeypair::from_secret_bytes(&seed_bytes(183));
+    let resealed = super::frame_auth::seal(&relay_key, &room, &b.device_id, &removal());
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, resealed);
+    flush_frames(&relay, &room, 181, &mut b).await;
+    assert!(is_friend(&b, &a.master_id), "a removal A never sealed must not unfriend");
+
+    // The same removal sealed by A itself lands, so the refusals above were the seal's.
+    relay.inject_direct(&room, &a.device_id, &b.device_id, removal());
+    assert!(
+        wait_until(10, async || !is_friend(&b, &a.master_id)).await,
+        "A's own sealed removal must land"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_sealed_frame_cannot_be_moved_to_another_room_or_device() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 184, 185).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(184));
+
+    // A genuine removal A sealed for another device, for another room, and for a
+    // whole room, each delivered to B as a direct in the DM room.
+    let elsewhere = NativeKeypair::from_secret_bytes(&seed_bytes(186)).peer_id();
+    let for_another_device = super::frame_auth::seal(&a_key, &room, &elsewhere, &removal());
+    let for_another_room = super::frame_auth::seal(&a_key, "another-room", &b.device_id, &removal());
+    let for_the_room = super::frame_auth::seal(&a_key, &room, super::frame_auth::ROUTE_ROOM, &removal());
+    for frame in [for_another_device, for_another_room, for_the_room.clone()] {
+        relay.inject_raw_direct(&room, &a.device_id, &b.device_id, frame);
+    }
+    // A direct sealed for B, delivered as a room broadcast.
+    let for_b = super::frame_auth::seal(&a_key, &room, &b.device_id, &removal());
+    relay.inject_raw(&room, &a.device_id, &b.device_id, for_b.clone());
+    flush_frames(&relay, &room, 184, &mut b).await;
+    assert!(is_friend(&b, &a.master_id), "a frame moved off its room or route must be refused");
+
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, for_b);
+    assert!(
+        wait_until(10, async || !is_friend(&b, &a.master_id)).await,
+        "the same frame on its own route must land"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_the_relay_cannot_echo_a_devices_own_frame_back_to_it() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 187, 188).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(188));
+    let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(187));
+    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
+        server_id: String::new(),
+        channel_id: String::new(),
+    })
+    .unwrap();
+    drain_events(&mut b);
+    let typed = async |b: &mut TestNode| {
+        wait_event(b, std::time::Duration::from_millis(1500), |ev| {
+            matches!(ev, NetworkEvent::TypingStarted { .. })
+        })
+        .await
+    };
+
+    // B's own genuine seal, handed back to B: every "is this us" gate would pass it.
+    let own = super::frame_auth::seal(&b_key, &room, &b.device_id, &typing);
+    relay.inject_raw_direct(&room, &b.device_id, &b.device_id, own);
+    assert!(!typed(&mut b).await, "a device's own frame handed back to it must be dropped unread");
+
+    let from_a = super::frame_auth::seal(&a_key, &room, &b.device_id, &typing);
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, from_a);
+    assert!(typed(&mut b).await, "the same frame from A is taken");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_removal_older_than_the_friendship_is_ignored() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 189, 190).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(189));
+    // Seeded friendships are stamped 0; this one began an hour ago.
+    {
+        let store = b.store();
+        store.remove_friend(&a.master_id).unwrap();
+        store.save_friend(&a.master_id, "accepted", "", super::frame_auth::now_ms() - 3600 * 1000).unwrap();
+    }
+
+    // A removal A sealed a day ago, before this friendship: held back or replayed.
+    let a_day_ago = super::frame_auth::now_ms() - 24 * 3600 * 1000;
+    let old = super::frame_auth::seal_at(&a_key, &room, &b.device_id, a_day_ago, [9; 16], &removal());
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, old);
+    flush_frames(&relay, &room, 189, &mut b).await;
+    assert!(is_friend(&b, &a.master_id), "a removal from before the friendship must not end it");
+
+    relay.inject_direct(&room, &a.device_id, &b.device_id, removal());
+    assert!(
+        wait_until(10, async || !is_friend(&b, &a.master_id)).await,
+        "a removal sealed now must land"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_live_frame_is_taken_once_and_only_while_fresh() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 191, 192).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(191));
+    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
+        server_id: String::new(),
+        channel_id: String::new(),
+    })
+    .unwrap();
+    drain_events(&mut b);
+    let typed = async |b: &mut TestNode| {
+        wait_event(b, std::time::Duration::from_millis(1500), |ev| {
+            matches!(ev, NetworkEvent::TypingStarted { .. })
+        })
+        .await
+    };
+
+    let stale_at = super::frame_auth::now_ms() - super::frame_auth::LIVE_SKEW_MS - 1_000;
+    let stale = super::frame_auth::seal_at(&a_key, &room, &b.device_id, stale_at, [3; 16], &typing);
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, stale);
+    assert!(!typed(&mut b).await, "a live frame sealed over five minutes ago must be dropped");
+
+    let fresh = super::frame_auth::seal(&a_key, &room, &b.device_id, &typing);
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, fresh.clone());
+    assert!(typed(&mut b).await, "a fresh live frame is taken");
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, fresh);
+    assert!(!typed(&mut b).await, "the relay's second copy of it must be dropped");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_call_invite_held_back_by_the_relay_never_rings() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 193, 194).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(193));
+    drain_events(&mut b);
+
+    // The relay keeps A's invite and delivers it ten minutes later.
+    relay.set_recording(&a.device_id, true);
+    relay.swallow_direct(&a.device_id, &b.device_id);
+    a.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: b.master_id.clone(),
+            signal_type: "invite".to_string(),
+            payload: serde_json::json!({ "call_id": "held", "video": false, "sframe_key": "k" }).to_string(),
+        })
+        .await
+        .unwrap();
+    let mut captured = None;
+    assert!(
+        wait_until(10, async || {
+            captured = relay.recorded_frames(&a.device_id).into_iter().rev().find(|f| {
+                String::from_utf8_lossy(super::frame_auth::unchecked_body(f)).contains("\"encrypted\"")
+            });
+            captured.is_some()
+        })
+        .await,
+        "A's invite must reach the wire"
+    );
+    let body = super::frame_auth::unchecked_body(captured.as_ref().unwrap()).to_vec();
+    let ten_minutes_ago = super::frame_auth::now_ms() - 10 * 60 * 1000;
+    let held = super::frame_auth::seal_at(&a_key, &room, &b.device_id, ten_minutes_ago, [5; 16], &body);
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, held);
+
+    let rang = wait_event(&mut b, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::CallSignal { .. })
+    })
+    .await;
+    assert!(!rang, "an invite sealed ten minutes ago must not ring");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_replayed_olm_frame_leaves_the_session_alone() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, mut b) = friend_pair(&relay, 195, 196).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    relay.set_recording(&a.device_id, true);
+    relay.set_recording(&b.device_id, true);
+    let (b_master, b_device) = (b.master_id.clone(), b.device_id.clone());
+
+    let send = |text: &str, mid: &str| NodeCommand::SendMessage {
+        peer_id: b_master.clone(),
+        text: text.to_string(),
+        message_id: mid.to_string(),
+        reply_to_mid: None,
+        link_preview: None,
+    };
+    a.cmd_tx.send(send("first", "5f0c5a4e-3b9d-4a51-9d0e-6b7f0e1a2c31")).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "first")
+        })
+        .await,
+        "the first DM arrives"
+    );
+    let delivered = relay
+        .recorded_frames(&a.device_id)
+        .into_iter()
+        .rev()
+        .find(|f| String::from_utf8_lossy(super::frame_auth::unchecked_body(f)).contains("\"encrypted\""))
+        .expect("A's DM frame on the wire");
+    let key_requests = |relay: &MockRelay| {
+        relay.recorded_frames(&b_device).iter().filter(|f| {
+            matches!(
+                serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(f)),
+                Ok(HavenMessage::KeyRequest { .. })
+            )
+        }).count()
+    };
+    let before = key_requests(&relay);
+
+    // The exact frame again: its message key is spent, so a decrypt would fail and
+    // tear the session down.
+    relay.inject_raw_direct(&room, &a.device_id, &b.device_id, delivered);
+    // ABSENCE on the relay side: a teardown's KeyRequest would leave through the
+    // sealing stage, after any barrier event the node itself could emit.
+    sleep_ms(1500).await;
+    assert_eq!(key_requests(&relay), before, "a repeated Olm frame must not cost the session");
+
+    a.cmd_tx.send(send("second", "5f0c5a4e-3b9d-4a51-9d0e-6b7f0e1a2c32")).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "second")
+        })
+        .await,
+        "the session still carries the next DM"
+    );
+    assert_eq!(key_requests(&relay), before, "and it never needed a re-key");
+}
+
+/// A socket of our own in `room`, as any stranger holding the room name can open.
+async fn stranger_in_room(relay: &MockRelay, tag: u8, room: &str) -> (String, RawSocket) {
+    let device = NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let sock = raw_socket(relay, &device);
+    sock.cmd_tx.send(WsCommand::JoinRoom { room_code: room.to_string() }).unwrap();
+    assert!(
+        wait_until(10, async || relay.room_devices(room).contains(&device)).await,
+        "the stranger must be in the room"
+    );
+    (device, sock)
+}
+
+fn mentions(frames: &[Vec<u8>], tag: &str) -> bool {
+    frames.iter().any(|f| String::from_utf8_lossy(f).contains(tag))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_only_a_member_is_served_the_op_log() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 197, 198, 199).await;
+    let (stranger, mut sock) = stranger_in_room(&relay, 202, &server_id).await;
+
+    // A stranger holding the server id asks for everything the server is.
+    let empty = crate::crdt::sync::StateVector { server_id: server_id.clone(), entries: HashMap::new() };
+    let request = serde_json::to_vec(&super::types::HavenMessage::SyncRequest {
+        server_id: server_id.clone(),
+        state_vector_json: serde_json::to_string(&empty).unwrap(),
+        mls_epoch: None,
+    })
+    .unwrap();
+    relay.inject_direct(&server_id, &stranger, &o.device_id, request);
+    let answers = sock.direct_payloads(1500).await;
+    assert!(!mentions(&answers, "\"sync_response\""), "a non-member must not be served the op log");
+    drop((m, x));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_full_profile_goes_only_to_someone_we_know() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, b) = friend_pair(&relay, 203, 204).await;
+    let still = {
+        use image::{Rgba, RgbaImage};
+        let mut png = Vec::new();
+        RgbaImage::from_pixel(64, 64, Rgba([40, 160, 90, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    };
+    b.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "B".to_string(),
+            status: String::new(),
+            about_me: String::new(),
+            avatar_bytes: Some(still),
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || {
+            b.store().load_profile(&b.master_id).ok().flatten().is_some_and(|p| p.avatar_bytes.as_ref().is_some_and(|a| !a.is_empty()))
+        })
+        .await,
+        "precondition: B has an avatar"
+    );
+    let inbox = format!("inbox:{}", b.master_id);
+    let (stranger, mut sock) = stranger_in_room(&relay, 205, &inbox).await;
+
+    let request = serde_json::to_vec(&super::types::HavenMessage::ProfileRequest).unwrap();
+    relay.inject_direct(&inbox, &stranger, &b.device_id, request);
+    let answers = sock.direct_payloads(1500).await;
+    let full = answers.iter().any(|f| {
+        matches!(
+            serde_json::from_slice::<super::types::HavenMessage>(f),
+            Ok(super::types::HavenMessage::ProfileUpdate { ref avatar_b64, .. }) if !avatar_b64.is_empty()
+        )
+    });
+    assert!(!full, "a stranger must not pull a full profile");
+    drop(a);
+}
+
+/// A member leaves; a join request it had sealed while joining, held back by the relay
+/// and handed to the owner afterwards, must not bring it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_join_request_from_before_a_leave_never_readmits() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, m, x, server_id) = three_member_server(&relay, 206, 207, 208).await;
+    let m_key = NativeKeypair::from_secret_bytes(&seed_bytes(207));
+    let sealed_while_joining = super::frame_auth::now_ms();
+
+    m.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&m.master_id) && s.left_at(&m.master_id).is_some())
+        })
+        .await,
+        "O must record M's leave"
+    );
+
+    let o_device = o.device_id.clone();
+    let request = |at: i64, nonce: u8| {
+        let body = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            requested_at: at,
+            device_list: None,
+            parked: false,
+            key_package: None,
+        })
+        .unwrap();
+        super::frame_auth::seal_at(&m_key, &server_id, &o_device, at, [nonce; 16], &body)
+    };
+    relay.inject_raw_direct(&server_id, &m.device_id, &o.device_id, request(sealed_while_joining, 1));
+    flush_frames(&relay, &super::types::dm_room_code(&o.master_id, &m.master_id), 207, &mut o).await;
+    assert!(
+        !o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m.master_id)),
+        "a request sealed before the leave must not re-admit"
+    );
+
+    relay.inject_raw_direct(&server_id, &m.device_id, &o.device_id, request(super::frame_auth::now_ms(), 2));
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m.master_id))).await,
+        "a request sealed after the leave is a real ask and is admitted"
+    );
+    drop(x);
+}
+
+/// A member kicked and back again: the kick notice, held back by the relay and handed
+/// over after the rejoin, must not throw it out a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut m, x, server_id) = three_member_server(&relay, 209, 210, 211).await;
+    let o_key = NativeKeypair::from_secret_bytes(&seed_bytes(209));
+    let kick = serde_json::to_vec(&super::types::HavenMessage::MemberKickBroadcast {
+        server_id: server_id.clone(),
+    })
+    .unwrap();
+
+    // M's current membership began a moment ago; a kick sealed an hour ago predates it.
+    assert!(
+        m.live_server_state(&server_id).await.is_some_and(|s| s.member_since(&m.master_id).is_some()),
+        "precondition: M's record holds its membership"
+    );
+    let an_hour_ago = super::frame_auth::now_ms() - 3600 * 1000;
+    let old = super::frame_auth::seal_at(&o_key, &server_id, &m.device_id, an_hour_ago, [4; 16], &kick);
+    relay.inject_raw_direct(&server_id, &o.device_id, &m.device_id, old);
+    flush_frames(&relay, &super::types::dm_room_code(&o.master_id, &m.master_id), 209, &mut m).await;
+    assert!(m.live_server_state(&server_id).await.is_some(), "a kick from before the membership must not land");
+
+    relay.inject_direct(&server_id, &o.device_id, &m.device_id, kick);
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_none()).await,
+        "a kick sealed now lands"
+    );
+    drop(x);
 }

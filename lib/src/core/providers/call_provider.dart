@@ -418,6 +418,9 @@ class CallNotifier extends Notifier<CallState> {
         {
           final webrtc = ref.read(webRtcProvider.notifier).service;
           webrtc.onScreenAudioReceived = (fromPeer, data) async {
+            // Only the call's peer, and only for a share we asked to watch: any
+            // other open data channel could otherwise play into this output.
+            if (!_fromCallPeer(fromPeer) || !state.watchingRemoteShare) return;
             if (_screenAudioRenderer == null) {
               _screenAudioRenderer = ScreenAudioReceiver.forPlatform();
               final ok = await _screenAudioRenderer!.start();

@@ -19,6 +19,22 @@ pub(crate) struct OlmManager {
     /// `(sig_b64, pk_b64)`: our DEVICE's signature over our identity key, attached to
     /// every PreKey we send. Set once by the owner of the device key.
     identity_proof: Option<(String, String)>,
+    /// Digests of the ciphertexts each peer's session last decrypted. A spent message
+    /// key fails to decrypt again, and that failure tears the session down, so a relay
+    /// replaying a genuine frame must be recognised before it is ever tried.
+    decrypted: HashMap<String, std::collections::VecDeque<[u8; 16]>>,
+}
+
+/// Ciphertexts remembered per peer; more than the frames a session sees between two
+/// deliveries of the same one from a relay's buffer.
+const DECRYPTED_REMEMBERED: usize = 512;
+
+fn ciphertext_digest(ciphertext: &[u8]) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let full = Sha256::digest(ciphertext);
+    let mut d = [0u8; 16];
+    d.copy_from_slice(&full[..16]);
+    d
 }
 
 impl OlmManager {
@@ -30,6 +46,7 @@ impl OlmManager {
             outbound_only: HashSet::new(),
             session_last_used: HashMap::new(),
             identity_proof: None,
+            decrypted: HashMap::new(),
         }
     }
 
@@ -62,7 +79,23 @@ impl OlmManager {
             outbound_only: HashSet::new(),
             session_last_used,
             identity_proof: None,
+            decrypted: HashMap::new(),
         })
+    }
+
+    /// Whether `peer`'s session already decrypted this exact ciphertext.
+    pub(crate) fn already_decrypted(&self, peer: &str, ciphertext: &[u8]) -> bool {
+        let digest = ciphertext_digest(ciphertext);
+        self.decrypted.get(peer).is_some_and(|seen| seen.contains(&digest))
+    }
+
+    /// Remember a ciphertext `peer`'s session decrypted, so a repeat is dropped unread.
+    pub(crate) fn note_decrypted(&mut self, peer: &str, ciphertext: &[u8]) {
+        let seen = self.decrypted.entry(peer.to_string()).or_default();
+        if seen.len() >= DECRYPTED_REMEMBERED {
+            seen.pop_front();
+        }
+        seen.push_back(ciphertext_digest(ciphertext));
     }
 
     /// Our Curve25519 identity key as unpadded base64.

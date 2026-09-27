@@ -719,6 +719,7 @@ pub(crate) async fn handle_create_server(
     // exists. Offline siblings onboard on their next connect, via re-announce.
     let announce = serde_json::to_vec(&HavenMessage::SiblingServerAnnounce {
         server_id: server_id.clone(),
+        owner: Some(local_peer_str.to_string()),
     }).unwrap_or_default();
     let sent = fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, announce);
     if sent > 0 {
@@ -1840,10 +1841,10 @@ pub(crate) async fn handle_leave_server(
     crdt_store: &CrdtStore,
 ) -> bool {
     if let Some(state) = server_states.get_mut(&server_id) {
-        // Owner cannot leave — must delete or transfer ownership first.
+        // The owner is fixed for the server's life, so the only way out is a delete.
         if state.get_role(local_peer_str) == crate::crdt::operations::MemberRole::Owner {
             hollow_log!("[HOLLOW-CRDT] Owner cannot leave server {server_id}");
-            return deny(event_tx, "Owner cannot leave the server. Delete it or transfer ownership first.").await;
+            return deny(event_tx, "You own this server, so you can't leave it, only delete it.").await;
         }
 
         hollow_log!("[HOLLOW-CRDT] Leaving server {server_id}");
@@ -3211,6 +3212,13 @@ pub(crate) async fn handle_envelope_server_delete(
     }
 }
 
+/// Whether a kick sealed at `frame_ts_ms` predates our current membership: a relay
+/// holding back or replaying a kick from before we rejoined.
+pub(crate) fn kick_predates_membership(state: &ServerState, local_master: &str, frame_ts_ms: i64) -> bool {
+    let sealed = frame_ts_ms.saturating_add(super::frame_auth::LIVE_SKEW_MS).max(0) as u64;
+    state.member_since(local_master).is_some_and(|since| sealed < since)
+}
+
 /// Handle `MessageEnvelope::MemberKick` (MLS path) — kicker must outrank kickee.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_member_kick(
@@ -3221,6 +3229,7 @@ pub(crate) async fn handle_envelope_member_kick(
     local_peer: &str,
     sender_peer_id: &str,
     sid: String,
+    frame_ts_ms: i64,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) {
@@ -3231,6 +3240,7 @@ pub(crate) async fn handle_envelope_member_kick(
         let sender_perms = state.get_permissions(sender_peer_id);
         (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) != 0
             && sender_role.outranks(&our_role)
+            && !kick_predates_membership(state, local_peer, frame_ts_ms)
     } else { false };
     if !can_kick {
         hollow_log!("[HOLLOW-SECURITY] REJECTED MLS MemberKick from {sender_peer_id} — insufficient permissions");

@@ -489,6 +489,16 @@ impl ServerState {
         }))
     }
 
+    /// When `master` last left, if the record shows it gone now.
+    pub fn left_at(&self, master: &str) -> Option<u64> {
+        self.member_record.get(master)?.last().filter(|s| s.until_ms != u64::MAX).map(|s| s.until_ms)
+    }
+
+    /// When `master`'s current membership began, if the record holds an open span.
+    pub fn member_since(&self, master: &str) -> Option<u64> {
+        self.member_record.get(master)?.last().filter(|s| s.until_ms == u64::MAX).map(|s| s.from_ms)
+    }
+
     /// Restore from persistence (HLC set separately via `set_hlc`).
     pub fn set_hlc(&mut self, hlc: Hlc) {
         self.hlc = Some(hlc);

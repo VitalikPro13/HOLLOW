@@ -833,6 +833,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     {
       final webrtc = ref.read(webRtcProvider.notifier).service;
       webrtc.onScreenAudioReceived = (peerId, data) async {
+        // Sharers send audio straight to each watcher, so it plays only from a
+        // share we asked to watch, never from any other open data channel.
+        if (!state.watchingScreenShares.contains(peerId)) return;
         if (_screenAudioRenderer == null) {
           _screenAudioRenderer = ScreenAudioReceiver.forPlatform();
           final ok = await _screenAudioRenderer!.start();

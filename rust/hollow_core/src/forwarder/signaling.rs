@@ -69,6 +69,7 @@ pub(crate) async fn run(
 
     // Peers we hold a session-teardown cooldown for (KeyRequest re-key storms).
     let mut rekey_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
+    let mut sealing = Sealing { keypair: keypair.clone(), sealed: HashSet::new() };
     let mut backoff: u64 = 1;
 
     loop {
@@ -123,7 +124,7 @@ pub(crate) async fn run(
                 }
                 out = out_rx.recv() => {
                     let Some(sig) = out else { return Ok(()) }; // engine gone
-                    send_encrypted(&mut olm, &crypto_store, &mut write, &room, sig).await;
+                    send_encrypted(&mut olm, &crypto_store, &mut write, &room, &sealing, sig).await;
                 }
                 frame = read.next() => {
                     let Some(Ok(msg)) = frame else {
@@ -138,7 +139,7 @@ pub(crate) async fn run(
                         Message::Binary(data) => {
                             handle_binary_frame(
                                 &data, &peer_id, &keypair, &mut olm, &crypto_store,
-                                &mut rekey_cooldown, &mut write, &room, &engine_tx,
+                                &mut rekey_cooldown, &mut write, &room, &engine_tx, &mut sealing,
                             ).await;
                         }
                         Message::Ping(p) => {
@@ -209,14 +210,48 @@ fn handle_text_frame(
 }
 
 /// Parse a relay direct frame body (after the 0x06 type byte):
-/// `[room\0][sender\0][payload]` (fetch.rs parse shape).
-fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
+/// `[room\0][sender\0][payload]` into `(room, sender, payload)`.
+fn parse_direct_frame(body: &[u8]) -> Option<(String, String, &[u8])> {
     let room_end = body.iter().position(|&b| b == 0)?;
+    let room = String::from_utf8_lossy(&body[..room_end]).to_string();
     let after_room = &body[room_end + 1..];
     let sender_end = after_room.iter().position(|&b| b == 0)?;
     let sender = String::from_utf8_lossy(&after_room[..sender_end]).to_string();
-    let payload = String::from_utf8_lossy(&after_room[sender_end + 1..]).to_string();
-    Some((sender, payload))
+    Some((room, sender, &after_room[sender_end + 1..]))
+}
+
+/// Which clients speak sealed frames (`node::frame_auth`). A client that ever sealed
+/// is answered sealed and its unsealed frames are refused; a client older than 0.12
+/// keeps the old format, which is safe here because everything the forwarder acts on
+/// is device-signed key exchange or Olm.
+struct Sealing {
+    keypair: NativeKeypair,
+    sealed: HashSet<String>,
+}
+
+impl Sealing {
+    fn open(&mut self, room: &str, sender: &str, local: &str, frame: &[u8]) -> Option<Vec<u8>> {
+        use crate::node::frame_auth::{open, now_ms, Delivery, Refusal};
+        match open(frame, sender, room, Delivery::Direct { device: local, master: local }, now_ms()) {
+            Ok(opened) => {
+                self.sealed.insert(sender.to_string());
+                Some(opened.body.to_vec())
+            }
+            Err(Refusal::Unsealed) if !self.sealed.contains(sender) => Some(frame.to_vec()),
+            Err(refusal) => {
+                hollow_log!("[HOLLOW-FWD] inbound frame refused: {refusal:?}");
+                None
+            }
+        }
+    }
+
+    fn payload_for(&self, room: &str, target: &str, body: &[u8]) -> Vec<u8> {
+        if self.sealed.contains(target) {
+            crate::node::frame_auth::seal(&self.keypair, room, target, body)
+        } else {
+            body.to_vec()
+        }
+    }
 }
 
 /// The engine-bound fwd envelope's wire tag, for the inbound observability line
@@ -254,16 +289,20 @@ async fn handle_binary_frame(
     write: &mut WsSink,
     room: &str,
     engine_tx: &mpsc::UnboundedSender<EngineCmd>,
+    sealing: &mut Sealing,
 ) {
     if data.len() <= 3 || data[0] != 0x06 {
         return;
     }
     let frame_len = data.len();
-    let Some((sender, payload)) = parse_direct_frame(&data[1..]) else {
+    let Some((frame_room, sender, frame)) = parse_direct_frame(&data[1..]) else {
         hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: malformed direct frame — dropped");
         return;
     };
-    let Ok(haven) = serde_json::from_str::<HavenMessage>(&payload) else {
+    let Some(payload) = sealing.open(&frame_room, &sender, local_peer_id, frame) else {
+        return;
+    };
+    let Ok(haven) = serde_json::from_slice::<HavenMessage>(&payload) else {
         hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: unparseable HavenMessage — dropped");
         return;
     };
@@ -273,7 +312,7 @@ async fn handle_binary_frame(
             hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: KeyRequest");
             handle_key_request(
                 &sender, to, ts, sig, pk, local_peer_id, keypair, olm, crypto_store,
-                rekey_cooldown, write, room,
+                rekey_cooldown, write, room, sealing,
             )
             .await;
         }
@@ -342,6 +381,7 @@ async fn handle_key_request(
     rekey_cooldown: &mut HashMap<String, std::time::Instant>,
     write: &mut WsSink,
     room: &str,
+    sealing: &Sealing,
 ) {
     let payload = key_request_signing_payload(sender, local_peer_id, ts.unwrap_or(0));
     match verify_key_exchange(
@@ -383,7 +423,7 @@ async fn handle_key_request(
     }
     persist_crypto_state(olm, crypto_store, sender);
     let bundle = signed_key_bundle(keypair, local_peer_id, sender, identity_key, otk);
-    send_haven_direct(write, room, sender, &bundle).await;
+    send_haven_direct(write, room, sender, &bundle, sealing).await;
 }
 
 /// Olm decrypt for an inbound Encrypted body: prekey messages try the existing
@@ -453,6 +493,7 @@ async fn send_encrypted(
     crypto_store: &CryptoStore,
     write: &mut WsSink,
     room: &str,
+    sealing: &Sealing,
     sig: OutSignal,
 ) {
     let env_json = match serde_json::to_string(&sig.envelope) {
@@ -469,7 +510,7 @@ async fn send_encrypted(
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, &sig.to_peer);
             let haven = crate::node::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
-            send_haven_direct(write, room, &sig.to_peer, &haven).await;
+            send_haven_direct(write, room, &sig.to_peer, &haven, sealing).await;
         }
         Err(e) => {
             hollow_log!("[HOLLOW-FWD] encrypt for reply failed: {e}");
@@ -478,13 +519,14 @@ async fn send_encrypted(
 }
 
 /// Frame + send one HavenMessage as a relay 0x04 direct.
-async fn send_haven_direct(write: &mut WsSink, room: &str, target: &str, msg: &HavenMessage) {
+async fn send_haven_direct(write: &mut WsSink, room: &str, target: &str, msg: &HavenMessage, sealing: &Sealing) {
     let Ok(json) = serde_json::to_string(msg) else {
         return;
     };
     let room_b = room.as_bytes();
     let target_b = target.as_bytes();
-    let payload = json.as_bytes();
+    let payload = sealing.payload_for(room, target, json.as_bytes());
+    let payload = payload.as_slice();
     let mut frame = Vec::with_capacity(1 + room_b.len() + 1 + target_b.len() + 1 + payload.len());
     frame.push(0x04);
     frame.extend_from_slice(room_b);

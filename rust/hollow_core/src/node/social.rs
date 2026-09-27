@@ -2025,6 +2025,26 @@ pub(crate) async fn handle_envelope_profile_update(
 
 /// Handle `ProfileRequestFor` — look up the target peer's profile in our DB
 /// and send it back as `ProfileRelay` (avatar included, no banner).
+/// Who may pull our full profile: our own devices, friends, members of a server we
+/// share, and anyone we have asked to be friends (their card shows our avatar).
+pub(crate) fn profile_request_allowed(
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    local_master: &str,
+    requester: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    if super::voice_handler::data_channel_peer_allowed(server_states, local_master, requester, db_path, db_passphrase) {
+        return true;
+    }
+    let master = super::resolver::resolve(requester);
+    !super::blocklist::is_blocked(requester)
+        && crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|st| st.get_friend_status_direction(&master).ok().flatten())
+            .is_some_and(|(status, direction)| status == "pending" && direction == "outgoing")
+}
+
 pub(crate) fn handle_profile_request_for(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,

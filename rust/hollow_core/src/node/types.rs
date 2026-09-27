@@ -1433,9 +1433,6 @@ pub(crate) enum HavenMessage {
         identity_pk: Option<String>,
     },
 
-    #[serde(rename = "ack")]
-    Ack,
-
     // -- CRDT sync messages --
 
     #[serde(rename = "sync_request")]
@@ -1517,7 +1514,7 @@ pub(crate) enum HavenMessage {
         /// `send_message_to_peer_in_room`, so the relay BUFFERS it for an absent joiner
         /// and replays it on that device's next join of the server room, which is
         /// usually the user asking again. Without the nonce that stale copy would kill
-        /// the fresh request. 0 = a pre-nonce client: "refuse whatever is pending".
+        /// the fresh request. It must equal the pending ask exactly.
         #[serde(default)]
         requested_at: i64,
     },
@@ -1548,11 +1545,6 @@ pub(crate) enum HavenMessage {
         /// The `MemberAdded` CrdtOp JSON when admitted, else None.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         op_json: Option<String>,
-    },
-
-    #[serde(rename = "server_delete")]
-    ServerDeleteBroadcast {
-        server_id: String,
     },
 
     /// Sent to the kicked member so they remove themselves from the server.
@@ -1608,10 +1600,6 @@ pub(crate) enum HavenMessage {
         gaps: HashMap<String, GapDigest>,
     },
 
-    /// Sent to all connected peers when the app is shutting down.
-    #[serde(rename = "disconnecting")]
-    PeerDisconnecting,
-
     /// Multi-device: the creator of a NEW server tells its OWN siblings that the
     /// server exists, because the room is brand-new and a sibling has no other way
     /// to learn. The sibling runs its normal join flow; the creator's request
@@ -1619,6 +1607,10 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "sib_server_announce")]
     SiblingServerAnnounce {
         server_id: String,
+        /// The owner the announcing device holds as the server's anchor, pinned on our
+        /// join so no member's snapshot can name another.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
 
     // -- MLS group encryption messages --
@@ -2313,21 +2305,6 @@ pub(crate) enum HavenMessage {
         aes_nonce: String,
     },
 
-    /// "Do you have this file?"
-    #[serde(rename = "file_probe")]
-    FileProbe {
-        file_id: String,
-    },
-
-    /// Response: "I have this file / these chunks."
-    #[serde(rename = "file_probe_resp")]
-    FileProbeResponse {
-        file_id: String,
-        has_file: bool,
-        #[serde(default)]
-        available_chunks: Vec<u32>,
-    },
-
     // -- WebRTC signaling --
 
     /// SDP offer for WebRTC data channel connection.
@@ -2689,12 +2666,6 @@ pub(crate) enum HavenMessage {
         shard_index: u16,
     },
 
-    /// Coordinator broadcasts pool-wide status update for the dashboard.
-    #[serde(rename = "recovery_status")]
-    RecoveryStatus {
-        #[serde(default)]
-        status_json: String,
-    },
 
     /// Initiator stops the pool.
     #[serde(rename = "recovery_stop")]
@@ -3724,6 +3695,127 @@ pub(crate) enum MessageEnvelope {
     },
 }
 
+impl HavenMessage {
+    /// Whether a sealed frame of this kind is acted on only while fresh and only once
+    /// (see `frame_auth`). The rest may legitimately arrive late, from an offline
+    /// buffer, a mailbox or a ring, and each carries its own replay defence: an Olm or
+    /// MLS ratchet, a signed op or message id, a request stamp, a content hash.
+    /// Exhaustive on purpose: a new variant must pick one.
+    pub(crate) fn live_only(&self) -> bool {
+        match self {
+            Self::Encrypted { .. }
+            | Self::SyncResponse { .. }
+            | Self::ServerStateSnapshot { .. }
+            | Self::CrdtOpBroadcast { .. }
+            | Self::ServerJoinRequest { parked: true, .. }
+            | Self::ServerJoinRejected { .. }
+            | Self::ServerJoinResolved { .. }
+            | Self::MemberKickBroadcast { .. }
+            | Self::MlsChannelMessage { .. }
+            | Self::MlsWelcome { .. }
+            | Self::MlsCommit { .. }
+            | Self::MlsCommitCatchup { .. }
+            | Self::FriendRequest { .. }
+            | Self::FriendAccept { .. }
+            | Self::FriendReject { .. }
+            | Self::FriendRemove
+            | Self::IdentityDestroyed { .. }
+            | Self::PublicChannelMessage { .. }
+            | Self::PublicChannelEdit { .. }
+            | Self::PublicLinkPreviewSet { .. }
+            | Self::PublicChannelDelete { .. }
+            | Self::PublicChannelAddReaction { .. }
+            | Self::PublicChannelRemoveReaction { .. }
+            | Self::PublicChannelSyncResponse { .. }
+            | Self::ShareManifestResponse { .. } => false,
+            Self::KeyRequest { .. }
+            | Self::KeyBundle { .. }
+            | Self::ServerJoinRequest { parked: false, .. }
+            | Self::MlsKeyPackage { .. }
+            | Self::SyncRequest { .. }
+            | Self::ChannelSyncRequest { .. }
+            | Self::DmSyncRequest { .. }
+            | Self::DmSiblingSyncRequest { .. }
+            | Self::SiblingServerAnnounce { .. }
+            | Self::MlsKeyPackageRequest { .. }
+            | Self::MlsEpochProbe { .. }
+            | Self::ConferenceJoinRequest { .. }
+            | Self::ConferenceJoinDenied { .. }
+            | Self::ConferenceLobbyInfo { .. }
+            | Self::ConferenceChat { .. }
+            | Self::ConferenceEnded { .. }
+            | Self::ConferenceKicked { .. }
+            | Self::ProfileUpdate { .. }
+            | Self::FriendListSync { .. }
+            | Self::FriendListRequest
+            | Self::SiblingStateSyncRequest
+            | Self::ReadMarkers { .. }
+            | Self::PersonalEmoteSync { .. }
+            | Self::SiblingProveRequest { .. }
+            | Self::SiblingProveResponse { .. }
+            | Self::LinkSnapshotRequest { .. }
+            | Self::LinkSnapshotKey { .. }
+            | Self::LinkDeclined
+            | Self::LinkSnapshotAck { .. }
+            | Self::ChannelNotificationHint { .. }
+            | Self::PublicChannelListRequest { .. }
+            | Self::PublicChannelListResponse { .. }
+            | Self::PublicChannelSyncRequest { .. }
+            | Self::PublicChannelConfigChanged { .. }
+            | Self::TypingIndicator { .. }
+            | Self::StatusUpdate { .. }
+            | Self::AutoDownloadPref { .. }
+            | Self::FileRequest { .. }
+            | Self::FileUnavailable { .. }
+            | Self::PublicFileHeader { .. }
+            | Self::RtcOffer { .. }
+            | Self::RtcAnswer { .. }
+            | Self::RtcIceCandidate { .. }
+            | Self::RtcShareOffer { .. }
+            | Self::RtcShareAnswer { .. }
+            | Self::RtcShareIceCandidate { .. }
+            | Self::CallInvite { .. }
+            | Self::CallAccept { .. }
+            | Self::CallReject { .. }
+            | Self::CallEnd { .. }
+            | Self::CallBusy { .. }
+            | Self::CallMediaRestart { .. }
+            | Self::CallSdpOffer { .. }
+            | Self::CallSdpAnswer { .. }
+            | Self::CallIceCandidate { .. }
+            | Self::CallVideoState { .. }
+            | Self::CallAudioState { .. }
+            | Self::CallScreenState { .. }
+            | Self::CallScreenOffer { .. }
+            | Self::CallScreenAnswer { .. }
+            | Self::CallScreenIce { .. }
+            | Self::CallScreenWatch { .. }
+            | Self::CallRecordingState { .. }
+            | Self::PeerExchange { .. }
+            | Self::ProfileRequest
+            | Self::EmoteRequest { .. }
+            | Self::EmoteAssets { .. }
+            | Self::ProfileRequestFor { .. }
+            | Self::ProfileRelay { .. }
+            | Self::VoiceChannelJoin { .. }
+            | Self::VoiceChannelLeave { .. }
+            | Self::VoiceChannelAudioState { .. }
+            | Self::VoiceChannelScreenState { .. }
+            | Self::VoiceChannelCameraState { .. }
+            | Self::VoiceChannelRecordingState { .. }
+            | Self::RecoveryHello { .. }
+            | Self::RecoveryWelcome { .. }
+            | Self::RecoveryTransferPlan { .. }
+            | Self::RecoveryShardReceived { .. }
+            | Self::RecoveryStop
+            | Self::ShareManifestRequest { .. }
+            | Self::ShareHave { .. }
+            | Self::ShareChunkRequest { .. }
+            | Self::ShareChunkResponse { .. } => true,
+        }
+    }
+}
+
 impl MessageEnvelope {
     /// Returns the target peer ID if this is a targeted message.
     pub(crate) fn target(&self) -> Option<&str> {
@@ -3826,6 +3918,72 @@ impl MessageEnvelope {
             | Self::VoiceChannelCameraState { sid, cid, .. }
             | Self::VoiceChannelRecordingState { sid, cid, .. }
             | Self::BroadcastMeta { sid, cid, .. } => Server { sid, cid: Some(cid) },
+        }
+    }
+
+    /// Whether this envelope is acted on only while the frame that carried it is
+    /// fresh: a ratchet stops a replay, never a relay that holds a frame back and
+    /// delivers it late. Exhaustive on purpose, like [`Self::place`].
+    pub(crate) fn live_only(&self) -> bool {
+        match self {
+            Self::DirectMessage { .. }
+            | Self::ChannelMessage { .. }
+            | Self::ChannelSyncBatch { .. }
+            | Self::DmSyncBatch { .. }
+            | Self::DmSiblingSyncBatch { .. }
+            | Self::EditMessage { .. }
+            | Self::LinkPreviewSet { .. }
+            | Self::DeleteMessage { .. }
+            | Self::AddReaction { .. }
+            | Self::RemoveReaction { .. }
+            | Self::FileHeader { .. }
+            | Self::ShardStore { .. }
+            | Self::ShardStoreAck { .. }
+            | Self::ShardDelete { .. }
+            | Self::ShardRequest { .. }
+            | Self::ShardResponse { .. }
+            | Self::VaultManifestBroadcast { .. }
+            | Self::ShardMigrate { .. }
+            | Self::CrdtOp { .. }
+            | Self::ServerDelete { .. }
+            | Self::MemberKick { .. }
+            | Self::ProfileUpdate { .. }
+            | Self::SyncResp { .. }
+            | Self::DestroyIdentityOrder { .. }
+            | Self::SessionAck => false,
+            Self::Typing { .. }
+            | Self::SyncReq { .. }
+            | Self::ChannelSyncReq { .. }
+            | Self::CallSignal { .. }
+            | Self::VoiceChannelJoin { .. }
+            | Self::VoiceChannelLeave { .. }
+            | Self::VoiceChannelSdpOffer { .. }
+            | Self::VoiceChannelSdpAnswer { .. }
+            | Self::VoiceChannelAudioState { .. }
+            | Self::VoiceChannelIce { .. }
+            | Self::VoiceChannelScreenOffer { .. }
+            | Self::VoiceChannelScreenAnswer { .. }
+            | Self::VoiceChannelScreenIce { .. }
+            | Self::VoiceChannelScreenState { .. }
+            | Self::VoiceChannelScreenWatch { .. }
+            | Self::VoiceChannelScreenAssign { .. }
+            | Self::VoiceChannelScreenFeedState { .. }
+            | Self::VoiceChannelRenegOffer { .. }
+            | Self::VoiceChannelRenegAnswer { .. }
+            | Self::VoiceChannelLegRestart { .. }
+            | Self::VoiceChannelCameraState { .. }
+            | Self::VoiceChannelRecordingState { .. }
+            | Self::FwdStreamRegister { .. }
+            | Self::FwdStreamAuth { .. }
+            | Self::FwdStreamUnregister { .. }
+            | Self::FwdIngestOffer { .. }
+            | Self::FwdIngestAnswer { .. }
+            | Self::FwdAttach { .. }
+            | Self::FwdDetach { .. }
+            | Self::FwdEgressOffer { .. }
+            | Self::FwdEgressAnswer { .. }
+            | Self::FwdError { .. }
+            | Self::BroadcastMeta { .. } => true,
         }
     }
 

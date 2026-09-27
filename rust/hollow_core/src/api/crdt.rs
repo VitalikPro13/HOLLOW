@@ -1490,7 +1490,7 @@ pub fn default_role_permissions(role: String) -> u32 {
 }
 
 /// Leave a server. The local user is removed from the server.
-/// Owner cannot leave — must delete or transfer ownership first.
+/// The owner cannot leave, only delete the server.
 #[frb]
 pub fn leave_server(server_id: String) -> Result<(), String> {
     let node = get_node();

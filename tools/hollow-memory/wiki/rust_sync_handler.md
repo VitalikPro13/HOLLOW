@@ -288,7 +288,7 @@ MLS cleanup after kick:
 
 `sync_handler.rs:handle_leave_server()` — Self-removal from a server.
 
-Guard: **Owner cannot leave** — must delete or transfer ownership first. Returns error `NetworkEvent::Error` with message.
+Guard: **Owner cannot leave**, only delete (the owner is fixed; there is no transfer). Returns error `NetworkEvent::Error` with message.
 
 Flow:
 1. Check role is not Owner
