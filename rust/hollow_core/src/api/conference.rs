@@ -188,6 +188,7 @@ pub fn conference_leave(conf_id: String) -> Result<(), String> {
 /// Send a RAM-only conference chat line (MLS application message).
 #[frb]
 pub fn conference_send_chat(conf_id: String, text: String) -> Result<i64, String> {
+    super::network::refuse_oversized_message(&text)?;
     // Lamport chat clock: conference chat sorts by the same stamps as every
     // other chat surface (never raw SystemTime — clock skew misorders replies).
     let stamp_us = crate::chat_clock::next_send_stamp_us();

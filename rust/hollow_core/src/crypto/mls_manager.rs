@@ -880,6 +880,15 @@ mod tests {
         assert_eq!(mgr.credential_identity(), "12D3KooWMyDeviceId");
     }
 
+    /// The claim a receiver compares with the sending device before seating a leaf.
+    #[test]
+    fn key_package_identity_reads_the_leaf_credential() {
+        let mgr = MlsManager::new("12D3KooWMyDeviceId").unwrap();
+        let kp = mgr.generate_key_package().unwrap();
+        assert_eq!(MlsManager::key_package_identity(&kp).unwrap(), "12D3KooWMyDeviceId");
+        assert!(MlsManager::key_package_identity(b"not a key package").is_err());
+    }
+
     #[test]
     fn test_distinct_devices_have_distinct_signature_keys() {
         // Two independently-created managers must have DISTINCT MLS signature keys, so both

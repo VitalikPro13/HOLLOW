@@ -20815,12 +20815,9 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
 
 // A restricted channel's HISTORY and FILES never reach a member who cannot see it.
 // The per-channel subgroup protects LIVE traffic only, and backfill went round it
-// three ways, all reachable by any plain Member: the channel sync responder gated on
-// holding the SERVER and served any channel's rows, file headers (which carry the
-// AES key) included, with the probe alone leaking the hidden channel's message count;
-// `replicate_channel_file_full` streamed the ciphertext with no check at all; and the
-// `FileRequest` responder never asked whether the requester could see the channel. B
-// must end with nothing about either, having asked for all three.
+// three ways, all reachable by any plain Member: the channel sync responder, full
+// file replication and the `FileRequest` responder. B must end with nothing about
+// either, having asked for all three, and a stranger in the room with nothing at all.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -21070,12 +21067,13 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         b.channel_messages(&server_id, &general),
     );
 
-    // --- And a NON-MEMBER in the room gets nothing, for an Everyone channel that is not
-    //     public. ---
+    // --- A NON-MEMBER in the room learns nothing about the channels. ---
     //
-    // `can_see_channel` on its own is not a gate: an unknown peer's role resolves to
-    // plain Member, so membership is the first rung. The probe response is the
-    // discriminating frame because it goes out in the CLEAR.
+    // Its sync request is refused on the membership rung
+    // (`authz_channel_served_only_to_a_member_who_can_read_it`). The retired probe
+    // response used to make a member answer ANY sender with a plaintext sync request
+    // carrying its per-author watermarks for the named channel; that request is the
+    // discriminating frame, because it goes out in the clear.
     const X_MASTER: u8 = 245; // never joins the server
     let x_device = NativeKeypair::from_secret_bytes(&seed_bytes(X_MASTER)).peer_id();
     assert!(
@@ -21094,13 +21092,15 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         "the stranger must be in the server room, got {:?}",
         relay.room_devices(&server_id),
     );
-    let probe = serde_json::to_vec(&super::types::HavenMessage::ChannelSyncProbe {
-        server_id: server_id.clone(),
-        channel_id: general.clone(),
-        our_latest: 0,
-        msg_count: 0,
+    let retired_probe_resp = serde_json::json!({
+        "type": "ch_sync_probe_resp",
+        "server_id": server_id,
+        "channel_id": restricted_cid,
+        "their_latest": i64::MAX,
+        "msg_count": u32::MAX,
     })
-    .unwrap();
+    .to_string()
+    .into_bytes();
     let req = serde_json::to_vec(&super::types::HavenMessage::ChannelSyncRequest {
         server_id: server_id.clone(),
         channel_id: general.clone(),
@@ -21109,7 +21109,7 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         gap: None,
     })
     .unwrap();
-    for frame in [probe, req] {
+    for frame in [retired_probe_resp, req] {
         x.cmd_tx
             .send(WsCommand::SendDirect {
                 room_code: server_id.clone(),
@@ -21119,15 +21119,14 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
             .unwrap();
     }
     let stranger_frames = x.direct_payloads(6000).await;
-    let served = stranger_frames
+    let watermarks = stranger_frames
         .iter()
         .filter_map(|f| serde_json::from_slice::<super::types::HavenMessage>(f).ok())
-        .filter(|m| matches!(m, super::types::HavenMessage::ChannelSyncProbeResponse { channel_id, .. }
-            if *channel_id == general))
+        .filter(|m| matches!(m, super::types::HavenMessage::ChannelSyncRequest { .. }))
         .count();
     assert_eq!(
-        served, 0,
-        "a NON-MEMBER must be served nothing for a non-public channel, not even the          probe's message count and latest timestamp: membership is the first rung of          the gate, and the visibility ladder alone says yes to every Everyone channel"
+        watermarks, 0,
+        "a stranger's unsolicited probe response must not make a member send it the restricted channel's per-author watermarks"
     );
 
     let meta = c.file_meta(&fid).expect("the Admin still holds the header");

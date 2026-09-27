@@ -1,6 +1,7 @@
 ﻿import 'dart:async';
 
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/message_limits.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
@@ -619,6 +620,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
             style: HollowTypography.body.copyWith(color: hollow.textPrimary),
             maxLines: 5,
             minLines: 1,
+            inputFormatters: [MessageByteLimitFormatter()],
             decoration: InputDecoration(
               filled: true,
               fillColor: hollow.elevated,

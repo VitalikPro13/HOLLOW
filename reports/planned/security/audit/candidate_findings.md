@@ -31,6 +31,10 @@ settled in each finding file.
 5. `hollow_push_decrypt` (O4): delete it.
 
 **Decided 2026-09-26 (session 3):**
+2b. (2026-09-27, session 5) C7: a post dated more than 10 minutes ahead of our clock is
+   refused on every path; slow mode judges fresh posts by our own receive clock and
+   older replays (relay ring, sync) by their timestamp.
+
 2a. The author half of decision 2 ("rows whose author was never a member are
    refused") is a real fix, not an accepted risk and not a label: it becomes
    candidate E4 (High), built together with E1. Today `ServerState` keeps only
@@ -106,29 +110,29 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | C4 | `can_post_in_channel` enforced only on the sender's own client | channel:S5 | Medium | FIXED HOL-SEC-009 (posting checked at ingest on every live transport) |
 | C5 | Olm and push channel paths skip mute, slow mode, media-only | channel:S6, transport:S-08 | Medium | FIXED HOL-SEC-009 (Olm runs the shared ingest; push applies the same gate) |
 | C6 | Mute check keyed on the sender-supplied `sid`: omit it to bypass | channel:S7 | Medium | FIXED HOL-SEC-008 (edits, cards, reactions and deletions must name their row's own channel) |
-| C7 | Slow mode judged on the sender's own signed `ts` | channel:S8 | Low | AGENT |
-| C8 | Unsolicited probe responses make a member leak per-author watermarks of restricted channels and suppress its real sync | channel:S9 | Medium | AGENT |
-| C9 | `PublicChannelSyncRequest` serves the text of deleted messages to guests and the relay | channel:S13 | Low | AGENT |
-| C10 | `ChannelNotificationHint` and typing are unauthenticated (fake badges, typing) | channel:S15, S16, transport:S-13 | Low | AGENT |
-| C11 | Text clamp only on two of five paths | channel:S18 | Low | CONFIRMED, open: the clamp is 4,000 BYTES but the composer allows 4,000 CHARACTERS, so the DM and push clamps cut long non-Latin messages (and break their signature on re-serve); DECIDED (Vitalik, 2026-09-27): composer stays 4,000 characters; one 64 KiB byte limit in Rust and Dart, the composer refuses past it; receivers DROP oversized messages on every path (live and sync), never clip. Build next session |
-| C12 | A member who cannot see a restricted voice channel still joins it and gets dialed | media:S-04 | Medium | AGENT |
+| C7 | Slow mode judged on the sender's own signed `ts` | channel:S8 | Low | CONFIRMED (read in session 5): the window is `[ts - slow, ts]` on the signed `ts`, and nothing bounds a future `ts`, so a member can also pin a post to the bottom of a channel. Judging by our clock alone would drop honest posts replayed from the relay ring. DECIDED (Vitalik, 2026-09-27): refuse a post dated more than 10 minutes ahead of our clock on every path; slow mode judges fresh posts by our own receive clock, older replays by `ts` |
+| C8 | Unsolicited probe responses make a member leak per-author watermarks of restricted channels and suppress its real sync | channel:S9 | Medium | FIXED HOL-SEC-012: the probe wire types (plaintext and envelope) had no sender since 0.10 and are deleted with their handlers; the honest plaintext sync request is J8 |
+| C9 | `PublicChannelSyncRequest` serves the text of deleted messages to guests and the relay | channel:S13 | Low | FIXED HOL-SEC-014: the guest page query leaves deleted rows out; members keep them (Rat Files) |
+| C10 | `ChannelNotificationHint` and typing are unauthenticated (fake badges, typing) | channel:S15, S16, transport:S-13 | Low | Stranger and non-poster half FIXED HOL-SEC-015 (`channel_signal_accepted` on the hint, plaintext typing and MLS typing arms; blocked typists dropped); the plaintext exposure and relay forgery are J9 |
+| C11 | Text clamp only on two of five paths | channel:S18 | Low | FIXED HOL-SEC-011: one 64 KiB byte limit in Rust and Dart; every receive path (live, push, sync, edits, meeting chat) drops a longer body whole inside `verify_message_signature_v2` / `check_backfill_signature` (verdict `Oversized`), nothing clips; the sender refuses at the FFI and the composer and edit fields at input. Relay unchanged (rings byte-bounded, senders never clipped) |
+| C12 | A member who cannot see a restricted voice channel still joins it and gets dialed | media:S-04 | Medium | FIXED HOL-SEC-016: both voice join paths ask `voice_join_refusal` (member, voice channel, can see it) |
 | C13 | Push path stores `PublicChannelMessage` for conference ids (should be RAM only) | transport:S-10 | Low | FIXED HOL-SEC-009 |
-| C14 | 0x09 mention flag set by the sender bypasses "mentions only" | transport:S-11 | Low | AGENT |
+| C14 | 0x09 mention flag set by the sender bypasses "mentions only" | transport:S-11 | Low | CONFIRMED (read in session 5): the phone trusts the flag even with the decrypted text in hand (push_notification_service.dart `_postChannelWakeBanners`). Fix with class K: the woken device judges the mention from the decrypted messages (Rust fetch returns a per-message "mentions me"), iOS NSE the same; with nothing decrypted a mentions-only channel shows nothing; the relay flag stays a wake hint only |
 
 ## Class D. MLS credentials and group operations are not authorised (lead L-03)
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| D1 | A member gets a leaf whose credential claims any identity, the owner included; no credential validation at Add, Welcome, Update or Commit | server_mls:S-13, A-14 | Critical | AGENT |
-| D2 | Commits from any leaf merged with no role or membership check on Add/Remove | server_mls:S-19 | High | AGENT |
-| D3 | `MlsWelcome` from anyone drops the live group before validating; group substitution with a KeyPackage requested from the victim | server_mls:S-15, S-16, media:S-13 | High | AGENT |
-| D4 | Garbage `MlsCommit`, `MlsCommitCatchup` or 3 garbage `MlsChannelMessage`s drop the victim's group | server_mls:S-18, S-21, S-24 | Medium | AGENT |
-| D5 | `MlsKeyPackageRequest` ungated: KeyPackages on demand, persisted storage grows | server_mls:S-22 | Low | AGENT |
-| D6 | Subgroup membership decided on `resolve()` of the unvalidated credential | server_mls:S-25 | High | AGENT |
-| D7 | Conference chat attributed by a credential the sender chose | server_mls:S-28 | Medium | AGENT |
-| D8 | `MlsKeyPackage` has no ban check | server_mls:S-14 | Medium | AGENT |
-| D9 | VC frames over MLS attributed to relay `from`, never compared with the leaf | server_mls:S-23, media X-3 | Low | PLAUSIBLE |
-| D10 | Parked-join KeyPackage check compares against the relay-stamped sender | server_mls:S-03 | High | AGENT |
+| D1 | A member gets a leaf whose credential claims any identity, the owner included; no credential validation at Add, Welcome, Update or Commit | server_mls:S-13, A-14 | Critical | CONFIRMED (session 5). Member half FIXED HOL-SEC-017: the live `MlsKeyPackage` arm seats a leaf only when `key_package_identity` equals the sending device, as the parked-join path already did. Relay half (it names the sender) = the class D design: bind the leaf credential to a device key |
+| D2 | Commits from any leaf merged with no role or membership check on Add/Remove | server_mls:S-19 | High | CONFIRMED (session 5): `process_commit` merges the staged commit with no look at the committer or its Add/Remove proposals. Design: inspect the staged commit before merging (committer is the server authority; adds are CRDT members' devices; removes only non-members or authorised) |
+| D3 | `MlsWelcome` from anyone drops the live group before validating; group substitution with a KeyPackage requested from the victim | server_mls:S-15, S-16, media:S-13 | High | CONFIRMED (session 5): the live group is removed BEFORE the Welcome parses, and a valid Welcome from anyone holding our KeyPackage (D5) replaces the group. Staging is not a quick fix (OpenMLS storage is keyed by group id). Design: accept a Welcome only from the server authority, and only swap groups on success |
+| D4 | Garbage `MlsCommit`, `MlsCommitCatchup` or 3 garbage `MlsChannelMessage`s drop the victim's group | server_mls:S-18, S-21, S-24 | Medium | CONFIRMED (session 5): the live `MlsCommit` arm has no membership gate (its catch-up twin has one) and any failed commit drops the group and re-bootstraps; three undecryptable `MlsChannelMessage`s spread past the burst window do the same (the window guards against replays, not a sender). Design, with harness tests: membership gate (meetings by group), and drop only on errors that mean we are behind, never on a frame that does not parse |
+| D5 | `MlsKeyPackageRequest` ungated: KeyPackages on demand, persisted storage grows | server_mls:S-22 | Low | CONFIRMED (session 5): any sender gets a freshly minted, persisted KeyPackage. A membership gate is the fix, but a joiner's pending skeleton could refuse its own admitter, so it goes in with the design and harness runs |
+| D6 | Subgroup membership decided on `resolve()` of the unvalidated credential | server_mls:S-25 | High | CONFIRMED (session 5): sound only if credentials are; member-level forging through its own KeyPackage closed by HOL-SEC-017, still open through D2 (a member committing an Add) and the relay |
+| D7 | Conference chat attributed by a credential the sender chose | server_mls:S-28 | Medium | CONFIRMED (session 5). Knocker half FIXED HOL-SEC-017: a meeting knock is dropped unless its KeyPackage names the knocking device, so chat can no longer be attributed to the host or another participant; relay half with A15/A16 |
+| D8 | `MlsKeyPackage` has no ban check | server_mls:S-14 | Medium | CONFIRMED (session 5): the arm requires current membership and a ban removes the member, so this reduces to E7 (a `MemberAdded` that bypasses the ban) |
+| D9 | VC frames over MLS attributed to relay `from`, never compared with the leaf | server_mls:S-23, media X-3 | Low | CONFIRMED (session 5): MLS voice frames are keyed by the relay-stamped sender on purpose (multi-device routing), never compared with the leaf. Fix with class A/D: drop when `same_identity(peer_str, leaf)` fails |
+| D10 | Parked-join KeyPackage check compares against the relay-stamped sender | server_mls:S-03 | High | CONFIRMED (session 5): the parked-join check compares with the relay-stamped sender, so only the relay can pass another device's KeyPackage (with A4) |
 
 ## Class E. CRDT state authority
 
@@ -228,6 +232,8 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | J5 | Forwarder id from the relay is the only one an "Always relay calls" viewer accepts: the relay can name a member device and expose the viewer's address | media:S-12 | Low | PLAUSIBLE |
 | J6 | `PeerExchange` from a gossip neighbour inserts arbitrary peer ids | dm:S-23 | Low | PLAUSIBLE |
 | J7 | Nickname `master_id` chosen by the claimer becomes the friend-request target | relay:23 | Low | AGENT (by design) |
+| J8 | Channel sync requests ride plaintext by design (MLS-epoch resilience) with per-author watermarks and the gap digest: the relay learns who posts in which channel and when, restricted channels included | sync_handler::channel_sync_request, swarm.rs reconnect fan-out | Medium (privacy, C-24) | CONFIRMED (read in session 5); move into Olm with class A |
+| J9 | `ChannelNotificationHint` is plaintext to the whole server room: the relay and anyone with the server id learn that a channel had a post, which member names it mentioned and whether it pinged everyone, restricted channels included; the relay can forge a hint or typing in a member's name | message_ops.rs hint broadcast, swarm.rs hint arm | Medium (privacy, C-18, C-24) | CONFIRMED (read in session 5); move into MLS (subgroup for restricted channels) with class A |
 
 ## Class K. Push and background parity
 
@@ -243,7 +249,7 @@ context before the write. B10 and B11 (ordering and replay) remain.
 | L1 | `FriendAccept` with no row and no tombstone creates an accepted friend; on a pending-incoming row it accepts without consent | dm:S-05 | High | AGENT |
 | L2 | A blocked person's never-seen device passes the block check and is then bound to the blocked identity | dm:S-08 | Medium | AGENT |
 | L3 | Blocklist missing on edit, delete, react, link preview, friend accept/reject/remove, typing, status, key exchange, raw fallback, MLS twins | dm:S-19 | Medium | AGENT |
-| L4 | Legacy raw-text fallback shows an unsigned message with no block or revoked check | dm:S-04, transport:S-15 | Medium | AGENT |
+| L4 | Legacy raw-text fallback shows an unsigned message with no block or revoked check | dm:S-04, transport:S-15 | Medium | FIXED HOL-SEC-013: an unparseable decrypted payload is dropped, as on the push path |
 | L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | FIXED HOL-SEC-008 (cards, reactions) and HOL-SEC-010 (typing) |
 | L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | PLAUSIBLE |
 
@@ -261,6 +267,7 @@ context before the write. B10 and B11 (ordering and replay) remain.
 |---|---|---|---|---|
 | N1 | Plaintext `ProfileUpdate` stores avatar bytes without comparing them to the signed hash; banner, showcase, frame, animation unsigned | identity:S11 | Medium | AGENT |
 | N2 | `saved` is true when the SQL guard refused a stale profile, so a replayed old profile still rewrites the member display name | identity:S12 | Low | AGENT |
+| N3 | Profile fields clipped to 64/96/256 BYTES against 32/48/128 CHARACTER UI limits: emoji or CJK names cut, and a cut after the signature check breaks the relayed profile (variant of HOL-SEC-011) | swarm.rs ProfileUpdate arm | Low | CONFIRMED (clip read), signature interplay unverified |
 
 ## Class O. Device linking (beyond HOL-SEC-002)
 

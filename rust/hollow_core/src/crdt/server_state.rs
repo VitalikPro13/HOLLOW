@@ -2571,6 +2571,75 @@ mod tests {
         assert!(allowed(Some(&s), "vipper", "ch"));
     }
 
+    /// Stored channel content is served only to a current member who can see the
+    /// channel, or to anyone for a public one; an unknown peer's role resolves to
+    /// plain Member, so membership is the first rung.
+    #[test]
+    fn authz_channel_served_only_to_a_member_who_can_read_it() {
+        let _g = crate::node::resolver::test_lock();
+        let readable = crate::node::crypto_handler::channel_readable_by;
+        let mut s = label_gate_fixture();
+        assert!(readable(&s, "member", "ch"));
+        assert!(!readable(&s, "stranger", "ch"), "an Everyone channel that is not public");
+        let op = s.create_op(CrdtPayload::ChannelPublicChanged { channel_id: "ch".into(), is_public: true });
+        s.apply_op(&op).unwrap();
+        assert!(readable(&s, "stranger", "ch"), "a public channel");
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(!readable(&s, "member", "ch"), "a member who cannot see the channel");
+        assert!(readable(&s, "vipper", "ch"));
+    }
+
+    /// C10: typing and unread hints come only from someone who may post in the
+    /// channel, about a channel we can see ourselves.
+    #[test]
+    fn authz_channel_signals_only_from_a_poster_about_a_channel_we_see() {
+        let _g = crate::node::resolver::test_lock();
+        let ok = |s: &ServerState, sender: &str, local: &str| {
+            crate::node::message_ops::channel_signal_accepted(s, sender, local, "ch", 1_000)
+        };
+        let mut s = label_gate_fixture();
+        assert!(ok(&s, "member", "admin"));
+        assert!(!ok(&s, "stranger", "admin"), "a non-member");
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(!ok(&s, "member", "admin"), "a sender who cannot see the channel");
+        assert!(ok(&s, "vipper", "admin"));
+        assert!(!ok(&s, "vipper", "member"), "a channel we cannot see");
+    }
+
+    /// C12: a seat in a voice channel, and with it the dial, only for a member who
+    /// can see that channel.
+    #[test]
+    fn authz_voice_seat_only_for_a_member_who_can_see_the_channel() {
+        let _g = crate::node::resolver::test_lock();
+        let refusal = crate::node::voice_handler::voice_join_refusal;
+        let mut s = label_gate_fixture();
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "vc".into(),
+            name: "vc".into(),
+            category: None,
+            channel_type: "voice".into(),
+        });
+        s.apply_op(&op).unwrap();
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "vc".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        assert_eq!(refusal(Some(&s), "vipper", "vc"), None);
+        assert_eq!(refusal(Some(&s), "member", "vc"), Some("cannot see the channel"));
+        assert_eq!(refusal(Some(&s), "stranger", "vc"), Some("not a member"));
+        assert_eq!(refusal(Some(&s), "vipper", "ch"), Some("not a voice channel"));
+        assert!(refusal(None, "vipper", "vc").is_some());
+    }
+
     #[test]
     fn label_gate_replaces_visibility_tier() {
         let mut s = label_gate_fixture();

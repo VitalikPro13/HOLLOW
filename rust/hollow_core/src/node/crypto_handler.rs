@@ -259,8 +259,9 @@ pub(crate) fn sign_message_versioned(
 ///
 /// There is deliberately no v1 fallback: it would be a downgrade oracle, since
 /// the attacker rather than the sender picks which payload is checked. A
-/// malformed album fails. Reuses `pk_cache` across a batch; a missing signature
-/// returns false.
+/// malformed album fails, and so does a body over [`MAX_MESSAGE_BYTES`], which
+/// makes this the one place every signed receive path enforces the limit.
+/// Reuses `pk_cache` across a batch; a missing signature returns false.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_message_signature_v2(
     sender_peer_str: &str,
@@ -274,6 +275,10 @@ pub(crate) fn verify_message_signature_v2(
     pk_cache: &mut PkCache,
 ) -> bool {
     if extras.album().is_some_and(|a| !is_album_id_shape(a)) {
+        return false;
+    }
+    if !message_body_fits(text) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a {msg_type} message of {} bytes, over the {MAX_MESSAGE_BYTES}-byte limit", text.len());
         return false;
     }
     let payload = message_signing_payload_v2(msg_type, context, sender_peer_str, ts, extras, text);
@@ -1761,20 +1766,17 @@ async fn ingest_sibling_device_list(
     (changed, newly_revoked)
 }
 
-/// Maximum stored length, in BYTES, of a received message body.
-pub(crate) const MAX_MESSAGE_BYTES: usize = 4000;
+/// Protocol ceiling, in BYTES, of one message body (post, edit, caption, meeting
+/// line). The composer caps CHARACTERS (4,000); this bounds what those expand to,
+/// emote tokens and combining marks included. Dart's `kMaxMessageBytes` is the
+/// same number.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
-/// Clip a sender-controlled message body to `MAX_MESSAGE_BYTES` on a UTF-8
-/// character boundary.
-///
-/// SECURITY: the naive `text[..4000]` PANICS when byte 4000 lands inside a
-/// multi-byte character, and the body arrives from a remote peer, so a modified
-/// client could abort the swarm event loop at will.
-pub(crate) fn clip_text(text: String) -> String {
-    if text.len() <= MAX_MESSAGE_BYTES {
-        return text;
-    }
-    clip_bytes(&text, MAX_MESSAGE_BYTES).to_string()
+/// True when a message body fits [`MAX_MESSAGE_BYTES`]. A longer one is DROPPED
+/// whole on every path, never clipped: a clipped row no longer matches its
+/// signature, so it would fail on every device we serve it to.
+pub(crate) fn message_body_fits(text: &str) -> bool {
+    text.len() <= MAX_MESSAGE_BYTES
 }
 
 /// The longest prefix of `s` that is at most `max` bytes and ends on a character
@@ -1913,6 +1915,8 @@ pub(crate) enum BackfillSig {
     /// Signature present and it does NOT verify. REJECT the item — a wrong
     /// signature is not legacy data, it is tampering.
     Forged,
+    /// The body is over [`MAX_MESSAGE_BYTES`]. Refused whatever it carries.
+    Oversized,
 }
 
 impl BackfillSig {
@@ -1921,7 +1925,7 @@ impl BackfillSig {
     pub(crate) fn is_acceptable(self) -> bool {
         match self {
             BackfillSig::Valid => true,
-            BackfillSig::Forged => false,
+            BackfillSig::Forged | BackfillSig::Oversized => false,
             BackfillSig::Absent => !REQUIRE_SIGNED_BACKFILL,
         }
     }
@@ -1932,6 +1936,7 @@ impl BackfillSig {
         match self {
             BackfillSig::Absent => "NO signature (pre-signing history, or stripped in transit)",
             BackfillSig::Forged => "signature present but INVALID",
+            BackfillSig::Oversized => "body over the message size limit",
             BackfillSig::Valid => "accepted",
         }
     }
@@ -1960,6 +1965,9 @@ pub(crate) fn check_backfill_signature(
     pk_b64: Option<&str>,
     pk_cache: &mut PkCache,
 ) -> BackfillSig {
+    if !message_body_fits(text) {
+        return BackfillSig::Oversized;
+    }
     if sig_b64.is_none() && pk_b64.is_none() {
         return BackfillSig::Absent;
     }
@@ -5699,12 +5707,65 @@ mod tests {
             let body = between(&swarm, &arm, "message_ops::handle_envelope_");
             assert!(body.contains("public_frame_accepted("), "swarm.rs: {kind} skips the public check");
         }
+        for (arm, until) in [
+            ("HavenMessage::ChannelNotificationHint {", "NetworkEvent::ChannelNotificationHint {"),
+            ("HavenMessage::TypingIndicator {", "NetworkEvent::TypingStarted {"),
+            ("MessageEnvelope::Typing { sid, cid } => {", "handle_envelope_typing("),
+        ] {
+            assert!(between(&swarm, arm, until).contains("channel_signal_accepted("), "swarm.rs: {arm} skips the signal gate");
+        }
+        let voice = read("voice_handler.rs");
+        for (name, src, arm) in [
+            ("swarm.rs", &swarm, "HavenMessage::VoiceChannelJoin { server_id, channel_id } => {"),
+            ("voice_handler.rs", &voice, "pub(crate) async fn handle_envelope_voice_channel_join("),
+        ] {
+            assert!(between(src, arm, "voice_channel_participants.entry(").contains("voice_join_refusal("), "{name}: a voice join skips the seat gate");
+        }
         let olm = between(&swarm, "Ok(MessageEnvelope::ChannelMessage { inner }) => {", "Ok(MessageEnvelope::ChannelSyncBatch");
         assert!(olm.contains("message_ops::handle_envelope_channel_message("), "swarm.rs: the Olm arm has its own ingest again");
         let public = between(&fetch, "HavenMessage::PublicChannelMessage {", "insert_channel_row(");
         assert!(public.contains("public_frame_accepted(") && public.contains("fetch_post_refused("));
         let mls = between(&fetch, "MessageEnvelope::ChannelMessage { inner } => {", "insert_channel_row(");
         assert!(mls.contains("fetch_post_refused("), "fetch.rs: MLS posts skip the live post gate");
+    }
+
+    /// D1, D7 (member half): a KeyPackage is seated only under the credential of
+    /// the device that sent it, on the live, parked-join and meeting paths. The relay
+    /// can still name another sender; binding the credential to a device key is
+    /// the class D design.
+    #[test]
+    fn authz_key_package_must_name_its_sending_device() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs");
+        let swarm = std::fs::read_to_string(path).expect("read swarm.rs");
+        let arm = |from: &str, to: &str| {
+            let start = swarm.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = swarm[start..].find(to).unwrap_or_else(|| panic!("missing {to}"));
+            swarm[start..start + end].to_string()
+        };
+        let live = arm("HavenMessage::MlsKeyPackage { server_id, key_package, channel_id: kp_channel_id } => {", "pending_mls_key_packages");
+        assert!(live.contains("key_package_identity(") && live.contains("id == peer_str"), "live KeyPackage arm");
+        let parked = arm("if parked && let Some(kp_b64) = key_package.as_ref() {", "pending_mls_key_packages");
+        assert!(parked.contains("key_package_identity(") && parked.contains("id != peer_str"), "parked-join KeyPackage");
+        let conf = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/conference.rs"))
+            .expect("read conference.rs");
+        let knock = &conf[conf.find("if super::blocklist::is_blocked(sender_peer)").expect("knock handler")..];
+        let knock = &knock[..knock.find("host_state.pending.insert(").expect("waiting room")];
+        assert!(knock.contains("key_package_identity(") && knock.contains("id == sender_peer"), "meeting knock");
+    }
+
+    /// L4: the live node shows a DM only after its signature verified. A decrypted
+    /// payload that was not an envelope used to reach the UI as an unsigned,
+    /// unblocked "legacy" DM.
+    #[test]
+    fn a_dm_reaches_the_ui_only_after_its_signature_verifies() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs");
+        let swarm = std::fs::read_to_string(path).expect("read swarm.rs");
+        let emits: Vec<usize> = swarm.match_indices("NetworkEvent::MessageReceived {").map(|(i, _)| i).collect();
+        assert_eq!(emits.len(), 1, "swarm.rs shows a DM from one place, the verified arm");
+        let head = &swarm[..emits[0]];
+        let arm = head.rfind("Ok(MessageEnvelope::DirectMessage { inner }) => {").expect("DM arm");
+        let verify = head.rfind("verify_message_signature_v2(").expect("DM verification");
+        assert!(verify > arm, "the DM arm verifies before it emits");
     }
 
     /// C2: MLS proves only that a member of THIS group sent an envelope, so it must
@@ -5749,5 +5810,36 @@ mod tests {
         assert!(!fits(&MessageEnvelope::SessionAck, "srv", None));
         let chunk = MessageEnvelope::FileChunk { fid: "f".into(), idx: 0, data: String::new() };
         assert!(fits(&chunk, "srv", None));
+    }
+
+    /// C11: a body over the protocol limit never verifies, live or backfilled, so
+    /// every receive path drops it whole. A full composer of Cyrillic (8,000 bytes)
+    /// used to be clipped at 4,000 bytes and then failed its own signature.
+    #[test]
+    fn message_over_the_size_limit_never_verifies() {
+        let a = kp(31);
+        let (a_id, a_pk) = (a.peer_id(), pk_b64(&a));
+        let extras = SignedExtras { mid: Some("m"), ..SignedExtras::default() };
+        let check = |text: &str| {
+            let (sig, pk) = sign_message_versioned(&a, &a_pk, "dm", "them", &a_id, 1_000, &extras, text);
+            let live = verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "dm", "them", 1_000, &extras, text, &mut PkCache::new(),
+            );
+            let synced = check_backfill_signature(
+                &a_id, "dm", "them", 1_000, None, &extras, text, sig.as_deref(), pk.as_deref(), &mut PkCache::new(),
+            );
+            (live, synced)
+        };
+
+        assert_eq!(check(&"я".repeat(4_000)), (true, BackfillSig::Valid));
+        assert_eq!(check(&"é".repeat(MAX_MESSAGE_BYTES / 2)), (true, BackfillSig::Valid));
+        let over = format!("{}!", "é".repeat(MAX_MESSAGE_BYTES / 2));
+        assert_eq!(check(&over), (false, BackfillSig::Oversized));
+        assert!(!BackfillSig::Oversized.is_acceptable());
+        assert_eq!(
+            check_backfill_signature(&a_id, "dm", "them", 1_000, None, &extras, &over, None, None, &mut PkCache::new()),
+            BackfillSig::Oversized,
+            "an unsigned oversized item is refused for its size",
+        );
     }
 }

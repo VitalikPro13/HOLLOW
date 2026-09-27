@@ -1484,24 +1484,13 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     // MLS-DECRYPTED under the `conf:{id}` group, so the sender provably holds it,
     // and that IS the membership check. The plaintext path keeps its strict CRDT
     // guard and conferences never ride it. Channel is always the synthetic "main".
-    let is_conf = super::conference::is_conference_sid(&sid);
-    let is_member = if is_conf { true } else {
-        server_states.get(&sid)
-            .map(|s| s.is_member(&sender_peer_id))
-            .unwrap_or(false)
+    let refusal = if super::conference::is_conference_sid(&sid) {
+        (cid != super::conference::CONF_CHANNEL).then_some("not the meeting channel")
+    } else {
+        voice_join_refusal(server_states.get(&sid), &sender_peer_id, &cid)
     };
-    let is_voice_channel = if is_conf { cid == super::conference::CONF_CHANNEL } else {
-        server_states.get(&sid)
-            .and_then(|s| s.channels.get(&cid))
-            .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
-            .unwrap_or(false)
-    };
-    if !is_member {
-        hollow_log!("[HOLLOW-SECURITY] BLOCKED VoiceChannelJoin from non-member {sender_peer_id} in server {sid}");
-        return;
-    }
-    if !is_voice_channel {
-        hollow_log!("[HOLLOW-SECURITY] BLOCKED VoiceChannelJoin for non-voice channel {cid} in server {sid}");
+    if let Some(reason) = refusal {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VoiceChannelJoin from {sender_peer_id} for {sid}/{cid}: {reason}");
         return;
     }
     hollow_log!("[HOLLOW-VC] {sender_peer_id} joined voice channel {cid} in {sid}");
@@ -1534,6 +1523,27 @@ pub(crate) async fn handle_envelope_voice_channel_join(
         voice_channel_participants, voice_channel_gossip_mode,
         gossip_overlays, device_peer_id, event_tx,
     ).await;
+}
+
+/// Why `sender` (a device) may not sit in voice channel `cid` of a server, or
+/// `None`: a member who can see the channel, and it is a voice channel. Meetings
+/// hold no server state and are judged by their group instead.
+pub(crate) fn voice_join_refusal(
+    state: Option<&ServerState>,
+    sender: &str,
+    cid: &str,
+) -> Option<&'static str> {
+    let Some(state) = state else { return Some("a server we do not hold") };
+    let master = super::resolver::resolve(sender);
+    if !state.is_member(&master) {
+        Some("not a member")
+    } else if !state.channels.get(cid).is_some_and(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice) {
+        Some("not a voice channel")
+    } else if !state.can_see_channel(&master, cid) {
+        Some("cannot see the channel")
+    } else {
+        None
+    }
 }
 
 /// Handle `MessageEnvelope::VoiceChannelLeave` (MLS path).

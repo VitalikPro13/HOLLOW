@@ -429,6 +429,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   Future<void> _handleSend({bool refocus = true}) async {
     _emoteAutocomplete.dismiss();
+    final refusal = composerSendRefusal(_controller.expandedText().trim());
+    if (refusal != null) {
+      HollowToast.show(context, refusal, type: HollowToastType.error);
+      return;
+    }
     if (_staged.isNotEmpty) {
       // FileHeaderPayload has no link_preview slot, so the staged card must be
       // cleared here or it stays on screen attached to a message that never
@@ -448,11 +453,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // Expand inline-emote placeholders to [e:name:hash] wire tokens.
     final text = _controller.expandedText().trim();
     if (text.isEmpty) return;
-    if (exceedsAssetLimit(text)) {
-      HollowToast.show(context, kAssetLimitMessage,
-          type: HollowToastType.error);
-      return;
-    }
     _controller.clear();
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();

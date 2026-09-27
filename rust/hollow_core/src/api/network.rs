@@ -1990,6 +1990,16 @@ pub fn fetch_link_preview(url: String) -> Result<LinkPreviewRef, String> {
     Ok(internal.into())
 }
 
+/// Refuses a message body every receiver would drop (`MAX_MESSAGE_BYTES`), so the
+/// sender learns it here instead of the message vanishing on the other side.
+pub(crate) fn refuse_oversized_message(text: &str) -> Result<(), String> {
+    if node::crypto_handler::message_body_fits(text) {
+        Ok(())
+    } else {
+        Err("This message is too long to send.".to_string())
+    }
+}
+
 /// Send a text message to a peer. The peer must be reachable (discovered via mDNS).
 #[frb]
 pub fn send_message(
@@ -1999,6 +2009,7 @@ pub fn send_message(
     reply_to_mid: Option<String>,
     link_preview: Option<LinkPreviewRef>,
 ) -> Result<(), String> {
+    refuse_oversized_message(&text)?;
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
 
@@ -2031,6 +2042,7 @@ pub fn send_channel_message(
     reply_to_mid: Option<String>,
     link_preview: Option<LinkPreviewRef>,
 ) -> Result<(), String> {
+    refuse_oversized_message(&text)?;
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
@@ -2062,6 +2074,7 @@ pub fn edit_channel_message(
     message_id: String,
     new_text: String,
 ) -> Result<(), String> {
+    refuse_oversized_message(&new_text)?;
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
@@ -2088,6 +2101,7 @@ pub fn edit_dm_message(
     message_id: String,
     new_text: String,
 ) -> Result<(), String> {
+    refuse_oversized_message(&new_text)?;
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
@@ -3688,6 +3702,7 @@ pub fn send_file(
     if album.as_deref().is_some_and(|a| !node::crypto_handler::is_album_id_shape(a)) {
         return Err("Invalid album id".to_string());
     }
+    refuse_oversized_message(&message_text)?;
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;

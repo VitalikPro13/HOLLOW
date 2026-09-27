@@ -62,6 +62,20 @@ into possible holes, so this file itself belongs on the security branch.
   was never bound to the group that decrypted it). Also closed: C4, C5, C13, L5.
   Found on the way, not security: the 4,000-byte text clamp cuts composer-legal
   non-Latin messages (C11, decision for Vitalik).
+- **Session 5 (2026-09-27):** C11 built (**HOL-SEC-011**): one 64 KiB message
+  limit in Rust and Dart, every receive path drops a longer body whole inside
+  signature verification, nothing clips any more, and the composer and edit
+  fields stop at it. Class C closed except C7 (decided: a future bound plus our
+  own clock for slow mode, to build) and C14 (moves to class K):
+  **HOL-SEC-012** (the dead channel probes leaked per-author watermarks to anyone
+  and stalled sync; deleted), **HOL-SEC-013** (an unparseable Olm payload was
+  shown as an unsigned DM; L4), **HOL-SEC-014** (guests were served deleted
+  text), **HOL-SEC-015** (typing and unread hints from anyone in the room),
+  **HOL-SEC-016** (a member who cannot see a restricted voice channel took a
+  seat). Class D confirmed row by row; the member-level halves of D1 and D7 fixed
+  as **HOL-SEC-017** (a leaf seated under another device's name), the rest is the
+  class D design. New candidates: J8, J9 (sync requests and hints in plaintext),
+  N3 (profile fields clipped in bytes).
 - **Next:** verify the candidate classes in the plan's priority order (MLS
   credentials D, CRDT snapshot E1/E2 with the membership record E4, channel
   ingest C1/C2, files H, relay I1/I2); every AGENT-status row must be re-read

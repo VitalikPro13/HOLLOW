@@ -395,7 +395,6 @@ use super::types::*;
 
 use super::crypto_handler;
 use super::crypto_handler::{
-    clip_text,
     key_bundle_signing_payload, key_request_signing_payload, signed_key_bundle, signed_key_request,
     verify_key_exchange, key_exchange_device_unauthorized,
     KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
@@ -1886,12 +1885,12 @@ async fn run_event_loop(
                             if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                 let limit = 50i32;
                                 let messages_result = if let Some(before_ts) = before_timestamp {
-                                    store.get_channel_messages_before(&server_id, &channel_id, before_ts, limit)
+                                    store.get_visible_channel_messages_before(&server_id, &channel_id, before_ts, limit)
                                 } else {
                                     // Initial request: LATEST messages, mirroring the remote responder.
                                     // `messages_since(0)` returns the OLDEST 50, which lands an owner cold-starting
                                     // into their own public channel at the START of history.
-                                    store.get_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
+                                    store.get_visible_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                                 };
                                 if let Ok(msgs) = messages_result {
                                     let has_more = msgs.len() as i32 >= limit;
@@ -6969,8 +6968,7 @@ async fn handle_incoming_request(
 
             // ASYNC FRIENDING: the accepter's ONE pre-key establisher. Its whole job was
             // done by the decrypt above, which created our inbound session, so it stops
-            // here. Checked BEFORE the envelope parse because it is deliberately not
-            // JSON, and the parse-failure path renders unknown plaintext as a DM bubble.
+            // here, before the envelope parse: it is deliberately not JSON.
             if text == social::FRIEND_HANDSHAKE_SENTINEL {
                 hollow_log!("[HOLLOW-FRIENDS] Friend-handshake establisher from {peer_str} — Olm session live, no DM row");
                 return;
@@ -7049,9 +7047,6 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
                     let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us, album } = *inner;
-                    // NOTE: the length clamp lives AFTER signature verification —
-                    // the signature covers the text the sender actually sent, so
-                    // clipping first would invalidate it. See below.
 
                     // Multi-device: attribute the DM to the sender's MASTER, so messages from any
                     // of a friend's devices land in the single DM thread and our own other-device
@@ -7087,11 +7082,7 @@ async fn handle_incoming_request(
                     //
                     // A MISSING signature is rejected too: the old `if sig.is_some()` gate was
                     // itself the bypass, since stripping `sig`/`pk` skipped verification entirely.
-                    //
-                    // Verified against the RAW text, before the length clamp: the sender signed
-                    // what they sent, and a 4,000-CHARACTER composer limit is up to ~16,000
-                    // BYTES in Cyrillic, CJK or emoji, so clipping first would have dropped
-                    // every long non-Latin DM.
+                    // So is a body over the message size limit, dropped whole, never clipped.
                     //
                     // Signer and context are SWAPPED for a self fan-out echo (`is_own_device`):
                     // WE signed it and the FRIEND (`convo_peer`) was the recipient.
@@ -7120,11 +7111,6 @@ async fn handle_incoming_request(
                             return;
                         }
                     }
-
-                    // Enforce the 4,000 byte storage limit, char-boundary safe: the old
-                    // `msg_text[..4000]` PANICKED when byte 4,000 landed inside a multi-byte
-                    // character, aborting the swarm event loop on a remote-controlled string.
-                    let msg_text = clip_text(msg_text);
 
                     // Persist with the SENDER timestamp, never a local now(), so DM sync
                     // dedups consistently. `is_own` flags an echo from our OWN device.
@@ -8715,7 +8701,6 @@ async fn handle_incoming_request(
                 | Ok(MessageEnvelope::Typing { .. })
                 | Ok(MessageEnvelope::ProfileUpdate { .. })
                 | Ok(MessageEnvelope::ChannelSyncReq { .. })
-                | Ok(MessageEnvelope::ChannelProbe { .. })
                 | Ok(MessageEnvelope::VoiceChannelJoin { .. })
                 | Ok(MessageEnvelope::VoiceChannelLeave { .. })
                 | Ok(MessageEnvelope::VoiceChannelAudioState { .. })
@@ -8726,30 +8711,9 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
                 }
 
-                // Voice SDP/ICE + ChannelProbeResp — Olm fallback handlers.
-                // These arrive via Olm when MLS encrypt failed on the sender side
-                // (peer's epoch may be stale after reconnection).
-                Ok(MessageEnvelope::ChannelProbeResp { sid, cid, their_latest, msg_count, .. }) => {
-                    // Mirror the MLS ChannelProbeResp handler — compare timestamps,
-                    // send plaintext ChannelSyncRequest if peer has newer messages.
-                    let dedup_key = format!("{sid}:{cid}");
-                    if channel_sync_sent.get(&dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
-                        return;
-                    }
-                    if !server_states.contains_key(&sid) { return; }
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
-                            .unwrap_or(None).unwrap_or(0);
-                        if their_latest > our_latest || msg_count > store.count_channel_messages(&sid, &cid) {
-                            channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers, peer_str,
-                                super::sync_handler::channel_sync_request(&store, &sid, &cid, true),
-                            );
-                        }
-                    }
-                }
-
+                // Voice SDP/ICE Olm fallback handlers: these arrive via Olm when MLS
+                // encrypt failed on the sender side (its epoch may be stale after a
+                // reconnect).
                 Ok(MessageEnvelope::VoiceChannelSdpOffer { sid, cid, sdp, .. }) => {
                     let vc_key = format!("{sid}:{cid}");
                     let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
@@ -8974,33 +8938,9 @@ async fn handle_incoming_request(
                 }
 
                 Err(e) => {
-                    // A decrypted payload that LOOKS like JSON but failed the
-                    // MessageEnvelope parse is version skew or corruption being
-                    // MISROUTED into the legacy-DM fallback, so say so with the sender.
-                    if text.trim_start().starts_with('{') {
-                        hollow_log!("[HOLLOW-SWARM] Decrypted envelope from {peer_str} failed MessageEnvelope parse ({} B) — falling through as legacy raw-text DM: {e}", text.len());
-                    }
-                    // Legacy raw-text DM (backward compatible). No signature
-                    // available since these aren't wrapped in signed envelopes.
-                    let legacy_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    let _ = event_tx
-                        .send(NetworkEvent::MessageReceived {
-                            from_peer: peer_str.to_string(),
-                            text,
-                            timestamp: legacy_ts,
-                            message_id: String::new(),
-                            reply_to_mid: String::new(),
-                            link_preview: None,
-                            signature: None,
-                            public_key: None,
-                            album_id: None,
-                            is_own: false,
-                            duplicate: false,
-                        })
-                        .await;
+                    // Every sender wraps its payload in a signed envelope, so one that
+                    // does not parse is version skew or tampering, never a message.
+                    hollow_log!("[HOLLOW-SWARM] Dropped a decrypted payload from {peer_str} that is not an envelope ({} B): {e}", text.len());
                 }
             }
 
@@ -10133,84 +10073,6 @@ async fn handle_incoming_request(
             }
         }
 
-        // -- Multi-peer fan-out sync probe handlers --
-
-        HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest, msg_count: _probe_count } => {
-            
-
-            // The same visibility gate as the full request. A probe answers with
-            // the channel's message count and latest timestamp, which is exactly
-            // the metadata a hidden channel is hidden to withhold.
-            let visible = match server_states.get(&server_id) {
-                Some(state) => super::crypto_handler::channel_readable_by(state, peer_str, &channel_id),
-                None => return,
-            };
-            if !visible {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncProbe from {peer_str} for {channel_id}: not visible to that member");
-                return;
-            }
-
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                let their_latest = store
-                    .get_latest_channel_timestamp(&server_id, &channel_id)
-                    .unwrap_or(None)
-                    .unwrap_or(0);
-                let msg_count = store
-                    .count_channel_messages(&server_id, &channel_id);
-
-                hollow_log!(
-                    "[HOLLOW-SYNC] Probe from {peer_str} for {channel_id}: ours={their_latest} theirs={our_latest} (count={msg_count})"
-                );
-
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers,
-                    peer_str, HavenMessage::ChannelSyncProbeResponse {
-                        server_id,
-                        channel_id,
-                        their_latest,
-                        msg_count,
-                    },
-                );
-            }
-        }
-
-        HavenMessage::ChannelSyncProbeResponse { server_id, channel_id, their_latest, msg_count } => {
-            
-
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                let our_latest = store
-                    .get_latest_channel_timestamp(&server_id, &channel_id)
-                    .unwrap_or(None)
-                    .unwrap_or(0);
-                let our_msg_count = store.count_channel_messages(&server_id, &channel_id);
-
-                // Sync if the peer has newer messages OR more of them: a message
-                // missed behind our newest one never moves `latest`.
-                // Dedup: skip if already syncing this channel recently.
-                let dedup_key = format!("{server_id}:{channel_id}");
-                let recently_synced = channel_sync_sent.get(&dedup_key)
-                    .is_some_and(|t| t.elapsed() < Duration::from_secs(5));
-                if (their_latest > our_latest || msg_count > our_msg_count) && !recently_synced {
-                    channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-                    hollow_log!(
-                        "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ts: ours={our_latest} peer={their_latest}, count: ours={our_msg_count} peer={msg_count}). Requesting from {peer_str}"
-                    );
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers, peer_str,
-                        super::sync_handler::channel_sync_request(&store, &server_id, &channel_id, true),
-                    );
-                } else {
-                    hollow_log!(
-                        "[HOLLOW-SYNC] Probe response: {channel_id} is up to date (ts: ours={our_latest} peer={their_latest}, count: {our_msg_count}). Skipping."
-                    );
-                    let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
-                        server_id,
-                        new_message_count: 0,
-                    }).await;
-                }
-            }
-        }
-
         HavenMessage::DmSyncRequest { since_timestamp, both_directions, gap } => {
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp} (both_directions={both_directions}, gap={})", gap.is_some());
 
@@ -10746,10 +10608,20 @@ async fn handle_incoming_request(
                             }
 
                             MessageEnvelope::Typing { sid, cid } => {
-                                // Typing indicator is keyed on the MASTER identity.
-                                super::social::handle_envelope_typing(
-                                    event_tx, sender_master.clone(), sid, cid,
-                                ).await;
+                                // A meeting holds no server state: admission to its
+                                // group is the membership proof.
+                                let typing_ok = super::conference::is_conference_sid(&sid)
+                                    || server_states.get(&sid).is_some_and(|state| {
+                                        message_ops::channel_signal_accepted(
+                                            state, &sender_master, master_peer_str, &cid,
+                                            crate::crdt::hlc::wall_clock_ms(),
+                                        )
+                                    });
+                                if typing_ok {
+                                    super::social::handle_envelope_typing(
+                                        event_tx, sender_master.clone(), sid, cid,
+                                    ).await;
+                                }
                             }
 
                             MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk } => {
@@ -10802,26 +10674,6 @@ async fn handle_incoming_request(
                                     ws_cmd_tx, ws_room_peers,
                                     &sender_peer_id, sid, cid, since_timestamp, sender_timestamps, gap,
                                     crypto_store, crdt_store,
-                                    db_path, db_passphrase,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ChannelProbe { sid, cid, our_latest: _their_latest, msg_count: _their_count, .. } => {
-                                sync_handler::handle_envelope_channel_probe(
-                                    server_states, olm, crypto_store,
-                                    bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
-                                    sender_peer_id, sid, cid,
-                                    crdt_store,
-                                    db_path, db_passphrase,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ChannelProbeResp { sid, cid, their_latest, msg_count, .. } => {
-                                sync_handler::handle_envelope_channel_probe_resp(
-                                    bundle_keypair, ws_cmd_tx, ws_room_peers,
-                                    channel_sync_sent, sender_peer_id,
-                                    sid, cid, their_latest, msg_count,
-                                    crdt_store,
                                     db_path, db_passphrase,
                                 ).await;
                             }
@@ -11288,6 +11140,20 @@ async fn handle_incoming_request(
                 return;
             }
 
+            let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(&key_package) {
+                Ok(b) => b,
+                Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode KeyPackage failed: {e}"); return; }
+            };
+            // A leaf only in the name of the device that asked for it: a member must
+            // not be seated as someone else, the owner included (D1).
+            match crate::crypto::MlsManager::key_package_identity(&kp_bytes) {
+                Ok(id) if id == peer_str => {}
+                other => {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from {peer_str} for {group_key}: credential {other:?} is not the sending device");
+                    return;
+                }
+            }
+
             // SIBLING-RE-ADDS-SIBLING fast path (keystone regen recovery): when WE
             // hold the group and the sender is OUR OWN identity, we process it
             // directly, because the coordinator election below excludes the sender's
@@ -11418,11 +11284,6 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-MLS] Device {peer_str} already in MLS group {group_key} — queuing for batch removal + re-add");
                     pending_mls_removals.entry(group_key.clone()).or_default().push(peer_str.to_string());
                 }
-
-                let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(&key_package) {
-                    Ok(b) => b,
-                    Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode KeyPackage failed: {e}"); return; }
-                };
 
                 // Queue KeyPackage for batch processing (single epoch advance per batch).
                 pending_mls_key_packages
@@ -12676,10 +12537,10 @@ async fn handle_incoming_request(
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let limit = 50i32;
                     let messages_result = if let Some(before_ts) = before_timestamp {
-                        store.get_channel_messages_before(&server_id, &channel_id, before_ts, limit)
+                        store.get_visible_channel_messages_before(&server_id, &channel_id, before_ts, limit)
                     } else {
                         // Initial request: get the latest messages (not oldest).
-                        store.get_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
+                        store.get_visible_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                     };
                     if let Ok(msgs) = messages_result {
                         let msg_ids: Vec<String> = msgs.iter().filter_map(|m| m.message_id.clone()).collect();
@@ -12950,6 +12811,15 @@ async fn handle_incoming_request(
             if super::resolver::same_identity(peer_str, local_peer_str) {
                 return;
             }
+            let signal_ok = server_states.get(&server_id).is_some_and(|state| {
+                message_ops::channel_signal_accepted(
+                    state, &super::resolver::resolve(peer_str), master_peer_str, &channel_id,
+                    crate::crdt::hlc::wall_clock_ms(),
+                )
+            });
+            if !signal_ok {
+                return;
+            }
             // Reply-to-ME only — the wire's bare `is_reply` fired the
             // mentions-only level on every reply to anyone (#42). Hints from
             // pre-0.9.1 senders carry no author → false (never over-notify).
@@ -12966,13 +12836,23 @@ async fn handle_incoming_request(
             // Phantom-chat guard (Step 7): ignore typing from a just-revoked-but-still-
             // alive device (same reason we drop its DMs — it would spawn/feed a phantom
             // conversation). Stops once the device self-nukes / disconnects.
-            if super::resolver::is_revoked(peer_str) {
+            if super::resolver::is_revoked(peer_str) || super::blocklist::is_blocked(peer_str) {
                 return;
             }
             // Attribute typing to the sender's MASTER identity, since server members and
             // DM threads are master-keyed. The raw `peer_str` is a device id and would
             // never match, so the indicator never shows for a multi-device sender.
             let typist_master = super::resolver::resolve(peer_str);
+            if !server_id.is_empty()
+                && !server_states.get(&server_id).is_some_and(|state| {
+                    message_ops::channel_signal_accepted(
+                        state, &typist_master, master_peer_str, &channel_id,
+                        crate::crdt::hlc::wall_clock_ms(),
+                    )
+                })
+            {
+                return;
+            }
             hollow_log!(
                 "[HOLLOW-TYPING] Received from {peer_str} (server={}, master {typist_master})",
                 if server_id.is_empty() { "DM" } else { &server_id }
@@ -13662,27 +13542,17 @@ async fn handle_incoming_request(
             // group membership (leaf credentials ARE device ids), which only an
             // ADMITTED peer can hold. That is what lets the PeerJoined re-broadcast
             // and the conference reply-on-join sync reach late joiners.
-            let is_conf = super::conference::is_conference_sid(&server_id);
-            let is_member = if is_conf {
-                mls.as_ref().is_some_and(|m|
-                    m.group_members(&server_id).iter().any(|c| c == peer_str))
+            let refusal = if super::conference::is_conference_sid(&server_id) {
+                if !mls.as_ref().is_some_and(|m| m.group_members(&server_id).iter().any(|c| c == peer_str)) {
+                    Some("not in the meeting group")
+                } else {
+                    (channel_id != super::conference::CONF_CHANNEL).then_some("not the meeting channel")
+                }
             } else {
-                server_states.get(&server_id)
-                    .map(|s| s.is_member(peer_str))
-                    .unwrap_or(false)
+                voice_handler::voice_join_refusal(server_states.get(&server_id), peer_str, &channel_id)
             };
-            let is_voice_channel = if is_conf {
-                channel_id == super::conference::CONF_CHANNEL
-            } else {
-                server_states.get(&server_id)
-                    .and_then(|s| s.channels.get(&channel_id))
-                    .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
-                    .unwrap_or(false)
-            };
-            if !is_member {
-                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VoiceChannelJoin from non-member {peer_str} in server {server_id}");
-            } else if !is_voice_channel {
-                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VoiceChannelJoin for non-voice channel {channel_id} in server {server_id}");
+            if let Some(reason) = refusal {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VoiceChannelJoin from {peer_str} for {server_id}/{channel_id}: {reason}");
             } else {
                 hollow_log!("[HOLLOW-VC] {peer_str} joined voice channel {channel_id} in {server_id} (plaintext)");
                 let vc_key = format!("{server_id}:{channel_id}");

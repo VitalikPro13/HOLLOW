@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_limits.dart';
 import 'package:hollow/src/core/message_tokens.dart'
     show assetTokenRegex, emoteTokenRegex;
 import 'package:hollow/src/core/models/call_record.dart';
@@ -147,6 +148,20 @@ bool exceedsAssetLimit(String expandedText) =>
 
 /// User-facing reason for a refused send, so all three panes say it the same.
 const String kAssetLimitMessage = 'One sticker or GIF per message';
+
+/// Only reachable by inserting hundreds of emotes from the picker: typing and
+/// pasting already stop at [kMaxMessageBytes].
+const String kMessageTooLongMessage = 'This message is too long to send';
+
+/// Why the composer must not send [expandedText] (a text or a caption), or
+/// null when it may go. Receivers drop a body over [kMaxMessageBytes] whole.
+String? composerSendRefusal(String expandedText) {
+  if (exceedsAssetLimit(expandedText)) return kAssetLimitMessage;
+  if (utf8ByteLength(expandedText) > kMaxMessageBytes) {
+    return kMessageTooLongMessage;
+  }
+  return null;
+}
 
 /// Which seams of a message are continued by its neighbours. A run tiles only
 /// where BOTH rows are candidates and already grouped, the same rule that
@@ -1570,6 +1585,9 @@ Widget chatComposerField(
       maxLines: 5,
       minLines: 1,
       maxLength: 4000,
+      inputFormatters: [
+        MessageByteLimitFormatter(measure: controller.wireByteLength),
+      ],
       showCounter: false,
       quietFocus: true,
       style: (isTouchForm ? HollowTypography.bodyTouch : HollowTypography.body)

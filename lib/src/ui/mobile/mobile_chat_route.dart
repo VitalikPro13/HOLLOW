@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/message_limits.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -880,9 +881,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (text.isEmpty && staged.isEmpty) return;
     if (_blockedBySlowMode()) return;
     if (!_passesMediaOnlyGate(staged)) return;
-    if (exceedsAssetLimit(text)) {
-      HollowToast.show(context, kAssetLimitMessage,
-          type: HollowToastType.error);
+    final refusal = composerSendRefusal(text);
+    if (refusal != null) {
+      HollowToast.show(context, refusal, type: HollowToastType.error);
       return;
     }
     _controller.clear();
@@ -2860,6 +2861,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             focusNode: _editFocusNode,
             maxLines: 5,
             minLines: 1,
+            inputFormatters: [MessageByteLimitFormatter()],
             textInputAction: TextInputAction.newline,
             style: HollowTypography.bodyTouch.copyWith(color: hollow.textPrimary),
             decoration: InputDecoration(

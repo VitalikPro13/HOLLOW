@@ -838,6 +838,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _dismissMentionOverlay();
     _emoteAutocomplete.dismiss();
     if (_blockedBySlowMode()) return;
+    final refusal = composerSendRefusal(_controller.expandedText().trim());
+    if (refusal != null) {
+      HollowToast.show(context, refusal, type: HollowToastType.error);
+      return;
+    }
     if (_staged.isNotEmpty) {
       // FileHeaderPayload has no link_preview slot, so the staged card must be
       // cleared here or it stays on screen attached to a message that never
@@ -863,11 +868,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         'This is a media-only channel. Attach an image, GIF, or video',
         type: HollowToastType.info,
       );
-      return;
-    }
-    if (exceedsAssetLimit(text)) {
-      HollowToast.show(context, kAssetLimitMessage,
-          type: HollowToastType.error);
       return;
     }
     _controller.clear();

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/message_limits.dart';
 import '../../theme/hollow_shadows.dart';
 import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
@@ -77,21 +78,36 @@ class EmoteComposerController extends TextEditingController {
     final buf = StringBuffer();
     for (final code in text.codeUnits) {
       if (_isPua(code)) {
-        final key = String.fromCharCode(code);
-        final emote = _emotes[key];
-        if (emote != null) {
-          buf.write('[e:${emote.name}:${emote.hash}]');
-          continue;
-        }
-        final asset = _assets[key];
-        if (asset != null) {
-          buf.write('[a:${asset.kind}:${asset.hash}:${asset.w}:${asset.h}]');
-        }
+        final token = _tokenFor(code);
+        if (token != null) buf.write(token);
       } else {
         buf.writeCharCode(code);
       }
     }
     return buf.toString();
+  }
+
+  /// The UTF-8 size [value] will have once its placeholders expand, which is
+  /// what [kMaxMessageBytes] limits.
+  int wireByteLength(String value) {
+    var bytes = 0;
+    for (final rune in value.runes) {
+      bytes += _isPua(rune)
+          ? (_tokenFor(rune)?.length ?? 0)
+          : utf8RuneLength(rune);
+    }
+    return bytes;
+  }
+
+  String? _tokenFor(int placeholder) {
+    final key = String.fromCharCode(placeholder);
+    final emote = _emotes[key];
+    if (emote != null) return '[e:${emote.name}:${emote.hash}]';
+    final asset = _assets[key];
+    if (asset != null) {
+      return '[a:${asset.kind}:${asset.hash}:${asset.w}:${asset.h}]';
+    }
+    return null;
   }
 
   @override

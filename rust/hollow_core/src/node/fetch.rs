@@ -14,7 +14,7 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 #[allow(unused_imports)]
 use crate::hollow_log;
 use crate::node::crypto_handler::{
-    check_backfill_signature, clip_text, persist_crypto_state, persist_mls_state,
+    check_backfill_signature, persist_crypto_state, persist_mls_state,
     persist_olm_session, PkCache,
 };
 use crate::node::types::{
@@ -533,7 +533,6 @@ fn try_process_channel_msg(
                     ) {
                         return None;
                     }
-                    let text = clip_text(text);
                     insert_channel_row(
                         db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
@@ -597,7 +596,6 @@ fn try_process_channel_msg(
             ) {
                 return None;
             }
-            let text = clip_text(text);
             insert_channel_row(
                 db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
@@ -961,8 +959,7 @@ fn handle_direct_message(
         ..
     } = inner;
 
-    // Verify against the RAW text, before the length clamp: the sender signed
-    // what they sent. The v2 extras come from the wire fields persisted below.
+    // The v2 extras come from the wire fields persisted below.
     let lp_digest = link_preview.as_ref()
         .map(crate::node::crypto_handler::link_preview_digest);
     let extras = crate::node::crypto_handler::SignedExtras {
@@ -976,8 +973,6 @@ fn handle_direct_message(
     if fetch_dm_sig_rejected(convo, local_master, ts, &msg_text, sig.as_deref(), pk.as_deref(), &extras) {
         return None;
     }
-
-    let msg_text = clip_text(msg_text);
 
     persist_direct_message(
         from, convo, &msg_text, ts, mid.as_deref(), reply_to.as_deref(), file_id.as_deref(),
@@ -1135,8 +1130,8 @@ fn handle_edit_message(
     // arrives before its original is left to DM-sync, matching the live handler.
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
     crate::node::message_ops::live_dm_change(&store, &mid, convo, local_master)?;
-    // Reject a tampered edit before it overwrites the stored row (raw text). The
-    // v2 edit signature binds the ORIGINAL row's structural fields, so they are
+    // Reject a tampered edit before it overwrites the stored row. The v2 edit
+    // signature binds the ORIGINAL row's structural fields, so they are
     // reconstructed from our stored row.
     let row_extras = store.get_dm_message_sig_row(&mid);
     let lp_digest = row_extras.as_ref()
@@ -1153,7 +1148,6 @@ fn handle_edit_message(
     if fetch_dm_sig_rejected(convo, local_master, ts, &new_text, sig.as_deref(), pk.as_deref(), &extras) {
         return None;
     }
-    let new_text = clip_text(new_text);
     let applied = store
         .edit_dm_message(&mid, &new_text, ts, sig.as_deref(), pk.as_deref())
         .unwrap_or(false);
@@ -1453,5 +1447,38 @@ mod tests {
             None, None, None, &path, &pass,
         );
         assert_eq!(text("f1"), "the photo");
+    }
+
+    /// C11 on the push path: a DM is stored exactly as signed or not at all. The
+    /// 4,000-byte clamp cut a full composer of Cyrillic in half, and the clipped
+    /// row then failed its signature on every device it was served to.
+    #[test]
+    fn push_dm_is_stored_whole_or_dropped_never_clipped() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("push.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let (alice, bob) = (kp(164), kp(165));
+        let (a, b) = (alice.peer_id(), bob.peer_id());
+        let push = |mid: &str, text: &str| {
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(1_000_000), ..SignedExtras::default() };
+            let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "dm", &a, &b, 1_000, &extras, text);
+            let inner = DirectMessagePayload {
+                text: text.into(), ts: 1_000, sig, pk, mid: Some(mid.into()), reply_to: None,
+                file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+            };
+            handle_direct_message(&b, &b, &a, inner, &path, &pass)
+        };
+        let stored = |mid: &str| {
+            crate::storage::MessageStore::open(&path, &pass).unwrap().get_dm_message_sig_row(mid).map(|r| r.text)
+        };
+
+        let long = "я".repeat(4_000);
+        assert_eq!(push("long", &long).map(|f| f.text).as_ref(), Some(&long));
+        assert_eq!(stored("long").as_ref(), Some(&long));
+
+        let over = "x".repeat(crate::node::crypto_handler::MAX_MESSAGE_BYTES + 1);
+        assert!(push("over", &over).is_none());
+        assert_eq!(stored("over"), None);
     }
 }

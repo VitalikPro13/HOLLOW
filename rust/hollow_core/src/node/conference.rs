@@ -307,6 +307,17 @@ pub(crate) async fn handle_inbound_join_request(
         hollow_log!("[HOLLOW-CONF] Dropped join request from blocked peer for {conf_id}");
         return;
     }
+    // Chat is attributed by the leaf credential, so the knocker is seated only
+    // under its own device id, never as the host or another participant (D7).
+    let names_sender = base64::engine::general_purpose::STANDARD
+        .decode(&key_package_b64)
+        .ok()
+        .and_then(|kp| MlsManager::key_package_identity(&kp).ok())
+        .is_some_and(|id| id == sender_peer);
+    if !names_sender {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a join request for {conf_id} from {sender_peer}: its KeyPackage names another device");
+        return;
+    }
 
     let sid = conf_server_id(&conf_id);
 
@@ -540,7 +551,7 @@ pub(crate) async fn handle_inbound_chat(
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&plaintext) else { return; };
     let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let timestamp = parsed.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
-    if text.is_empty() { return; }
+    if text.is_empty() || !super::crypto_handler::message_body_fits(&text) { return; }
     let sender = if credential.is_empty() { sender_peer.to_string() } else { credential };
     let _ = event_tx.send(NetworkEvent::ConferenceChatMessage {
         conf_id, sender_peer_id: sender, text, timestamp,

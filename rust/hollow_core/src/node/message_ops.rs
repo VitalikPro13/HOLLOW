@@ -2684,6 +2684,21 @@ async fn live_channel_moderation_drop(
     false
 }
 
+/// Whether a live channel signal from `sender` (a MASTER), typing or an unread
+/// hint, is taken in: the sender may post in `cid` and we may see it, so nobody
+/// outside the channel fakes activity there and nobody is told about a channel
+/// they cannot open.
+pub(crate) fn channel_signal_accepted(
+    state: &ServerState,
+    sender: &str,
+    local_master: &str,
+    cid: &str,
+    now_ms: u64,
+) -> bool {
+    live_channel_post_refusal(state, sender, cid, true, now_ms).is_none()
+        && state.can_see_channel(local_master, cid)
+}
+
 /// Whether a PLAINTEXT public-channel frame for `sid`/`cid` may be taken in at all.
 /// A member takes one only for a channel that is public in its own state (the frame
 /// is unencrypted, so anyone in the room can send one); a node with no state for the
@@ -4083,5 +4098,68 @@ mod tests {
         assert!(!store.channel_message_exists("from-stranger"));
         assert!(!store.channel_message_exists("into-admin-only"));
         assert!(store.channel_message_exists("fine"));
+    }
+
+    /// C11: a body over the size limit is dropped whole on the live post, live edit
+    /// and sync paths, never clipped. A full composer of Cyrillic (8,000 bytes) is
+    /// stored exactly as sent; the old 4,000-byte clamp cut it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn oversized_message_is_dropped_whole_on_every_path() {
+        use crate::node::crypto_handler::MAX_MESSAGE_BYTES;
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv-d", "D", 191);
+        let (bob, us) = (kp(192), kp(193));
+        let (b, a) = (bob.peer_id(), us.peer_id());
+        for op in [
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into() },
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: a.clone(), display_name: "a".into() },
+            crate::crdt::operations::CrdtPayload::ChannelAdded {
+                channel_id: "general".into(), name: "general".into(), category: None, channel_type: "text".into(),
+            },
+        ] {
+            let op = state.create_op(op);
+            state.apply_op(&op).unwrap();
+        }
+        let (tx, _rx) = mpsc::channel(16);
+        let long = "я".repeat(4_000);
+        let over = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let channel_text = |mid: &str| open(&path, &pass).get_channel_message_sig_row(mid).map(|r| r.text);
+
+        for (mid, text) in [("fits", &long), ("too-big", &over)] {
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(1_000_000), ..SignedExtras::default() };
+            let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "ch", "srv-d:general", &b, 1_000, &extras, text);
+            handle_envelope_channel_message(
+                &tx, &us, Some(&state), &a, b.clone(), "srv-d".into(), "general".into(),
+                text.clone(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None,
+                &path, &pass,
+            ).await;
+        }
+        assert_eq!(channel_text("fits").as_ref(), Some(&long));
+        assert_eq!(channel_text("too-big"), None);
+
+        let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-d:general", "fits", 5_000, &over);
+        handle_envelope_edit_message(
+            &tx, &us, Some(&state), &b, "fits".into(), over.clone(), 5_000, sig, pk,
+            Some("srv-d".into()), Some("general".into()), &path, &pass,
+        ).await;
+        assert_eq!(channel_text("fits").as_ref(), Some(&long), "an oversized edit leaves the row alone");
+
+        open(&path, &pass).insert(&b, "from bob", false, 1_000, None, None, Some("b1"), None, None, Some(1_000_000), None).unwrap();
+        live_dm_edit(&path, &pass, &bob, &a, &a, "b1", &over).await;
+        assert_eq!(open(&path, &pass).get_dm_message_sig_row("b1").unwrap().text, "from bob");
+
+        let mut cache = PkCache::new();
+        let store = open(&path, &pass);
+        for (mid, text, stored) in [("synced-big", &over, 0), ("synced-long", &long, 1)] {
+            let item = own_channel_item(&bob, "srv-d", "general", mid, text, 2_000, None, None, None);
+            let (inserted, _) = super::super::sync_handler::ingest_synced_channel_item(
+                &store, "srv-d", "general", &item, &a, &mut cache,
+            );
+            assert_eq!(inserted, stored, "{mid}");
+        }
+        assert_eq!(channel_text("synced-long").as_ref(), Some(&long));
+        assert_eq!(channel_text("synced-big"), None);
     }
 }

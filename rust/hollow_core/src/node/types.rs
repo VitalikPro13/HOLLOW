@@ -1842,21 +1842,6 @@ pub(crate) enum HavenMessage {
         profile_pk: Option<String>,
     },
 
-    // -- Multi-peer fan-out sync --
-
-    /// Lightweight probe: "what's your latest timestamp for this channel?"
-    /// Used to skip channels that have no new messages before sending a full sync request.
-    #[serde(rename = "ch_sync_probe")]
-    ChannelSyncProbe {
-        server_id: String,
-        channel_id: String,
-        /// Our latest timestamp for this channel (so the peer can quickly compare).
-        our_latest: i64,
-        /// Total message count for health check (catches mid-session drops).
-        #[serde(default)]
-        msg_count: u32,
-    },
-
     // -- Friends --
 
     #[serde(rename = "friend_request")]
@@ -2253,17 +2238,6 @@ pub(crate) enum HavenMessage {
     AutoDownloadPref {
         #[serde(default)]
         mb: u32,
-    },
-
-    /// Response to a sync probe: the peer's latest timestamp for the channel.
-    #[serde(rename = "ch_sync_probe_resp")]
-    ChannelSyncProbeResponse {
-        server_id: String,
-        channel_id: String,
-        /// Peer's latest timestamp for this channel.
-        their_latest: i64,
-        /// Total message count the peer has for this channel (for load estimation).
-        msg_count: u32,
     },
 
     // -- File sharing --
@@ -3331,30 +3305,6 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
-    /// Channel sync probe (replaces HavenMessage::ChannelSyncProbe for MLS path).
-    #[serde(rename = "ch_probe")]
-    ChannelProbe {
-        sid: String,
-        cid: String,
-        our_latest: i64,
-        #[serde(default)]
-        msg_count: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
-    /// Channel sync probe response (replaces HavenMessage::ChannelSyncProbeResponse for MLS path).
-    #[serde(rename = "ch_probe_resp")]
-    ChannelProbeResp {
-        sid: String,
-        cid: String,
-        their_latest: i64,
-        #[serde(default)]
-        msg_count: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
     /// Lightweight encrypted ping sent after creating an inbound session.
     /// Causes the remote peer's outbound session to ratchet (upgrade from
     /// PreKey type 0 to Normal type 1) when they decrypt this message.
@@ -3834,8 +3784,6 @@ impl MessageEnvelope {
             | Self::SyncReq { target, .. }
             | Self::SyncResp { target, .. }
             | Self::ChannelSyncReq { target, .. }
-            | Self::ChannelProbe { target, .. }
-            | Self::ChannelProbeResp { target, .. }
             | Self::VoiceChannelSdpOffer { target, .. }
             | Self::VoiceChannelSdpAnswer { target, .. }
             | Self::VoiceChannelIce { target, .. }
@@ -3911,8 +3859,6 @@ impl MessageEnvelope {
             | Self::ShardMigrate { sid, cid, .. }
             | Self::Typing { sid, cid }
             | Self::ChannelSyncReq { sid, cid, .. }
-            | Self::ChannelProbe { sid, cid, .. }
-            | Self::ChannelProbeResp { sid, cid, .. }
             | Self::VoiceChannelJoin { sid, cid }
             | Self::VoiceChannelLeave { sid, cid }
             | Self::VoiceChannelSdpOffer { sid, cid, .. }
@@ -4619,6 +4565,25 @@ mod epoch_catchup_wire_tests {
         match serde_json::from_str::<HavenMessage>(&json).unwrap() {
             HavenMessage::SyncRequest { mls_epoch, .. } => assert_eq!(mls_epoch, Some(6)),
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// C8: the channel probes had no sender left, and a response from anyone made
+    /// a member send it that channel's per-author watermarks in the clear. Their
+    /// wire types are refused at parse now.
+    #[test]
+    fn retired_channel_probes_are_refused_at_parse() {
+        for frame in [
+            r#"{"type":"ch_sync_probe","server_id":"s","channel_id":"c","our_latest":1}"#,
+            r#"{"type":"ch_sync_probe_resp","server_id":"s","channel_id":"c","their_latest":1,"msg_count":1}"#,
+        ] {
+            assert!(serde_json::from_str::<HavenMessage>(frame).is_err(), "{frame}");
+        }
+        for envelope in [
+            r#"{"t":"ch_probe","sid":"s","cid":"c","our_latest":1}"#,
+            r#"{"t":"ch_probe_resp","sid":"s","cid":"c","their_latest":1}"#,
+        ] {
+            assert!(serde_json::from_str::<MessageEnvelope>(envelope).is_err(), "{envelope}");
         }
     }
 

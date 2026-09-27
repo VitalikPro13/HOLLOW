@@ -2208,7 +2208,10 @@ impl MessageStore {
         collect_rows(rows, "messages_since")
     }
 
-    pub fn get_channel_messages_before(
+    /// A page of a public channel for the guest browser, newest first then
+    /// reversed. Deleted rows never leave: their text is evidence for members
+    /// (Rat Files), not for a stranger who was never there.
+    pub fn get_visible_channel_messages_before(
         &self,
         server_id: &str,
         channel_id: &str,
@@ -2221,6 +2224,7 @@ impl MessageStore {
                 "SELECT {CHANNEL_MSG_COLS}
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND timestamp < ?3
+                   AND hidden_at IS NULL
                  ORDER BY timestamp DESC
                  LIMIT ?4",
             ))
@@ -6164,6 +6168,18 @@ mod tests {
             connected_at: Some(started + 2_000),
             ended_at: started + 242_000,
         }
+    }
+
+    /// C9: the guest browser's pages never carry a deleted message.
+    #[test]
+    fn guest_pages_leave_deleted_messages_out() {
+        let store = mem_store();
+        for (mid, ts) in [("kept", 1_000), ("deleted", 2_000)] {
+            store.insert_channel_message("s", "c", "al", mid, false, ts, None, None, Some(mid), None, None, None, None).unwrap();
+        }
+        store.set_channel_message_hidden("deleted", 3_000).unwrap();
+        let page = store.get_visible_channel_messages_before("s", "c", i64::MAX, 50).unwrap();
+        assert_eq!(page.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["kept"]);
     }
 
     /// Call records come back per conversation, oldest first, and a second write
