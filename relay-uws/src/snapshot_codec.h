@@ -15,10 +15,11 @@
 // took them; the reader rebuilds "at = now - age" on its own clock.
 namespace snapshot {
 
-// 2 added the parked destroy signals (`kills`). A version 1 snapshot still
-// decodes, with no kills, so a relay coming up on this build keeps the buffers
-// the previous one handed over.
-static constexpr uint32_t VERSION = 2;
+// 2 added the parked destroy signals (`kills`), 3 the device-list version marks
+// that keep a revoked device out of its master's mailbox (`marks`). An older
+// snapshot still decodes, without the newer fields, so a relay coming up on this
+// build keeps the buffers the previous one handed over.
+static constexpr uint32_t VERSION = 3;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -79,6 +80,10 @@ struct Kill {
     int64_t issued_at_ms = 0;
     uint32_t age_secs = 0;
 };
+struct Mark {
+    std::string master;
+    uint64_t version = 0;
+};
 
 struct Data {
     std::vector<DmQueue> dm;
@@ -87,6 +92,7 @@ struct Data {
     std::vector<PushToken> push_tokens;
     std::vector<PushPref> push_prefs;
     std::vector<Kill> kills;
+    std::vector<Mark> marks;  // oldest first, the eviction order
 
     size_t dm_frames() const {
         size_t n = 0;
@@ -256,6 +262,12 @@ inline std::string encode(const Data& d) {
         w.u32(k.age_secs);
     }
 
+    w.count(d.marks.size());
+    for (const auto& m : d.marks) {
+        w.str(m.master);
+        w.u64(m.version);
+    }
+
     w.out.append("HRSE", 4);
     return w.out;
 }
@@ -338,6 +350,15 @@ inline bool decode(std::string_view bytes, Data& out) {
             if (!r.str(k.target) || !r.str(k.issuer) || !r.str(k.blob) ||
                 !r.i64(k.issued_at_ms) || !r.u32(k.age_secs)) return false;
             d.kills.push_back(std::move(k));
+        }
+    }
+
+    if (version >= 3) {
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            Mark m;
+            if (!r.str(m.master) || !r.u64(m.version)) return false;
+            d.marks.push_back(std::move(m));
         }
     }
 

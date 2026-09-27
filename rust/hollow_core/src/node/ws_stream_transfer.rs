@@ -75,6 +75,15 @@ const TYPE_SHARE_CHUNK: u8 = 2;
 const TYPE_LINK: u8 = 3;
 const TYPE_CONTINUATION: u8 = 0xFF;
 
+/// Receive streams one peer, and all peers together, may hold open: every open
+/// stream is a temp file on disk until it completes or we disconnect.
+const MAX_RECV_STREAMS_PER_SENDER: usize = 16;
+const MAX_RECV_STREAMS: usize = 128;
+
+/// How long a stream sits idle before another peer may open its id afresh (the
+/// next holder after one that stalled). Until then the id is its opener's alone.
+const STREAM_TAKEOVER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// State for an in-progress WS stream transfer (receiver side).
 pub struct WsTransferState {
     pub kind: StreamKind,
@@ -84,6 +93,9 @@ pub struct WsTransferState {
     pub temp_file: std::fs::File,
     pub temp_path: PathBuf,
     pub progress: Option<Arc<AtomicU64>>,
+    /// The device that opened the stream: only its frames extend it.
+    pub sender: String,
+    pub last_frame_at: std::time::Instant,
 }
 
 /// Send a file or shard to a peer via chunked WS binary frames.
@@ -295,10 +307,52 @@ pub async fn ws_stream_send_bytes(
     hollow_log!("[HOLLOW-WS-STREAM] Sent {id} ({total_size} bytes, in-memory) to {target_peer} in {chunk_count} chunks");
 }
 
-/// Process a received WS binary chunk. Called from the swarm when BinaryDirect arrives.
-/// Returns `Some(StreamRequest)` when the transfer is complete (all bytes received).
+/// Append `payload` to an open stream, ending it when it reaches its declared size.
+/// A sender that writes past that size loses the stream.
+fn append_frame(
+    pending: &mut HashMap<String, WsTransferState>,
+    id: &str,
+    payload: &[u8],
+) -> Option<StreamRequest> {
+    let state = pending.get_mut(id)?;
+    let received = state.bytes_received.saturating_add(payload.len() as u64);
+    if received > state.total_size {
+        hollow_log!("[HOLLOW-WS-STREAM] Dropped {id}: {received} bytes past its declared {}", state.total_size);
+        abandon(pending, id);
+        return None;
+    }
+    if let Err(e) = state.temp_file.write_all(payload) {
+        hollow_log!("[HOLLOW-WS-STREAM] Write failed for {id}: {e}");
+        abandon(pending, id);
+        return None;
+    }
+    state.bytes_received = received;
+    state.last_frame_at = std::time::Instant::now();
+    if let Some(ref progress) = state.progress {
+        progress.store(state.bytes_received, Ordering::Relaxed);
+    }
+    if state.bytes_received >= state.total_size {
+        return complete_transfer(pending, id);
+    }
+    None
+}
+
+fn abandon(pending: &mut HashMap<String, WsTransferState>, id: &str) {
+    if let Some(state) = pending.remove(id) {
+        drop(state.temp_file);
+        let _ = std::fs::remove_file(&state.temp_path);
+        if let Ok(mut map) = stream_progress().lock() {
+            map.remove(id);
+        }
+    }
+}
+
+/// Process a received WS binary chunk from `from`. Called from the swarm when
+/// BinaryDirect arrives. Returns `Some(StreamRequest)` when the transfer is complete
+/// (all bytes received).
 pub fn ws_stream_receive(
     pending: &mut HashMap<String, WsTransferState>,
+    from: &str,
     data: &[u8],
 ) -> Option<StreamRequest> {
     if data.is_empty() {
@@ -316,23 +370,11 @@ pub fn ws_stream_receive(
             hollow_log!("[HOLLOW-WS-STREAM] Dropped continuation: id outside the allowlist");
             return None;
         };
-        let payload = &data[65..];
-
-        let state = pending.get_mut(&id)?;
-        if let Err(e) = state.temp_file.write_all(payload) {
-            hollow_log!("[HOLLOW-WS-STREAM] Write failed for {id}: {e}");
-            pending.remove(&id);
+        if pending.get(&id)?.sender != from {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a continuation of {id} from {from}: another peer's stream");
             return None;
         }
-        state.bytes_received += payload.len() as u64;
-        if let Some(ref progress) = state.progress {
-            progress.store(state.bytes_received, Ordering::Relaxed);
-        }
-
-        if state.bytes_received >= state.total_size {
-            return complete_transfer(pending, &id);
-        }
-        None
+        append_frame(pending, &id, &data[65..])
     } else if type_byte == TYPE_FILE || type_byte == TYPE_SHARD || type_byte == TYPE_SHARE_CHUNK || type_byte == TYPE_LINK {
         // First chunk: [type][id:64][size:8][extra...][data]
         let min_len = 1 + 64 + 8;
@@ -367,19 +409,22 @@ pub fn ws_stream_receive(
         let payload = &data[payload_start..];
 
         // Check if this is a resumed transfer (partial temp file exists from before disconnect).
-        if let Some(state) = pending.get_mut(&id) {
-            if let Err(e) = state.temp_file.write_all(payload) {
-                hollow_log!("[HOLLOW-WS-STREAM] Write failed for resumed {id}: {e}");
-                pending.remove(&id);
+        if let Some(state) = pending.get(&id) {
+            if state.sender == from {
+                return append_frame(pending, &id, payload);
+            }
+            if state.last_frame_at.elapsed() < STREAM_TAKEOVER_IDLE {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a new stream for {id} from {from}: {} holds it", state.sender);
                 return None;
             }
-            state.bytes_received += payload.len() as u64;
-            if let Some(ref progress) = state.progress {
-                progress.store(state.bytes_received, Ordering::Relaxed);
-            }
-            if state.bytes_received >= state.total_size {
-                return complete_transfer(pending, &id);
-            }
+            abandon(pending, &id);
+        }
+        let open_by_sender = pending.values().filter(|s| s.sender == from).count();
+        if open_by_sender >= MAX_RECV_STREAMS_PER_SENDER || pending.len() >= MAX_RECV_STREAMS {
+            hollow_log!("[HOLLOW-SECURITY] Dropped stream {id} from {from}: {open_by_sender} open from it, {} in all", pending.len());
+            return None;
+        }
+        if payload.len() as u64 > total_size {
             return None;
         }
 
@@ -414,17 +459,16 @@ pub fn ws_stream_receive(
             None
         };
 
+        let state = WsTransferState {
+            kind, id: id.clone(), total_size, bytes_received, temp_file, temp_path, progress,
+            sender: from.to_string(),
+            last_frame_at: std::time::Instant::now(),
+        };
+        pending.insert(id.clone(), state);
         if bytes_received >= total_size {
             // Single-chunk transfer (small file/shard).
-            pending.insert(id.clone(), WsTransferState {
-                kind, id: id.clone(), total_size, bytes_received, temp_file, temp_path, progress,
-            });
             return complete_transfer(pending, &id);
         }
-
-        pending.insert(id.clone(), WsTransferState {
-            kind, id, total_size, bytes_received, temp_file, temp_path, progress,
-        });
         None
     } else {
         hollow_log!("[HOLLOW-WS-STREAM] Unknown chunk type: {type_byte:#x}");
@@ -524,6 +568,51 @@ mod tests {
         assert_eq!(parse_id(&not_utf8), None);
     }
 
+    fn first_frame(id: &str, total: u64, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![TYPE_FILE];
+        frame.extend_from_slice(&pad_id(id));
+        frame.extend_from_slice(&total.to_le_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn continuation(id: &str, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![TYPE_CONTINUATION];
+        frame.extend_from_slice(&pad_id(id));
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// H8, H9: a stream belongs to the peer that opened it. Another peer's frames
+    /// for its id are dropped while it is live, nobody writes past the size it
+    /// declared, and one peer cannot hold more than its share of open streams.
+    #[test]
+    fn a_stream_belongs_to_the_peer_that_opened_it() {
+        let id = "h8_owned_stream";
+        let data = vec![0x5Au8; 1000];
+        let mut pending = HashMap::new();
+        assert!(ws_stream_receive(&mut pending, "bob", &first_frame(id, 1000, &data[..500])).is_none());
+        assert!(ws_stream_receive(&mut pending, "mallory", &continuation(id, &[0u8; 500])).is_none(), "another peer appended");
+        assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(id, 500, &[0u8; 500])).is_none(), "another peer reopened it");
+        let done = ws_stream_receive(&mut pending, "bob", &continuation(id, &data[500..])).expect("the opener completes it");
+        assert_eq!(std::fs::read(&done.temp_path).unwrap(), data);
+        let _ = std::fs::remove_file(&done.temp_path);
+
+        let over = "h9_past_declared";
+        assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(over, 10, &[1u8; 5])).is_none());
+        assert!(ws_stream_receive(&mut pending, "mallory", &continuation(over, &[1u8; 4096])).is_none(), "wrote past its size");
+        assert!(!pending.contains_key(over));
+
+        for i in 0..MAX_RECV_STREAMS_PER_SENDER + 4 {
+            ws_stream_receive(&mut pending, "mallory", &first_frame(&format!("h9_open_{i}"), 1 << 20, &[1u8; 8]));
+        }
+        let held = pending.len();
+        for (_, state) in pending.drain() {
+            let _ = std::fs::remove_file(&state.temp_path);
+        }
+        assert_eq!(held, MAX_RECV_STREAMS_PER_SENDER);
+    }
+
     #[test]
     fn test_single_chunk_file_roundtrip() {
         let id = "test_file_001";
@@ -539,7 +628,7 @@ mod tests {
         chunk.extend_from_slice(file_data);
 
         let mut pending = HashMap::new();
-        let result = ws_stream_receive(&mut pending, &chunk);
+        let result = ws_stream_receive(&mut pending, "peer", &chunk);
         assert!(result.is_some());
         let req = result.unwrap();
         assert_eq!(req.id, id);
@@ -568,7 +657,7 @@ mod tests {
         chunk.extend_from_slice(shard_data);
 
         let mut pending = HashMap::new();
-        let result = ws_stream_receive(&mut pending, &chunk);
+        let result = ws_stream_receive(&mut pending, "peer", &chunk);
         assert!(result.is_some());
         let req = result.unwrap();
         assert_eq!(req.id, id);
@@ -594,7 +683,7 @@ mod tests {
         first.extend_from_slice(&file_data[..500]);
 
         let mut pending = HashMap::new();
-        let result = ws_stream_receive(&mut pending, &first);
+        let result = ws_stream_receive(&mut pending, "peer", &first);
         assert!(result.is_none()); // Not complete yet.
         assert!(pending.contains_key(id));
 
@@ -604,7 +693,7 @@ mod tests {
         cont.extend_from_slice(&id_padded);
         cont.extend_from_slice(&file_data[500..]);
 
-        let result = ws_stream_receive(&mut pending, &cont);
+        let result = ws_stream_receive(&mut pending, "peer", &cont);
         assert!(result.is_some());
         let req = result.unwrap();
         assert_eq!(req.id, id);

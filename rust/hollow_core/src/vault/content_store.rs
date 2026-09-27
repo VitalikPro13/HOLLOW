@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -63,6 +63,11 @@ pub struct PlacementRecord {
 /// SHA-256 hash, hex-encoded (64 chars). Canonical content identifier.
 pub fn content_id(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
+}
+
+/// Whether `id` has the shape `content_id` produces (64 lowercase hex).
+pub fn is_content_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Compute the shard key for a specific shard of a content item.
@@ -556,16 +561,28 @@ impl ContentStore {
         Ok(())
     }
 
-    /// Delete all placements for a content item. Returns count deleted.
-    pub fn delete_placements(&self, cid: &str) -> Result<u32, String> {
+    /// Delete a content item's placements in one server. Returns count deleted.
+    pub fn delete_placements(&self, server_id: &str, cid: &str) -> Result<u32, String> {
         let deleted = self
             .conn
             .execute(
-                "DELETE FROM vault_placement WHERE content_id = ?1",
-                params![cid],
+                "DELETE FROM vault_placement WHERE server_id = ?1 AND content_id = ?2",
+                params![server_id, cid],
             )
             .map_err(|e| format!("Failed to delete placements: {e}"))?;
         Ok(deleted as u32)
+    }
+
+    /// The peer a shard of ours was placed on, as recorded at upload.
+    pub fn placement_target(&self, cid: &str, shard_index: u16) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT target_peer FROM vault_placement WHERE content_id = ?1 AND shard_index = ?2",
+                params![cid, shard_index as i32],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read placement: {e}"))
     }
 
     /// List all placements for a server, sorted by content_id + shard_index.
@@ -645,6 +662,18 @@ impl ContentStore {
             )
             .map_err(|e| format!("Failed to save manifest: {e}"))?;
         Ok(())
+    }
+
+    /// Where a manifest lives: `(server_id, channel_id, creator_peer_id)`.
+    pub fn manifest_home(&self, cid: &str) -> Result<Option<(String, String, String)>, String> {
+        self.conn
+            .query_row(
+                "SELECT server_id, channel_id, creator_peer_id FROM vault_manifests WHERE content_id = ?1",
+                params![cid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read manifest home: {e}"))
     }
 
     /// Load a vault manifest by content_id.
@@ -1568,7 +1597,8 @@ mod tests {
         store.save_placements("srv1", "cid1", &placements).unwrap();
         assert_eq!(store.load_placements("cid1").unwrap().len(), 2);
 
-        let deleted = store.delete_placements("cid1").unwrap();
+        assert_eq!(store.delete_placements("other-srv", "cid1").unwrap(), 0, "another server's order");
+        let deleted = store.delete_placements("srv1", "cid1").unwrap();
         assert_eq!(deleted, 2);
         assert!(store.load_placements("cid1").unwrap().is_empty());
     }

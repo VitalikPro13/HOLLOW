@@ -77,12 +77,41 @@ into possible holes, so this file itself belongs on the security branch.
   seat). Class D confirmed row by row; the member-level halves of D1 and D7 fixed
   as **HOL-SEC-017** (a leaf seated under another device's name), the rest is the
   class D design. New candidates: J8, J9 (sync requests and hints in plaintext),
-  N3 (profile fields clipped in bytes).
-- **Next:** verify the candidate classes in the plan's priority order (MLS
-  credentials D, CRDT snapshot E1/E2 with the membership record E4, channel
-  ingest C1/C2, files H, relay I1/I2); every AGENT-status row must be re-read
-  before it counts. Policy decisions for Vitalik are listed at the top of
-  `candidate_findings.md`.
+  N3 (profile fields clipped in bytes). Class E then confirmed row by row (all
+  CONFIRMED, no code changed): E1/E2 snapshot and founding-op capture, E3/E5
+  replay past the 1000-op window and arrival-order registers, E6/E7 non-member
+  authors and bans skipped on `MemberAdded`, E8/E9 device-id authority, E10
+  retention (decided 2c: app values only, Owner only), E11/E12 moderation and ownership edges, E13 a
+  one-line quick win, E14 HLC, E15 founding replay. Commits `4727b176`,
+  `e17a2dea`, local only.
+- **Session 6 (2026-09-27):** the quick class E fixes (**HOL-SEC-019** Olm
+  CRDT arms with no sender, plus a non-security bug: at the 1000-op cap new
+  remote ops were never saved, shown or passed on; **HOL-SEC-020** op clock bound
+  to its author; **HOL-SEC-021** retention from the Owner only, app values
+  only). Class H closed: **HOL-SEC-022** (a friend or member replaced or
+  emptied someone else's file: one header gate, finished files immutable,
+  `FileChunk` deleted), **HOL-SEC-023** (streams owned by their opener),
+  **HOL-SEC-024** (vault shards, manifests and deletes authorised, rebuilt files
+  checked against their content id, a cache path that wrote outside its
+  folder), **HOL-SEC-025** (restricted-channel files kept out of the vault),
+  **HOL-SEC-026** (recovery pool), **HOL-SEC-027** (share manifest replay).
+  Class I: **HOL-SEC-028** (pre-auth relay crash), **HOL-SEC-029** (destroy
+  orders one slot per issuer), **HOL-SEC-030** (fair-share rings, guest limits),
+  **HOL-SEC-031** (revocation marks survive a restart), all DEPLOYED to the
+  official relay the same day (decision 4). Accepted: AR-05..AR-08 (H20, H21,
+  I9, the report half of I12). The push half of I12 turned out to be visible
+  (a fallback banner) and is open as K3.
+- **Next (session 7, xhigh):** rerun the suite, then the smaller classes: F4,
+  F5, F7, F8 (revoked devices), K1, K2, K3 with C14 (push parity), L1, L2, L3,
+  L6, M1..M3, N1..N3, J1..J7 triage, B10, B11. Then the four DESIGN
+  sessions, each at xhigh with harness tests: class D (MLS credential binding,
+  who may commit and Welcome), class E (pinned owner + signed membership record
+  E1/E2/E4; tombstoned HLC sets E3/E5/E15; author and target rules E6..E9,
+  E11, E12), class A with J8/J9 (plaintext control messages into Olm/MLS; also
+  I4..I6, A17, and a signed content hash for files, the variant left by
+  HOL-SEC-022/023), ID-1 with HOL-SEC-002 (also I3, I8, F3, F6). The relay
+  traffic measurement waits for phase G. Every AGENT-status row must be
+  re-read before it counts.
 
 ---
 
@@ -548,7 +577,13 @@ reproduced by a test count; the finding file names the test, never the steps.
 (they may go on `main`); item 3 is phase C; items 4-8 alongside phase F.
 
 **G. Close-out.** Every finding fixed and retested, or in the accepted-risk
-register. `WHITEPAPER.md` security claims re-checked against `claims.md`. A
+register. Then, and only then, the relay traffic work (decided 2026-09-27):
+measure genuine traffic first with the fleet and the app (per-connection peaks
+of frames, room joins and distinct targets, anonymous counters only, the way
+the 44k-connection baseline was measured), and only on those numbers decide a
+circuit breaker for clearly inhuman behaviour (close the connection, never drop
+single frames; short escalating IP cooldowns, never week-long bans that hit
+shared carrier addresses). It revisits AR-01, AR-06 and AR-07. `WHITEPAPER.md` security claims re-checked against `claims.md`. A
 report in the professional format (`SECURITY_AUDIT_2026_10.md` or whenever it
 lands): executive summary, scope with commit, method, coverage and
 non-findings, findings table, maturity scorecard. Release, merge, push,

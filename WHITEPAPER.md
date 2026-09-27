@@ -666,6 +666,8 @@ Files are encrypted **before** erasure coding:
 - **Algorithm:** AES-256-GCM
 - **Key/nonce:** Random per file, stored in the manifest (encrypted via MLS for the server)
 
+Because the manifest reaches every member of the server, a file posted in a restricted channel (one with its own MLS subgroup) never enters the Vault; it is delivered only to the members who can read that channel. A manifest is accepted only from the member it names as its creator, and never replaces another creator's manifest.
+
 ### 9.2 Adaptive Storage Modes
 
 **Small servers (<6 members): Full Replication**
@@ -695,7 +697,7 @@ Every piece of data is addressed by its SHA-256 hash:
 content_id = SHA-256(encrypted_data)
 ```
 
-This provides deduplication, integrity verification, and location-independent addressing.
+This provides deduplication, integrity verification, and location-independent addressing. Every member holds a Vault file's key, so authenticated decryption alone cannot tell the real file from bytes a member encrypted under the same key: the ciphertext rebuilt from shards must hash to the content ID before it is decrypted. A shard slot, once filled, is never overwritten by another sender.
 
 ### 9.4 Deterministic Shard Placement (XOR Distance)
 
@@ -734,7 +736,7 @@ Header:
 | All files | Standard (1.0× parity) | 365 days |
 | Channel messages | Configurable via CRDT | Permanent (default); a server may set a window |
 
-Retention is forward-only: changing the retention setting only affects content created after the change. Existing files and messages keep their original retention. This prevents retroactive evidence destruction. Message retention is a per-server CRDT setting; file retention is per-tier.
+Message retention is forward-only: changing it only affects messages created after the change, which prevents retroactive destruction of the history. File retention applies to every file older than the window. Both are per-server CRDT settings that only the server Owner may change, and only to the values the app offers (30, 90, 180 or 365 days, or permanent); every member treats any other value as "keep everything", since every member's own sweep deletes by it.
 
 ### 9.7 Self-Healing and Rebalancing
 
@@ -752,7 +754,7 @@ When a new member joins:
 
 When a server is dissolved or members are ejected, ex-members can cooperatively reconstruct files using the shards they still hold locally:
 
-1. **Pool formation:** the initiator creates a relay room keyed by a random pool ID and broadcasts a `RecoveryHello` message containing their local shard inventory (manifest IDs + shard indices).
+1. **Pool formation:** the initiator creates a relay room keyed by a random pool ID and broadcasts a `RecoveryHello` message containing their local shard inventory (manifest IDs + shard indices). Pool messages count only when they arrive in that room, and a transfer plan only from the elected coordinator and only towards pool members.
 
 2. **Inventory exchange:** each joining member sends their own `RecoveryHello` with their local inventory. The pool coordinator (lowest online peer ID) aggregates all inventories.
 

@@ -5258,47 +5258,6 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Mark a chunk as received. Returns the new chunks_received count.
-    pub fn mark_chunk_received(
-        &self,
-        file_id: &str,
-        chunk_index: u32,
-    ) -> Result<u32, String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        let inserted = self.conn
-            .execute(
-                "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, received_at)
-                 VALUES (?1, ?2, ?3)",
-                params![file_id, chunk_index, now],
-            )
-            .map_err(|e| format!("Failed to insert file chunk: {e}"))?;
-
-        // Increment only when the chunk row was actually new: a full COUNT(*) recount here
-        // made receiving a file O(n²) in its chunk count.
-        if inserted > 0 {
-            self.conn
-                .execute(
-                    "UPDATE files SET chunks_received = chunks_received + 1
-                     WHERE file_id = ?1",
-                    params![file_id],
-                )
-                .map_err(|e| format!("Failed to update chunks_received: {e}"))?;
-        }
-
-        let count: u32 = self
-            .conn
-            .query_row(
-                "SELECT chunks_received FROM files WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to read chunks_received: {e}"))?;
-        Ok(count)
-    }
-
     /// Mark a file as fully received.
     pub fn mark_file_complete(
         &self,
@@ -5865,6 +5824,19 @@ impl MessageStore {
     }
 
     /// Link a vault content_id to a file record via its message_id.
+    /// Who sent each file card a message carries.
+    pub fn file_senders_for_message(&self, message_id: &str) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT sender_id FROM files WHERE message_id = ?1")
+            .map_err(|e| format!("Failed to prepare file sender query: {e}"))?;
+        let rows = stmt
+            .query_map(params![message_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query file senders: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read file sender: {e}"))
+    }
+
     pub fn set_file_content_id(&self, message_id: &str, content_id: &str) -> Result<(), String> {
         self.conn
             .execute(

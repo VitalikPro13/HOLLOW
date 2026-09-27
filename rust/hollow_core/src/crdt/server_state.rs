@@ -583,8 +583,14 @@ impl ServerState {
         clamped
     }
 
-    /// Apply a CRDT operation. Idempotent — safe to apply duplicates.
-    pub fn apply_op(&mut self, op: &CrdtOp) -> Result<(), String> {
+    /// Apply a CRDT operation. Idempotent: a duplicate is a no-op.
+    ///
+    /// `Ok(true)` when the op was new here and entered the op log: the ONE signal
+    /// callers persist, emit and re-flood on. The log's length cannot say it, since at
+    /// the compaction cap (where every restart restores it) each insert drains an op.
+    /// An op older than the whole retained window drains straight back out and reports
+    /// `false`, or two nodes would re-flood it to each other forever.
+    pub fn apply_op(&mut self, op: &CrdtOp) -> Result<bool, String> {
         if op.server_id != self.server_id {
             return Err(format!(
                 "Op server_id {} doesn't match {}",
@@ -602,7 +608,7 @@ impl ServerState {
         // O(1) duplicate check (same author + same HLC = same op)
         let dedup_key = (op.author.clone(), op.hlc.clone());
         if self.op_log_dedup.contains(&dedup_key) {
-            return Ok(());
+            return Ok(false);
         }
 
         // Witness the remote timestamp to keep our HLC in sync
@@ -1053,7 +1059,7 @@ impl ServerState {
             .binary_search_by(|existing| existing.hlc.cmp(&op.hlc))
             .unwrap_or_else(|pos| pos);
         self.op_log.insert(insert_pos, op.clone());
-        self.op_log_dedup.insert(dedup_key);
+        self.op_log_dedup.insert(dedup_key.clone());
 
         // Compact the op log to bound growth; older ops are already applied to state.
         const MAX_OP_LOG: usize = 1000;
@@ -1067,7 +1073,7 @@ impl ServerState {
             }
         }
 
-        Ok(())
+        Ok(self.op_log_dedup.contains(&dedup_key))
     }
 
     /// List all channels, sorted by name.
@@ -1296,6 +1302,24 @@ impl ServerState {
         self.can_kick(actor, target)
     }
 
+    /// May `author` set `key` to `value`? The ONE rule for authoring and ingest alike.
+    ///
+    /// Retention decides what every member's sweep deletes, so only the Owner writes it,
+    /// and a policy only with a value the app offers (decision 2c). Every other key is
+    /// MANAGE_SERVER, override-aware.
+    pub fn setting_change_allowed(&self, author: &str, key: &str, value: &str) -> bool {
+        match key {
+            "retention_files" | "retention_messages" => {
+                self.get_role(author) == MemberRole::Owner
+                    && crate::vault::adaptive::RETENTION_CHOICES.contains(&value)
+            }
+            "retention_files_since" | "retention_messages_since" => {
+                self.get_role(author) == MemberRole::Owner && value.parse::<u64>().is_ok()
+            }
+            _ => self.has_permission(author, Permission::MANAGE_SERVER),
+        }
+    }
+
     /// The ingest permission matrix: may `op.author` apply this op to this server? Shared
     /// by BOTH remote-op ingest paths so the matrices can never drift apart.
     ///
@@ -1320,9 +1344,11 @@ impl ServerState {
             // Permission-based (override-aware), NOT role-based: the local send handlers
             // gate on MANAGE_SERVER, so ingest must match or an override-granted author
             // forks from the network.
-            CrdtPayload::ServerRenamed { .. }
-            | CrdtPayload::ServerSettingChanged { .. } => {
+            CrdtPayload::ServerRenamed { .. } => {
                 (sender_perms & Permission::MANAGE_SERVER) != 0
+            }
+            CrdtPayload::ServerSettingChanged { key, value } => {
+                self.setting_change_allowed(&op.author, key, value)
             }
             // Self-removal (voluntary leave) is always allowed; kicking
             // someone ELSE needs moderator+ and outranking.
@@ -2157,6 +2183,37 @@ mod tests {
             "false",
             "the owner's replica must accept the admin's later write"
         );
+    }
+
+    /// E10 (decision 2c): retention decides what every member's sweep deletes, so only
+    /// the Owner writes it, a policy only with a value the app offers, and a reader
+    /// treats any other value as "keep".
+    #[test]
+    fn authz_retention_is_owner_only_and_takes_only_app_values() {
+        let (mut state, _) = owner_state_with_admin_and_setting();
+        let cases = [
+            ("owner", "retention_files", "30d", true),
+            ("admin_peer", "retention_files", "30d", false),
+            ("owner", "retention_files", "0d", false),
+            ("owner", "retention_files", "60d", false),
+            ("owner", "retention_messages", "permanent", true),
+            ("admin_peer", "retention_messages", "365d", false),
+            ("owner", "retention_messages_since", "1790000000", true),
+            ("admin_peer", "retention_messages_since", "0", false),
+            ("owner", "retention_files_since", "soon", false),
+            ("admin_peer", "twitch_verification_enabled", "false", true),
+        ];
+        for (author, key, value, allowed) in cases {
+            let op = op_by(&mut state, author, CrdtPayload::ServerSettingChanged {
+                key: key.into(),
+                value: value.into(),
+            });
+            assert_eq!(state.op_allowed(&op), allowed, "{author} sets {key}={value}");
+            assert_eq!(state.setting_change_allowed(author, key, value), allowed, "authoring {key}={value}");
+        }
+        for (policy, days) in [("30d", Some(30)), ("365d", Some(365)), ("permanent", None), ("0d", None), ("1d", None)] {
+            assert_eq!(crate::vault::adaptive::parse_retention_days(policy), days, "{policy}");
+        }
     }
 
     #[test]
@@ -3426,6 +3483,25 @@ mod tests {
             auth: None,
         };
         assert_eq!(state.admit_remote_op(&op), Err(OpReject::MissingSignature));
+    }
+
+    /// E14: the member signs its own op correctly but stamps the owner's name into
+    /// the clock, which breaks LWW ties and the dedup key in the owner's name.
+    #[test]
+    fn admit_remote_rejects_a_clock_naming_another_author() {
+        let (state, owner_id, member) = admitting_server();
+        let mut op = CrdtOp {
+            server_id: "s1".into(),
+            hlc: HlcTimestamp { physical_ms: hlc_now(), counter: 0, actor: owner_id.clone() },
+            author: member.1.clone(),
+            payload: CrdtPayload::NicknameChanged {
+                peer_id: member.1.clone(),
+                nickname: "M".into(),
+            },
+            auth: None,
+        };
+        op.sign(&member.0, &member.2);
+        assert_eq!(state.admit_remote_op(&op), Err(OpReject::ActorMismatch));
     }
 
     /// The member signs with its OWN key but writes the owner's id into

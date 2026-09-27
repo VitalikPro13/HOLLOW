@@ -764,7 +764,9 @@ class _RetentionState extends ConsumerState<_Retention> {
   @override
   Widget build(BuildContext context) {
     final role = ref.watch(myRoleProvider(widget.serverId)).valueOrNull;
-    final canEdit = role == 'owner' || role == 'admin';
+    // Every member's sweep deletes by these, so the network takes them from the
+    // Owner only (Rust `setting_change_allowed`).
+    final canEdit = role == 'owner';
     Widget row(String title, String key, String sheetTitle) =>
         _ChoiceRow<String>(
           title: title,
@@ -781,7 +783,7 @@ class _RetentionState extends ConsumerState<_Retention> {
         SettingsNote(
           canEdit
               ? 'Applies to new messages and files.'
-              : 'Only admins can change this.',
+              : 'Only the owner can change this.',
         ),
       ],
     );

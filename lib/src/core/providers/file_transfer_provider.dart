@@ -9,6 +9,7 @@ import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:path/path.dart' as p;
 
 import '../services/video_thumbnail_service.dart';
+import 'channel_provider.dart';
 
 /// Why the bytes of a file are not here yet, as Rust's pending-ask walk sees it.
 ///
@@ -228,8 +229,14 @@ class FileTransferNotifier
 
     final ext = p.extension(filePath).toLowerCase().replaceFirst('.', '');
     final isVideo = _videoExtensions.contains(ext);
-    final isVaultMode =
-        serverId != null && channelId != null && memberCount >= 6;
+    // A restricted channel stays out of the vault: its manifest carries the
+    // file's key to every member of the server. Rust refuses one too.
+    final restricted = channelId != null &&
+        (ref.read(channelListProvider)[channelId]?.usesSubgroup ?? false);
+    final isVaultMode = serverId != null &&
+        channelId != null &&
+        memberCount >= 6 &&
+        !restricted;
 
     // Pre-extract a thumbnail for ALL video files so the FileHeader can carry the
     // SOURCE pixel dimensions and receivers size the bubble without their own

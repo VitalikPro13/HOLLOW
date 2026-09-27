@@ -35,6 +35,10 @@ settled in each finding file.
    refused on every path; slow mode judges fresh posts by our own receive clock and
    older replays (relay ring, sync) by their timestamp.
 
+2c. (2026-09-27, session 5) E10: `retention_files` takes only the values the app
+   offers (30d, 90d, 180d, 365d, permanent), refused otherwise at ingest, and only
+   the Owner may change it (authoring and ingest alike).
+
 2a. The author half of decision 2 ("rows whose author was never a member are
    refused") is a real fix, not an accepted risk and not a label: it becomes
    candidate E4 (High), built together with E1. Today `ServerState` keeps only
@@ -138,21 +142,21 @@ context before the write. B10 and B11 (ordering and replay) remain.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| E1 | While a join is pending, a `ServerStateSnapshot` from any sender is adopted whole: the joiner can be handed a state where the attacker is Owner | crdt:S1 | High | AGENT (E4 builds on its fix) |
-| E2 | The pending-join skeleton has no Owner, so the first `ServerCreated` naming itself wins | crdt:S2 | High | AGENT |
-| E3 | Replay after the 1000-op dedup window (restart reloads only the newest 1000): old ops re-apply, deleted registers come back | crdt:S5 | High | PLAUSIBLE reach |
+| E1 | While a join is pending, a `ServerStateSnapshot` from any sender is adopted whole: the joiner can be handed a state where the attacker is Owner | crdt:S1 | High | CONFIRMED (session 5): while a join is pending, any sender's `ServerStateSnapshot` with the right id is adopted whole (owner, roles, members), and later ops are judged against it. Design with E2/E4: the joiner needs a pinned owner (from the invite) and a state it can derive from signed ops |
+| E2 | The pending-join skeleton has no Owner, so the first `ServerCreated` naming itself wins | crdt:S2 | High | CONFIRMED (session 5): the SyncResponse skeleton strips the responder's seeding, so no Owner exists and `op_allowed` admits the first `ServerCreated` naming its own signer; the real founding op is then refused. Design with E1 |
+| E3 | Replay after the 1000-op dedup window (restart reloads only the newest 1000): old ops re-apply, deleted registers come back | crdt:S5 | High | CONFIRMED (session 5): `op_log_dedup` holds only the newest 1000 ops by HLC; an older signed op (the relay holds every op through the plaintext twin) re-applies, and set ops (`ChannelAdded`/`Removed`, `MemberAdded`, emotes, stickers) are plain insert/remove, so removed state comes back and a kicked member is re-admitted. Design: HLC-ordered sets with tombstones plus a persistent seen-set (the `crdt_ops` table), with E5 |
 | E4 | No provable record of past membership: a current member backfills channel posts signed by an identity that was NEVER a member; they verify, show as Verified in the Message Proof, and spread server-wide through every receiver's own sync. Fix = keep every signed `MemberAdded`/`MemberRemoved` op forever (exempt from the op-log cap) so "was a member" is provable and never-member authors are refused; built on the E1 fix, since a joiner today trusts whoever sends its starting state | decision 2a, sync_handler/swarm channel batch arms, api/network.rs `verify_message_proof_v2` | High | CONFIRMED (read in session 3); fix with E1 |
-| E5 | Several registers apply in arrival order, not HLC: the relay picks each replica's final value | crdt:S6 | Medium | AGENT |
-| E6 | Unknown authors count as Member: strangers author self ops everyone persists and re-floods | crdt:S7 | Medium | AGENT |
-| E7 | `MemberAdded` at ingest checks only that the author is a member: ban, private, cap, Twitch, owner-verify bypassed | crdt:S8, server_mls:S-02 | Medium | AGENT |
-| E8 | Admin targets an Owner device id the replica cannot resolve yet; canonicalisation later demotes, bans or mutes the Owner | crdt:S9 | Medium | PLAUSIBLE |
-| E9 | A device key authors with its master's authority through the process-global resolver; a revoked device keeps it where the revocation has not landed | crdt:S10 | Medium | PLAUSIBLE |
-| E10 | `ServerSettingChanged` has no key/value validation: an Admin sets `retention_files` to 0 and every member deletes channel files and vault content | crdt:S11 | Medium | AGENT |
-| E11 | Unban/unmute check no target; Admin edits the Owner's nickname, pledge, twitch; `RolePermissionsChanged` unbounded; author/ingest gates disagree | crdt:S12 | Low | AGENT |
-| E12 | Owner can create co-Owners or remove itself at ingest; an Owner-less server takes `ServerCreated` from anyone | crdt:S13 | Low | AGENT |
-| E13 | Olm `CrdtOp` path re-pushes duplicates: unbounded op log | crdt:S14 | Low | AGENT |
-| E14 | `hlc.actor` not bound to the author; `counter + 1` unchecked | crdt:S16 | Low | PLAUSIBLE |
-| E15 | A replayed founding `ServerCreated` resets the name and replaces the Owner's role register | crdt:S18 | Low | AGENT |
+| E5 | Several registers apply in arrival order, not HLC: the relay picks each replica's final value | crdt:S6 | Medium | CONFIRMED (session 5): channel visibility, posting, public, slow mode, media-only and label fields are plain assignments, last arrival wins per replica; the relay picks each replica's final value by delaying frames, and a replayed old `is_public: true` reopens a channel (E3). Fix: HLC LWW registers, with E3 |
+| E6 | Unknown authors count as Member: strangers author self ops everyone persists and re-floods | crdt:S7 | Medium | CONFIRMED (session 5): `get_role` defaults to Member for a non-member, and `op_allowed` requires membership only for `MemberAdded`, so strangers, kicked or banned ex-members author self nickname/Twitch/pledge, self `MemberRemoved` and cosmetic label ops that every receiver persists and re-floods. Fix: every op except `ServerCreated` and self-leave needs a current member as author |
+| E7 | `MemberAdded` at ingest checks only that the author is a member: ban, private, cap, Twitch, owner-verify bypassed | crdt:S8, server_mls:S-02 | Medium | CONFIRMED (session 5): `op_allowed` asks only that the author is a member and the apply arm inserts regardless of `banned_members`, so any member re-adds a banned peer or admits anyone past private, cap, Twitch and owner-verify (those gates run only on the admitter's join path). Fix: `MemberAdded` needs `admit`-level authority or a join proof, and never lands on a banned identity |
+| E8 | Admin targets an Owner device id the replica cannot resolve yet; canonicalisation later demotes, bans or mutes the Owner | crdt:S9 | Medium | CONFIRMED by reading (session 5): a target device id the replica cannot resolve reads as Member, so the rank check passes; `canonicalize_members` later folds the device register into the master's by LWW and can demote, ban or mute the Owner. Reach PLAUSIBLE (needs a replica that has not seen the device list). Fix: resolve targets at ingest and refuse an unresolvable device target |
+| E9 | A device key authors with its master's authority through the process-global resolver; a revoked device keeps it where the revocation has not landed | crdt:S10 | Medium | CONFIRMED by reading (session 5): `verify_author` binds the op to the device key and `get_role` resolves that device to its master through the process-global resolver, so a device (revoked where the revocation has not landed) authors with its master's authority; honest clients sign with the master. Fix with ID-1: ops must be master-signed |
+| E10 | `ServerSettingChanged` has no key/value validation: an Admin sets `retention_files` to 0 and every member deletes channel files and vault content | crdt:S11 | Medium | FIXED HOL-SEC-021 (decision 2c): `setting_change_allowed` is the one rule for authoring and ingest; retention policies and their `_since` stamps from the Owner only, a policy only with an app value, and a reader treats any other value as keep-everything; the settings page shows retention read-only to non-Owners |
+| E11 | Unban/unmute check no target; Admin edits the Owner's nickname, pledge, twitch; `RolePermissionsChanged` unbounded; author/ingest gates disagree | crdt:S12 | Low | CONFIRMED (session 5): unban and unmute check no target rank; Owner and Admin rewrite anyone's nickname, Twitch and pledge, the Owner's included; `RolePermissionsChanged` checks only MANAGE_ROLES and rank. Authoring vs ingest disagreement not re-read. Fix: the rank rules of kick/ban on every moderation edge, one shared predicate for authoring and ingest |
+| E12 | Owner can create co-Owners or remove itself at ingest; an Owner-less server takes `ServerCreated` from anyone | crdt:S13 | Low | CONFIRMED (session 5): `can_change_role` returns true for any Owner action (co-Owners, self-demotion); ingest accepts an Owner's self `MemberRemoved`; an ownerless state then takes `ServerCreated` from anyone (E2). Fix: ownership changes only through an explicit transfer op; refuse self-demotion and self-removal of the last Owner |
+| E13 | Olm `CrdtOp` path re-pushes duplicates: unbounded op log | crdt:S14 | Low | FIXED HOL-SEC-019: the Olm `CrdtOp`, `SyncReq` and `SyncResp` arms had no sender and are ignored; `apply_op` now reports newness, which also fixes a non-security bug (at the 1000-op cap every caller treated a new op as old, so it was never persisted, shown or re-flooded) |
+| E14 | `hlc.actor` not bound to the author; `counter + 1` unchecked | crdt:S16 | Low | FIXED HOL-SEC-020: `verify_author` refuses an op whose clock names anyone but its author; the clock steps the millisecond at the counter's ceiling instead of overflowing |
+| E15 | A replayed founding `ServerCreated` resets the name and replaces the Owner's role register | crdt:S18 | Low | CONFIRMED (session 5): the `ServerCreated` apply arm assigns the name register directly and re-inserts the Owner's role register, so a replay outside the dedup window (E3) resets the name. Fix with E3, merge instead of assign |
 
 ## Class F. Device lists and revocation (variants of HOL-SEC-001)
 
@@ -180,46 +184,46 @@ context before the write. B10 and B11 (ordering and replay) remain.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| H1 | A `FileHeader` registers its own key for someone else's file id; the stream then replaces the file (MLS: even when complete) | files:F1-1, transport:S-06 | High | AGENT |
-| H2 | Inline `FileHeader` bytes written and marked complete outside the owner guard (push path overwrites completed files) | files:F1-2 | High | AGENT |
-| H3 | `FileChunk` truncates any known file to empty or replaces it | files:F2-1 | High | AGENT |
-| H4 | `FileChunk` writes orphan chunk files for unknown ids without limit | files:F2-2 | Medium | AGENT |
-| H5 | Any sender consumes download receipts, decline pins and pending asks before any check | files:F1-3 | Low | AGENT |
-| H6 | No membership/post check on the announced `sid:cid` of a channel file | files:F1-4 | Medium | AGENT |
-| H7 | `FileHeaderReceived` still carries the attacker's `share_ref` after the guard refused; Dart auto-starts that share | files:F1-6 | Medium | PLAUSIBLE |
-| H8 | WS stream state keyed by id alone: any room peer appends to or completes another's transfer | files:F7-1, relay:16, transport:S-18 | Medium | CONFIRMED (read in ws_stream_transfer.rs) |
-| H9 | Unsolicited streams write unbounded `.ws_recv_` temps; ShareChunk temps never deleted | files:F7-2 | Medium | AGENT |
-| H10 | FILE-3 shard hash check skipped when the registrant sets k = m = 0 | files:F7-3 | Medium | AGENT |
-| H11 | Any member overwrites any shard Alice holds; pledge checked on one path only (storage exhaustion) | files:V1-1, V1-2, V11-1 | High | AGENT |
-| H12 | `ShardDelete` from an admin of ANY shared server wipes placement records of another server; MLS path ignores overrides and membership | files:V4-1, V4-2 | High | AGENT |
-| H13 | Restricted-channel files in 6+ member servers go to the vault: the key manifest reaches the whole server, shards served without `channel_readable_by` | files:V5-1 | High | AGENT |
-| H14 | Unsolicited `ShardResponse` stores or overwrites any shard | files:V6-1, V6-2 | High | AGENT |
-| H15 | `VaultManifestBroadcast` from anyone replaces any manifest, key included, and relinks any file row | files:V10-1 | High | AGENT |
-| H16 | Recovery pool accepts Hello/Welcome/ManifestSync/TransferPlan/Stop from anyone in any room: steer the plan, make us stream shards to a named peer, stop the pool | files:R-1..R-7, relay:15, transport:S-17 | High | AGENT |
+| H1 | A `FileHeader` registers its own key for someone else's file id; the stream then replaces the file (MLS: even when complete) | files:F1-1, transport:S-06 | High | FIXED HOL-SEC-022: one header gate `file_header_refused` on every arm (owner of the card, or the holder we asked, or first header; channel headers from a member who can read the channel); completed files never re-delivered |
+| H2 | Inline `FileHeader` bytes written and marked complete outside the owner guard (push path overwrites completed files) | files:F1-2 | High | FIXED HOL-SEC-022 (inline bytes behind the same gate, DM headers only, push path included) |
+| H3 | `FileChunk` truncates any known file to empty or replaces it | files:F2-1 | High | FIXED HOL-SEC-022 (`FileChunk` had no sender: type and handlers deleted, refused at parse) |
+| H4 | `FileChunk` writes orphan chunk files for unknown ids without limit | files:F2-2 | Medium | FIXED HOL-SEC-022 (with H3) |
+| H5 | Any sender consumes download receipts, decline pins and pending asks before any check | files:F1-3 | Low | FIXED HOL-SEC-022 (receipts and asks consumed only after the gate) |
+| H6 | No membership/post check on the announced `sid:cid` of a channel file | files:F1-4 | Medium | FIXED HOL-SEC-022 (Olm channel headers need a member who can read the channel; MLS already bound by HOL-SEC-010) |
+| H7 | `FileHeaderReceived` still carries the attacker's `share_ref` after the guard refused; Dart auto-starts that share | files:F1-6 | Medium | FIXED HOL-SEC-022 (Dart gets a share reference only from the card's owner) |
+| H8 | WS stream state keyed by id alone: any room peer appends to or completes another's transfer | files:F7-1, relay:16, transport:S-18 | Medium | FIXED HOL-SEC-023: a stream belongs to the device that opened it (takeover only after 10 s idle); the content-substitution half for channel files needs a signed content hash (class A) |
+| H9 | Unsolicited streams write unbounded `.ws_recv_` temps; ShareChunk temps never deleted | files:F7-2 | Medium | FIXED HOL-SEC-023: declared size enforced, 16 open streams per peer and 128 in all, share-chunk temps deleted, `.ws_recv_` swept at boot |
+| H10 | FILE-3 shard hash check skipped when the registrant sets k = m = 0 | files:F7-3 | Medium | FIXED HOL-SEC-024 (the rebuilt ciphertext must hash to its content id, so the per-shard hash is no longer the only integrity check) |
+| H11 | Any member overwrites any shard Alice holds; pledge checked on one path only (storage exhaustion) | files:V1-1, V1-2, V11-1 | High | FIXED HOL-SEC-024: `shard_write_refused` on every write (member, shard not held, pledge) |
+| H12 | `ShardDelete` from an admin of ANY shared server wipes placement records of another server; MLS path ignores overrides and membership | files:V4-1, V4-2 | High | FIXED HOL-SEC-024: `handle_shard_delete` for both transports, override-aware, placements deleted only in the server named |
+| H13 | Restricted-channel files in 6+ member servers go to the vault: the key manifest reaches the whole server, shards served without `channel_readable_by` | files:V5-1 | High | FIXED HOL-SEC-025: restricted-channel files never enter the vault (Dart, node and send path); `shard_serve_refused` checks the channel |
+| H14 | Unsolicited `ShardResponse` stores or overwrites any shard | files:V6-1, V6-2 | High | FIXED HOL-SEC-024 (shard responses pass the write gate and never replace a pending registration) |
+| H15 | `VaultManifestBroadcast` from anyone replaces any manifest, key included, and relinks any file row | files:V10-1 | High | FIXED HOL-SEC-024 (`ingest_vault_manifest`: creator only, never over another creator's, well-formed content id, relinks only the creator's cards; the cache path is sanitized, which closed a write outside the cache folder) |
+| H16 | Recovery pool accepts Hello/Welcome/ManifestSync/TransferPlan/Stop from anyone in any room: steer the plan, make us stream shards to a named peer, stop the pool | files:R-1..R-7, relay:15, transport:S-17 | High | FIXED HOL-SEC-026: recovery frames only from the pool room, plans only from the coordinator and only to members; `RecoveryManifestSync` deleted. The token-as-room-name half is HOL-SEC-002 class |
 | H17 | `.stream_shard_{cid}.tmp` with an unsanitised cid: write outside files/ on Windows | files:V5-3 | High? | FIXED HOL-SEC-007 |
-| H18 | `PublicFileHeader` receipt not tied to the asked peer: substitute a guest's public file | files:F5-1 | Medium | AGENT |
-| H19 | Replayed share manifest zeroes a have-bitmap; huge `ShareHave` allocates ~512 MiB | files:S-2, S-3 | Low | AGENT/PLAUSIBLE |
-| H20 | `EmoteRequest` answers reveal which blobs we hold; 8 MiB replies at 20/s | files:E-1, E-2 | Low | PLAUSIBLE |
-| H21 | Every `FileRequest` re-encrypts and re-streams the whole file (amplification) | files:F3-1 | Low | PLAUSIBLE |
-| H22 | Shard assembly holds unbounded RAM for 600 s; placement confirm by any Olm peer | files:V2-1, V3-1 | Low | AGENT |
+| H18 | `PublicFileHeader` receipt not tied to the asked peer: substitute a guest's public file | files:F5-1 | Medium | FIXED HOL-SEC-022 (the guest receipt names the peer asked) |
+| H19 | Replayed share manifest zeroes a have-bitmap; huge `ShareHave` allocates ~512 MiB | files:S-2, S-3 | Low | FIXED HOL-SEC-027: a share takes its manifest once; a Have only against a known manifest |
+| H20 | `EmoteRequest` answers reveal which blobs we hold; 8 MiB replies at 20/s | files:E-1, E-2 | Low | ACCEPTED AR-05 (2026-09-27) |
+| H21 | Every `FileRequest` re-encrypts and re-streams the whole file (amplification) | files:F3-1 | Low | ACCEPTED AR-06 (2026-09-27) |
+| H22 | Shard assembly holds unbounded RAM for 600 s; placement confirm by any Olm peer | files:V2-1, V3-1 | Low | FIXED HOL-SEC-024 (the chunked shard envelopes had no sender and are gone; a placement is confirmed only by the peer it was placed on) |
 
 ## Class I. The relay itself (C++)
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| I1 | Crash the relay before auth with a wrong-typed JSON field (no snapshot: buffers, kill list, push tokens lost) | relay:1 | Critical (availability) | AGENT |
-| I2 | Replace or pre-block a parked destroy order with junk and a huge `issued_at_ms`; the target acks the junk | relay:5, identity:S8 | High | AGENT |
-| I3 | Evict every kill-list entry with throwaway identities | relay:6 | Medium | AGENT |
-| I4 | Room joins are ungated: `inbox:{master}` and DM rooms become presence and friendship oracles | relay:7 | Medium (privacy) | AGENT |
-| I5 | Anyone with a server id turns ring retention on, extends or clears it | relay:9 | Medium | AGENT |
-| I6 | Anyone with a server id reads the `~join` ring (plaintext join requests: device list, KeyPackage, Twitch credential) and every channel ring | relay:10 | Medium | AGENT |
-| I7 | Ring flush with junk 0x07 frames; guests unthrottled on 0x07 | relay:11 | Medium | AGENT |
-| I8 | Link-code guess throttle bypassed by two oracles (`claim` answers "taken", joining `link:{CODE}` returns the roster) | relay:4 | Medium | AGENT |
-| I9 | Offline-buffer global backstop evicted by throwaway identities | relay:18 | Low | AGENT |
-| I10 | A revoked sibling reads the mailbox again after any relay restart (version marks in RAM only) | relay:19 | Medium | AGENT (documented in code) |
-| I11 | Guests deposit and trigger pushes through JSON `direct` | relay:20 | Low | AGENT |
-| I12 | Report counts inflated by throwaway identities; push wake-ups by any new identity | relay:21, relay:17 | Low | AGENT |
-| I13 | Stale security comments cite a rate limit and a constant that do not exist | relay:24 | Info | AGENT |
+| I1 | Crash the relay before auth with a wrong-typed JSON field (no snapshot: buffers, kill list, push tokens lost) | relay:1 | Critical (availability) | FIXED + DEPLOYED HOL-SEC-028: `parse_auth_frame` never throws, pre-auth frames capped at 16 KiB, auth and binary dispatch wrapped |
+| I2 | Replace or pre-block a parked destroy order with junk and a huge `issued_at_ms`; the target acks the junk | relay:5, identity:S8 | High | FIXED + DEPLOYED HOL-SEC-029: one slot per issuer per target, every slot delivered, future stamps refused, per-signal ack (client half in 0.12) |
+| I3 | Evict every kill-list entry with throwaway identities | relay:6 | Medium | OPEN, residual of HOL-SEC-029: Sybil deposits still evict; the relay cannot judge an order. Design ID-1 |
+| I4 | Room joins are ungated: `inbox:{master}` and DM rooms become presence and friendship oracles | relay:7 | Medium (privacy) | OPEN, class A design (room joins need no proof) |
+| I5 | Anyone with a server id turns ring retention on, extends or clears it | relay:9 | Medium | OPEN, class A design (an owner-signed ring opt-in) |
+| I6 | Anyone with a server id reads the `~join` ring (plaintext join requests: device list, KeyPackage, Twitch credential) and every channel ring | relay:10 | Medium | OPEN, class A design (join requests out of the plaintext ring) |
+| I7 | Ring flush with junk 0x07 frames; guests unthrottled on 0x07 | relay:11 | Medium | FIXED + DEPLOYED HOL-SEC-030: fair-share ring eviction (a flooder evicts itself); guests may not send topic frames |
+| I8 | Link-code guess throttle bypassed by two oracles (`claim` answers "taken", joining `link:{CODE}` returns the roster) | relay:4 | Medium | OPEN, folded into HOL-SEC-002 (the link-code redesign) |
+| I9 | Offline-buffer global backstop evicted by throwaway identities | relay:18 | Low | ACCEPTED AR-07 (2026-09-27); revisit with the phase G traffic measurement |
+| I10 | A revoked sibling reads the mailbox again after any relay restart (version marks in RAM only) | relay:19 | Medium | FIXED + DEPLOYED HOL-SEC-031: the device-list marks ride the restart snapshot (codec version 3) |
+| I11 | Guests deposit and trigger pushes through JSON `direct` | relay:20 | Low | FIXED + DEPLOYED HOL-SEC-030 (guests may not send JSON `direct`) |
+| I12 | Report counts inflated by throwaway identities; push wake-ups by any new identity | relay:21, relay:17 | Low | Report half ACCEPTED AR-08 (2026-09-27). Push half OPEN as K3: the wake is not silent, the app shows a fallback banner when the fetch finds nothing |
+| I13 | Stale security comments cite a rate limit and a constant that do not exist | relay:24 | Info | FIXED + DEPLOYED (comments corrected with HOL-SEC-030) |
 
 ## Class J. Reach, presence and metadata
 
@@ -241,6 +245,7 @@ context before the write. B10 and B11 (ordering and replay) remain.
 |---|---|---|---|---|
 | K1 | The push fetch node and the iOS NSE never load the block list: blocked senders' DMs are stored and shown | transport:S-01 | Medium | AGENT |
 | K2 | A key change first seen through push never raises the alert | transport:S-02 | Low | PLAUSIBLE |
+| K3 | Anyone who knows a device id can make the relay wake that phone (10 s debounce, 30 an hour); when the fetch finds nothing decryptable the app shows a fallback "new message" banner naming the sender's shortened id, so a stranger puts up to 30 visible banners an hour on the phone | relay:A-22a, push_notification_service.dart `_showDmFallbackIfNeeded` | Low | CONFIRMED (read in session 6). Fix idea: the fallback banner only for a sender we know (friend, sibling, a member of a shared server); nothing for a stranger's empty wake; check the iOS NSE path too |
 
 ## Class L. Friends, blocklist, DM edges
 

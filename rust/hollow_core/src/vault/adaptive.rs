@@ -48,16 +48,18 @@ pub fn determine_tier(_mime_type: &str) -> StorageTier {
 
 // ── Retention policy helpers ─────────────────────────────
 
-/// Parse a retention policy string into days. Returns None for "permanent".
-/// Valid values: "permanent", "365d", "180d", "90d", "30d", or custom like "60d".
+/// The retention policies the app offers, the only ones a server may carry.
+pub const RETENTION_CHOICES: [&str; 5] = ["permanent", "30d", "90d", "180d", "365d"];
+
+/// Parse a retention policy string into days. `None` = keep everything: "permanent",
+/// and any value the app does not offer, since every member's sweep deletes by it.
 pub fn parse_retention_days(policy: &str) -> Option<u32> {
     match policy {
-        "permanent" | "" => None,
         "365d" => Some(365),
         "180d" => Some(180),
         "90d" => Some(90),
         "30d" => Some(30),
-        other => other.trim_end_matches('d').parse().ok(),
+        _ => None,
     }
 }
 
@@ -228,9 +230,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_custom() {
-        assert_eq!(parse_retention_days("60d"), Some(60));
-        assert_eq!(parse_retention_days("7d"), Some(7));
+    fn a_value_the_app_does_not_offer_keeps_everything() {
+        for policy in ["60d", "7d", "0d", "0", "-1d", "99999999999d"] {
+            assert_eq!(parse_retention_days(policy), None, "{policy}");
+        }
     }
 
     #[test]

@@ -21,50 +21,10 @@ pub fn files_dir() -> PathBuf {
     dir
 }
 
-/// Write a single chunk to disk as a temporary file.
-pub fn write_chunk(file_id: &str, chunk_index: u32, data: &[u8]) -> Result<(), String> {
-    let path = chunk_path(file_id, chunk_index);
-    crate::node::at_rest::write_all(&path, data)
-        .map_err(|e| format!("Failed to write chunk {chunk_index} for {file_id}: {e}"))
-}
-
-/// Reassemble chunks into the final file, reading the chunk files in order and
-/// cleaning them up after a successful assembly.
-pub fn assemble_file(
-    file_id: &str,
-    total_chunks: u32,
-    final_path: &std::path::Path,
-) -> Result<(), String> {
-    // Assembled in memory rather than appended chunk by chunk: the at-rest layout
-    // is sealed per chunk against the FINAL file's length, which an append-as-you-go
-    // writer does not know. Bounded by the 34 MB transfer cap.
-    let mut whole = Vec::new();
-    for idx in 0..total_chunks {
-        let cp = chunk_path(file_id, idx);
-        let data = crate::node::at_rest::read_all(&cp)
-            .map_err(|e| format!("Failed to read chunk {idx}: {e}"))?;
-        whole.extend_from_slice(&data);
-    }
-    crate::node::at_rest::write_all(final_path, &whole)
-        .map_err(|e| format!("Failed to write the assembled file: {e}"))?;
-
-    for idx in 0..total_chunks {
-        let _ = crate::node::at_rest::remove(&chunk_path(file_id, idx));
-    }
-
-    Ok(())
-}
-
 /// SECURITY: Sanitize file ID / extension to prevent path traversal.
 /// Only allows alphanumeric characters (strips path separators, dots, etc.).
 fn sanitize_path_component(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
-}
-
-/// Path for a temporary chunk file.
-fn chunk_path(file_id: &str, chunk_index: u32) -> PathBuf {
-    let safe_id = sanitize_path_component(file_id);
-    files_dir().join(format!("{safe_id}.chunk.{chunk_index}"))
 }
 
 /// Build the final file path: files_dir/{file_id}.{ext}

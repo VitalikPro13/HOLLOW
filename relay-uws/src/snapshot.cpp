@@ -54,8 +54,14 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         d.topics.push_back(std::move(t));
     }
     for (const auto& [peer, tok] : st.push_tokens) d.push_tokens.push_back({peer, tok.token, tok.platform});
-    for (const auto& [target, e] : st.kill_list.entries) {
-        d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now)});
+    for (const auto& [target, list] : st.kill_list.entries) {
+        for (const auto& e : list) {
+            d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now)});
+        }
+    }
+    for (const auto& master : st.device_list_version_fifo) {
+        auto it = st.device_list_max_version.find(master);
+        if (it != st.device_list_max_version.end()) d.marks.push_back({master, it->second});
     }
     for (const auto& [peer, servers] : st.push_prefs) {
         snapshot::PushPref p;
@@ -92,6 +98,11 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
               [](const snapshot::Kill& a, const snapshot::Kill& b) { return a.age_secs > b.age_secs; });
     for (auto& k : d.kills) {
         st.kill_list.restore(k.target, k.issuer, k.blob, k.issued_at_ms, at_from_age(k.age_secs, now));
+    }
+    for (auto& m : d.marks) {
+        if (st.device_list_max_version.emplace(m.master, m.version).second) {
+            st.device_list_version_fifo.push_back(std::move(m.master));
+        }
     }
 
     // The eviction index must see every frame in the order the old process

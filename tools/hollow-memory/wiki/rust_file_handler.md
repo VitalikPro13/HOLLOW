@@ -6,7 +6,7 @@ Covers `file_handler.rs` (file send/receive orchestration, stream completion, go
 
 ## file_handler.rs Overview
 
-Orchestrates all file transfer flows: sending files in DMs and channels, receiving FileHeader/FileChunk envelopes, completing streamed transfers (both WSS and WebRTC), gossip relay broadcast, and WebRTC failure fallback. Every public function takes individual swarm state fields as parameters (no SwarmContext struct due to borrow checker constraints with crypto helpers).
+Orchestrates all file transfer flows: sending files in DMs and channels, receiving FileHeader envelopes, completing streamed transfers (both WSS and WebRTC), gossip relay broadcast, and WebRTC failure fallback. Every public function takes individual swarm state fields as parameters (no SwarmContext struct due to borrow checker constraints with crypto helpers).
 
 ---
 
@@ -214,19 +214,9 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp and skips bi
 
 ---
 
-## handle_envelope_file_chunk()
+## FileChunk (deleted 2026-09-27)
 
-`file_handler.rs:handle_envelope_file_chunk()` -- Legacy chunked file transfer path. Handles `MessageEnvelope::FileChunk`.
-
-1. Base64-decodes the chunk data.
-2. Writes chunk to disk via `file_transfer::write_chunk()`.
-3. Marks chunk received in DB (`mark_chunk_received()`).
-4. Emits `NetworkEvent::FileProgress`.
-5. When all chunks received (`received >= chunk_count`), assembles via `file_transfer::assemble_file()`, marks complete, emits `FileCompleted`.
-
-Note: The streamed transfer path (`chunks: 0`) is the primary path now. This chunked path is for fallback/legacy.
-
----
+`MessageEnvelope::FileChunk` had no sender and wrote chunks for any file id with no check, so a single chunk could mark a received file complete as an empty file. The type, both arms and `handle_envelope_file_chunk` are gone (HOL-SEC-022); a frame of it fails to parse. Every FileHeader arm now runs `file_header_refused` and `file_bytes_on_disk` first (wiki `security_write_gates` §14).
 
 ## handle_envelope_broadcast_meta()
 

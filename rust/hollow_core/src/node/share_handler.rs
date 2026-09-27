@@ -1505,8 +1505,10 @@ pub async fn handle_envelope_share_manifest_response(
         .map(|(_, ext)| ext.to_string())
         .unwrap_or_default();
 
-    // Cache manifest in-memory for the probe. DB write deferred to ShareStart.
-    if let Some(state) = registry.get_mut(&root_hash) {
+    // Cache manifest in-memory for the probe. DB write deferred to ShareStart. A
+    // share that already holds its manifest takes no second copy: it would reset
+    // the have-bitmap of a seeder or a download under way.
+    if let Some(state) = registry.get_mut(&root_hash).filter(|s| s.manifest.is_none()) {
         state.manifest = Some(manifest.clone());
         state.file_ext = file_ext;
         state.have = ChunkBitmap::empty(manifest.chunk_count);
@@ -1529,10 +1531,9 @@ pub async fn handle_envelope_share_have(
     chunk_count: u32,
 ) {
     let Some(state) = registry.get_mut(&root_hash) else { return; };
-    // Sanity: ignore Have messages for the wrong manifest dimensions.
-    if let Some(ref m) = state.manifest
-        && m.chunk_count != chunk_count
-    {
+    // A Have is judged against the manifest's dimensions, so none is taken before
+    // it: peers re-send theirs every HAVE_REBROADCAST_INTERVAL.
+    if state.manifest.as_ref().is_none_or(|m| m.chunk_count != chunk_count) {
         return;
     }
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&bitmap_b64) {
@@ -2033,6 +2034,50 @@ pub async fn handle_webrtc_share_chunk_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seeding_share(manifest: Option<ShareManifest>) -> ShareSwarmState {
+        let now = Instant::now();
+        let chunks = manifest.as_ref().map_or(0, |m| m.chunk_count);
+        let mut have = ChunkBitmap::empty(chunks);
+        for i in 0..chunks { have.set(i); }
+        ShareSwarmState {
+            root_hash: [0; 32], key: [0; 32], manifest, file_ext: String::new(), save_dir: None,
+            have, data_path: None, writer: None, seeding: true, bytes_uploaded: 0,
+            bytes_downloaded: 0, peer_have: HashMap::new(), inflight: HashMap::new(),
+            last_have_broadcast: now, speed_samples: Vec::new(), speed_bps: 0,
+            manifest_requested_at: None, last_seeding_emit: now, sequential: false,
+            hidden: false, server_id: None, context_type: None,
+        }
+    }
+
+    /// H19: anyone in a share's room (and the relay, which sees every manifest)
+    /// could replay the manifest to a seeder and zero its have-bitmap, so it stopped
+    /// serving; and before a manifest arrived, a Have naming four billion chunks
+    /// allocated half a gigabyte per sender.
+    #[tokio::test]
+    async fn a_share_takes_its_manifest_once_and_haves_only_against_it() {
+        let manifest = ShareManifest {
+            version: MANIFEST_VERSION, file_name: "a.bin".into(), mime: "application/octet-stream".into(),
+            total_size: 3 * CHUNK_SIZE as u64, chunk_size: CHUNK_SIZE, chunk_count: 3,
+            chunk_hashes: vec![[1; 32], [2; 32], [3; 32]], created_at: 1, note: None,
+        };
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let root = hex::encode(manifest_root_hash(&bytes));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let (tx, _rx) = mpsc::channel(8);
+        let kp = NativeKeypair::from_secret_bytes(&[5; 32]);
+
+        let mut registry = new_registry();
+        registry.insert(root.clone(), seeding_share(Some(manifest)));
+        handle_envelope_share_manifest_response(&mut registry, &kp, &tx, root.clone(), b64.clone()).await;
+        assert_eq!(registry[&root].have.count_set(), 3, "a replayed manifest reset the seeder");
+
+        registry.insert(root.clone(), seeding_share(None));
+        handle_envelope_share_have(&mut registry, "mallory", root.clone(), String::new(), u32::MAX).await;
+        assert!(registry[&root].peer_have.is_empty(), "a Have before the manifest was taken");
+        handle_envelope_share_manifest_response(&mut registry, &kp, &tx, root.clone(), b64).await;
+        assert!(registry[&root].manifest.is_some(), "the first manifest lands");
+    }
 
     /// The Share lane's liveness set gates BOTH scheduling and serving. A peer with
     /// only the general hollow-data channel must be invisible to it: that channel

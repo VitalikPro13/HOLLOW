@@ -352,19 +352,7 @@ These handle `MessageEnvelope` variants received from other peers via MLS or Olm
 
 **vault_ops:handle_envelope_shard_store_ack()** — processes ack from peer. Emits `NetworkEvent::ShardStoreAckReceived` with success/failure.
 
-**vault_ops:handle_envelope_shard_delete()** — receives deletion command. Validates sender has MANAGE_SERVER permission (checks role default_permissions). Deletes local shards via ContentStore. Emits `ShardDeleted`.
-
-**vault_ops:handle_envelope_shard_request()** — peer requests a shard from us. Validates sender is server member. Reads shard from ContentStore. Sends `ShardResponse` metadata (data field empty, found=true) via MLS/Olm, then streams shard bytes directly from memory via `stream_to_peer_bytes()`. If shard not found: sends ShardResponse with found=false.
-
-**vault_ops:handle_envelope_shard_response()** — receives shard response metadata. If found && data empty: registers in `pending_shard_streams` for binary stream arrival. If found && data non-empty: decodes base64, emits `ShardReceived`.
-
-**vault_ops:handle_envelope_shard_response_chunk()** — legacy no-op.
-
-**vault_ops:handle_envelope_shard_probe()** — peer asks "what shards do you have for this content?" Validates membership. Lists local shards via ContentStore, sends `ShardProbeResponse` with shard index list.
-
-**vault_ops:handle_envelope_shard_probe_response()** — informational log only. Records which shards a peer has for a given content_id.
-
-**vault_ops:handle_envelope_vault_manifest_broadcast()** — receives manifest from another member. Deserializes VaultManifest JSON, saves to local ContentStore. If message_id is present, links it in MessageStore via `set_file_content_id()`.
+**vault_ops gates (HOL-SEC-024, 2026-09-27):** the per-envelope MLS handlers are gone. `shard_write_refused` (member, shard not held, pledge) guards every shard write in the Olm arms; `shard_serve_refused` guards `ShardRequest` (member who can read the file's channel when the manifest is known; the shard key must be the shard's own); `handle_shard_delete` is the one delete rule for both transports (member with Manage Server, override-aware, placements only in that server); `ingest_vault_manifest` takes a manifest only from the member named as creator, never over another creator's, with a 64-hex content id, and relinks only that creator's file cards. A `ShardStoreAck` confirms a placement only from its target. `handle_vault_upload_file` refuses a restricted channel.
 
 **vault_ops:handle_envelope_shard_migrate()** — receives a migrated shard (rebalancing). Validates sender is server member. Decodes base64 shard data, stores via ContentStore with tier=Standard and k=0,m=0,total_size=0 (placeholder metadata).
 
@@ -480,18 +468,14 @@ All vault-related MessageEnvelope variants (defined in `node/types.rs`):
 | Variant | Direction | Purpose |
 |---------|-----------|---------|
 | `ShardStore { sid, cid, si, sk, k, m, total_size, tier, data, chunks, target }` | uploader -> holder | Shard storage metadata. data="" means binary stream follows |
-| `ShardChunk { sid, cid, si, ci, data }` | legacy | No-op, ignored |
 | `ShardStoreAck { sid, cid, si, ok, err, target }` | holder -> uploader | Confirms shard receipt |
 | `ShardDelete { sid, cid }` | admin -> all | Delete all shards for content |
 | `ShardRequest { sid, cid, si, sk, target }` | downloader -> holder | Request a specific shard |
 | `ShardResponse { sid, cid, si, data, chunks, found, target }` | holder -> downloader | Shard response metadata. data="" means stream |
-| `ShardResponseChunk { sid, cid, si, ci, data, target }` | legacy | No-op, ignored |
-| `ShardProbe { sid, cid, target }` | any -> any | "What shards do you have for this content?" |
-| `ShardProbeResponse { sid, cid, shards, target }` | any -> any | List of shard indices held |
 | `ShardMigrate { sid, cid, si, sk, data, target }` | old holder -> new holder | Rebalance shard transfer (base64 data) |
 | `VaultManifestBroadcast { sid, cid, chid, manifest }` | uploader -> all | Broadcast manifest JSON to server |
 
-All variants with `target: Option<String>` support MLS targeted delivery.
+All variants with `target: Option<String>` support MLS targeted delivery. Since HOL-SEC-024 (2026-09-27) only `ShardDelete` and `VaultManifestBroadcast` are taken over MLS; the rest are one peer to another over Olm and their MLS copies are ignored. `ShardChunk`, `ShardResponseChunk`, `ShardProbe` and `ShardProbeResponse` had no sender and were deleted. Every write passes `vault_ops::shard_write_refused`, serving `shard_serve_refused`, deletes `handle_shard_delete`, manifests `ingest_vault_manifest` (wiki `security_write_gates` §14).
 
 ### Pending State in swarm.rs
 

@@ -86,8 +86,7 @@ impl Hlc {
                 actor: self.actor.clone(),
             };
         } else {
-            self.latest.counter += 1;
-            self.latest.actor = self.actor.clone();
+            self.step_to(successor(self.latest.physical_ms, self.latest.counter));
         }
         self.latest.clone()
     }
@@ -107,23 +106,27 @@ impl Hlc {
 
         let max_physical = wall.max(self.latest.physical_ms).max(other.physical_ms);
 
-        if max_physical == self.latest.physical_ms
+        let next = if max_physical == self.latest.physical_ms
             && max_physical == other.physical_ms
         {
             // All three equal — take max counter + 1
-            self.latest.counter = self.latest.counter.max(other.counter) + 1;
+            successor(max_physical, self.latest.counter.max(other.counter))
         } else if max_physical == self.latest.physical_ms {
             // Our physical time is ahead — just increment
-            self.latest.counter += 1;
+            successor(max_physical, self.latest.counter)
         } else if max_physical == other.physical_ms {
             // Remote is ahead — adopt their counter + 1
-            self.latest.physical_ms = other.physical_ms;
-            self.latest.counter = other.counter + 1;
+            successor(max_physical, other.counter)
         } else {
             // Wall clock is ahead of both — reset counter
-            self.latest.physical_ms = max_physical;
-            self.latest.counter = 0;
-        }
+            (max_physical, 0)
+        };
+        self.step_to(next);
+    }
+
+    fn step_to(&mut self, (physical_ms, counter): (u64, u32)) {
+        self.latest.physical_ms = physical_ms;
+        self.latest.counter = counter;
         self.latest.actor = self.actor.clone();
     }
 
@@ -140,6 +143,16 @@ impl Hlc {
     /// The actor ID for this clock.
     pub fn actor(&self) -> &str {
         &self.actor
+    }
+}
+
+/// The timestamp right after `(physical_ms, counter)`. A remote peer picks its own
+/// counter, so at `u32::MAX` the millisecond steps instead: the clock can neither
+/// panic nor wrap below a timestamp it has already witnessed.
+fn successor(physical_ms: u64, counter: u32) -> (u64, u32) {
+    match counter.checked_add(1) {
+        Some(counter) => (physical_ms, counter),
+        None => (physical_ms.saturating_add(1), 0),
     }
 }
 
@@ -175,6 +188,26 @@ mod tests {
 
         // B's timestamp must be after A's
         assert!(t_b1 > t_a1);
+    }
+
+    /// E14: a remote counter at its ceiling must neither panic the clock nor wrap it
+    /// below what it witnessed, on every witness branch and on the next `now()`.
+    #[test]
+    fn a_counter_at_its_ceiling_moves_the_clock_forward() {
+        let ahead = wall_clock_ms() + 60_000;
+        let remote = HlcTimestamp { physical_ms: ahead, counter: u32::MAX, actor: "remote".into() };
+
+        let mut behind = Hlc::new("local".into());
+        behind.witness(&remote);
+        assert!(behind.now() > remote, "adopting a remote counter at its ceiling");
+
+        let mut level = Hlc::from_saved(ahead, 7, "local".into());
+        level.witness(&remote);
+        assert!(level.now() > remote, "equal physical times, remote counter at its ceiling");
+
+        let mut own = Hlc::from_saved(ahead, u32::MAX, "local".into());
+        let before = HlcTimestamp { physical_ms: ahead, counter: u32::MAX, actor: "local".into() };
+        assert!(own.now() > before, "our own counter at its ceiling");
     }
 
     #[test]

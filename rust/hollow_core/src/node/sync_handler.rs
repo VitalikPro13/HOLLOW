@@ -195,6 +195,8 @@ enum OpGate<'a> {
     ManageRolesOutranking(&'a str),
     /// The target is the local peer itself, or fall back to `Perm(bits)`.
     SelfOrPerm(&'a str, u32),
+    /// `state.setting_change_allowed(local, key, value)`, the ingest rule.
+    Setting(&'a str, &'a str),
     /// No gate (e.g. changing our own storage pledge).
     Always,
 }
@@ -212,6 +214,7 @@ fn gate_allows(state: &ServerState, local_peer: &str, gate: &OpGate<'_>) -> bool
         OpGate::SelfOrPerm(target, bits) => {
             *target == local_peer || state.has_permission(local_peer, *bits)
         }
+        OpGate::Setting(key, value) => state.setting_change_allowed(local_peer, key, value),
         OpGate::Always => true,
     }
 }
@@ -992,14 +995,18 @@ pub(crate) async fn handle_update_server_setting(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) {
-    // Local permission gate (MANAGE_SERVER, override-aware), mirroring what every
-    // RECEIVER enforces. Without it an unauthorized FFI call applies the op
-    // locally, the network rejects it, and our state diverges from everyone else's.
+    // The same rule every RECEIVER enforces. Without it an unauthorized FFI call
+    // applies the op locally, the network rejects it, and our state diverges.
+    let denied = if key.starts_with("retention_") {
+        "Only the server owner can change how long things are kept"
+    } else {
+        "Permission denied: changing server settings needs the Manage Server permission"
+    };
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
-        OpGate::Perm(Permission::MANAGE_SERVER),
-        Some("Permission denied: changing server settings needs the Manage Server permission"),
+        OpGate::Setting(&key, &value),
+        Some(denied),
         CrdtPayload::ServerSettingChanged { key: key.clone(), value: value.clone() },
         &format!("Updating setting '{key}'='{value}'"),
         NetworkEvent::ServerUpdated { server_id: server_id.clone() },
@@ -2976,9 +2983,7 @@ pub(crate) async fn handle_envelope_crdt_op(
         );
         return;
     }
-    let was_len = state.op_log.len();
-    let _ = state.apply_op(&op);
-    if state.op_log.len() > was_len {
+    if let Ok(true) = state.apply_op(&op) {
         crdt_store.insert_op(op.clone());
         crdt_store.save_state_snapshot(sid.clone(), state);
         emit_crdt_apply_event(event_tx, ws_cmd_tx, state, &sid, &op).await;

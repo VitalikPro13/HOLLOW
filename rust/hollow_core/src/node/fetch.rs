@@ -1182,6 +1182,23 @@ fn handle_file_header(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
+    // The live header gate: a DM header only, from the owner of any card we already
+    // hold, and never for bytes already on disk.
+    if p.sid.is_some() {
+        return None;
+    }
+    {
+        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+        if let Some(reason) = crate::node::file_handler::file_header_refused(
+            &store, &std::collections::HashMap::new(), &p.fid, None, None, convo, false,
+        ) {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {} from {convo} in fetch: {reason}", p.fid);
+            return None;
+        }
+        if crate::node::file_handler::file_bytes_on_disk(&store, &p.fid) {
+            return None;
+        }
+    }
     if p.inline_bytes.is_some() && p.aes_key.is_some() && p.aes_nonce.is_some() {
         // AUTO-DOWNLOAD GATE (#41): honour the same config as the live node.
         // Gated keeps the sentinel row and metadata, so the card renders with a

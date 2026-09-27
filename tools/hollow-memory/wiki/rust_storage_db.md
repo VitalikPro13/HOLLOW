@@ -425,7 +425,7 @@ Indexes:
 ### File Operations
 
 - `messages.rs:insert_file_metadata()` -- `INSERT OR IGNORE INTO files`. Serializes `VideoThumbRef` to JSON if present.
-- `messages.rs:mark_chunk_received()` -- `INSERT OR IGNORE INTO file_chunks`, then `UPDATE files SET chunks_received = (SELECT COUNT(*) FROM file_chunks WHERE file_id = ?1)`. Returns new count.
+- (deleted 2026-09-27 with `FileChunk`, HOL-SEC-022) `messages.rs:mark_chunk_received()` -- `INSERT OR IGNORE INTO file_chunks`, then `UPDATE files SET chunks_received = (SELECT COUNT(*) FROM file_chunks WHERE file_id = ?1)`. Returns new count.
 - `messages.rs:mark_file_complete()` -- `UPDATE files SET completed_at = now, disk_path = ?`.
 - `messages.rs:get_file_metadata()` -- Full SELECT by file_id. Deserializes `video_thumb_json` via `parse_video_thumb_json()`. Returns `Option<StoredFile>`.
 - `messages.rs:get_files_for_message()` -- `SELECT ... FROM files WHERE message_id = ?1`. Returns `Vec<StoredFile>`.

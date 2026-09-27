@@ -5702,6 +5702,22 @@ mod tests {
         );
     }
 
+    /// E13: no client sends a CRDT op or an op-log sync over Olm, so the Olm dispatch
+    /// ignores all three envelopes instead of running a second, weaker ingest.
+    #[test]
+    fn authz_olm_carries_no_crdt_ingest() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs");
+        let swarm = std::fs::read_to_string(path).expect("read swarm.rs").replace("\r\n", "\n");
+        let end = swarm.find("Received MLS-only envelope via Olm").expect("the Olm ignore arm");
+        let start = swarm[..end].rfind("=> {").expect("an arm before the ignore arm");
+        let ignored = &swarm[swarm[..start].rfind("}\n").expect("the arm before it")..end];
+        for kind in ["CrdtOp", "SyncReq", "SyncResp"] {
+            let pattern = format!("Ok(MessageEnvelope::{kind} {{");
+            assert_eq!(swarm.matches(&pattern).count(), 1, "swarm.rs: an Olm {kind} arm is back");
+            assert!(ignored.contains(&format!("{pattern} .. }})")), "swarm.rs: Olm {kind} is not ignored");
+        }
+    }
+
     /// The channel ingest gates are only as good as their callers: a unit test on a
     /// rule cannot see a receive path that stopped asking. Every MLS receiver binds
     /// the envelope to its group before acting, every plaintext public arm asks
@@ -5830,8 +5846,6 @@ mod tests {
         };
         assert!(!fits(&dm_edit, "srv", None));
         assert!(!fits(&MessageEnvelope::SessionAck, "srv", None));
-        let chunk = MessageEnvelope::FileChunk { fid: "f".into(), idx: 0, data: String::new() };
-        assert!(fits(&chunk, "srv", None));
     }
 
     /// C7: a message dated more than ten minutes past our clock never verifies, so

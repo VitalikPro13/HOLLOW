@@ -467,14 +467,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Whether a channel is cryptographically isolated in its own MLS subgroup:
   /// restricted visibility AND not public. Mirrors Rust `channel_uses_subgroup`;
   /// such a channel's SFrame key comes ONLY from its subgroup.
-  bool _channelUsesSubgroup(String channelId) {
-    final ch = ref.read(channelListProvider)[channelId];
-    if (ch == null) return false;
-    // Label-gated channels are subgrouped too. This is a KEY-DOMAIN decision:
-    // never rely on the admin-tier stamp, mirror Rust's rule exactly.
-    return !ch.isPublic &&
-        (ch.visibility != 'everyone' || ch.visibilityLabels.isNotEmpty);
-  }
+  bool _channelUsesSubgroup(String channelId) =>
+      ref.read(channelListProvider)[channelId]?.usesSubgroup ?? false;
 
   /// Shared screen capture stream (captured once, shared across outgoing PCs).
   MediaStream? _screenCaptureStream;

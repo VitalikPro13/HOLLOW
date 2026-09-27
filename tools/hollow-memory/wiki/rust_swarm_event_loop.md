@@ -353,10 +353,9 @@ The Olm decryption result is matched against MessageEnvelope variants inline in 
 - `EditMessage` / `DeleteMessage` — verifies sender owns the message, persists edit/hide, emits events.
 - `AddReaction` / `RemoveReaction` — persists to DB, emits events.
 - `FileHeader` — validates file size, saves metadata, registers pending stream if AES key present, handles early-arrival race.
-- `FileChunk` — writes chunk to disk, updates DB, checks completion, assembles file.
-- `ShardStore` / `ShardChunk` / `ShardStoreAck` — vault shard storage with chunked reassembly.
-- `ShardRequest` / `ShardResponse` / `ShardResponseChunk` — vault shard retrieval.
-- `ShardDelete` / `ShardProbe` / `ShardProbeResponse` — vault shard management.
+- `ShardStore` / `ShardStoreAck` — vault shard storage (gated by `vault_ops::shard_write_refused`; placement confirmed only by its target).
+- `ShardRequest` / `ShardResponse` — vault shard retrieval (`shard_serve_refused` / `shard_write_refused`).
+- `ShardDelete` — vault shard deletion (`vault_ops::handle_shard_delete`). The chunked and probe variants were deleted (HOL-SEC-024).
 - `VaultManifestBroadcast` — saves manifest to ContentStore.
 - `ShardMigrate` — stores migrated shard.
 - `SessionAck` — marks Olm session as bidirectional (ratchet upgraded).
@@ -381,7 +380,7 @@ After MLS decryption in the `MlsChannelMessage` handler, the inner envelope is m
 - `ChannelSyncReq` -> `sync_handler::handle_envelope_channel_sync_req()`
 - `ChannelProbe` / `ChannelProbeResp` -> `sync_handler::handle_envelope_channel_probe*()`
 - `ChannelSyncBatch` -> `sync_handler::handle_envelope_channel_sync_batch()`
-- `ShardStore` / `ShardChunk` / `ShardStoreAck` / `ShardDelete` / `ShardRequest` / `ShardResponse` / `ShardProbe` / `ShardProbeResponse` / `VaultManifestBroadcast` / `ShardMigrate` -> `vault_ops::handle_envelope_*()`
+- MLS vault: `ShardDelete` -> `vault_ops::handle_shard_delete`, `VaultManifestBroadcast` -> `vault_ops::ingest_vault_manifest`; the Olm-only shard envelopes are ignored over MLS (HOL-SEC-024)
 - Voice channel join/leave/SDP/ICE/audio/screen/camera state -> `voice_handler::handle_envelope_voice_channel_*()`
 - `BroadcastMeta` -> `file_handler::handle_envelope_broadcast_meta()`
 

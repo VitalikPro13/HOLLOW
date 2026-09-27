@@ -60,7 +60,7 @@ sender needs no signature.
 | Server sticker blob (`kind='sticker'`, asset-rail Phase 5) | same `handle_emote_assets` path | same requested-only gate (512 KB cap from the recorded kind). The CRDT carries ONLY the hash — `CrdtPayload::StickerAdded/StickerRemoved`, `MANAGE_EMOTES`-gated at author AND ingest (`op_allowed` validates `op.author`, the 64-hex hash, both ≤32-char control-free labels, and 1..=4096 dims). `MAX_SERVER_STICKERS = 50` enforced at authoring AND apply so replicas converge on the same refusal. No pre-join wire path carries stickers |
 | Avatar frame blob (`kind='frame'`, issue #54) | same `handle_emote_assets` path | same requested-only gate (256 KB cap from the recorded kind — the tight EMOTE ceiling, not the rail's 512 KB, because a frame is decoration on every avatar you have ever seen). The PROFILE carries only the ID: `UserProfile.avatar_frame` is `""` / `b:<hue>` / 64-hex, and `social::sanitize_incoming_frame` is the sole validator on ingest. That validator matters more than it looks — the field is plaintext on the `HavenMessage::ProfileUpdate` fallback AND it keys a network PULL, so an unvalidated string would be a request-anything primitive. Anything unrecognised is treated as ABSENT (preserve what we stored), never as a clear, so a malformed field from a future client cannot wipe somebody's frame |
 | Animated avatar/banner blob (`kind='profile'`, asset-rail follow-up) | same `handle_emote_assets` path | same requested-only gate (1 MB cap from the recorded kind, which is `image_convert::MAX_PROFILE_ANIM_BYTES` by construction — a test pins the equality so the wire cap and the authoring limit cannot drift). ONE kind covers avatar and banner: they share a replication profile (one of each per person you have ever met) so they share a budget. The PROFILE carries only the hash: `UserProfile.avatar_anim` / `banner_anim` are `""` or 64-hex, and `social::sanitize_incoming_anim` is the sole validator on ingest — same reasoning as `sanitize_incoming_frame`, because the field is plaintext on the `HavenMessage::ProfileUpdate` fallback AND keys a network PULL. Anything unrecognised is ABSENT (preserve), never a clear. Deliberately OUTSIDE `profile_signing_payload`, matching `avatar_frame`: a rewritten hash swaps decoration a rewriter already holds, and the STILL companion the signature DOES cover keeps rendering underneath |
-| Vault / Share chunks | `vault`, `share_handler` | manifest root hash |
+| Vault / Share chunks | `vault`, `share_handler` | manifest root hash; a vault file rebuilt from shards must hash to its content id before it is decrypted (`pipeline::reconstruct_file`, HOL-SEC-024), and a share takes its manifest once (HOL-SEC-027). See §14 |
 | `.hollowpack` import (`api::import_hollowpack`, LOCAL file picker / drag-drop; writes `save_asset_blob` kind `frame`/`profile` + the `owned_art` row) | `hollowpack::verify_pack_file` = the ONE trust boundary, shared with the `hollowpack inspect` CLI | A pack is remote-AUTHORED bytes even though the user picks it locally. Caps before any decode (8 files, 4 MB each, 16 MB total, 20 MB zip, 64 KB manifest); every file's sha256 RECOMPUTED and the whole pack refused on any mismatch; WebP decode with per-role ceilings (frame square and ≤512, avatar/still ≤512, banner/still ≤1200x480 at 2.5:1 (the 2026-09-01 ceilings; older packs at the old exact sizes stay valid because every bound is a ceiling)), animated roles must animate and still roles must not, frames re-pass `validate_frame_centre`; a manifest that disagrees with the bytes about size/dims/animation is REFUSED, never corrected; nothing is written by a manifest-supplied name (files are keyed by hash); bytes are stored AS-IS, never re-encoded (identity is the hash of the processed bytes; the phase-2 credential binds it). Import does not touch the profile |
 
 ## 3. Gated by owner identity
@@ -307,20 +307,14 @@ Shop side (Node, `anonlisten-sites/shop/src/lib/server/redeem.js`, the audit's M
 
 | `user_profiles.avatar` / `user_profiles.banner` (a PEER's profile stills) | `social::gated_profile_image`, called from `save_incoming_profile` (both ProfileUpdate ingest paths and the ProfileRequest response) and from the relayed-profile arm in `handle_profile_relay` | The ONE validator for incoming profile BYTES, and the mirror of `sanitize_incoming_support_creds` for the byte-shaped fields. THREE checks, in this order: a byte cap (`PROFILE_AVATAR_RECV_MAX_BYTES` 1 MiB, `PROFILE_BANNER_RECV_MAX_BYTES` 3 MiB — the sender-side encoders cap at 250 KB and 400 KB, so this is those bounds with slack for an older client's fatter encode); then `image_convert::validate_remote_image_header`, which reads the DECLARED dimensions without decoding a pixel, refuses anything over `MAX_DECODE_DIM` (4096/side) and anything that is not PNG/JPEG/GIF/WebP. A refusal DROPS the blob and returns `None`, which is the same thing as "nothing was offered" and therefore PRESERVES what we already stored — refusing must never be a way to blank somebody's avatar. `Some(&[])` is the owner's explicit clear and is not an image, so it passes through untouched. PROFILE-1 (2026-09-03): these bytes were previously stored with NO format, size or canvas check whatsoever — the profile signature covers the avatar HASH, which proves the owner sent those bytes and says nothing about whether they are safe to decode — and `process_sync_avatar` decodes them later when a guest asks for a public-channel preview, so a peer could park arbitrary bytes in our database and choose the moment we decoded a bomb out of them. `handle_profile_relay` is the worse of the two paths: there the bytes come from a peer that is not even the subject. Unit: `incoming_profile_image_bomb_is_dropped`, `incoming_profile_image_over_byte_cap_is_dropped`. |
 
-**Still ungated, named here so a sweep does not have to re-derive it:** the
-other `store_shard` sites (`swarm.rs` WebRTC / assembled-shard arms, `vault_ops`
-direct StoreShard, `api/archive.rs`) do not yet apply the per-shard hash check,
-and `vault_ops::handle_vault_download_file`'s own local gather still uses
-`read_shard_unchecked`. There is also no RETRY on a bad shard: reconstruction
-drops it and waits for the next arrival. A retry is buildable rather than
-blocked — `NodeCommand::RequestShardFromPeer` already carries `target_peer`, and
-`ContentStore::load_placements` (or the deterministic recompute from server
-state that `handle_vault_download_file` falls back to) names the alternate
-holders of an index. What it needs is a `cmd_tx` threaded from `swarm.rs`'s
-completed-stream arm through `handle_shard_stream_complete` into
-`attempt_vault_reconstruction`, plus a per-`(content_id, index)` attempted-holder
-set so a lying holder cannot be asked forever, and a `delete_shard` of the bad
-local copy first.
+**Shard writes since HOL-SEC-024 (2026-09-27):** every remote `store_shard`
+path (Olm ShardStore inline and streamed, ShardResponse, ShardMigrate, stream
+completion) runs `vault_ops::shard_write_refused` (member of the server, a shard
+we do not hold yet, inside our pledge), and reconstruction refuses a rebuilt
+ciphertext that does not hash to the content id, so a lying holder can only fail
+a download, never substitute it. Still no RETRY on a bad shard: reconstruction
+waits for the next arrival (a retry needs a `cmd_tx` into
+`attempt_vault_reconstruction` and a per-index attempted-holder set).
 
 Image decoding is no longer on that list: PROFILE-1 (2026-09-03) put every
 decode in the crate behind `image_convert::load_bounded` and every REMOTE entry
@@ -394,6 +388,27 @@ COLD LAUNCH can only destroy locally. The master and device keys are wrapped by 
 real password, so nothing can be signed and no socket can be authenticated; scopes
 (b) and (c) reach the network only when the node is already running, which is what a
 mobile App Lock re-unlock looks like. The local erase always runs.
+
+
+## 14. Files, vault, recovery, share and relay gates (security audit session 6, 2026-09-27)
+
+| Write | Site | Gate |
+|---|---|---|
+| A FileHeader registering a decrypt key or writing inline bytes (every arm: Olm, MLS, push `fetch.rs`, guest `PublicFileHeader`) | `file_handler::file_header_refused` + `file_bytes_on_disk`, run FIRST | For a file we hold a card for: the card's owner (device→master) or the holder we asked (the pull's asked set, or the decrypt-fail retry target); a channel header only from a current member who can read the channel; nothing for bytes already on disk; inline bytes only on DM headers; receipts and asks consumed only after the gate; Dart gets a `share_ref` only from the owner. HOL-SEC-022, tests `authz_file_header_delivers_only_for_its_owner`, `file_header_gate_stays_wired` |
+| `FileChunk` | gone | No sender existed; the type is refused at parse (`retired_file_chunk_is_refused_at_parse`) |
+| Guest public-file receipt | `pending_public_file_requests` | Records the peer asked; only its answer counts |
+| WS stream temp (`.ws_recv_`) | `ws_stream_transfer::ws_stream_receive` | Owned by the device that opened it (takeover only after 10 s idle), never past its declared size, 16 open per peer and 128 in all, swept at boot; resume offsets asked only of the same device. HOL-SEC-023 |
+| Vault shard writes, serving, deletes, manifests | `vault_ops::{shard_write_refused, shard_serve_refused, handle_shard_delete, ingest_vault_manifest}` | Writes: member, shard not held, pledge. Serving: member who can read the file's channel when we hold its manifest. Deletes: member with Manage Server (override-aware), only that server's shards and placements, both transports. Manifests: from the member named as creator, never over another creator's, well-formed content id, relink only the creator's own cards. Placement confirmed only by its target. Vault envelopes other than delete/manifest are Olm-only. HOL-SEC-024 |
+| Vault cache file | `pipeline::cache_path` | Alphanumerics only in both parts (content id and extension came from a peer's manifest) |
+| Restricted-channel files | Dart `ChannelInfo.usesSubgroup`, `vault_ops::handle_vault_upload_file`, the channel send's `use_vault_only` | Never vaulted: the manifest carries the key to the whole server. HOL-SEC-025 |
+| Recovery pool state (members, plan, stop) | `swarm.rs` recovery interception | Frames only from the pool's own room; plans only from the coordinator (lowest member id) and only to pool members; `RecoveryManifestSync` deleted. HOL-SEC-026 |
+| Share manifest / Have | `share_handler` | Manifest taken once; a Have only against a known manifest. HOL-SEC-027 |
+| `ServerSettingChanged` | `ServerState::setting_change_allowed` (authoring and `op_allowed`) | Retention policies and their `_since` stamps from the Owner only, a policy only with an app value (`vault::adaptive::RETENTION_CHOICES`); readers treat any other value as keep. HOL-SEC-021 |
+| Any CRDT op | `CrdtOp::verify_author` | The op's clock must name its author (`OpReject::ActorMismatch`). HOL-SEC-020 |
+| Relay pre-auth frame | `relay-uws/src/auth_frame.h::parse_auth_frame` | Type-checked, 16 KiB cap; auth and binary dispatch wrapped so no input unwinds into uSockets. HOL-SEC-028 |
+| Relay kill list | `relay-uws/src/kill_list.h` | One slot per issuer per target (max 8), every slot delivered at auth, a stamp past the relay clock + 10 min refused, `kill_ack` with `issued_at_ms` removes one slot (bare ack all). HOL-SEC-029 |
+| Relay topic rings; guest sockets | `ring_evict.h`, binary dispatch, `handle_direct` | A full ring drops the oldest frame of whoever holds most; guests may not send 0x07 or JSON `direct`. HOL-SEC-030 |
+| Relay device-list marks | `snapshot_codec.h` v3 | Survive a restart. HOL-SEC-031 |
 
 ---
 

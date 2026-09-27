@@ -764,9 +764,12 @@ impl MockRelay {
                     }
                 }
             }
-            WsCommand::KillAck => {
-                // The only removal a client can ask for, and always its own.
-                inner.kill_list.remove(from);
+            WsCommand::KillAck { issued_at_ms } => {
+                // The only removal a client can ask for, and always its own: the
+                // one signal it names, or every one.
+                if issued_at_ms.is_none_or(|stamp| inner.kill_list.get(from).is_some_and(|e| e.issued_at_ms == stamp)) {
+                    inner.kill_list.remove(from);
+                }
             }
             // Channel-direct offline push, linkcode/push registries: not
             // needed for the current tests — no-op (add when a test does).
@@ -6264,6 +6267,61 @@ async fn recovery_pool_membership_forms() {
     })
     .await;
     assert!(o_saw_member, "initiator must register the joiner as a recovery-pool member");
+}
+
+// H16: recovery-pool frames count only from the pool's own room. A stop, a plan or
+// a hello from a peer in any other room (a DM room here) changes nothing.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_recovery_frames_count_only_from_the_pool_room() {
+    use super::types::HavenMessage;
+
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 131, 131).await;
+    let mallory = spawn_node_on(&relay, 141, 141).await;
+    drain_events(&mut o);
+
+    let server_id = "recovery-server-2".to_string();
+    o.cmd_tx
+        .send(NodeCommand::InitiateRecoveryPool { server_id: server_id.clone(), token: "tok456".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+            matches!(ev, NetworkEvent::RecoveryPoolCreated { server_id: sid, .. } if *sid == server_id)
+        })
+        .await
+    );
+    let pool_room = format!("recovery:{server_id}:tok456");
+    let other_room = super::types::dm_room_code(&o.master_id, &mallory.master_id);
+    let frame = |msg: &HavenMessage| serde_json::to_vec(msg).unwrap();
+
+    let hello = HavenMessage::RecoveryHello {
+        server_id: server_id.clone(),
+        manifest_ids: Vec::new(),
+        shard_inventory_json: "{}".into(),
+    };
+    relay.inject_direct(&other_room, &mallory.device_id, &o.device_id, frame(&hello));
+    relay.inject_direct(&other_room, &mallory.device_id, &o.device_id, frame(&HavenMessage::RecoveryStop));
+    let changed = wait_event(&mut o, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::RecoveryPoolStopped { .. } | NetworkEvent::RecoveryPoolMemberJoined { .. })
+    })
+    .await;
+    assert!(!changed, "a frame from outside the pool room joined or stopped the pool");
+
+    relay.inject_direct(&pool_room, &mallory.device_id, &o.device_id, frame(&HavenMessage::RecoveryStop));
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+            matches!(ev, NetworkEvent::RecoveryPoolStopped { server_id: sid } if *sid == server_id)
+        })
+        .await,
+        "a stop from inside the pool room still ends it",
+    );
 }
 
 // Sibling-to-sibling SERVER-message backfill, the server analog of the DM

@@ -97,11 +97,7 @@ pub fn merge_ops_with(
             continue;
         }
         on_admitted(op);
-        let was_len = state.op_log.len();
-        if state.apply_op(op).is_err() {
-            continue;
-        }
-        if state.op_log.len() > was_len {
+        if let Ok(true) = state.apply_op(op) {
             report.applied += 1;
         }
     }
@@ -313,5 +309,29 @@ mod tests {
         let report = merge_ops(&mut state_a, &[forged]).unwrap();
         assert_eq!(report, MergeReport { applied: 0, rejected: 1 });
         assert_eq!(state_a.name(), "Test", "a forged rename must not land");
+    }
+
+    /// Every restart restores the op log at its 1000-op cap, where each insert drains
+    /// one op, so a replica there must still see a new op as new: callers persist,
+    /// emit and re-flood only what the merge counts.
+    #[test]
+    fn a_full_op_log_still_counts_new_ops() {
+        let (mut state_a, _a_id, mut state_b, _b_id) = two_member_server();
+        for i in 0..1000 {
+            let op = state_a.create_op(CrdtPayload::ServerSettingChanged {
+                key: format!("k{i}"),
+                value: "v".into(),
+            });
+            state_a.apply_op(&op).unwrap();
+            state_b.apply_op(&op).unwrap();
+        }
+        assert_eq!(state_b.op_log.len(), 1000, "the replica sits at the cap");
+
+        let fresh = state_a.create_op(CrdtPayload::ServerRenamed { new_name: "Fresh".into() });
+        let report = merge_ops(&mut state_b, std::slice::from_ref(&fresh)).unwrap();
+        assert_eq!(report, MergeReport { applied: 1, rejected: 0 });
+        assert_eq!(state_b.name(), "Fresh");
+        let again = merge_ops(&mut state_b, &[fresh]).unwrap();
+        assert_eq!(again, MergeReport { applied: 0, rejected: 0 }, "a second copy is not new");
     }
 }

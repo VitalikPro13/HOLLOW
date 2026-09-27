@@ -372,8 +372,9 @@ struct RelayState {
     // Highest device-list version this relay has seen verify for each master
     // (RELAY-6). A revoked device keeps its last master-signed list forever and
     // that list still verifies, so without a high-water mark it can replay it
-    // to read the master's inbox mailbox for as long as it likes. RAM only: a
-    // restart forgets the marks, which is the known limit of this defence.
+    // to read the master's inbox mailbox for as long as it likes. The marks ride
+    // the restart snapshot, since a revoked device would otherwise read again
+    // after every deploy.
     std::unordered_map<std::string, uint64_t> device_list_max_version;
     std::deque<std::string> device_list_version_fifo;  // FIFO eviction order
 

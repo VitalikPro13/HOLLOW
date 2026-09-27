@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use base64::Engine;
 use tokio::sync::mpsc;
 
 use crate::crdt::server_state::ServerState;
@@ -8,7 +7,6 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::crypto_handler::{
     peer_is_reachable, preferred_online_device, send_mls_broadcast, send_encrypted_message,
 };
-use super::file_handler;
 use super::types::*;
 
 // ── 1. VaultDownloadFile ─────────────────────────────────────────────
@@ -233,6 +231,15 @@ pub(crate) async fn handle_vault_upload_file(
         }).await;
         return;
     };
+    // A restricted channel's file never enters the vault: the manifest (and so the
+    // key) goes to the whole server, and shards to every member.
+    if state.channel_uses_subgroup(&channel_id) {
+        let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
+            server_id: server_id.clone(), content_id,
+            error: "Files in a restricted channel are not stored in the vault".into(),
+        }).await;
+        return;
+    }
     let local_peer = local_peer_str.to_string();
 
     // Build members + pledges from server state
@@ -511,7 +518,7 @@ pub(crate) async fn handle_delete_vault_content(
         let vault_dir = data_dir.join("vault");
         if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
             let _ = cs.delete_content(&server_id, &content_id);
-            let _ = cs.delete_placements(&content_id);
+            let _ = cs.delete_placements(&server_id, &content_id);
         }
 
         // Broadcast ShardDelete to connected server members
@@ -811,96 +818,61 @@ pub(crate) async fn handle_stop_recovery_pool(
     }).await;
 }
 
-/// Handle `MessageEnvelope::ShardStore` (MLS path).
+/// Why a peer may not put shard `si` of `cid` for `sid` on our disk, `None` when it
+/// may: the ONE gate for every shard write (store, response, migrate). A shard's
+/// bytes never change once held, so a second writer is refused outright, and the
+/// file rebuilt from shards is checked against its content id anyway.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_shard_store(
+pub(crate) fn shard_write_refused(
     server_states: &HashMap<String, ServerState>,
-    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
-    olm: &mut OlmManager,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    crypto_store: &CryptoStore,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sender_peer_id: String,
-    sid: String,
-    cid: String,
+    cs: &crate::vault::content_store::ContentStore,
+    sender: &str,
+    sid: &str,
+    cid: &str,
     si: u16,
-    sk: String,
-    k: u16,
-    m: u16,
-    total_size: u64,
-    tier: String,
-    data: String,
-    chunks: u32,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    hollow_log!("[HOLLOW-MLS-VAULT] ShardStore: cid={cid} si={si} from {sender_peer_id}");
-    let is_member = server_states.get(&sid).map(|s| s.is_member(&sender_peer_id)).unwrap_or(false);
-    if !is_member { return; }
-    if chunks == 0 && data.is_empty() {
-        // Streamed shard — data arrives via binary WS stream.
-        let key = format!("{cid}:{si}");
-        pending_shard_streams.insert(key, PendingShardStream {
-            server_id: sid, content_id: cid, shard_index: si,
-            shard_key: sk, k, m, total_size, tier,
-        });
-    } else if chunks == 0 {
-        // Inline shard — store directly.
-        if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let vault_dir = data_dir.join("vault");
-            if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
-                let _ = cs.store_shard(&sid, &cid, si, k, m, total_size, tier_enum, &shard_bytes);
-            }
-            let _ = event_tx.send(NetworkEvent::ShardStored {
-                server_id: sid.clone(), content_id: cid.clone(),
-                shard_index: si, from_peer: sender_peer_id.clone(),
-            }).await;
-            let ack = MessageEnvelope::ShardStoreAck {
-                sid, cid, si, ok: true, err: None, target: None,
-            };
-            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-            send_encrypted_message(
-                olm, crypto_store, &sender_peer_id, &ack_json, event_tx,
-                ws_cmd_tx, ws_room_peers,
-            ).await;
+    local_peer: &str,
+    incoming_bytes: u64,
+) -> Option<&'static str> {
+    let Some(state) = server_states.get(sid).filter(|s| s.is_member(sender)) else {
+        return Some("not a member of the server");
+    };
+    if cs.has_shard(&crate::vault::content_store::shard_key(cid, si)).unwrap_or(true) {
+        return Some("that shard is already held");
+    }
+    let pledge = state.get_storage_pledge(local_peer);
+    let used = cs.total_storage_used(sid).unwrap_or(0);
+    if pledge > 0 && used.saturating_add(incoming_bytes) > pledge {
+        return Some("our storage pledge for the server is full");
+    }
+    None
+}
+
+/// Why `requester` may not pull a shard of `cid` in `sid`, `None` when it may. When
+/// we hold the manifest, serving follows the channel the file was posted in.
+pub(crate) fn shard_serve_refused(
+    server_states: &HashMap<String, ServerState>,
+    cs: &crate::vault::content_store::ContentStore,
+    requester: &str,
+    sid: &str,
+    cid: &str,
+) -> Option<&'static str> {
+    let Some(state) = server_states.get(sid).filter(|s| s.is_member(requester)) else {
+        return Some("not a member of the server");
+    };
+    match cs.manifest_home(cid) {
+        Ok(Some((home, _, _))) if home != sid => Some("the content belongs to another server"),
+        Ok(Some((_, channel_id, _)))
+            if !super::crypto_handler::channel_readable_by(state, requester, &channel_id) =>
+        {
+            Some("cannot read the channel the file was posted in")
         }
+        _ => None,
     }
 }
 
-/// Handle `MessageEnvelope::ShardChunk` (MLS path) — legacy no-op.
-pub(crate) async fn handle_envelope_shard_chunk(sender_peer_id: &str) {
-    hollow_log!("[HOLLOW-MLS-VAULT] ShardChunk via MLS from {sender_peer_id} — legacy, ignoring");
-}
-
-/// Handle `MessageEnvelope::ShardStoreAck` (MLS path).
-pub(crate) async fn handle_envelope_shard_store_ack(
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    sid: String,
-    cid: String,
-    si: u16,
-    ok: bool,
-    err: Option<String>,
-) {
-    if ok {
-        hollow_log!("[HOLLOW-MLS-VAULT] ShardStoreAck OK: cid={cid} si={si}");
-        let _ = event_tx.send(NetworkEvent::ShardStoreAckReceived {
-            server_id: sid, content_id: cid, shard_index: si, success: true, error: String::new(),
-        }).await;
-    } else {
-        hollow_log!("[HOLLOW-MLS-VAULT] ShardStoreAck FAILED: cid={cid} si={si} err={err:?}");
-        let _ = event_tx.send(NetworkEvent::ShardStoreAckReceived {
-            server_id: sid, content_id: cid, shard_index: si, success: false,
-            error: err.unwrap_or_default(),
-        }).await;
-    }
-}
-
-/// Handle `MessageEnvelope::ShardDelete` (MLS path) — requires MANAGE_SERVER permission.
-pub(crate) async fn handle_envelope_shard_delete(
+/// A peer's order to delete vault content: only a member holding Manage Server in the
+/// server named, and it reaches only that server's shards and placements.
+pub(crate) async fn handle_shard_delete(
     server_states: &HashMap<String, ServerState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: &str,
@@ -909,199 +881,231 @@ pub(crate) async fn handle_envelope_shard_delete(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let has_perm = server_states.get(&sid).map(|s| {
-        let role = s.get_role(sender_peer_id);
-        let perms = role.default_permissions();
-        (perms & crate::crdt::operations::Permission::MANAGE_SERVER) != 0
-    }).unwrap_or(false);
-    if !has_perm { return; }
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let vault_dir = data_dir.join("vault");
+    let allowed = server_states.get(&sid).is_some_and(|s| {
+        s.is_member(sender_peer_id)
+            && s.has_permission(sender_peer_id, crate::crdt::operations::Permission::MANAGE_SERVER)
+    });
+    if !allowed {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardDelete for {cid} from {sender_peer_id}: no Manage Server in {sid}");
+        return;
+    }
+    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
     if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         let _ = cs.delete_content(&sid, &cid);
+        let _ = cs.delete_placements(&sid, &cid);
     }
+    hollow_log!("[HOLLOW-VAULT] Shard content deleted: cid={cid}");
     let _ = event_tx.send(NetworkEvent::ShardDeleted {
         server_id: sid, content_id: cid,
     }).await;
 }
 
-/// Handle `MessageEnvelope::ShardRequest` (MLS path).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_shard_request(
+/// A vault manifest from a peer. It carries the file's key and names the message
+/// whose card it backs, so it lands only from the member who created it, never over
+/// another creator's manifest, and relinks only that creator's own file card.
+pub(crate) fn ingest_vault_manifest(
     server_states: &HashMap<String, ServerState>,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
-    server_id: &str,
-    sender_peer_id: String,
-    sid: String,
-    cid: String,
-    si: u16,
-    sk: String,
+    sender_peer_id: &str,
+    sid: &str,
+    chid: &str,
+    manifest: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    hollow_log!("[HOLLOW-MLS-VAULT] ShardRequest: cid={cid} si={si} from {sender_peer_id}");
-    let is_member = server_states.get(&sid).map(|s| s.is_member(&sender_peer_id)).unwrap_or(false);
-    if !is_member { return; }
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let vault_dir = data_dir.join("vault");
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-        match cs.read_shard_unchecked(&sid, &sk) {
-            Ok(shard_data) => {
-                let resp = MessageEnvelope::ShardResponse {
-                    sid: sid.clone(), cid: cid.clone(), si,
-                    data: String::new(), chunks: 0, found: true, target: None,
-                };
-                let resp_json = serde_json::to_string(&resp).unwrap_or_default();
-                send_encrypted_message(olm, crypto_store, &sender_peer_id, &resp_json, event_tx, ws_cmd_tx, ws_room_peers).await;
-                let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
-                file_handler::stream_to_peer_bytes(
-                    ws_cmd_tx, ws_room_peers,
-                    webrtc_peers, pending_webrtc_sends, event_tx,
-                    &sender_peer_id, &shard_kind,
-                    &cid, &shard_data,
-                ).await;
-            }
-            Err(_) => {
-                let resp = MessageEnvelope::ShardResponse {
-                    sid, cid, si, data: String::new(), chunks: 0, found: false, target: None,
-                };
-                let resp_json = serde_json::to_string(&resp).unwrap_or_default();
-                send_encrypted_message(olm, crypto_store, &sender_peer_id, &resp_json, event_tx, ws_cmd_tx, ws_room_peers).await;
-            }
-        }
-    }
-}
-
-/// Handle `MessageEnvelope::ShardResponse` (MLS path).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_shard_response(
-    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    sender_peer_id: String,
-    sid: String,
-    cid: String,
-    si: u16,
-    data: String,
-    _chunks: u32,
-    found: bool,
-) {
-    hollow_log!("[HOLLOW-MLS-VAULT] ShardResponse: cid={cid} si={si} found={found}");
-    if found && data.is_empty() {
-        let key = format!("{cid}:{si}");
-        pending_shard_streams.insert(key, PendingShardStream {
-            server_id: sid, content_id: cid, shard_index: si,
-            shard_key: String::new(), k: 0, m: 0, total_size: 0, tier: String::new(),
-        });
-    } else if found {
-        if let Ok(_shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-            let _ = event_tx.send(NetworkEvent::ShardReceived {
-                server_id: sid, content_id: cid, shard_index: si,
-                from_peer: sender_peer_id,
-            }).await;
-        }
-    }
-}
-
-/// Handle `MessageEnvelope::ShardResponseChunk` (MLS path) — legacy no-op.
-pub(crate) async fn handle_envelope_shard_response_chunk() {
-    hollow_log!("[HOLLOW-MLS-VAULT] ShardResponseChunk via MLS — legacy, ignoring");
-}
-
-/// Handle `MessageEnvelope::ShardProbe` (MLS path).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_shard_probe(
-    server_states: &HashMap<String, ServerState>,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sender_peer_id: String,
-    sid: String,
-    cid: String,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    let is_member = server_states.get(&sid).map(|s| s.is_member(&sender_peer_id)).unwrap_or(false);
-    if !is_member { return; }
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let vault_dir = data_dir.join("vault");
-    let mut indices = Vec::new();
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-        if let Ok(records) = cs.list_content_shards(&sid, &cid) {
-            indices = records.iter().map(|r| r.shard_index).collect();
-        }
-    }
-    let resp = MessageEnvelope::ShardProbeResponse {
-        sid: sid.clone(), cid, shards: indices, target: None,
+    let Ok(manifest) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(manifest) else {
+        return;
     };
-    let resp_json = serde_json::to_string(&resp).unwrap_or_default();
-    send_encrypted_message(olm, crypto_store, &sender_peer_id, &resp_json, event_tx, ws_cmd_tx, ws_room_peers).await;
-}
-
-/// Handle `MessageEnvelope::ShardProbeResponse` (MLS path) — informational log only.
-pub(crate) async fn handle_envelope_shard_probe_response(
-    sender_peer_id: &str,
-    _sid: String,
-    cid: String,
-    shards: Vec<u16>,
-) {
-    hollow_log!("[HOLLOW-MLS-VAULT] ShardProbeResponse: cid={cid} shards={shards:?} from {sender_peer_id}");
-}
-
-/// Handle `MessageEnvelope::VaultManifestBroadcast` (MLS path).
-pub(crate) async fn handle_envelope_vault_manifest_broadcast(
-    sid: String,
-    _cid: String,
-    chid: String,
-    manifest: String,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    hollow_log!("[HOLLOW-MLS-VAULT] VaultManifestBroadcast: cid={_cid} in {chid}");
-    if let Ok(manifest_obj) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(&manifest) {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let vault_dir = data_dir.join("vault");
-        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-            let _ = cs.save_manifest(&sid, &chid, &manifest_obj);
+    let creator = super::resolver::resolve(&manifest.creator_peer_id);
+    let refusal = if !server_states.get(sid).is_some_and(|s| s.is_member(sender_peer_id)) {
+        Some("not a member of the server")
+    } else if super::resolver::resolve(sender_peer_id) != creator {
+        Some("the manifest names another creator")
+    } else if manifest.channel_id != chid || !crate::vault::content_store::is_content_id(&manifest.content_id) {
+        Some("malformed manifest")
+    } else {
+        None
+    };
+    if let Some(reason) = refusal {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED vault manifest {} from {sender_peer_id}: {reason}", manifest.content_id);
+        return;
+    }
+    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+    let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else {
+        return;
+    };
+    if let Ok(Some((home, _, existing))) = cs.manifest_home(&manifest.content_id) {
+        if home != sid || super::resolver::resolve(&existing) != creator {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED vault manifest {} from {sender_peer_id}: it is another creator's", manifest.content_id);
+            return;
         }
-        if !manifest_obj.message_id.is_empty() {
-            if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                let _ = ms.set_file_content_id(&manifest_obj.message_id, &manifest_obj.content_id);
-            }
+    }
+    let _ = cs.save_manifest(sid, chid, &manifest);
+    if manifest.message_id.is_empty() {
+        return;
+    }
+    if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let cards = ms.file_senders_for_message(&manifest.message_id).unwrap_or_default();
+        if cards.iter().all(|sender| super::resolver::resolve(sender) == creator) {
+            let _ = ms.set_file_content_id(&manifest.message_id, &manifest.content_id);
+        } else {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED vault relink of {} from {sender_peer_id}: not its file card", manifest.message_id);
         }
     }
 }
 
-/// Handle `MessageEnvelope::ShardMigrate` (MLS path).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_shard_migrate(
-    server_states: &HashMap<String, ServerState>,
-    sender_peer_id: &str,
-    sid: String,
-    cid: String,
-    si: u16,
-    _sk: String,
-    data: String,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    let is_member = server_states.get(&sid).map(|s| s.is_member(sender_peer_id)).unwrap_or(false);
-    if !is_member { return; }
-    if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let vault_dir = data_dir.join("vault");
-        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-            let tier = crate::vault::content_store::StorageTier::Standard;
-            let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crdt::operations::CrdtPayload;
+    use crate::crdt::testkeys::{keys, owned_state};
+    use crate::vault::content_store::{ContentStore, StorageTier};
+
+    /// Server "srv" owned by tag 1 (the local node), with `members` added.
+    fn server_with(members: &[&str], local_pledge: u64) -> (HashMap<String, ServerState>, String) {
+        let (mut state, owner) = owned_state("srv", "S", 1);
+        let mut ops = vec![CrdtPayload::StoragePledgeChanged { peer_id: owner.clone(), pledge_bytes: local_pledge }];
+        ops.extend(members.iter().map(|id| CrdtPayload::MemberAdded {
+            peer_id: id.to_string(),
+            display_name: "m".into(),
+        }));
+        for payload in ops {
+            let op = state.create_op(payload);
+            state.apply_op(&op).unwrap();
         }
+        (HashMap::from([("srv".to_string(), state)]), owner)
+    }
+
+    fn temp_db() -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("vault.db").to_string_lossy().into_owned();
+        (tmp, db, "ab".repeat(32))
+    }
+
+    /// H11, H14, V1-2: a shard lands only from a member of its server, only while we
+    /// do not hold it, and only inside our pledge. A second writer used to replace
+    /// the bytes (and their recorded hash) of any shard we held.
+    #[test]
+    fn authz_shard_write_needs_a_member_and_a_shard_we_lack() {
+        let _g = super::super::resolver::test_lock();
+        let (tmp, db, pass) = temp_db();
+        let cs = ContentStore::open(&db, &pass, &tmp.path().join("vault")).unwrap();
+        let (bob, stranger) = (keys(2).1, keys(3).1);
+        let (states, local) = server_with(&[&bob], 64);
+        let refused = |who: &str, sid: &str, si: u16, bytes: u64| {
+            shard_write_refused(&states, &cs, who, sid, "cid-1", si, &local, bytes)
+        };
+        assert_eq!(refused(&stranger, "srv", 0, 8), Some("not a member of the server"));
+        assert_eq!(refused(&bob, "other-srv", 0, 8), Some("not a member of the server"));
+        assert_eq!(refused(&bob, "srv", 0, 8), None);
+        cs.store_shard("srv", "cid-1", 0, 0, 0, 8, StorageTier::Standard, b"realbyte").unwrap();
+        assert_eq!(refused(&bob, "srv", 0, 8), Some("that shard is already held"));
+        assert_eq!(refused(&bob, "srv", 1, 60), Some("our storage pledge for the server is full"));
+        assert_eq!(refused(&bob, "srv", 1, 8), None);
+    }
+
+    /// H13: a restricted channel's file never enters the vault, whose manifest (and
+    /// so the key) goes to the whole server.
+    #[tokio::test]
+    async fn authz_restricted_channel_file_never_enters_the_vault() {
+        let _g = super::super::resolver::test_lock();
+        let (mut states, local) = server_with(&[], 0);
+        let state = states.get_mut("srv").unwrap();
+        let op = state.create_op(CrdtPayload::ChannelVisibilityChanged {
+            channel_id: "srv-general".into(),
+            visibility: "admin".into(),
+        });
+        state.apply_op(&op).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        handle_vault_upload_file(
+            &states, &tx, &HashMap::new(), &cmd_tx, &local,
+            "srv".into(), "srv-general".into(), "a.txt".into(), "text/plain".into(), "m1".into(),
+            vec![1, 2, 3], vec![0; 32], vec![0; 12], 3, "c".repeat(64), "unused.db", "00",
+        ).await;
+        assert!(
+            matches!(rx.try_recv(), Ok(NetworkEvent::VaultUploadFailed { .. })),
+            "a restricted channel's file was taken into the vault",
+        );
+        tokio::task::yield_now().await;
+        assert!(cmd_rx.try_recv().is_err(), "the upload went ahead anyway");
+    }
+
+    /// Every vault arm runs its gate; the unit tests above drive only the gates.
+    #[test]
+    fn vault_gates_stay_wired() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs");
+        let swarm = std::fs::read_to_string(path).expect("read swarm.rs");
+        let arm = |from: &str| {
+            let start = swarm.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = swarm[start + from.len()..].find("Ok(MessageEnvelope::").map_or(swarm.len(), |e| start + from.len() + e);
+            swarm[start..end].to_string()
+        };
+        for (from, gate) in [
+            ("Ok(MessageEnvelope::ShardStore { inner }) => {", "vault_ops::shard_write_refused("),
+            ("Ok(MessageEnvelope::ShardResponse {", "vault_ops::shard_write_refused("),
+            ("Ok(MessageEnvelope::ShardMigrate {", "vault_ops::shard_write_refused("),
+            ("Ok(MessageEnvelope::ShardRequest {", "vault_ops::shard_serve_refused("),
+            ("Ok(MessageEnvelope::ShardStoreAck {", "placement_target("),
+            ("Ok(MessageEnvelope::ShardDelete {", "vault_ops::handle_shard_delete("),
+            ("Ok(MessageEnvelope::VaultManifestBroadcast {", "vault_ops::ingest_vault_manifest("),
+        ] {
+            assert!(arm(from).contains(gate), "swarm.rs: the Olm arm {from} skips {gate}");
+        }
+        let mls = &swarm[swarm.find("// -- Vault envelopes via MLS --").expect("the MLS vault arms")..];
+        let mls = &mls[..mls.find("// -- Voice channel signaling --").expect("end of the MLS vault arms")];
+        assert!(mls.contains("vault_ops::handle_shard_delete(") && mls.contains("vault_ops::ingest_vault_manifest("));
+        assert!(!mls.contains("store_shard(") && !mls.contains("pending_shard_streams"), "an MLS arm writes shards again");
+    }
+
+    /// H15: a manifest carries the file's key and names the card it backs, so it lands
+    /// only from the member it names as creator, never over another creator's, and
+    /// relinks only that creator's own card.
+    #[test]
+    fn authz_vault_manifest_lands_only_from_its_creator() {
+        let _g = super::super::resolver::test_lock();
+        let (_tmp, db, pass) = temp_db();
+        let (bob, mallory) = (keys(2).1, keys(3).1);
+        let (states, _) = server_with(&[&bob, &mallory], 0);
+        let manifest = |cid: &str, creator: &str, mid: &str| {
+            serde_json::to_string(&crate::vault::pipeline::VaultManifest {
+                content_id: cid.to_string(),
+                encryption_key: "00".repeat(32),
+                nonce: "00".repeat(12),
+                original_size: 4,
+                k: 0,
+                m: 0,
+                shard_count: 0,
+                file_name: "a.png".into(),
+                mime_type: "image/png".into(),
+                storage_tier: "standard".into(),
+                created_at: 1,
+                creator_peer_id: creator.to_string(),
+                channel_id: "srv-general".into(),
+                message_id: mid.to_string(),
+            })
+            .unwrap()
+        };
+        let store = || crate::storage::MessageStore::open(&db, &pass).unwrap();
+        store().insert_file_metadata(
+            "f-bob", "a.png", "png", "image/png", 4, 0, true, None, None, Some("m-bob"),
+            "channel", "srv:srv-general", &bob, false, 1, None, None,
+        ).unwrap();
+        let home = |cid: &str| {
+            ContentStore::open(&db, &pass, std::path::Path::new("unused")).unwrap().manifest_home(cid).unwrap()
+        };
+        let (bob_cid, evil_cid) = ("b".repeat(64), "e".repeat(64));
+
+        ingest_vault_manifest(&states, &mallory, "srv", "srv-general", &manifest(&bob_cid, &bob, "m-bob"), &db, &pass);
+        assert_eq!(home(&bob_cid), None, "a manifest naming another creator");
+        ingest_vault_manifest(&states, &bob, "srv", "srv-general", &manifest(&bob_cid, &bob, "m-bob"), &db, &pass);
+        assert_eq!(home(&bob_cid).map(|h| h.2), Some(bob.clone()));
+        assert_eq!(store().get_content_id_for_file("f-bob").unwrap(), Some(bob_cid.clone()));
+
+        ingest_vault_manifest(&states, &mallory, "srv", "srv-general", &manifest(&bob_cid, &mallory, ""), &db, &pass);
+        assert_eq!(home(&bob_cid).map(|h| h.2), Some(bob.clone()), "another creator's manifest replaced");
+        ingest_vault_manifest(&states, &mallory, "srv", "srv-general", &manifest(&evil_cid, &mallory, "m-bob"), &db, &pass);
+        assert_eq!(store().get_content_id_for_file("f-bob").unwrap(), Some(bob_cid.clone()), "Bob's card relinked");
+        ingest_vault_manifest(&states, &mallory, "srv", "srv-general", &manifest("..\\..\\x", &mallory, ""), &db, &pass);
+        assert_eq!(home("..\\..\\x"), None, "a content id that is not a hash");
     }
 }

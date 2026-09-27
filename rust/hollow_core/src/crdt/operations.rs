@@ -22,6 +22,8 @@ pub enum OpReject {
     MissingSignature,
     /// The signing key does not derive the claimed `author` peer_id.
     AuthorMismatch,
+    /// The op's clock names someone other than its author.
+    ActorMismatch,
     /// The signature does not verify over the op's signing payload.
     BadSignature,
     /// The op's HLC sits further ahead of our wall clock than the drift bound.
@@ -37,6 +39,7 @@ impl std::fmt::Display for OpReject {
         let s = match self {
             Self::MissingSignature => "no author signature",
             Self::AuthorMismatch => "signing key does not match the author",
+            Self::ActorMismatch => "clock names someone other than the author",
             Self::BadSignature => "signature does not verify",
             Self::FutureHlc => "timestamp too far ahead of the wall clock",
             Self::WrongServer => "op belongs to another server",
@@ -97,8 +100,9 @@ impl CrdtOp {
         }));
     }
 
-    /// Bind this op to its claimed `author`: the key must derive that peer_id AND the
-    /// signature must verify over the signing payload. REJECTS, never logs and continues.
+    /// Bind this op to its claimed `author`: the key must derive that peer_id, the clock
+    /// must name it, and the signature must verify over the signing payload. REJECTS,
+    /// never logs and continues.
     pub fn verify_author(&self) -> Result<(), OpReject> {
         let auth = self.auth.as_ref().ok_or(OpReject::MissingSignature)?;
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -107,6 +111,11 @@ impl CrdtOp {
             .ok_or(OpReject::AuthorMismatch)?;
         if derived != self.author {
             return Err(OpReject::AuthorMismatch);
+        }
+        // Every honest op is stamped by its author's own clock (`create_op`), and the
+        // actor breaks LWW ties and keys the dedup set.
+        if self.hlc.actor != self.author {
+            return Err(OpReject::ActorMismatch);
         }
         let sig_bytes = b64.decode(&auth.sig).map_err(|_| OpReject::BadSignature)?;
         match NativeKeypair::verify_peer_signature(
@@ -579,7 +588,7 @@ mod tests {
     }
 
     /// Every field in the signing payload is covered: changing any one of
-    /// them invalidates the signature.
+    /// them gets the op refused.
     #[test]
     fn signature_covers_every_field_of_the_op() {
         let base = signed_op(1, CrdtPayload::ServerRenamed { new_name: "Fine".into() });
@@ -602,7 +611,7 @@ mod tests {
 
         let mut reactored = base.clone();
         reactored.hlc.actor = "someone-else".into();
-        assert_eq!(reactored.verify_author(), Err(OpReject::BadSignature));
+        assert_eq!(reactored.verify_author(), Err(OpReject::ActorMismatch));
 
         // A different author string no longer matches the key at all.
         let mut reauthored = base.clone();

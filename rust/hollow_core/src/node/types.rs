@@ -2661,13 +2661,6 @@ pub(crate) enum HavenMessage {
         shard_inventory_json: String,
     },
 
-    /// Coordinator broadcasts the merged manifest set to all members.
-    #[serde(rename = "recovery_manifest_sync")]
-    RecoveryManifestSync {
-        #[serde(default)]
-        manifests_json: String,
-    },
-
     /// Coordinator assigns shard transfers: who sends which shard to whom.
     #[serde(rename = "recovery_transfer_plan")]
     RecoveryTransferPlan {
@@ -3064,32 +3057,12 @@ pub(crate) enum MessageEnvelope {
         inner: Box<FileHeaderPayload>,
     },
 
-    /// A single file chunk (base64-encoded data).
-    #[serde(rename = "file_chunk")]
-    FileChunk {
-        fid: String,
-        /// 0-based chunk index.
-        idx: u32,
-        /// Base64-encoded chunk data (up to 256KB decoded).
-        data: String,
-    },
-
     // -- Vault shard store --
 
     #[serde(rename = "shard_store")]
     ShardStore {
         #[serde(flatten)]
         inner: Box<ShardStorePayload>,
-    },
-
-    /// Vault shard chunk (for shards > 256KB).
-    #[serde(rename = "shard_chunk")]
-    ShardChunk {
-        sid: String,
-        cid: String,
-        si: u16,
-        ci: u32,
-        data: String,
     },
 
     /// Vault shard store acknowledgment.
@@ -3138,36 +3111,6 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
-    /// Chunked shard response (for shards > 256KB).
-    #[serde(rename = "shard_resp_chunk")]
-    ShardResponseChunk {
-        sid: String,
-        cid: String,
-        si: u16,
-        ci: u32,
-        data: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
-    /// Probe: ask peer which shards they have for a content item.
-    #[serde(rename = "shard_probe")]
-    ShardProbe {
-        sid: String,
-        cid: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
-    /// Probe response: list of shard indices available locally.
-    #[serde(rename = "shard_probe_resp")]
-    ShardProbeResponse {
-        sid: String,
-        cid: String,
-        shards: Vec<u16>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
 
     /// Vault manifest broadcast — carries file manifest (contains AES key).
     #[serde(rename = "vault_manifest")]
@@ -3777,9 +3720,6 @@ impl MessageEnvelope {
             | Self::ShardStoreAck { target, .. }
             | Self::ShardRequest { target, .. }
             | Self::ShardResponse { target, .. }
-            | Self::ShardResponseChunk { target, .. }
-            | Self::ShardProbe { target, .. }
-            | Self::ShardProbeResponse { target, .. }
             | Self::ShardMigrate { target, .. }
             | Self::SyncReq { target, .. }
             | Self::SyncResp { target, .. }
@@ -3826,7 +3766,7 @@ impl MessageEnvelope {
             | Self::FwdEgressOffer { .. }
             | Self::FwdEgressAnswer { .. }
             | Self::FwdError { .. } => Direct,
-            Self::ProfileUpdate { .. } | Self::FileChunk { .. } => Anywhere,
+            Self::ProfileUpdate { .. } => Anywhere,
             Self::ChannelMessage { inner } => Server { sid: &inner.sid, cid: Some(&inner.cid) },
             Self::ShardStore { inner } => Server { sid: &inner.sid, cid: Some(&inner.cid) },
             Self::FileHeader { inner } => match &inner.sid {
@@ -3847,14 +3787,10 @@ impl MessageEnvelope {
             | Self::SyncReq { sid, .. }
             | Self::SyncResp { sid, .. } => Server { sid, cid: None },
             Self::ChannelSyncBatch { sid, cid, .. }
-            | Self::ShardChunk { sid, cid, .. }
             | Self::ShardStoreAck { sid, cid, .. }
             | Self::ShardDelete { sid, cid }
             | Self::ShardRequest { sid, cid, .. }
             | Self::ShardResponse { sid, cid, .. }
-            | Self::ShardResponseChunk { sid, cid, .. }
-            | Self::ShardProbe { sid, cid, .. }
-            | Self::ShardProbeResponse { sid, cid, .. }
             | Self::VaultManifestBroadcast { sid, cid, .. }
             | Self::ShardMigrate { sid, cid, .. }
             | Self::Typing { sid, cid }
@@ -3906,23 +3842,6 @@ pub(crate) enum EnvelopePlace<'a> {
     Direct,
     /// Server traffic; `cid` is set for channel-scoped kinds.
     Server { sid: &'a str, cid: Option<&'a str> },
-}
-
-/// State for reassembling a chunked vault shard from multiple ShardChunk messages.
-pub(crate) struct PendingShardAssembly {
-    pub server_id: String,
-    pub content_id: String,
-    pub shard_index: u16,
-    pub shard_key: String,
-    pub k: u16,
-    pub m: u16,
-    pub total_size: u64,
-    pub tier: String,
-    pub expected_chunks: u32,
-    pub received: HashSet<u32>,
-    pub chunk_data: Vec<(u32, Vec<u8>)>,
-    pub sender_peer: String,
-    pub received_at: Instant,
 }
 
 /// Pending streamed file transfer — AES key stored here until stream bytes arrive.
@@ -4585,6 +4504,14 @@ mod epoch_catchup_wire_tests {
         ] {
             assert!(serde_json::from_str::<MessageEnvelope>(envelope).is_err(), "{envelope}");
         }
+    }
+
+    /// H3/H4: no client sends a file chunk envelope; one wrote any file id's bytes
+    /// with no check at all, so the type is gone and a frame of it never parses.
+    #[test]
+    fn retired_file_chunk_is_refused_at_parse() {
+        let envelope = r#"{"t":"file_chunk","fid":"f","idx":0,"data":""}"#;
+        assert!(serde_json::from_str::<MessageEnvelope>(envelope).is_err());
     }
 
     /// Tag pin: the probe's wire name is part of the protocol.

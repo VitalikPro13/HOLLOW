@@ -246,6 +246,11 @@ pub fn reconstruct_file(
         erasure::decode(packed_shards, manifest.k as usize, manifest.m as usize)?
     };
 
+    // The content id is the ciphertext's hash, so shards from any holder (or a
+    // member who knows the key) that do not rebuild exactly this file are refused.
+    if content_id(&ciphertext) != manifest.content_id {
+        return Err("reconstructed content does not match its id".to_string());
+    }
     aes_decrypt(&ciphertext, &key, &nonce)
 }
 
@@ -278,8 +283,17 @@ pub fn files_dir() -> PathBuf {
 
 /// Get the cache file path for a content item.
 pub fn cache_path(content_id: &str, ext: &str) -> PathBuf {
-    let safe_ext = if ext.is_empty() { "bin" } else { ext };
-    vault_cache_dir().join(format!("{content_id}.{safe_ext}"))
+    // Both come from a peer's manifest and name a file: only the characters a hex
+    // id and a plain extension use survive, so neither can leave the cache folder.
+    let clean = |s: &str, max: usize| -> String {
+        s.chars().filter(|c| c.is_ascii_alphanumeric()).take(max).collect()
+    };
+    let safe_id = clean(content_id, 64);
+    let safe_ext = match clean(ext, 16) {
+        e if e.is_empty() => "bin".to_string(),
+        e => e,
+    };
+    vault_cache_dir().join(format!("{safe_id}.{safe_ext}"))
 }
 
 /// Check if a file is in the local vault cache. Returns the path if found.
@@ -651,6 +665,40 @@ mod tests {
         let shards: Vec<Option<Vec<u8>>> = vec![Some(encrypted.ciphertext)];
         let result = reconstruct_file(&manifest, &shards);
         assert!(result.is_err());
+    }
+
+    /// H10, H11, H14: every member holds a vault file's key, so one could encrypt its
+    /// own bytes under it and hand them out as shards. The rebuilt ciphertext must
+    /// hash to the content id, which only the real file does.
+    #[test]
+    fn a_key_holder_cannot_rebuild_other_content() {
+        let encrypted = aes_encrypt(b"the real file").unwrap();
+        let manifest = VaultManifest {
+            content_id: content_id(&encrypted.ciphertext),
+            encryption_key: hex::encode(encrypted.key),
+            nonce: hex::encode(encrypted.nonce),
+            original_size: 13,
+            k: 0, m: 0, shard_count: 0,
+            file_name: "real.txt".into(),
+            mime_type: "text/plain".into(),
+            storage_tier: "standard".into(),
+            created_at: 0,
+            creator_peer_id: "peer".into(),
+            channel_id: "ch".into(),
+            message_id: String::new(),
+        };
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(encrypted.key));
+        let forged = cipher.encrypt(&Nonce::from(encrypted.nonce), &b"someone else's"[..]).unwrap();
+        assert!(reconstruct_file(&manifest, &[Some(forged)]).is_err());
+        assert_eq!(reconstruct_file(&manifest, &[Some(encrypted.ciphertext)]).unwrap(), b"the real file");
+    }
+
+    /// Both parts of a cache file name come from a peer's manifest.
+    #[test]
+    fn cache_path_stays_inside_the_cache() {
+        let path = cache_path("..\\..\\..\\Startup\\evil", "exe:stream");
+        assert_eq!(path.parent(), Some(vault_cache_dir().as_path()));
+        assert_eq!(path.file_name().unwrap().to_string_lossy(), "Startupevil.exestream");
     }
 
     // ── cache helpers ────────────────────────────────────────

@@ -589,7 +589,6 @@ async fn run_event_loop(
 
     // -- Vault shard assembly state --
     // Tracks chunked shard reassembly. Key = "content_id:shard_index:sender_peer".
-    let mut pending_shard_assembly: HashMap<String, PendingShardAssembly> = HashMap::new();
 
     // -- Pending stream transfer state --
     let mut pending_file_streams: HashMap<String, PendingFileStream> = HashMap::new();
@@ -633,11 +632,11 @@ async fn run_event_loop(
     let mut pending_file_asks: std::collections::HashMap<String, file_asks::PendingFileAsk> =
         std::collections::HashMap::new();
 
-    // Guest public-file downloads: file_id -> (server_id, requested-at). The receipt
+    // Guest public-file downloads: file_id -> (server_id, asked device, requested-at). The receipt
     // cap for plaintext `PublicFileHeader`s, mirroring `pending_asset_asks`: an
     // unsolicited header would register a decrypt key and let a stranger stream
     // bytes onto our disk.
-    let mut pending_public_file_requests: std::collections::HashMap<String, (String, std::time::Instant)> =
+    let mut pending_public_file_requests: std::collections::HashMap<String, (String, String, std::time::Instant)> =
         std::collections::HashMap::new();
 
     // Files WE explicitly asked for: file_id -> requested-at. A FileHeader answering
@@ -707,9 +706,9 @@ async fn run_event_loop(
         });
     }
 
-    // Startup sweep: delete orphaned sender-side stream temps left by a previous
-    // run. They are always transient ciphertext of an in-flight send, so none can
-    // legitimately exist on a fresh boot.
+    // Startup sweep: delete orphaned stream temps left by a previous run. They are
+    // always transient ciphertext of an in-flight send or receive, whose state lives
+    // in RAM, so none can legitimately exist on a fresh boot.
     {
         let files_dir = crate::node::file_transfer::files_dir();
         let swept = tokio::task::spawn_blocking(move || {
@@ -718,7 +717,10 @@ async fn run_event_loop(
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.starts_with(".stream_send_") || name.starts_with(".stream_shard_") {
+                if name.starts_with(".stream_send_")
+                    || name.starts_with(".stream_shard_")
+                    || name.starts_with(".ws_recv_")
+                {
                     if crate::node::at_rest::remove(&entry.path()).is_ok() {
                         swept += 1;
                     }
@@ -1444,7 +1446,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::KillAck => {
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillAck);
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillAck { issued_at_ms: None });
                     }
 
                     NodeCommand::DepositKillSignal { targets, issued_at_ms, blob } => {
@@ -2536,7 +2538,7 @@ async fn run_event_loop(
                             Some(t) => {
                                 pending_public_file_requests.insert(
                                     file_id.clone(),
-                                    (server_id.clone(), std::time::Instant::now()),
+                                    (server_id.clone(), t.clone(), std::time::Instant::now()),
                                 );
                                 // The answering PublicFileHeader delegates into the
                                 // shared header path — mark it explicitly requested
@@ -2932,7 +2934,7 @@ async fn run_event_loop(
                                 &mut mls_bootstrap_requested,
                                 &mut mls_welcome_grace,
                                 &mut relay_catchup_done,
-                                &mut pending_shard_assembly, &mut pending_file_streams,
+                                &mut pending_file_streams,
                                 &mut pending_shard_streams, &mut early_file_streams,
                                 &mut pending_link_snapshots,
                                 &mut decrypt_fail_cooldown,
@@ -4386,7 +4388,7 @@ async fn run_event_loop(
                     }
                     WsEvent::BinaryDirect { room: _, from, data } => {
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
-                            &mut pending_ws_transfers, &data,
+                            &mut pending_ws_transfers, &from, &data,
                         ) {
                             // Auto-download gate (issue #41): the sender queues its push before our
                             // decline could reach it, so bytes for a declined file are deleted here
@@ -4421,7 +4423,7 @@ async fn run_event_loop(
                     WsEvent::KillSignal { blob, issued_at_ms } => {
                         hollow_log!("[HOLLOW-DESTROY] Relay parked order issued_at={issued_at_ms}");
                         destroy::handle_kill_signal(
-                            &event_tx, &ws_cmd_tx, &blob,
+                            &event_tx, &ws_cmd_tx, &blob, issued_at_ms,
                             &master_peer_str, &device_peer_id, &db_path, &db_passphrase,
                         ).await;
                     }
@@ -4603,14 +4605,19 @@ async fn run_event_loop(
                                     let is_recovery = matches!(msg,
                                         HavenMessage::RecoveryHello { .. }
                                         | HavenMessage::RecoveryWelcome { .. }
-                                        | HavenMessage::RecoveryManifestSync { .. }
                                         | HavenMessage::RecoveryTransferPlan { .. }
                                         | HavenMessage::RecoveryShardReceived { .. }
                                         | HavenMessage::RecoveryStatus { .. }
                                         | HavenMessage::RecoveryStop
                                     );
                                     if is_recovery {
-                                        if let Some(pool) = recovery_pool_state.as_mut() {
+                                        // The pool's room is the only place its frames come from:
+                                        // a peer in any other room we share is not in the pool.
+                                        let in_pool_room = recovery_pool_state.as_ref().is_some_and(|p| room == p.room_code());
+                                        if !in_pool_room {
+                                            hollow_log!("[HOLLOW-SECURITY] Dropped a recovery frame from {from} in {room}: not the pool room");
+                                        }
+                                        if let Some(pool) = recovery_pool_state.as_mut().filter(|_| in_pool_room) {
                                             match msg {
                                                 HavenMessage::RecoveryHello { server_id, manifest_ids, shard_inventory_json } => {
                                                     if server_id == pool.server_id {
@@ -4743,27 +4750,17 @@ async fn run_event_loop(
                                                         server_id: sid,
                                                     }).await;
                                                 }
-                                                HavenMessage::RecoveryManifestSync { manifests_json } => {
-                                                    hollow_log!("[RECOVERY-POOL] ManifestSync from {from}");
-                                                    if let Ok(manifests) = serde_json::from_str::<Vec<crate::vault::pipeline::VaultManifest>>(&manifests_json) {
-                                                        for m in manifests {
-                                                            if m.k > 0 || m.m > 0 {
-                                                                pool.all_manifest_ids.insert(m.content_id.clone());
-                                                                pool.file_k_values.insert(m.content_id.clone(), m.k);
-                                                                pool.manifest_meta.insert(m.content_id.clone(), crate::node::recovery_pool::ManifestMeta {
-                                                                    k: m.k,
-                                                                    m: m.m,
-                                                                    total_data_size: m.original_size,
-                                                                    storage_tier: m.storage_tier.clone(),
-                                                                    file_name: m.file_name.clone(),
-                                                                });
-                                                            }
-                                                        }
-                                                    }
-                                                }
                                                 HavenMessage::RecoveryTransferPlan { plan_json } => {
                                                     hollow_log!("[RECOVERY-POOL] TransferPlan from {from}");
-                                                    if let Ok(plan) = serde_json::from_str::<Vec<crate::node::recovery_pool::TransferAssignment>>(&plan_json) {
+                                                    // Only the elected coordinator plans, and only for pool members.
+                                                    let from_coordinator = pool.members.keys().min() == Some(&from);
+                                                    if !from_coordinator {
+                                                        hollow_log!("[HOLLOW-SECURITY] Dropped a transfer plan from {from}: not the pool's coordinator");
+                                                    }
+                                                    if let Some(plan) = serde_json::from_str::<Vec<crate::node::recovery_pool::TransferAssignment>>(&plan_json)
+                                                        .ok()
+                                                        .filter(|_| from_coordinator)
+                                                    {
                                                         hollow_log!("[RECOVERY-POOL] Processing {} transfer assignments", plan.len());
 
                                                         let vault_dir_r = crate::identity::data_dir().unwrap_or_default().join("vault");
@@ -4793,7 +4790,9 @@ async fn run_event_loop(
                                                                     }
                                                                 }
 
-                                                                if assignment.source_peer == local_peer_str {
+                                                                if assignment.source_peer == local_peer_str
+                                                                    && pool.members.contains_key(&assignment.dest_peer)
+                                                                {
                                                                     let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
                                                                     if let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) {
                                                                         let temp_dir = std::env::temp_dir().join("hollow_recovery");
@@ -4901,7 +4900,7 @@ async fn run_event_loop(
                                         &mut mls_bootstrap_requested,
                                         &mut mls_welcome_grace,
                                         &mut relay_catchup_done,
-                                        &mut pending_shard_assembly, &mut pending_file_streams,
+                                        &mut pending_file_streams,
                                         &mut pending_shard_streams, &mut early_file_streams,
                                         &mut pending_link_snapshots,
                                         &mut decrypt_fail_cooldown,
@@ -5249,7 +5248,6 @@ async fn run_event_loop(
                     vc_signal_rate_tokens.retain(|_, (_, last)| last.elapsed() < stale);
                     decrypt_fail_cooldown.retain(|_, instant| instant.elapsed() < REKEY_COOLDOWN);
                     channel_sync_sent.retain(|_, instant| instant.elapsed() < Duration::from_secs(30));
-                    pending_shard_assembly.retain(|_, asm| asm.received_at.elapsed() < Duration::from_secs(600));
                     // Clean up orphaned early-arrival file streams (5 min TTL).
                     let mut stale_early: Vec<String> = Vec::new();
                     for (id, (tp, _, _)) in early_file_streams.iter() {
@@ -5402,7 +5400,7 @@ async fn run_event_loop(
                                 for manifest in &expired {
                                     hollow_log!("[HOLLOW-VAULT] Retention: deleting expired content {} (tier: {})", manifest.content_id, manifest.storage_tier);
                                     let _ = cs.delete_content(server_id, &manifest.content_id);
-                                    let _ = cs.delete_placements(&manifest.content_id);
+                                    let _ = cs.delete_placements(server_id, &manifest.content_id);
                                     let _ = cs.delete_manifest(&manifest.content_id);
                                 }
                             }
@@ -6174,10 +6172,7 @@ async fn apply_remote_crdt_op(
 
         let state = server_states.get_mut(&server_id).unwrap();
 
-        let was_len = state.op_log.len();
-        let _ = state.apply_op(&op);
-
-        if state.op_log.len() > was_len {
+        if let Ok(true) = state.apply_op(&op) {
             if let Ok(json) = serde_json::to_string(&state) {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.save_server_state(&server_id, &json);
@@ -6462,7 +6457,6 @@ async fn handle_incoming_request(
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
     relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
-    pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     early_file_streams: &mut HashMap<String, (std::path::PathBuf, u64, String)>,
@@ -6500,7 +6494,7 @@ async fn handle_incoming_request(
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
     pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
-    pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
+    pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
     peer_auto_dl: &mut HashMap<String, u32>,
@@ -7788,6 +7782,20 @@ async fn handle_incoming_request(
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
+                    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+                    // A holder answering for someone else's file: the device an explicit
+                    // pull asked on this connection, or the decrypt-fail retry's target.
+                    let asked = pending_file_asks.get(&fid).is_some_and(|a| a.asked.contains(peer_str))
+                        || pending_file_streams.get(&fid).is_some_and(|p| p.sender == peer_str);
+                    if let Some(reason) = file_handler::file_header_refused(
+                        &store, server_states, &fid, sid.as_deref(), cid.as_deref(), peer_str, asked,
+                    ) {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {peer_str}: {reason}");
+                        return;
+                    }
+                    let already_complete = file_handler::file_bytes_on_disk(&store, &fid);
+                    drop(store);
+
                     // Explicit pull (manual Download / sweep / guest request)?
                     // Consumes the receipt; bypasses the size cap AND the
                     // auto-download gate — we asked for exactly this file.
@@ -7873,8 +7881,10 @@ async fn handle_incoming_request(
                     // Save file metadata to DB. Owner guard (0.8.5): the header
                     // is Olm-authenticated, but that only proves WHO sent it —
                     // not that the `file_id` inside is theirs to relabel.
+                    let mut meta_written = false;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        if file_handler::file_meta_write_allowed(&store, &fid, &peer_str) {
+                        meta_written = file_handler::file_meta_write_allowed(&store, &fid, &peer_str);
+                        if meta_written {
                             let _ = store.insert_file_metadata(
                                 &fid, &name, &ext, &mime,
                                 size, chunks, img,
@@ -7904,19 +7914,6 @@ async fn handle_incoming_request(
                     // several of the recipient's devices and the decrypt-fail re-request also
                     // re-sends a header, so each re-registration reset retry_count and made an
                     // endless re-download of one already-saved file.
-                    let already_complete = {
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            match store.get_file_metadata(&fid) {
-                                Ok(Some(meta)) => meta.completed_at.is_some()
-                                    && meta.disk_path.as_ref()
-                                        .map(|p| std::path::Path::new(p).exists())
-                                        .unwrap_or(false),
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        }
-                    };
                     if already_complete {
                         // Clear any stale pending stream / early-arrival bytes for it and
                         // stop — no re-request, no re-register. Still emit FileHeaderReceived
@@ -7945,8 +7942,9 @@ async fn handle_incoming_request(
                         || pending_file_streams.contains_key(&fid)
                         || file_handler::auto_download_allows(size, &name, &ext, &auto_dl_key, voice);
 
+                    // Only a DM header inlines bytes (an offline image).
                     let mut inline_done = false;
-                    if !already_complete && share_ref.is_none() {
+                    if !already_complete && share_ref.is_none() && ctx_type == "dm" {
                         if let (Some(b64), Some(ak), Some(an)) =
                             (inline_bytes.as_ref(), aes_key.as_ref(), aes_nonce.as_ref())
                         {
@@ -8130,336 +8128,152 @@ async fn handle_incoming_request(
                         server_id: sid_str,
                         channel_id: cid_str,
                         video_thumb: vthumb,
-                        share_ref,
+                        // Dart starts a share download from this, so only the card's owner names one.
+                        share_ref: share_ref.filter(|_| meta_written),
                         thumb_b64: thumb,
                     }).await;
-                }
-                Ok(MessageEnvelope::FileChunk { fid, idx, data }) => {
-                    use crate::node::file_transfer;
-                    let chunk_bytes = base64::engine::general_purpose::STANDARD.decode(&data);
-                    if let Err(e) = &chunk_bytes {
-                        hollow_log!("[HOLLOW-FILE] Failed to decode chunk {idx} for {fid}: {e}");
-                    }
-                    if let Ok(chunk_bytes) = chunk_bytes {
-
-                    if let Err(e) = file_transfer::write_chunk(&fid, idx, &chunk_bytes) {
-                        hollow_log!("[HOLLOW-FILE] {e}");
-                    } else {
-
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        if let Ok(received) = store.mark_chunk_received(&fid, idx) {
-                            if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
-                                let _ = event_tx.send(NetworkEvent::FileProgress {
-                                    file_id: fid.clone(),
-                                    chunks_received: received,
-                                    total_chunks: file_meta.chunk_count,
-                                }).await;
-
-                                if received >= file_meta.chunk_count {
-                                    let final_path = file_transfer::final_file_path(&fid, &file_meta.file_ext);
-                                    match file_transfer::assemble_file(&fid, file_meta.chunk_count, &final_path) {
-                                        Ok(()) => {
-                                            let disk_path = final_path.to_string_lossy().to_string();
-                                            let _ = store.mark_file_complete(&fid, &disk_path);
-                                            hollow_log!("[HOLLOW-FILE] File {fid} complete: {disk_path}");
-                                            let _ = event_tx.send(NetworkEvent::FileCompleted {
-                                                file_id: fid,
-                                                disk_path,
-                                            }).await;
-                                        }
-                                        Err(e) => {
-                                            hollow_log!("[HOLLOW-FILE] Assembly failed for {fid}: {e}");
-                                            let _ = event_tx.send(NetworkEvent::FileFailed {
-                                                file_id: fid,
-                                                error: e,
-                                            }).await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    } // else (write_chunk ok)
-                    } // if let Ok(chunk_bytes)
                 }
 
                 // -- Vault shard receive handlers --
                 Ok(MessageEnvelope::ShardStore { inner }) => {
                     let ShardStorePayload { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } = *inner;
                     hollow_log!("[HOLLOW-VAULT] ShardStore received: cid={cid} si={si} chunks={chunks} from {peer_str}");
-
-                    // Verify sender is a member of the server
-                    let is_member = server_states.get(&sid)
-                        .map(|s| s.is_member(peer_str))
-                        .unwrap_or(false);
-                    if !is_member {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardStore from {peer_str} — not a member of {sid}");
-                    } else if chunks == 0 && data.is_empty() {
-                        // Streamed shard — data arrives via /hollow/stream/1.0.0.
-                        let key = format!("{cid}:{si}");
-                        pending_shard_streams.insert(key.clone(), PendingShardStream {
-                            server_id: sid, content_id: cid, shard_index: si,
-                            shard_key: sk, k, m, total_size, tier,
-                        });
-                        hollow_log!("[HOLLOW-VAULT] Registered pending shard stream: {key}");
-                    } else if chunks == 0 {
-                        // Inline shard (legacy) — decode and store immediately
-                        if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            let local_peer = local_peer_str.to_string();
-                            let pledge = server_states.get(&sid)
-                                .map(|s| s.get_storage_pledge(&local_peer))
-                                .unwrap_or(0);
-                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-
-                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                                let used = content_store.total_storage_used(&sid).unwrap_or(0);
-                                if pledge > 0 && used + shard_bytes.len() as u64 > pledge {
-                                    hollow_log!("[HOLLOW-VAULT] Pledge exceeded for {sid} — rejecting shard");
-                                    let ack = MessageEnvelope::ShardStoreAck {
-                                        sid: sid.clone(), cid: cid.clone(), si, ok: false,
-                                        err: Some("Pledge capacity exceeded".into()),
-                                        target: None,
-                                    };
-                                    let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                        send_encrypted_message(
-                                            olm, crypto_store,
-                                            
-                                            &peer_str, &ack_json, event_tx,
-                                        ws_cmd_tx, ws_room_peers,
-                                        ).await;
-                                } else {
-                                    let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
-                                    match content_store.store_shard(&sid, &cid, si, k, m, total_size, tier_enum, &shard_bytes) {
-                                        Ok(_) => {
-                                            hollow_log!("[HOLLOW-VAULT] Shard stored: cid={cid} si={si}");
-                                            let _ = event_tx.send(NetworkEvent::ShardStored {
-                                                server_id: sid.clone(),
-                                                content_id: cid.clone(),
-                                                shard_index: si,
-                                                from_peer: peer_str.to_string(),
-                                            }).await;
-                                            let ack = MessageEnvelope::ShardStoreAck {
-                                                sid: sid.clone(), cid: cid.clone(), si, ok: true, err: None,
-                                                target: None,
-                                            };
-                                            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                                send_encrypted_message(
-                                                    olm, crypto_store,
-                                                    
-                                                    &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers,
-                                                ).await;
-                                        }
-                                        Err(e) => {
-                                            hollow_log!("[HOLLOW-VAULT] Failed to store shard: {e}");
-                                            let ack = MessageEnvelope::ShardStoreAck {
-                                                sid: sid.clone(), cid: cid.clone(), si, ok: false,
-                                                err: Some(e),
-                                                target: None,
-                                            };
-                                            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                                send_encrypted_message(
-                                                    olm, crypto_store,
-                                                    
-                                                    &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers,
-                                                ).await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                    let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else { return };
+                    // Streamed (no data) or inline; a chunked store has no sender.
+                    let inline = if chunks > 0 {
+                        None
+                    } else if data.is_empty() {
+                        Some(Vec::new())
                     } else {
-                        let key = format!("{cid}:{si}:{peer_str}");
-                        pending_shard_assembly.insert(key, PendingShardAssembly {
-                            server_id: sid,
-                            content_id: cid,
+                        base64::engine::general_purpose::STANDARD.decode(&data).ok()
+                    };
+                    let Some(shard_bytes) = inline else {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardStore for {cid} from {peer_str}: unreadable shard");
+                        return;
+                    };
+                    let incoming = (shard_bytes.len() as u64).max(1);
+                    let refusal = vault_ops::shard_write_refused(
+                        server_states, &content_store, peer_str, &sid, &cid, si, local_peer_str, incoming,
+                    );
+                    let result = match refusal {
+                        Some("that shard is already held") => Ok(()),
+                        Some(reason) => Err(reason.to_string()),
+                        None if shard_bytes.is_empty() => {
+                            // Streamed shard: the bytes follow on the stream lane.
+                            let key = format!("{cid}:{si}");
+                            pending_shard_streams.entry(key.clone()).or_insert(PendingShardStream {
+                                server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
+                                shard_key: sk, k, m, total_size, tier,
+                            });
+                            hollow_log!("[HOLLOW-VAULT] Registered pending shard stream: {key}");
+                            return;
+                        }
+                        None => {
+                            let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
+                            content_store
+                                .store_shard(&sid, &cid, si, k, m, total_size, tier_enum, &shard_bytes)
+                                .map(|_| ())
+                        }
+                    };
+                    if let Err(e) = &result {
+                        hollow_log!("[HOLLOW-VAULT] Shard {si} of {cid} from {peer_str} not stored: {e}");
+                    } else {
+                        let _ = event_tx.send(NetworkEvent::ShardStored {
+                            server_id: sid.clone(),
+                            content_id: cid.clone(),
                             shard_index: si,
-                            shard_key: sk,
-                            k,
-                            m,
-                            total_size,
-                            tier,
-                            expected_chunks: chunks,
-                            received: std::collections::HashSet::new(),
-                            chunk_data: Vec::new(),
-                            sender_peer: peer_str.to_string(),
-                            received_at: std::time::Instant::now(),
-                        });
+                            from_peer: peer_str.to_string(),
+                        }).await;
                     }
-                }
-
-                Ok(MessageEnvelope::ShardChunk { sid, cid, si, ci, data }) => {
-                    let key = format!("{cid}:{si}:{peer_str}");
-                    if let Some(assembly) = pending_shard_assembly.get_mut(&key) {
-                        if let Ok(chunk_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            if !assembly.received.contains(&ci) {
-                                assembly.received.insert(ci);
-                                assembly.chunk_data.push((ci, chunk_bytes));
-                            }
-
-                            if assembly.received.len() as u32 >= assembly.expected_chunks {
-                                let mut asm = pending_shard_assembly.remove(&key).unwrap();
-                                asm.chunk_data.sort_by_key(|(idx, _)| *idx);
-                                let mut full_data = Vec::new();
-                                for (_, chunk) in &asm.chunk_data {
-                                    full_data.extend_from_slice(chunk);
-                                }
-
-                                let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-
-                                if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                                    let tier_enum = crate::vault::content_store::StorageTier::from_str(&asm.tier);
-                                    match content_store.store_shard(&asm.server_id, &asm.content_id, asm.shard_index, asm.k, asm.m, asm.total_size, tier_enum, &full_data) {
-                                        Ok(_) => {
-                                            hollow_log!("[HOLLOW-VAULT] Chunked shard assembled+stored: cid={} si={}", asm.content_id, asm.shard_index);
-                                            let _ = event_tx.send(NetworkEvent::ShardStored {
-                                                server_id: asm.server_id.clone(),
-                                                content_id: asm.content_id.clone(),
-                                                shard_index: asm.shard_index,
-                                                from_peer: peer_str.to_string(),
-                                            }).await;
-                                            let ack = MessageEnvelope::ShardStoreAck {
-                                                sid: asm.server_id, cid: asm.content_id, si: asm.shard_index, ok: true, err: None,
-                                                target: None,
-                                            };
-                                            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                                send_encrypted_message(
-                                                    olm, crypto_store,
-                                                    
-                                                    &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers,
-                                                ).await;
-                                        }
-                                        Err(e) => {
-                                            hollow_log!("[HOLLOW-VAULT] Failed to store assembled shard: {e}");
-                                            let ack = MessageEnvelope::ShardStoreAck {
-                                                sid: asm.server_id, cid: asm.content_id, si: asm.shard_index, ok: false, err: Some(e),
-                                                target: None,
-                                            };
-                                            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                                send_encrypted_message(
-                                                    olm, crypto_store,
-                                                    
-                                                    &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers,
-                                                ).await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        hollow_log!("[HOLLOW-VAULT] ShardChunk for unknown assembly: cid={cid} si={si} ci={ci}");
+                    if !shard_bytes.is_empty() {
+                        let ack = MessageEnvelope::ShardStoreAck {
+                            sid, cid, si, ok: result.is_ok(), err: result.err(), target: None,
+                        };
+                        let ack_json = serde_json::to_string(&ack).unwrap_or_default();
+                        send_encrypted_message(
+                            olm, crypto_store, &peer_str, &ack_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
+                        ).await;
                     }
                 }
 
                 Ok(MessageEnvelope::ShardStoreAck { sid, cid, si, ok, err, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardStoreAck: cid={cid} si={si} ok={ok} err={err:?}");
+                    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                    let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else { return };
+                    // Only the peer we placed the shard on speaks for it.
+                    let placed_on_sender = content_store
+                        .placement_target(&cid, si)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|target| super::resolver::same_identity(peer_str, &target));
+                    if !placed_on_sender {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardStoreAck for {cid}/{si} from {peer_str}: not where it was placed");
+                        return;
+                    }
+                    if ok {
+                        let _ = content_store.confirm_placement(&cid, si);
+                    }
                     let _ = event_tx.send(NetworkEvent::ShardStoreAckReceived {
-                        server_id: sid.clone(),
-                        content_id: cid.clone(),
+                        server_id: sid,
+                        content_id: cid,
                         shard_index: si,
                         success: ok,
                         error: err.unwrap_or_default(),
                     }).await;
-
-                    if ok {
-                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-                        if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                            let _ = content_store.confirm_placement(&cid, si);
-                        }
-                    }
                 }
 
                 Ok(MessageEnvelope::ShardDelete { sid, cid }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardDelete received: cid={cid} from {peer_str}");
-
-                    // Verify sender is a member with MANAGE_SERVER permission
-                    let allowed = server_states.get(&sid)
-                        .map(|s| {
-                            s.is_member(peer_str) &&
-                            s.has_permission(&peer_str, crate::crdt::operations::Permission::MANAGE_SERVER)
-                        })
-                        .unwrap_or(false);
-
-                    if !allowed {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardDelete from {peer_str} — not authorized for {sid}");
-                    } else {
-                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                            let _ = cs.delete_content(&sid, &cid);
-                            let _ = cs.delete_placements(&cid);
-                        }
-                        hollow_log!("[HOLLOW-VAULT] Shard content deleted: cid={cid}");
-                        let _ = event_tx.send(NetworkEvent::ShardDeleted {
-                            server_id: sid,
-                            content_id: cid,
-                        }).await;
-                    }
+                    vault_ops::handle_shard_delete(
+                        server_states, event_tx, peer_str, sid, cid, db_path, db_passphrase,
+                    ).await;
                 }
 
                 // -- Vault shard retrieve handlers --
 
                 Ok(MessageEnvelope::ShardRequest { sid, cid, si, sk, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardRequest: cid={cid} si={si} from {peer_str}");
-                    let is_member = server_states.get(&sid)
-                        .map(|s| s.is_member(peer_str))
-                        .unwrap_or(false);
-                    if !is_member {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardRequest from {peer_str} — not a member of {sid}");
+                    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                    let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else { return };
+                    if let Some(reason) = vault_ops::shard_serve_refused(server_states, &cs, peer_str, &sid, &cid) {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardRequest for {cid} from {peer_str}: {reason}");
+                        return;
+                    }
+                    // The key names the file we read, so it must be this shard's own.
+                    let shard = if sk == crate::vault::content_store::shard_key(&cid, si) {
+                        cs.read_shard_unchecked(&sid, &sk).ok()
                     } else {
-                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                            match cs.read_shard_unchecked(&sid, &sk) {
-                                Ok(shard_data) => {
-                                    // Send metadata via Olm, stream shard bytes.
-                                    let resp = MessageEnvelope::ShardResponse {
-                                        sid: sid.clone(), cid: cid.clone(), si,
-                                        data: String::new(), chunks: 0, found: true,
-                                        target: None,
-                                    };
-                                    let json = serde_json::to_string(&resp).unwrap_or_default();
-                                        send_encrypted_message(
-                                            olm, crypto_store,
-                                            
-                                            &peer_str, &json, event_tx,
-                                        ws_cmd_tx, ws_room_peers,
-                                        ).await;
-
-                                        let shard_temp_dir = crate::node::file_transfer::files_dir();
-                                        // The cid is whatever a member stored the shard under: it names a
-                                        // file here, so only alphanumerics survive (a `\..\` walks out on Windows).
-                                        let shard_safe_prefix: String =
-                                            cid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
-                                        let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
-                                        let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
-                                        if let Ok(()) = tokio::fs::write(&shard_temp_path, &shard_data).await {
-                                            let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
-                                            file_handler::stream_to_peer(
-                                                ws_cmd_tx, ws_room_peers,
-                                                webrtc_peers, pending_webrtc_sends, event_tx,
-                                                &peer_str, &shard_kind,
-                                                &cid, &shard_temp_path, shard_data.len() as u64,
-                                            ).await;
-                                            hollow_log!("[HOLLOW-VAULT] Streaming shard response si={si} ({} bytes) to {peer_str}", shard_data.len());
-                                        }
-                                }
-                                Err(_) => {
-                                    let resp = MessageEnvelope::ShardResponse {
-                                        sid, cid, si, data: String::new(), chunks: 0, found: false,
-                                        target: None,
-                                    };
-                                    let json = serde_json::to_string(&resp).unwrap_or_default();
-                                        send_encrypted_message(
-                                            olm, crypto_store,
-                                            
-                                            &peer_str, &json, event_tx,
-                                        ws_cmd_tx, ws_room_peers,
-                                        ).await;
-                                }
-                            }
+                        None
+                    };
+                    let resp = MessageEnvelope::ShardResponse {
+                        sid: sid.clone(), cid: cid.clone(), si,
+                        data: String::new(), chunks: 0, found: shard.is_some(),
+                        target: None,
+                    };
+                    let json = serde_json::to_string(&resp).unwrap_or_default();
+                    send_encrypted_message(
+                        olm, crypto_store, &peer_str, &json, event_tx,
+                        ws_cmd_tx, ws_room_peers,
+                    ).await;
+                    if let Some(shard_data) = shard {
+                        let shard_temp_dir = crate::node::file_transfer::files_dir();
+                        // The cid is whatever a member stored the shard under: it names a
+                        // file here, so only alphanumerics survive (a `\..\` walks out on Windows).
+                        let shard_safe_prefix: String =
+                            cid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+                        let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
+                        let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
+                        if let Ok(()) = tokio::fs::write(&shard_temp_path, &shard_data).await {
+                            let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
+                            file_handler::stream_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                webrtc_peers, pending_webrtc_sends, event_tx,
+                                &peer_str, &shard_kind,
+                                &cid, &shard_temp_path, shard_data.len() as u64,
+                            ).await;
+                            hollow_log!("[HOLLOW-VAULT] Streaming shard response si={si} ({} bytes) to {peer_str}", shard_data.len());
                         }
                     }
                 }
@@ -8471,117 +8285,57 @@ async fn handle_incoming_request(
                             server_id: sid, content_id: cid, shard_index: si,
                             error: "Shard not found on peer".into(),
                         }).await;
-                    } else if data.is_empty() {
-                        // Streamed shard response — data arrives via /hollow/stream/1.0.0.
-                        // Register pending_shard_streams so the stream handler stores it.
+                        return;
+                    }
+                    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                    let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else { return };
+                    let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) else { return };
+                    let incoming = (shard_bytes.len() as u64).max(1);
+                    if let Some(reason) = vault_ops::shard_write_refused(
+                        server_states, &cs, peer_str, &sid, &cid, si, local_peer_str, incoming,
+                    ) {
+                        hollow_log!("[HOLLOW-VAULT] Shard response {si} of {cid} from {peer_str} not taken: {reason}");
+                        return;
+                    }
+                    if shard_bytes.is_empty() {
+                        // Streamed shard response: the bytes follow on the stream lane.
                         let key = format!("{cid}:{si}");
-                        pending_shard_streams.insert(key.clone(), PendingShardStream {
+                        pending_shard_streams.entry(key.clone()).or_insert(PendingShardStream {
                             server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
                             shard_key: String::new(), k: 0, m: 0, total_size: 0,
                             tier: "standard".to_string(),
                         });
                         hollow_log!("[HOLLOW-VAULT] Registered pending shard stream for response: {key}");
                     } else {
-                        // Inline shard data (small shards) — decode and store immediately
-                        if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-                            if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                                let tier = crate::vault::content_store::StorageTier::Standard;
-                                let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
-                            }
-                            let _ = event_tx.send(NetworkEvent::ShardReceived {
-                                server_id: sid, content_id: cid, shard_index: si,
-                                from_peer: peer_str.to_string(),
-                            }).await;
-                        }
+                        let tier = crate::vault::content_store::StorageTier::Standard;
+                        let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
+                        let _ = event_tx.send(NetworkEvent::ShardReceived {
+                            server_id: sid, content_id: cid, shard_index: si,
+                            from_peer: peer_str.to_string(),
+                        }).await;
                     }
-                }
-
-                Ok(MessageEnvelope::ShardResponseChunk { sid, cid, si, ci, data, .. }) => {
-                    let key = format!("resp:{cid}:{si}:{peer_str}");
-                    if let Some(assembly) = pending_shard_assembly.get_mut(&key) {
-                        if let Ok(chunk_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            if !assembly.received.contains(&ci) {
-                                assembly.received.insert(ci);
-                                assembly.chunk_data.push((ci, chunk_bytes));
-                            }
-                            if assembly.received.len() as u32 >= assembly.expected_chunks {
-                                let asm = pending_shard_assembly.remove(&key).unwrap();
-                                let mut sorted = asm.chunk_data;
-                                sorted.sort_by_key(|(idx, _)| *idx);
-                                let _full_data: Vec<u8> = sorted.into_iter().flat_map(|(_, d)| d).collect();
-                                let _ = event_tx.send(NetworkEvent::ShardReceived {
-                                    server_id: sid, content_id: cid, shard_index: si,
-                                    from_peer: peer_str.to_string(),
-                                }).await;
-                            }
-                        }
-                    }
-                }
-
-                Ok(MessageEnvelope::ShardProbe { sid, cid, .. }) => {
-                    hollow_log!("[HOLLOW-VAULT] ShardProbe: cid={cid} from {peer_str}");
-                    let is_member = server_states.get(&sid)
-                        .map(|s| s.is_member(peer_str))
-                        .unwrap_or(false);
-                    if is_member {
-                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-
-                        let mut indices = Vec::new();
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                            if let Ok(records) = cs.list_content_shards(&sid, &cid) {
-                                indices = records.iter().map(|r| r.shard_index).collect();
-                            }
-                        }
-                        let resp = MessageEnvelope::ShardProbeResponse {
-                            sid, cid, shards: indices,
-                            target: None,
-                        };
-                        let json = serde_json::to_string(&resp).unwrap_or_default();
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                
-                                &peer_str, &json, event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                            ).await;
-                    }
-                }
-
-                Ok(MessageEnvelope::ShardProbeResponse { sid, cid, shards, .. }) => {
-                    hollow_log!("[HOLLOW-VAULT] ShardProbeResponse: cid={cid} shards={shards:?} from {peer_str}");
-                    // Logged for now — download pipeline will use this data when built
                 }
 
                 Ok(MessageEnvelope::VaultManifestBroadcast { sid, cid, chid, manifest }) => {
                     hollow_log!("[HOLLOW-VAULT] VaultManifest received: cid={cid} in {sid}/{chid} from {peer_str}");
-                    if let Ok(manifest_obj) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(&manifest) {
-                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                            let _ = cs.save_manifest(&sid, &chid, &manifest_obj);
-                        }
-                        // Link vault content_id to the file record via message_id.
-                        if !manifest_obj.message_id.is_empty() {
-                            if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                let _ = ms.set_file_content_id(&manifest_obj.message_id, &manifest_obj.content_id);
-                            }
-                        }
-                    }
+                    vault_ops::ingest_vault_manifest(
+                        server_states, peer_str, &sid, &chid, &manifest, db_path, db_passphrase,
+                    );
                 }
 
-                Ok(MessageEnvelope::ShardMigrate { sid, cid, si, sk, data, .. }) => {
+                Ok(MessageEnvelope::ShardMigrate { sid, cid, si, data, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardMigrate received: cid={cid} si={si} from {peer_str}");
-                    // Same logic as ShardStore inline — verify membership, store shard
-                    let is_member = server_states.get(&sid)
-                        .map(|s| s.is_member(peer_str))
-                        .unwrap_or(false);
-                    if is_member {
-                        if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                                let tier = crate::vault::content_store::StorageTier::Standard;
-                                let _ = content_store.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
-                                hollow_log!("[HOLLOW-VAULT] Migrated shard stored: cid={cid} si={si}");
-                            }
+                    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                    let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else { return };
+                    let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) else { return };
+                    match vault_ops::shard_write_refused(
+                        server_states, &cs, peer_str, &sid, &cid, si, local_peer_str, shard_bytes.len() as u64,
+                    ) {
+                        Some(reason) => hollow_log!("[HOLLOW-VAULT] Migrated shard {si} of {cid} from {peer_str} not taken: {reason}"),
+                        None => {
+                            let tier = crate::vault::content_store::StorageTier::Standard;
+                            let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
+                            hollow_log!("[HOLLOW-VAULT] Migrated shard stored: cid={cid} si={si}");
                         }
                     }
                 }
@@ -8616,91 +8370,13 @@ async fn handle_incoming_request(
                     ).await;
                 }
 
-                // Phase 6 MLS envelope variants — should not arrive via Olm, log and ignore.
-                // CrdtOp via Olm fallback — apply it (may arrive when MLS is out of sync).
-                Ok(MessageEnvelope::CrdtOp { sid, op_json, .. }) => {
-                    if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
-                        if let Some(state) = server_states.get_mut(&sid) {
-                            // SECURITY: the Olm fallback is the SAME ingest as
-                            // the MLS envelope and the plaintext broadcast, so
-                            // it runs the same admission gate. It had none.
-                            if let Err(reason) = state.admit_remote_op(&op) {
-                                hollow_log!(
-                                    "[HOLLOW-SECURITY] REJECTED Olm-fallback CrdtOp {} for {sid} from {peer_str}: {reason}",
-                                    crate::crdt::sync::payload_name(&op.payload),
-                                );
-                            } else if let Ok(()) = state.apply_op(&op) {
-                                state.op_log.push(op.clone());
-                                if let Ok(json) = serde_json::to_string(&*state) {
-                                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                        let _ = store.save_server_state(&sid, &json);
-                                        let _ = store.insert_crdt_op(&op);
-                                    }
-                                }
-                                let _ = event_tx.send(NetworkEvent::SyncCompleted {
-                                    server_id: sid, ops_applied: 1,
-                                }).await;
-                            }
-                        }
-                    }
-                }
-                // SyncReq/SyncResp via Olm fallback — handle normally.
-                Ok(MessageEnvelope::SyncReq { sid, state_vector_json, .. }) => {
-                    if let Some(state) = server_states.get(&sid) {
-                        if let Ok(their_vector) = serde_json::from_str::<crate::crdt::sync::StateVector>(&state_vector_json) {
-                            let delta = crate::crdt::sync::compute_delta(&state.op_log, &their_vector);
-                            if !delta.is_empty() {
-                                let ops_json = serde_json::to_string(&delta).unwrap_or_default();
-                                // Respond via plaintext since Olm is the active path.
-                                send_message_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    peer_str, HavenMessage::SyncResponse {
-                                        server_id: sid,
-                                        ops_json,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(MessageEnvelope::SyncResp { sid, ops_json, .. }) => {
-                    if let Some(state) = server_states.get_mut(&sid) {
-                        // Tolerant parse: a NEWER client's op variant skips
-                        // just that op, never the whole batch.
-                        let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
-                        if !incoming_ops.is_empty() {
-                            // Persist synced ops (op_log is RAM-only). ONLY ops
-                            // merge_ops admitted reach the table: the gate lives
-                            // inside the merge and the hook fires for what passed it.
-                            let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
-                            let report = crate::crdt::sync::merge_ops_with(state, &incoming_ops, |op| {
-                                if let Some(store) = store.as_ref() {
-                                    if op.server_id == sid {
-                                        let _ = store.insert_crdt_op(op);
-                                    }
-                                }
-                            });
-                            if let Ok(report) = report {
-                                if report.rejected > 0 {
-                                    hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from an Olm-fallback SyncResp for {sid} from {peer_str}", report.rejected);
-                                }
-                                if report.applied > 0 {
-                                    if let Ok(json) = serde_json::to_string(&*state) {
-                                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                            let _ = store.save_server_state(&sid, &json);
-                                        }
-                                    }
-                                    let _ = event_tx.send(NetworkEvent::SyncCompleted {
-                                        server_id: sid, ops_applied: report.applied as u32,
-                                    }).await;
-                                }
-                            }
-                        }
-                    }
-                }
                 // MLS-only envelopes that should never arrive via Olm (they use plaintext
-                // HavenMessage variants instead for epoch resilience).
-                Ok(MessageEnvelope::ServerDelete { .. })
+                // HavenMessage variants instead for epoch resilience). CRDT ops and op-log
+                // sync have no Olm sender at all: ops ride MLS plus the plaintext twin.
+                Ok(MessageEnvelope::CrdtOp { .. })
+                | Ok(MessageEnvelope::SyncReq { .. })
+                | Ok(MessageEnvelope::SyncResp { .. })
+                | Ok(MessageEnvelope::ServerDelete { .. })
                 | Ok(MessageEnvelope::MemberKick { .. })
                 | Ok(MessageEnvelope::Typing { .. })
                 | Ok(MessageEnvelope::ProfileUpdate { .. })
@@ -10482,15 +10158,9 @@ async fn handle_incoming_request(
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
-                                    thumb, voice,
+                                    thumb, voice, false,
                                     requested_file_receipts, declined_file_ids,
                                     ws_cmd_tx, ws_room_peers,
-                                    db_path, db_passphrase,
-                                ).await;
-                            }
-                            MessageEnvelope::FileChunk { fid, idx, data } => {
-                                file_handler::handle_envelope_file_chunk(
-                                    bundle_keypair, event_tx, fid, idx, data,
                                     db_path, db_passphrase,
                                 ).await;
                             }
@@ -10694,86 +10364,30 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // -- Vault/shard envelopes via MLS (same logic as Olm handlers) --
-
-                            MessageEnvelope::ShardStore { inner } => {
-                                let ShardStorePayload { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } = *inner;
-                                vault_ops::handle_envelope_shard_store(
-                                    server_states, pending_shard_streams, olm,
-                                    bundle_keypair, crypto_store, event_tx, ws_cmd_tx,
-                                    ws_room_peers, sender_peer_id,
-                                    sid, cid, si, sk, k, m, total_size, tier, data, chunks,
-                                    db_path, db_passphrase,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ShardChunk { .. } => {
-                                vault_ops::handle_envelope_shard_chunk(&sender_peer_id).await;
-                            }
-
-                            MessageEnvelope::ShardStoreAck { sid, cid, si, ok, err, .. } => {
-                                vault_ops::handle_envelope_shard_store_ack(
-                                    event_tx, sid, cid, si, ok, err,
-                                ).await;
-                            }
-
+                            // -- Vault envelopes via MLS --
+                            // Deletions and manifests go to the whole server; every other
+                            // vault envelope is one peer to another and rides Olm only.
                             MessageEnvelope::ShardDelete { sid, cid } => {
-                                vault_ops::handle_envelope_shard_delete(
+                                vault_ops::handle_shard_delete(
                                     server_states, event_tx,
                                     &sender_peer_id, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
                             }
 
-                            MessageEnvelope::ShardRequest { sid, cid, si, sk, .. } => {
-                                vault_ops::handle_envelope_shard_request(
-                                    server_states, olm, crypto_store,
-                                    bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
-                                    webrtc_peers, pending_webrtc_sends,
-                                    &server_id, sender_peer_id, sid, cid, si, sk,
+                            MessageEnvelope::VaultManifestBroadcast { sid, chid, manifest, .. } => {
+                                vault_ops::ingest_vault_manifest(
+                                    server_states, &sender_peer_id, &sid, &chid, &manifest,
                                     db_path, db_passphrase,
-                                ).await;
+                                );
                             }
 
-                            MessageEnvelope::ShardResponse { sid, cid, si, data, chunks, found, .. } => {
-                                vault_ops::handle_envelope_shard_response(
-                                    pending_shard_streams, event_tx, sender_peer_id,
-                                    sid, cid, si, data, chunks, found,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ShardResponseChunk { .. } => {
-                                vault_ops::handle_envelope_shard_response_chunk().await;
-                            }
-
-                            MessageEnvelope::ShardProbe { sid, cid, .. } => {
-                                vault_ops::handle_envelope_shard_probe(
-                                    server_states, olm, crypto_store,
-                                    bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
-                                    sender_peer_id, sid, cid,
-                                    db_path, db_passphrase,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ShardProbeResponse { sid, cid, shards, .. } => {
-                                vault_ops::handle_envelope_shard_probe_response(
-                                    &sender_peer_id, sid, cid, shards,
-                                ).await;
-                            }
-
-                            MessageEnvelope::VaultManifestBroadcast { sid, cid, chid, manifest } => {
-                                vault_ops::handle_envelope_vault_manifest_broadcast(
-                                    sid, cid, chid, manifest,
-                                    db_path, db_passphrase,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ShardMigrate { sid, cid, si, sk, data, .. } => {
-                                vault_ops::handle_envelope_shard_migrate(
-                                    server_states, &sender_peer_id,
-                                    sid, cid, si, sk, data,
-                                    db_path, db_passphrase,
-                                ).await;
+                            MessageEnvelope::ShardStore { .. }
+                            | MessageEnvelope::ShardStoreAck { .. }
+                            | MessageEnvelope::ShardRequest { .. }
+                            | MessageEnvelope::ShardResponse { .. }
+                            | MessageEnvelope::ShardMigrate { .. } => {
+                                hollow_log!("[HOLLOW-MLS-VAULT] Olm-only vault envelope via MLS from {sender_peer_id}, ignoring");
                             }
 
                             // -- Voice channel signaling --
@@ -12780,14 +12394,19 @@ async fn handle_incoming_request(
             // fresh header answering a request WE made, for the server we made it
             // in, and only while browsing that server as a guest. An unsolicited
             // plaintext header would register a decrypt key and stream bytes to disk.
-            let Some((req_sid, req_at)) = pending_public_file_requests.remove(&file_id) else {
+            let Some((req_sid, asked, req_at)) = pending_public_file_requests.get(&file_id) else {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED unsolicited PublicFileHeader for {file_id} from {peer_str}");
                 return;
             };
-            if req_sid != sid
-                || !guest_rooms.contains(&sid)
-                || req_at.elapsed() > std::time::Duration::from_secs(120)
-            {
+            // Only the peer we asked answers, or anyone in the room could hand the
+            // guest a file of its own under this id.
+            if asked != peer_str {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED PublicFileHeader for {file_id} from {peer_str}: we asked {asked}");
+                return;
+            }
+            let fresh = *req_sid == sid && req_at.elapsed() <= std::time::Duration::from_secs(120);
+            pending_public_file_requests.remove(&file_id);
+            if !fresh || !guest_rooms.contains(&sid) {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED PublicFileHeader for {file_id} from {peer_str} — stale or server mismatch");
                 return;
             }
@@ -12802,7 +12421,7 @@ async fn handle_incoming_request(
                 mid, Some(sid.clone()), Some(cid), ts,
                 Some(aes_key), Some(aes_nonce),
                 None, None,
-                None, false,
+                None, false, true,
                 requested_file_receipts, declined_file_ids,
                 ws_cmd_tx, ws_room_peers,
                 db_path, db_passphrase,

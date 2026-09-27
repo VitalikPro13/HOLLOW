@@ -1,4 +1,6 @@
 #include "ws_handler.h"
+#include "auth_frame.h"
+#include "ring_evict.h"
 #include "crypto.h"
 #include "device_list.h"
 #include "validate.h"
@@ -164,29 +166,22 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
 
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
                          std::string_view message, RelayState& state) {
-    json j;
-    try {
-        j = json::parse(message);
-    } catch (...) {
+    // parse_auth_frame never throws: this frame comes from anyone on the internet.
+    std::optional<AuthFrame> frame = parse_auth_frame(message);
+    if (!frame) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
         ws->end(1008, "bad_auth");
         return;
     }
 
-    if (!j.contains("type") || j["type"] != "auth") {
-        send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
-        ws->end(1008, "bad_auth");
-        return;
-    }
-
-    std::string peer_id = j.value("peer_id", "");
-    std::string public_key = j.value("public_key", "");
-    uint64_t timestamp = j.value("timestamp", uint64_t(0));
-    std::string signature = j.value("signature", "");
-    std::string license_key_val = j.value("license_key", "");
+    std::string peer_id = frame->peer_id;
+    std::string public_key = frame->public_key;
+    uint64_t timestamp = frame->timestamp;
+    std::string signature = frame->signature;
+    std::string license_key_val = frame->license_key;
     const std::string* license_key_ptr = license_key_val.empty() ? nullptr : &license_key_val;
-    bool guest = j.value("guest", false);
-    bool fetch = j.value("fetch", false);
+    bool guest = frame->guest;
+    bool fetch = frame->fetch;
 
     if (peer_id.empty() || public_key.empty() || signature.empty()) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
@@ -326,10 +321,14 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     // Out with the auth, before any join: a device whose identity is gone may
     // never join a room again, and a phone that only wakes for push (a fetch
     // socket) has to act on it too.
-    if (const auto* kill = state.kill_list.find(peer_id)) {
-        send_json(ws, {{"type", "kill_signal"},
-                       {"blob", kill->blob},
-                       {"issued_at_ms", kill->issued_at_ms}});
+    // Every issuer's signal: the relay cannot tell the genuine order from junk,
+    // the device can.
+    if (const auto* kills = state.kill_list.find(peer_id)) {
+        for (const auto& kill : *kills) {
+            send_json(ws, {{"type", "kill_signal"},
+                           {"blob", kill.blob},
+                           {"issued_at_ms", kill.issued_at_ms}});
+        }
         // Operational only: no peer id, no issuer, no blob.
         fprintf(stderr, "[kill] kill_signal delivered\n");
     }
@@ -448,8 +447,7 @@ static void replay_mailbox_no_delete(SSLWebSocket* ws,
 // necessarily carries a higher version. The mark is bumped from ANY list that
 // verifies for the master, whoever carries it, because only the master can mint
 // one — a third party presenting the current list can therefore raise the bar
-// but never lower it. Known limit: the marks are RAM only, so a relay restart
-// forgets them until the next genuine device presents its current list.
+// but never lower it. The marks survive a restart through the snapshot.
 static void maybe_replay_inbox_mailbox(SSLWebSocket* ws, PerSocketData* data,
                                         const std::string& room,
                                         const json& proof_json,
@@ -1210,6 +1208,7 @@ static void handle_kill_deposit(SSLWebSocket* ws, PerSocketData* data, const jso
     if (targets_it == j.end() || !targets_it->is_array()) return;
 
     auto now = std::chrono::steady_clock::now();
+    const int64_t now_wall_ms = static_cast<int64_t>(now_unix_secs()) * 1000;
     size_t stored = 0, seen = 0;
     for (const auto& t : *targets_it) {
         if (++seen > KillList::MAX_TARGETS_PER_DEPOSIT) break;
@@ -1217,15 +1216,22 @@ static void handle_kill_deposit(SSLWebSocket* ws, PerSocketData* data, const jso
         const std::string& target = t.get_ref<const std::string&>();
         // The target is a map KEY, so it must be a peer id and not free text.
         if (!is_peer_id_shape(target)) continue;
-        if (state.kill_list.deposit(target, data->peer_id, blob, issued_at_ms, now)) stored++;
+        if (state.kill_list.deposit(target, data->peer_id, blob, issued_at_ms, now, now_wall_ms)) stored++;
     }
     send_json(ws, {{"type", "kill_deposited"}, {"stored", stored}});
     // No logging - the targets of a destroy are the social graph of an identity.
 }
 
-// The only removal a client can ask for, and always its own: no field is read.
-static void handle_kill_ack(PerSocketData* data, RelayState& state) {
-    state.kill_list.ack(data->peer_id);
+// The only removal a client can ask for, and always its own. `issued_at_ms`
+// names the one signal answered; without it (older clients, and a finished wipe)
+// every signal for the caller goes.
+static void handle_kill_ack(PerSocketData* data, const json& j, RelayState& state) {
+    auto issued_it = j.find("issued_at_ms");
+    if (issued_it != j.end() && issued_it->is_number_integer()) {
+        state.kill_list.ack(data->peer_id, issued_it->get<int64_t>());
+    } else {
+        state.kill_list.ack(data->peer_id);
+    }
 }
 
 // Store a peer's channel push prefs (RAM only, replaced wholesale). The app
@@ -1498,7 +1504,7 @@ static void handle_binary_channel_direct(PerSocketData* data,
     // one 0x09 frame per OFFLINE member, so a flat cap would silently drop
     // delivery for large servers. Abuse is bounded per target instead — the
     // per-sender channel share in buffer_offline_msg plus the channel push
-    // debounce below. See OFFLINE_INJECT_PER_MIN.
+    // debounce below.
     if (!payload.empty()) {
         buffer_offline_msg(target_str, room_str,
                            build_direct_frame(room_code, data->peer_id, payload), state,
@@ -1539,6 +1545,9 @@ static void handle_msg(PerSocketData* data, const std::string& room,
 static void handle_direct(PerSocketData* data, const std::string& room,
                            const std::string& target, const std::string& msg_data,
                            RelayState& state) {
+    // The JSON twin of 0x04, refused to guests like the binary form: a deposit
+    // wakes the target's phone.
+    if (data->is_guest) return;
     // The target becomes an offline_buffer KEY on the miss path below.
     if (!is_peer_id_shape(target)) return;
 
@@ -1720,9 +1729,10 @@ static void handle_binary_direct_msg(PerSocketData* data,
         // membership to verify against: any authenticated peer can reach this
         // branch with any room code and any target peer_id. That is deliberate
         // (a first DM to an offline peer legitimately has no live room), but it
-        // makes this the widest deposit primitive on the relay, so it carries
-        // the rate limit AND the per-sender buffer share. The frame itself is
-        // ciphertext the target's client verifies and drops if unwanted.
+        // makes this the widest deposit primitive on the relay. It carries the
+        // per-sender buffer share and the push budget, no rate limit (see
+        // buffer_offline_msg). The frame itself is ciphertext the target's
+        // client verifies and drops if unwanted.
         if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
             buffer_offline_msg(target_str, room_str,
                                build_direct_frame(room_code, data->peer_id, payload), state,
@@ -1842,12 +1852,16 @@ static void handle_binary_topic_msg(PerSocketData* data,
                                  std::chrono::steady_clock::now(), seq});
             tb.bytes += forwarded.size();
             state.buffer_total_bytes += forwarded.size();
+            // A full ring drops the oldest frame of whoever holds the most. A frame
+            // taken from the middle leaves a stale eviction ref, which the budget
+            // evictor skips by its seq.
             while (!tb.frames.empty() &&
                    (tb.frames.size() > MAX_TOPIC_BUFFER_MSGS || tb.bytes > MAX_TOPIC_BUFFER_BYTES)) {
-                size_t sz = tb.frames.front().frame.size();
+                auto victim = tb.frames.begin() + ring_victim(tb.frames);
+                size_t sz = victim->frame.size();
                 tb.bytes -= std::min(tb.bytes, sz);
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
-                tb.frames.pop_front();
+                tb.frames.erase(victim);
                 state.buffer_index.released_topic();
             }
             evict_over_budget(state);
@@ -2299,7 +2313,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     } else if (type == "kill_deposit") {
         handle_kill_deposit(ws, data, j, state);
     } else if (type == "kill_ack") {
-        handle_kill_ack(data, state);
+        handle_kill_ack(data, j, state);
     } else if (type == "set_push_prefs") {
         handle_set_push_prefs(data, j, state);
     } else if (type == "set_offline_buffer") {
@@ -2480,8 +2494,14 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
         .message = [&state, &config](SSLWebSocket* ws, std::string_view message, uWS::OpCode opCode) {
             auto* data = ws->getUserData();
 
+            // Nothing a client sends may unwind into uSockets' C frames: that ends
+            // the process, and an abnormal exit takes no snapshot.
             if (!data->authenticated) {
-                handle_auth(ws, data, message, state);
+                try {
+                    handle_auth(ws, data, message, state);
+                } catch (const std::exception&) {
+                    ws->end(1008, "bad_auth");
+                }
                 return;
             }
 
@@ -2505,7 +2525,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 
                     // Guest binary restrictions
                     if (data->is_guest) {
-                        if (opcode == 0x04 || opcode == 0x08 || opcode == 0x09) return; // no SendDirect for guests
+                        // No SendDirect and no channel topic for guests: the web
+                        // viewer only reads, and 0x07 feeds the catch-up rings.
+                        if (opcode == 0x04 || opcode == 0x07 || opcode == 0x08 || opcode == 0x09) return;
                         if (opcode == 0x03) {
                             auto now = std::chrono::steady_clock::now();
                             if ((now - data->minute_window_start) > std::chrono::seconds(60)) {
@@ -2518,6 +2540,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                         }
                     }
 
+                    try {
                     switch (opcode) {
                         // 0x01 intentionally unhandled — see the note above
                         // handle_binary_direct. It was an unauthorized
@@ -2546,6 +2569,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                             break;
                         default:
                             break;
+                    }
+                    } catch (const std::exception&) {
+                        return;
                     }
                 }
             }

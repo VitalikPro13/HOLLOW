@@ -129,7 +129,9 @@ pub enum WsCommand {
     KillDeposit { targets: Vec<String>, issued_at_ms: i64, blob: String },
     /// Delete OUR OWN parked entry. Sent after a wipe and after a PERMANENT
     /// rejection: without it the relay re-sends on every auth for a year.
-    KillAck,
+    /// `issued_at_ms` names the one signal answered, so turning away a junk
+    /// deposit never takes a genuine order with it; `None` clears them all.
+    KillAck { issued_at_ms: Option<i64> },
     /// Drop this device's push token from the relay (wipe step 5). No reply.
     UnregisterPushToken,
     /// File a user report with the relay. One-shot — deliberately NOT cached
@@ -1100,8 +1102,11 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::KillAck => {
-            let msg = serde_json::json!({ "type": "kill_ack" });
+        WsCommand::KillAck { issued_at_ms } => {
+            let mut msg = serde_json::json!({ "type": "kill_ack" });
+            if let Some(stamp) = issued_at_ms {
+                msg["issued_at_ms"] = serde_json::json!(stamp);
+            }
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] KillAck send failed: {e}");
                 return false;

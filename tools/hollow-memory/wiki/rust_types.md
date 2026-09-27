@@ -492,7 +492,7 @@ These use plaintext HavenMessage instead of MLS MessageEnvelope so they survive 
 
 - **`RecoveryHello { server_id, manifest_ids, shard_inventory_json }`** — `"recovery_hello"` — sent when joining a recovery pool room. Lists locally available vault manifests and shard inventory.
 - **`RecoveryWelcome { manifest_ids, shard_inventory_json }`** — `"recovery_welcome"` — reply from existing pool members to a new joiner.
-- **`RecoveryManifestSync { manifests_json }`** — `"recovery_manifest_sync"` — coordinator broadcasts the merged manifest set.
+- ~~`RecoveryManifestSync`~~ — deleted 2026-09-27 (HOL-SEC-026): it had no sender and let any room peer overwrite the pool's manifest metadata.
 - **`RecoveryTransferPlan { plan_json }`** — `"recovery_transfer_plan"` — coordinator assigns shard transfers (who sends which shard to whom).
 - **`RecoveryShardReceived { content_id, shard_index }`** — `"recovery_shard_received"` — broadcast when a shard arrives in the pool.
 - **`RecoveryStatus { status_json }`** — `"recovery_status"` — coordinator broadcasts pool-wide status for the dashboard.

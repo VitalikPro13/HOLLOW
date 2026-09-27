@@ -216,6 +216,49 @@ pub(crate) fn file_meta_write_allowed(
     false
 }
 
+/// Why a FileHeader may not deliver anything for `fid`, `None` when it may. The ONE
+/// gate every header arm runs before it consumes a receipt, registers a key or
+/// writes a byte.
+///
+/// The owner guard protects only the card, but the key a header registers is what
+/// the file's stream decrypts under and inline bytes are the file itself. So a
+/// header for a file we hold a row for comes from its owner or from the holder we
+/// `asked`; a channel header comes from a current member who can read the channel.
+pub(crate) fn file_header_refused(
+    store: &crate::storage::MessageStore,
+    server_states: &HashMap<String, ServerState>,
+    fid: &str,
+    sid: Option<&str>,
+    cid: Option<&str>,
+    sender: &str,
+    asked: bool,
+) -> Option<&'static str> {
+    let master = super::resolver::resolve(sender);
+    if let Some(sid) = sid {
+        let reader = cid.zip(server_states.get(sid))
+            .is_some_and(|(cid, s)| s.is_member(&master) && s.can_see_channel(&master, cid));
+        if !reader {
+            return Some("not a member who can read the channel");
+        }
+    }
+    match store.get_file_metadata(fid) {
+        Ok(Some(row)) if !asked && super::resolver::resolve(&row.sender_id) != master => {
+            Some("the file belongs to someone else")
+        }
+        _ => None,
+    }
+}
+
+/// Whether `fid`'s bytes are already on disk. A file's content never changes once
+/// written, so no header, stream or chunk may deliver it again.
+pub(crate) fn file_bytes_on_disk(store: &crate::storage::MessageStore, fid: &str) -> bool {
+    matches!(
+        store.get_file_metadata(fid),
+        Ok(Some(meta)) if meta.completed_at.is_some()
+            && meta.disk_path.as_ref().is_some_and(|p| std::path::Path::new(p).exists())
+    )
+}
+
 /// The file card riding a verified sync item, when it may land. The item's
 /// signature binds `file_id` but not the `file_meta` blob, so the blob must
 /// describe exactly that file, and ownership is judged against the item's verified
@@ -1623,8 +1666,10 @@ async fn send_channel_file(
         .map(|s| s.members.len())
         .unwrap_or(0);
     // Stream images to online peers even in vault mode (instant display).
-    // Non-image files in 6+ servers use vault shards only.
-    let use_vault_only = member_count >= 6 && !is_image;
+    // Non-image files in 6+ servers use vault shards only, except in a restricted
+    // channel, which the vault never takes.
+    let restricted = server_states.get(sid).is_some_and(|s| s.channel_uses_subgroup(cid));
+    let use_vault_only = member_count >= 6 && !is_image && !restricted;
 
     let has_share_ref = share_ref.is_some();
 
@@ -2046,10 +2091,6 @@ pub(crate) async fn handle_request_file(
     // No row of our own (a guest pull, a file we only know by id): a single direct
     // send to whichever device of the named identity is reachable. There is no
     // context to queue against, so there is no ask to keep.
-    let offset = pending_ws_transfers
-        .get(&file_id)
-        .map(|s| s.bytes_received)
-        .unwrap_or(0);
     let target = if ws_room_peers.values().any(|peers| peers.contains(&peer_id_str)) {
         Some(peer_id_str.clone())
     } else {
@@ -2062,6 +2103,11 @@ pub(crate) async fn handle_request_file(
     };
     match target {
         Some(t) => {
+            let offset = pending_ws_transfers
+                .get(&file_id)
+                .filter(|s| s.sender == t)
+                .map(|s| s.bytes_received)
+                .unwrap_or(0);
             hollow_log!("[HOLLOW-FILE] Requesting rowless file {file_id} from {t} (offset {offset})");
             send_message_to_peer(
                 ws_cmd_tx,
@@ -2249,8 +2295,12 @@ pub(crate) async fn handle_completed_stream(
     use ws_stream_transfer::StreamKind;
 
     // Share chunks have their own completion path (handle_webrtc_share_chunk_complete)
-    // and never flow through this function — early return defensively.
-    if matches!(request.kind, StreamKind::ShareChunk { .. }) { return; }
+    // and never ride the WS stream lane, so one arriving here is nobody's: drop it
+    // with its temp.
+    if matches!(request.kind, StreamKind::ShareChunk { .. }) {
+        let _ = tokio::fs::remove_file(&request.temp_path).await;
+        return;
+    }
 
     match request.kind {
         StreamKind::ShareChunk { .. } => unreachable!(),
@@ -2517,6 +2567,12 @@ async fn handle_shard_stream_complete(
         let data_dir = crate::identity::data_dir().unwrap_or_default();
         let vault_dir = data_dir.join("vault");
         if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
+            let key = crate::vault::content_store::shard_key(&pss.content_id, pss.shard_index);
+            if content_store.has_shard(&key).unwrap_or(true) {
+                hollow_log!("[HOLLOW-VAULT] Shard {shard_index} of {content_id} from {sender_peer} dropped: already held");
+                let _ = tokio::fs::remove_file(&request.temp_path).await;
+                return;
+            }
             let tier = crate::vault::content_store::StorageTier::from_str(&pss.tier);
             let _ = content_store.store_shard(
                 &pss.server_id, &pss.content_id, pss.shard_index,
@@ -2806,6 +2862,9 @@ pub(crate) async fn handle_envelope_file_header(
     share_ref: Option<super::types::ShareRef>,
     thumb: Option<String>,
     voice: bool,
+    // The answer to a guest pull, from the peer we asked (the caller checked the
+    // receipt): we hold no membership to judge the channel by.
+    from_guest_pull: bool,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -2814,6 +2873,16 @@ pub(crate) async fn handle_envelope_file_header(
     db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FILE] MLS FileHeader: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
+
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let judged_sid = if from_guest_pull { None } else { sid.as_deref() };
+    if let Some(reason) = file_header_refused(
+        &store, server_states, &fid, judged_sid, cid.as_deref(), &sender_peer_id, from_guest_pull,
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {sender_peer_id}: {reason}");
+        return;
+    }
+    let complete = file_bytes_on_disk(&store, &fid);
 
     // Explicit pull — bypasses the size cap and the auto-download gate
     // (mirrors the DM/Olm header arm in swarm.rs; issue #41).
@@ -2848,24 +2917,31 @@ pub(crate) async fn handle_envelope_file_header(
     // size-capped — see accept_header_thumb.
     let thumb = accept_header_thumb(thumb, img, &mime);
 
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        // Owner guard (0.8.5): MLS proves the sender is a group member, not
-        // that this `file_id` is theirs to relabel. See `file_meta_write_allowed`.
-        if file_meta_write_allowed(&store, &fid, &sender_peer_id) {
-            let _ = store.insert_file_metadata(
-                &fid, &name, &ext, &mime,
-                size, chunks, img,
-                w, h,
-                mid.as_deref(), ctx_type, &ctx_id,
-                &sender_peer_id, false, ts,
-                vthumb.as_ref(), thumb.as_deref(),
-            );
-            // Persist the share back-reference (issue #41) so a manual
-            // download can rejoin the share swarm after a restart.
-            if let Some(sr) = share_ref.as_ref() {
-                let _ = store.set_file_share_ref(&fid, sr);
-            }
+    // Owner guard (0.8.5): MLS proves the sender is a group member, not
+    // that this `file_id` is theirs to relabel. See `file_meta_write_allowed`.
+    let meta_written = file_meta_write_allowed(&store, &fid, &sender_peer_id);
+    if meta_written {
+        let _ = store.insert_file_metadata(
+            &fid, &name, &ext, &mime,
+            size, chunks, img,
+            w, h,
+            mid.as_deref(), ctx_type, &ctx_id,
+            &sender_peer_id, false, ts,
+            vthumb.as_ref(), thumb.as_deref(),
+        );
+        // Persist the share back-reference (issue #41) so a manual
+        // download can rejoin the share swarm after a restart.
+        if let Some(sr) = share_ref.as_ref() {
+            let _ = store.set_file_share_ref(&fid, sr);
         }
+    }
+    drop(store);
+    if complete {
+        pending_file_streams.remove(&fid);
+        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+        hollow_log!("[HOLLOW-FILE] MLS FileHeader for {fid} registers nothing: already complete on disk");
     }
 
     // AUTO-DOWNLOAD GATE (#41), mirroring the DM/Olm arm: metadata above still
@@ -2875,7 +2951,7 @@ pub(crate) async fn handle_envelope_file_header(
     let auto_ok = explicitly_requested
         || pending_file_streams.contains_key(&fid)
         || auto_download_allows(size, &name, &ext, &format!("server:{server_id}"), voice);
-    if !auto_ok && share_ref.is_none() && aes_key.is_some() {
+    if !complete && !auto_ok && share_ref.is_none() && aes_key.is_some() {
         declined_file_ids.insert(fid.clone());
         if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
             let _ = tokio::fs::remove_file(&temp_path).await;
@@ -2890,7 +2966,7 @@ pub(crate) async fn handle_envelope_file_header(
 
     // Register pending stream so binary file bytes can be decrypted on arrival.
     // Skip for share-backed files — no binary data arrives via P2P, Share handles delivery.
-    if auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+    if !complete && auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
         register_pending_file_stream_and_reprocess(
             &fid, ak, an, &name, &ext, &sender_peer_id, server_id,
             &sid, &cid, &mid, img, w, h,
@@ -2912,7 +2988,8 @@ pub(crate) async fn handle_envelope_file_header(
         server_id: sid.unwrap_or_else(|| server_id.to_string()),
         channel_id: cid.unwrap_or_default(),
         video_thumb: vthumb,
-        share_ref,
+        // Dart starts a share download from this, so only the card's owner names one.
+        share_ref: share_ref.filter(|_| meta_written),
         thumb_b64: thumb,
     }).await;
 }
@@ -3042,85 +3119,6 @@ async fn register_pending_file_stream_and_reprocess(
     }
 }
 
-/// Handle `MessageEnvelope::FileChunk` — write chunk + assemble on completion.
-pub(crate) async fn handle_envelope_file_chunk(
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    fid: String,
-    idx: u32,
-    data: String,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    let chunk_bytes = match base64::engine::general_purpose::STANDARD.decode(&data) {
-        Ok(b) => b,
-        Err(e) => {
-            hollow_log!("[HOLLOW-FILE] MLS chunk decode failed: {e}");
-            return;
-        }
-    };
-
-    if let Err(e) = file_transfer::write_chunk(&fid, idx, &chunk_bytes) {
-        hollow_log!("[HOLLOW-FILE] {e}");
-    } else {
-        ingest_file_chunk_progress(fid, idx, event_tx, db_path, db_passphrase).await;
-    }
-}
-
-/// DB-side chunk ingest: mark the chunk received, emit FileProgress, and
-/// assemble + mark complete when all chunks have arrived (event emit order:
-/// FileProgress first, then FileCompleted/FileFailed — unchanged).
-async fn ingest_file_chunk_progress(
-    fid: String,
-    idx: u32,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        if let Ok(received) = store.mark_chunk_received(&fid, idx) {
-            if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
-                let _ = event_tx.send(NetworkEvent::FileProgress {
-                    file_id: fid.clone(),
-                    chunks_received: received,
-                    total_chunks: file_meta.chunk_count,
-                }).await;
-
-                if received >= file_meta.chunk_count {
-                    let completion = assemble_completed_chunked_file(
-                        &store, &fid, file_meta.chunk_count, &file_meta.file_ext,
-                    );
-                    let _ = event_tx.send(completion).await;
-                }
-            }
-        }
-    }
-}
-
-/// Assemble a fully-received chunked file and mark it complete in the store.
-/// Sync (takes the already-open store) — returns the completion/failure event
-/// for the async caller to emit.
-fn assemble_completed_chunked_file(
-    store: &crate::storage::MessageStore,
-    fid: &str,
-    chunk_count: u32,
-    file_ext: &str,
-) -> NetworkEvent {
-    let final_path = file_transfer::final_file_path(fid, file_ext);
-    match file_transfer::assemble_file(fid, chunk_count, &final_path) {
-        Ok(()) => {
-            let disk_path = final_path.to_string_lossy().to_string();
-            let _ = store.mark_file_complete(fid, &disk_path);
-            hollow_log!("[HOLLOW-FILE] MLS file {fid} complete: {disk_path}");
-            NetworkEvent::FileCompleted { file_id: fid.to_string(), disk_path }
-        }
-        Err(e) => {
-            hollow_log!("[HOLLOW-FILE] MLS assembly failed: {e}");
-            NetworkEvent::FileFailed { file_id: fid.to_string(), error: e }
-        }
-    }
-}
-
 /// Handle `MessageEnvelope::BroadcastMeta` — gossip relay tree dedup + pending relay registration.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_broadcast_meta(
@@ -3154,6 +3152,100 @@ pub(crate) async fn handle_envelope_broadcast_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One MLS FileHeader for `fid` in `srv`'s #general from `sender`, answering an
+    /// explicit pull so the auto-download setting plays no part.
+    async fn deliver_header(
+        states: &HashMap<String, ServerState>,
+        pending: &mut HashMap<String, PendingFileStream>,
+        sender: &str,
+        fid: &str,
+        path: &str,
+        pass: &str,
+    ) {
+        let (tx, _rx) = mpsc::channel(64);
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut receipts = HashMap::from([(fid.to_string(), std::time::Instant::now())]);
+        handle_envelope_file_header(
+            states, pending, &mut HashMap::new(), &mut HashMap::new(),
+            &crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[9; 32]), &tx,
+            "srv", sender.to_string(),
+            fid.to_string(), "a.png".into(), "png".into(), "image/png".into(), 10, 0, true, None, None,
+            Some("m1".into()), Some("srv".into()), Some("srv-general".into()), 1,
+            Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, false,
+            &mut receipts, &mut std::collections::HashSet::new(), &ws_tx, &HashMap::new(),
+            path, pass,
+        ).await;
+    }
+
+    /// The Olm and push header arms run the same gate before anything else: the
+    /// unit test above drives only the MLS handler.
+    #[test]
+    fn file_header_gate_stays_wired() {
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let read = |f: &str| std::fs::read_to_string(node.join(f)).expect("read node source");
+        let (swarm, fetch) = (read("swarm.rs"), read("fetch.rs"));
+        let arm = |src: &str, from: &str, to: &str| {
+            let start = src.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = src[start..].find(to).unwrap_or_else(|| panic!("missing {to}"));
+            src[start..start + end].to_string()
+        };
+        let olm = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "requested_file_receipts");
+        assert!(olm.contains("file_handler::file_header_refused("), "swarm.rs: the Olm header arm skips the gate");
+        let push = arm(&fetch, "fn handle_file_header(", "inline_bytes.is_some()");
+        assert!(push.contains("file_header_refused(") && push.contains("file_bytes_on_disk("), "fetch.rs: the push header skips the gate");
+    }
+
+    /// H1, H2, H6: a FileHeader registers the key its file's bytes decrypt under,
+    /// so it lands only from the file's owner (or a holder we asked), only from a
+    /// member who can read the channel, and never for bytes already on disk. Each
+    /// refused header is a well-formed MLS header from its own sender.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_file_header_delivers_only_for_its_owner() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hdr.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv", "S", 1);
+        let (bob, mallory, stranger) = (
+            crate::crdt::testkeys::keys(2).1,
+            crate::crdt::testkeys::keys(3).1,
+            crate::crdt::testkeys::keys(4).1,
+        );
+        for id in [&bob, &mallory] {
+            let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberAdded {
+                peer_id: id.clone(),
+                display_name: "m".into(),
+            });
+            state.apply_op(&op).unwrap();
+        }
+        let states = HashMap::from([("srv".to_string(), state)]);
+        let store = || crate::storage::MessageStore::open(&path, &pass).unwrap();
+        store().insert_file_metadata(
+            "f1", "a.png", "png", "image/png", 10, 0, true, None, None, Some("m1"),
+            "channel", "srv:srv-general", &bob, false, 1, None, None,
+        ).unwrap();
+        let mut pending = HashMap::new();
+
+        deliver_header(&states, &mut pending, &mallory, "f1", &path, &pass).await;
+        assert!(!pending.contains_key("f1"), "a member registered a key for Bob's file");
+        deliver_header(&states, &mut pending, &stranger, "f2", &path, &pass).await;
+        assert!(!pending.contains_key("f2"), "a non-member registered a key in the channel");
+        assert!(
+            file_header_refused(&store(), &states, "f1", Some("srv"), Some("srv-general"), &mallory, true).is_none(),
+            "the holder we asked answers for Bob's file",
+        );
+
+        deliver_header(&states, &mut pending, &bob, "f1", &path, &pass).await;
+        assert_eq!(pending.remove("f1").map(|p| p.sender), Some(bob.clone()));
+
+        let bytes = tmp.path().join("f1.png");
+        std::fs::write(&bytes, b"done").unwrap();
+        store().mark_file_complete("f1", &bytes.to_string_lossy()).unwrap();
+        deliver_header(&states, &mut pending, &bob, "f1", &path, &pass).await;
+        assert!(!pending.contains_key("f1"), "a completed file took a new key");
+    }
 
     /// FILE-2 regression. The auto-download exemption is the one way a pushed
     /// transfer writes bytes in a conversation the user gated, so it has to name a

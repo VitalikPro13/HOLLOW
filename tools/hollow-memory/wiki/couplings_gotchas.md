@@ -605,7 +605,7 @@ flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust
 
 **Where:**
 - `sync_handler.rs` -- `handle_envelope_crdt_op()`, `handle_envelope_sync_req()`, `handle_envelope_sync_resp()`, `handle_envelope_channel_sync_req()`, `handle_envelope_channel_sync_batch()`, `handle_envelope_server_delete()`, `handle_envelope_member_kick()`, `handle_envelope_channel_probe()`, `handle_envelope_channel_probe_resp()`
-- `file_handler.rs` -- `handle_envelope_file_header()`, `handle_envelope_file_chunk()`, `handle_envelope_broadcast_meta()`
+- `file_handler.rs` -- `handle_envelope_file_header()`, `handle_envelope_broadcast_meta()`
 - `message_ops.rs` -- message-related envelope handling
 - `swarm.rs` -- the MLS decrypt match block dispatches to these
 

@@ -69,6 +69,9 @@ static snapshot::Data sample() {
 
     d.kills.push_back({"12D3KooWTargetOne", "12D3KooWSenderA", "Y2lwaGVy", 1757000000000, 900});
     d.kills.push_back({"12D3KooWTargetTwo", "12D3KooWSenderA", std::string(2048, 'k'), 1757000001000, 0});
+
+    d.marks.push_back({"12D3KooWMasterOne", 7});
+    d.marks.push_back({"12D3KooWMasterTwo", 1ull << 40});
     return d;
 }
 
@@ -108,6 +111,42 @@ static const unsigned char V1_FIXTURE[] = {
     0x07, 0x00, 0x00, 0x00, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x6c, 0x03,
     0x00, 0x00, 0x00, 0x61, 0x6c, 0x6c, 0x48, 0x52, 0x53, 0x45,
 };
+
+// A byte-exact VERSION 2 snapshot, written by the encoder before `marks` existed.
+// 226 bytes, VERSION 2
+static const unsigned char V2_FIXTURE[] = {
+    0x48, 0x52, 0x53, 0x4e, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x15, 0x00, 0x00, 0x00, 0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57,
+    0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x54, 0x61, 0x72, 0x67, 0x65,
+    0x74, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x64, 0x6d, 0x72,
+    0x6f, 0x6f, 0x6d, 0x05, 0x00, 0x00, 0x00, 0x06, 0x00, 0x70, 0x61, 0x79,
+    0x15, 0x00, 0x00, 0x00, 0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57,
+    0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x53, 0x65, 0x6e, 0x64, 0x65,
+    0x72, 0x3c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x31,
+    0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78, 0x74, 0x75,
+    0x72, 0x65, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74, 0x10, 0x0e, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00,
+    0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78, 0x74,
+    0x75, 0x72, 0x65, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74, 0x15, 0x00, 0x00,
+    0x00, 0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78,
+    0x74, 0x75, 0x72, 0x65, 0x53, 0x65, 0x6e, 0x64, 0x65, 0x72, 0x04, 0x00,
+    0x00, 0x00, 0x62, 0x32, 0x73, 0x3d, 0x00, 0x62, 0x5c, 0x15, 0x99, 0x01,
+    0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 0x48, 0x52, 0x53, 0x45,
+};
+
+// The same state, as this build models it.
+static snapshot::Data v2_sample() {
+    snapshot::Data d;
+    snapshot::DmQueue q;
+    q.target = "12D3KooWFixtureTarget";
+    q.frames.push_back({"dmroom", std::string("\x06\x00pay", 5), "12D3KooWFixtureSender", 60, false, false, 3});
+    d.dm.push_back(q);
+    d.optin.push_back({"12D3KooWFixtureTarget", 3600});
+    d.kills.push_back({"12D3KooWFixtureTarget", "12D3KooWFixtureSender", "b2s=", 1757000000000, 30});
+    return d;
+}
 
 // The same state, as this build models it.
 static snapshot::Data v1_sample() {
@@ -190,6 +229,10 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
         if (x.target != y.target || x.issuer != y.issuer || x.blob != y.blob ||
             x.issued_at_ms != y.issued_at_ms || x.age_secs != y.age_secs) return false;
     }
+    if (a.marks.size() != b.marks.size()) return false;
+    for (size_t i = 0; i < a.marks.size(); i++) {
+        if (a.marks[i].master != b.marks[i].master || a.marks[i].version != b.marks[i].version) return false;
+    }
     return true;
 }
 
@@ -210,6 +253,9 @@ int main() {
                                       out.kills[0].issuer == "12D3KooWSenderA" &&
                                       out.kills[1].blob.size() == 2048 &&
                                       out.kills[1].issued_at_ms == 1757000001000);
+        check("device-list marks survive, in order", out.marks.size() == 2 &&
+                                                     out.marks[0].master == "12D3KooWMasterOne" &&
+                                                     out.marks[1].version == (1ull << 40));
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
     }
 
@@ -221,7 +267,7 @@ int main() {
         check("empty snapshot decodes", snapshot::decode(bytes, out));
         check("empty snapshot is empty", out.dm.empty() && out.optin.empty() && out.topics.empty() &&
                                          out.push_tokens.empty() && out.push_prefs.empty() &&
-                                         out.kills.empty());
+                                         out.kills.empty() && out.marks.empty());
     }
 
     // Every proper prefix is refused and leaves `out` untouched.
@@ -290,13 +336,13 @@ int main() {
     {
         std::string_view v1(reinterpret_cast<const char*>(V1_FIXTURE), sizeof(V1_FIXTURE));
         snapshot::Data out;
-        check("the v1 fixture decodes under the v2 reader", snapshot::decode(v1, out));
+        check("the v1 fixture decodes under this reader", snapshot::decode(v1, out));
         check("a v1 snapshot carries no kills", out.kills.empty());
         check("every other v1 field is unchanged", same(v1_sample(), out));
 
         std::string rewritten = snapshot::encode(out);
         snapshot::Data again;
-        check("a restored v1 snapshot is written back as version 2",
+        check("a restored v1 snapshot is written back at this version",
               rewritten != std::string(v1) && snapshot::decode(rewritten, again) &&
               same(v1_sample(), again));
 
@@ -304,6 +350,16 @@ int main() {
         zero_version[4] = 0;
         snapshot::Data untouched;
         check("a version below the floor is refused", !snapshot::decode(zero_version, untouched));
+    }
+
+    // I10: the relay that introduces the marks takes back what the previous
+    // build handed over.
+    {
+        std::string_view v2(reinterpret_cast<const char*>(V2_FIXTURE), sizeof(V2_FIXTURE));
+        snapshot::Data out;
+        check("the v2 fixture decodes under this reader", snapshot::decode(v2, out));
+        check("a v2 snapshot carries no marks", out.marks.empty());
+        check("every v2 field is unchanged", same(v2_sample(), out));
     }
 
     if (failures) {
