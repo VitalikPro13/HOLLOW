@@ -527,21 +527,7 @@ pub(crate) fn channel_sync_items(
             }).collect())
             .unwrap_or_default();
         let file_meta = m.file_id.as_ref().and_then(|fid| {
-            file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
-                fid: f.file_id.clone(),
-                name: f.file_name.clone(),
-                ext: f.file_ext.clone(),
-                mime: f.mime_type.clone(),
-                size: f.size_bytes,
-                img: f.is_image,
-                w: f.width,
-                h: f.height,
-                mid: f.message_id.clone(),
-                ts: f.created_at,
-                sender: f.sender_id.clone(),
-                vthumb: f.video_thumb.clone(),
-                thumb: f.thumb_b64.clone(),
-            })
+            file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem::from_stored(f, f.sender_id.clone()))
         });
         // Deletion proof rides with the hidden flag (REJECT-ABSENT on apply).
         let (hidden_at, hidden_sig, hidden_pk) = super::message_ops::deletion_proof_fields(
@@ -3635,7 +3621,7 @@ fn apply_sync_item_extras(
         }
     }
     if let Some(fm) = super::file_handler::synced_file_meta(
-        store, msg.file_meta.as_ref(), msg.file_id.as_deref(), &msg.s,
+        store, msg.file_meta.as_ref(), msg.file_id.as_deref(), msg.mid.as_deref(), &msg.s,
     ) {
         let ctx_id = format!("{sid}:{cid}");
         let thumb = super::file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime);
@@ -3644,7 +3630,7 @@ fn apply_sync_item_extras(
             fm.size, 0, fm.img, fm.w, fm.h,
             msg.mid.as_deref(), "channel", &ctx_id,
             &msg.s, is_mine, fm.ts,
-            fm.vthumb.as_ref(), thumb.as_deref(),
+            fm.vthumb.as_ref(), thumb.as_deref(), fm.sha256.as_deref(),
         );
         events.push(NetworkEvent::FileHeaderReceived {
             file_id: fm.fid.clone(), file_name: fm.name.clone(),

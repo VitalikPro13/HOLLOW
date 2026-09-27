@@ -6099,21 +6099,7 @@ fn build_dm_sync_items(
             }).collect())
             .unwrap_or_default();
         let file_meta = m.file_id.as_ref().and_then(|fid| {
-            file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
-                fid: f.file_id.clone(),
-                name: f.file_name.clone(),
-                ext: f.file_ext.clone(),
-                mime: f.mime_type.clone(),
-                size: f.size_bytes,
-                img: f.is_image,
-                w: f.width,
-                h: f.height,
-                mid: f.message_id.clone(),
-                ts: f.created_at,
-                sender: f.sender_id.clone(),
-                vthumb: f.video_thumb.clone(),
-                thumb: f.thumb_b64.clone(),
-            })
+            file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem::from_stored(f, f.sender_id.clone()))
         });
         // Deletion proof rides with the hidden flag (REJECT-ABSENT on apply).
         let (hidden_at, hidden_sig, hidden_pk) = message_ops::deletion_proof_fields(
@@ -7592,7 +7578,7 @@ async fn handle_incoming_request(
                             // device id, so it matches where the message row is stored and
                             // `_reloadChatForFile` reloads the right thread.
                             if let Some(fm) = file_handler::synced_file_meta(
-                                &store, msg.file_meta.as_ref(), msg.file_id.as_deref(), sender_m,
+                                &store, msg.file_meta.as_ref(), msg.file_id.as_deref(), msg.mid.as_deref(), sender_m,
                             ) {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
@@ -7601,6 +7587,7 @@ async fn handle_incoming_request(
                                     sender_m, false, fm.ts,
                                     fm.vthumb.as_ref(),
                                     file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
+                                    fm.sha256.as_deref(),
                                 );
                                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
@@ -7836,7 +7823,7 @@ async fn handle_incoming_request(
 
                             // File metadata (so the card renders; bytes fetch on demand).
                             if let Some(fm) = file_handler::synced_file_meta(
-                                &store, msg.file_meta.as_ref(), msg.file_id.as_deref(), sender_m,
+                                &store, msg.file_meta.as_ref(), msg.file_id.as_deref(), msg.mid.as_deref(), sender_m,
                             ) {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
@@ -7845,6 +7832,7 @@ async fn handle_incoming_request(
                                     sender_m, false, fm.ts,
                                     fm.vthumb.as_ref(),
                                     file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
+                                    fm.sha256.as_deref(),
                                 );
                                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
@@ -8014,7 +8002,7 @@ async fn handle_incoming_request(
                 }
                 // -- File transfer receive handlers --
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, album, inline_bytes, thumb, voice, .. } = *inner;
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, album, inline_bytes, thumb, voice, author, sha256, .. } = *inner;
                     // Envelope-borne thumb: image blur placeholder or video
                     // poster, size-capped — see accept_header_thumb.
                     let thumb = file_handler::accept_header_thumb(thumb, img, &mime);
@@ -8028,12 +8016,20 @@ async fn handle_incoming_request(
                         || pending_file_streams.get(&fid).is_some_and(|p| p.sender == peer_str);
                     if let Some(reason) = file_handler::file_header_refused(
                         &store, server_states, &fid, sid.as_deref(), cid.as_deref(), peer_str, asked,
-                    ) {
+                    ).or_else(|| super::file_commit::header_claim_refused(
+                        &fid, author.as_deref(), mid.as_deref(), size, sha256.as_deref(), &name, &ext,
+                        vthumb.as_ref(), peer_str, asked,
+                    )) {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {peer_str}: {reason}");
                         return;
                     }
                     let already_complete = file_handler::file_bytes_on_disk(&store, &fid);
                     drop(store);
+                    // A committed card belongs to the author its id names, whoever delivered it.
+                    let card_owner = match author.as_deref() {
+                        Some(a) if super::file_commit::is_committed_id(&fid) => a.to_string(),
+                        _ => peer_str.to_string(),
+                    };
 
                     // Explicit pull (manual Download / sweep / guest request)?
                     // Consumes the receipt; bypasses the size cap AND the
@@ -8129,8 +8125,8 @@ async fn handle_incoming_request(
                                 size, chunks, img,
                                 w, h,
                                 mid.as_deref(), ctx_type, &ctx_id,
-                                &peer_str, false, ts,
-                                vthumb.as_ref(), thumb.as_deref(),
+                                &card_owner, false, ts,
+                                vthumb.as_ref(), thumb.as_deref(), sha256.as_deref(),
                             );
                             // Persist the share back-reference (issue #41) so a
                             // manual download can rejoin the share swarm after a
@@ -8262,6 +8258,11 @@ async fn handle_incoming_request(
                                     // directory, so a peer that chooses the name
                                     // chooses the directory.
                                     hollow_log!("[HOLLOW-SECURITY] REJECTED inline FileHeader from {peer_str}: bad file id or extension");
+                                } else if let Some(reason) = match crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                    Ok(store) => super::file_commit::completion_refused(&store, &fid, &plaintext),
+                                    Err(_) => Some("the store could not be opened"),
+                                } {
+                                    hollow_log!("[HOLLOW-SECURITY] REJECTED inline bytes for {fid} from {peer_str}: {reason}");
                                 } else {
                                     let files_dir = file_transfer::files_dir();
                                     let _ = tokio::fs::create_dir_all(&files_dir).await;
@@ -10400,14 +10401,14 @@ async fn handle_incoming_request(
                                 ).await;
                             }
                             MessageEnvelope::FileHeader { inner } => {
-                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, thumb, voice, .. } = *inner;
+                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, thumb, voice, author, sha256, .. } = *inner;
                                 file_handler::handle_envelope_file_header(
                                     server_states, pending_file_streams, pending_shard_streams,
                                     early_file_streams, bundle_keypair, event_tx,
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
-                                    thumb, voice, false,
+                                    thumb, voice, author, sha256, false,
                                     requested_file_receipts, declined_file_ids,
                                     ws_cmd_tx, ws_room_peers,
                                     db_path, db_passphrase,
@@ -12211,6 +12212,7 @@ async fn handle_incoming_request(
             if server_states.get(&server_id).is_none() && guest_rooms.contains(&server_id) {
                 if let Some(fm) = file_meta
                     .filter(|fm| file_id.as_deref() == Some(fm.fid.as_str()))
+                    .filter(|fm| file_handler::synced_card_claim_refused(fm, Some(&mid), &sender_master).is_none())
                 {
                     let thumb_b64 =
                         file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime);
@@ -12414,21 +12416,7 @@ async fn handle_incoming_request(
                                 }).collect())
                                 .unwrap_or_default();
                             let file_meta = m.file_id.as_ref().and_then(|fid| {
-                                file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
-                                    fid: f.file_id.clone(),
-                                    name: f.file_name.clone(),
-                                    ext: f.file_ext.clone(),
-                                    mime: f.mime_type.clone(),
-                                    size: f.size_bytes,
-                                    img: f.is_image,
-                                    w: f.width,
-                                    h: f.height,
-                                    mid: f.message_id.clone(),
-                                    ts: f.created_at,
-                                    sender: m.sender_id.clone(),
-                                    vthumb: f.video_thumb.clone(),
-                                    thumb: f.thumb_b64.clone(),
-                                })
+                                file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem::from_stored(f, m.sender_id.clone()))
                             });
                             // Deletion proof rides with the hidden flag — guests
                             // verify it item-locally (REJECT-ABSENT, 0.8.4).
@@ -12561,8 +12549,10 @@ async fn handle_incoming_request(
                 // item's v2 signature binds `file_id` but NOT this blob, so require the
                 // blob to describe exactly the signed file_id: a rewriting responder can
                 // then only change cosmetic fields, never attach someone else's file id.
+                let author = super::resolver::resolve(&m.s);
                 let file_meta = m.file_meta
                     .filter(|fm| m.file_id.as_deref() == Some(fm.fid.as_str()))
+                    .filter(|fm| file_handler::synced_card_claim_refused(fm, m.mid.as_deref(), &author).is_none())
                     .map(|fm| GuestFileMetaFfi {
                         file_id: fm.fid,
                         file_name: fm.name,
@@ -12611,7 +12601,7 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::PublicFileHeader {
-            file_id, name, ext, mime, size, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce,
+            file_id, name, ext, mime, size, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, author, sha256,
         } => {
             // SECURITY receipt cap (mirrors `pending_asset_asks`): accept ONLY a
             // fresh header answering a request WE made, for the server we made it
@@ -12644,7 +12634,7 @@ async fn handle_incoming_request(
                 mid, Some(sid.clone()), Some(cid), ts,
                 Some(aes_key), Some(aes_nonce),
                 None, None,
-                None, false, true,
+                None, false, author, sha256, true,
                 requested_file_receipts, declined_file_ids,
                 ws_cmd_tx, ws_room_peers,
                 db_path, db_passphrase,
@@ -13009,6 +12999,8 @@ async fn handle_incoming_request(
                             let nonce_hex = hex::encode(enc.nonce);
                             let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{nonce_hex}.tmp"));
                             if let Ok(()) = tokio::fs::write(&temp_path, &enc.ciphertext).await {
+                                // The card's author, as the committed id names it.
+                                let served_author = Some(super::resolver::resolve(&file_meta.sender_id));
                                 let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {
                                     let parts: Vec<&str> = file_meta.context_id.splitn(2, ':').collect();
                                     if parts.len() == 2 {
@@ -13054,6 +13046,8 @@ async fn handle_incoming_request(
                                             // receipt bypasses the gate; no voice flag
                                             // is persisted to rehydrate from.
                                             voice: false,
+                                            author: served_author.clone(),
+                                            sha256: file_meta.sha256.clone(),
                                         }),
                                     };
                                     let header_json = serde_json::to_string(&header).unwrap_or_default();
@@ -13083,6 +13077,8 @@ async fn handle_incoming_request(
                                             ts: file_meta.created_at,
                                             aes_key: hex::encode(enc.key),
                                             aes_nonce: hex::encode(enc.nonce),
+                                            author: served_author.clone(),
+                                            sha256: file_meta.sha256.clone(),
                                         },
                                     );
                                 }

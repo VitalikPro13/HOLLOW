@@ -23646,6 +23646,7 @@ async fn at_rest_channel_file_served_from_encrypted_copy_after_migration() {
                 1_700_000_000_000,
                 None,
                 None,
+                None,
             )
             .expect("insert the legacy file row");
         store
@@ -25642,4 +25643,95 @@ async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
         "a kick sealed now lands"
     );
     drop(x);
+}
+
+/// A-D2: a file's id commits to its author, message and bytes, so a member holding a
+/// channel file's key cannot answer another member's pull with different bytes. The
+/// forged bytes decrypt under the holder's header and then fail the id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_holder_cannot_substitute_a_files_bytes() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut m, mut x, server_id) = three_member_server(&relay, 212, 213, 214).await;
+    let general = general_channel_of(&server_id);
+
+    // X is offline for the send, so it holds the card and never the bytes.
+    relay.set_online(&x.device_id, false);
+    sleep_ms(2000).await;
+    drain_events(&mut o);
+    drain_events(&mut m);
+
+    let src = global_tmp.path().join("real.bin");
+    std::fs::write(&src, b"the author's real file").expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "subst-file-1".to_string(),
+            message_text: "subst-caption".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name == "real.bin"
+        {
+            got_fid = Some(file_id.clone());
+        }
+        got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("M must receive the channel FileHeader");
+    assert!(super::file_commit::is_committed_id(&fid), "a 0.12 file carries a committed id");
+    let m_done = wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(m_done, "the honest bytes complete for M");
+
+    // M swaps the bytes it holds; O has lost its copy, so X's pull ends at M.
+    let m_disk = m.file_meta(&fid).and_then(|f| f.disk_path).expect("M holds the file");
+    super::at_rest::write_all(std::path::Path::new(&m_disk), b"a forged file, same size")
+        .expect("M rewrites its copy");
+    o.store().null_disk_path_all().expect("clear O's cached bytes");
+
+    relay.set_online(&x.device_id, true);
+    let x_card = wait_event(&mut x, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(x_card, "X learns the file from the relay's catch-up");
+    sleep_ms(500).await;
+    drain_events(&mut x);
+
+    x.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: o.master_id.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    let refused = wait_event(&mut x, std::time::Duration::from_secs(30), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileFailed { file_id, error }
+                if *file_id == fid && error == super::file_handler::FORGED_FILE_ERROR
+        )
+    })
+    .await;
+    assert!(refused, "X must refuse the forged bytes");
+    assert!(
+        x.file_meta(&fid).is_some_and(|f| f.completed_at.is_none()),
+        "the forged bytes never complete X's card"
+    );
 }

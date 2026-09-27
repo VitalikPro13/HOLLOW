@@ -14,6 +14,7 @@ pub(crate) mod emotes;
 pub(crate) mod fetch;
 pub(crate) mod frame_auth;
 pub(crate) mod file_asks;
+pub(crate) mod file_commit;
 pub(crate) mod file_handler;
 pub(crate) mod file_transfer;
 pub(crate) mod forwarder_client;

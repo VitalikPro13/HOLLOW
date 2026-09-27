@@ -1055,7 +1055,7 @@ mod tests {
                 ms.insert_file_metadata(
                     id, id, "bin", "application/octet-stream", 10,
                     1, false, None, None, Some(id), "channel", "srv1:general",
-                    "sender", false, old_ms, None, None,
+                    "sender", false, old_ms, None, None, None,
                 )
                 .unwrap();
                 // The message row is what the missing-file sweep walks.

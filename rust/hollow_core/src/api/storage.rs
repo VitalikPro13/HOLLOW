@@ -1004,10 +1004,29 @@ pub fn get_incomplete_files() -> Result<Vec<StoredFileInfo>, String> {
         .collect())
 }
 
-/// Mark a file as complete with its disk path (used for share-backed files).
+/// Mark a file as complete with its disk path (used for share-backed files). A
+/// committed file's bytes must be the ones its id commits to; the hash runs with the
+/// store unlocked, since a share download can be gigabytes.
 #[frb]
 pub fn mark_file_complete(file_id: String, disk_path: String) -> Result<(), String> {
+    use crate::node::file_commit;
     let store = get_store();
+    if file_commit::is_committed_id(&file_id) {
+        let row = {
+            let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+            let ms = guard.as_ref().ok_or("Message store is not open")?;
+            ms.get_file_metadata(&file_id)?
+        };
+        let refusal = match (row, file_commit::hash_at_rest(std::path::Path::new(&disk_path))) {
+            (Some(row), Some((len, sha256))) => file_commit::content_refused(&row, len, &sha256),
+            (None, _) => Some("no file card to check the bytes against"),
+            (_, None) => Some("the bytes on disk could not be read"),
+        };
+        if let Some(reason) = refusal {
+            hollow_log!("[HOLLOW-SECURITY] REFUSED to complete {file_id} from {disk_path}: {reason}");
+            return Err(crate::node::file_handler::FORGED_FILE_ERROR.to_string());
+        }
+    }
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
     ms.mark_file_complete(&file_id, &disk_path)

@@ -180,6 +180,16 @@ path (stream decrypt, inline, push, guest pull, share bridge, vault relink) chec
 bytes before `mark_file_complete`; the file name and extension ride the signature too.
 DECIDED: yes, in 0.12.
 
+BUILT (session 11, HOL-SEC-060), as self-certifying file ids rather than a v4 payload:
+the id is SHA-256 over author master, message id, size, plaintext SHA-256, name, ext
+and a thumbnail's vault video (`node/file_commit.rs`). The existing signature binds the
+id, so it covers the commitment with no new payload version; the id also names its
+author, which closes the first-header race the v4 payload would have left (a member
+could sign a v4 message of its own with the same id). Headers, sync and public cards
+are checked against the id before a row is written, an unasked header only from the
+author's devices, and every completion path hashes the bytes first (a wiring test
+counts them). Pre-0.12 files keep random ids and the old gates: AR-13 (accepted).
+
 ### A-D3. Conferences (S-26, S-29..S-32)
 
 The knock's access hash is a replayable bearer broadcast in plaintext; while a knock is

@@ -3807,7 +3807,7 @@ mod tests {
         crate::node::types::SyncFileMetaItem {
             fid: fid.to_string(), name: name.to_string(), ext: "pdf".to_string(),
             mime: "application/pdf".to_string(), size: 10, img: false, w: None, h: None,
-            mid: None, ts: 1_000, sender: sender.to_string(), vthumb: None, thumb: None,
+            mid: None, ts: 1_000, sender: sender.to_string(), vthumb: None, thumb: None, sha256: None,
         }
     }
 

@@ -1300,7 +1300,10 @@ fn handle_file_header(
         let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
         if let Some(reason) = crate::node::file_handler::file_header_refused(
             &store, &std::collections::HashMap::new(), &p.fid, None, None, convo, false,
-        ) {
+        ).or_else(|| crate::node::file_commit::header_claim_refused(
+            &p.fid, p.author.as_deref(), p.mid.as_deref(), p.size, p.sha256.as_deref(),
+            &p.name, &p.ext, p.vthumb.as_ref(), convo, false,
+        )) {
             hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {} from {convo} in fetch: {reason}", p.fid);
             return None;
         }
@@ -1317,7 +1320,7 @@ fn handle_file_header(
         );
         if !auto_ok {
             let msg_text = format!("[file:{}]", p.fid);
-            persist_inline_image(convo, local_master, &p, &msg_text, None, db_path, db_passphrase);
+            persist_inline_image(convo, local_master, &p, &msg_text, db_path, db_passphrase);
             hollow_log!(
                 "[HOLLOW-FETCH] Auto-download gate dropped inline image bytes for {} (dm:{convo}) — message kept",
                 p.fid
@@ -1350,17 +1353,28 @@ fn handle_file_header(
             return None;
         }
         if let Some(plaintext) = decoded {
+            // The companion text DM is sent through a room lookup that fails for an
+            // OFFLINE peer, so the fetch often gets ONLY this FileHeader. Insert the
+            // MESSAGE row here (INSERT OR IGNORE) or the image lands on disk with
+            // nothing referencing it; the card goes first so the bytes are judged by it.
+            let msg_text = format!("[file:{}]", p.fid);
+            persist_inline_image(convo, local_master, &p, &msg_text, db_path, db_passphrase);
+            let refusal = match crate::storage::MessageStore::open(db_path, db_passphrase) {
+                Ok(store) => crate::node::file_commit::completion_refused(&store, &p.fid, &plaintext),
+                Err(_) => Some("the store could not be opened"),
+            };
+            if let Some(reason) = refusal {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED inline bytes for {} from {convo} in fetch: {reason}", p.fid);
+                return None;
+            }
             let files_dir = crate::node::file_transfer::files_dir();
             let _ = std::fs::create_dir_all(&files_dir);
             let disk_path = crate::node::file_transfer::final_file_path(&p.fid, &p.ext);
             if crate::node::at_rest::write_all(&disk_path, &plaintext).is_ok() {
                 let disk_str = disk_path.to_string_lossy().to_string();
-                // The companion text DM is sent through a room lookup that fails
-                // for an OFFLINE peer, so the fetch often gets ONLY this
-                // FileHeader. Insert the MESSAGE row here (INSERT OR IGNORE) or
-                // the image lands on disk with nothing referencing it.
-                let msg_text = format!("[file:{}]", p.fid);
-                persist_inline_image(convo, local_master, &p, &msg_text, Some(&disk_str), db_path, db_passphrase);
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.mark_file_complete(&p.fid, &disk_str);
+                }
                 hollow_log!(
                     "[HOLLOW-FETCH] wrote inline image {} ({} bytes) -> {}",
                     p.fid, plaintext.len(), disk_str
@@ -1429,15 +1443,13 @@ fn decrypt_inline_image(b64: &str, key_hex: &str, nonce_hex: &str) -> Option<Vec
         })
 }
 
-/// Persist the message row + file metadata for an inlined image FileHeader.
-/// `disk_str` = Some(path) marks the file complete on disk; None = the bytes
-/// were gated (auto-download off) — rows only, card renders a Download button.
+/// Persist the message row + file metadata for an inlined image FileHeader. The
+/// bytes are the caller's: gated ones never land, others only past the file's gate.
 fn persist_inline_image(
     convo: &str,
     local_master: &str,
     p: &FileHeaderPayload,
     msg_text: &str,
-    disk_str: Option<&str>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1482,11 +1494,8 @@ fn persist_inline_image(
                 p.size, 0, p.img, p.w, p.h,
                 p.mid.as_deref(), "dm", convo,
                 convo, false, p.ts,
-                p.vthumb.as_ref(), thumb.as_deref(),
+                p.vthumb.as_ref(), thumb.as_deref(), p.sha256.as_deref(),
             );
-        }
-        if let Some(disk_str) = disk_str {
-            let _ = store.mark_file_complete(&p.fid, disk_str);
         }
     }
 }

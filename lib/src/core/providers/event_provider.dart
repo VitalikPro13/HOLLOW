@@ -1600,11 +1600,15 @@ class EventStreamNotifier extends Notifier<bool> {
         final completedFileId = _shareToFileId.remove(rootHash);
         if (completedFileId != null) {
           debugPrint('[HOLLOW-SHARE] Bridging share completion to file $completedFileId → $diskPath');
-          storage_api.markFileComplete(fileId: completedFileId, diskPath: diskPath).catchError((e) {
+          // Rust refuses bytes that are not the file its id commits to, so the card
+          // completes only once it agrees.
+          storage_api.markFileComplete(fileId: completedFileId, diskPath: diskPath).then((_) {
+            ref.read(fileTransferProvider.notifier).onFileCompleted(completedFileId, diskPath);
+            _reloadChatForFile(completedFileId);
+          }).catchError((Object e) {
             debugPrint('[HOLLOW] markFileComplete failed: $e');
+            ref.read(fileTransferProvider.notifier).onFileFailed(completedFileId, friendlyError(e));
           });
-          ref.read(fileTransferProvider.notifier).onFileCompleted(completedFileId, diskPath);
-          _reloadChatForFile(completedFileId);
         }
       case NetworkEvent_ShareFailed(:final rootHash, :final error):
         debugPrint('[HOLLOW-SHARE] failed $rootHash: $error');

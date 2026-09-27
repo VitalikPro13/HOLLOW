@@ -2303,6 +2303,11 @@ pub(crate) enum HavenMessage {
         ts: i64,
         aes_key: String,
         aes_nonce: String,
+        /// The commitment a committed file id hashes from (`node::file_commit`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
     },
 
     // -- WebRTC signaling --
@@ -2865,6 +2870,12 @@ pub(crate) struct FileHeaderPayload {
     /// legacy fallback (see `is_voice_message_name`).
     #[serde(default)]
     pub voice: bool,
+    /// Master id of the message's author and the plaintext SHA-256: with `mid`, `size`,
+    /// `name` and `ext` what a committed file id hashes from (`node::file_commit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4160,6 +4171,32 @@ pub(crate) struct SyncFileMetaItem {
     /// sync-backfilled cards render it too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb: Option<String>,
+    /// Plaintext SHA-256 a committed file id hashes from (`node::file_commit`); the
+    /// author is the item's verified signer, never `sender`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl SyncFileMetaItem {
+    /// The card for a stored file, as a sync responder re-serves it.
+    pub(crate) fn from_stored(f: &crate::storage::StoredFile, sender: String) -> Self {
+        Self {
+            fid: f.file_id.clone(),
+            name: f.file_name.clone(),
+            ext: f.file_ext.clone(),
+            mime: f.mime_type.clone(),
+            size: f.size_bytes,
+            img: f.is_image,
+            w: f.width,
+            h: f.height,
+            mid: f.message_id.clone(),
+            ts: f.created_at,
+            sender,
+            vthumb: f.video_thumb.clone(),
+            thumb: f.thumb_b64.clone(),
+            sha256: f.sha256.clone(),
+        }
+    }
 }
 
 /// Back-reference from a thumbnail image (sent over the image P2P path) to the

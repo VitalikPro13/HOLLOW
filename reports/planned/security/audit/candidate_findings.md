@@ -101,7 +101,7 @@ New in session 10 (design A inventories, `design_A_inventory/`), all decision 6:
 | A27 | Conference access hash is a replayable bearer | server_mls, relay inventories | Medium | OPEN (A-D3) |
 | A28 | Light profile and device list announced to every room peer; a friend request's sender gets our profile | dm inventory | Medium (C-24) | OPEN (A-D1/A-D5) |
 | A29 | DM typing has no friend check; sibling-lane stamps unbounded; unreaction and link-card replays | server_mls, dm inventories | Low | OPEN (A-D5) |
-| A30 | No file carries a signed content hash (H8 remainder) | files inventory | High | OPEN (A-D2) |
+| A30 | No file carries a signed content hash (H8 remainder) | files inventory | High | FIXED HOL-SEC-060 (self-certifying file ids; pre-0.12 files = AR-13, accepted) |
 
 ## Class B. Message rows change by message id alone
 

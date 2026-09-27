@@ -261,12 +261,14 @@ pub(crate) fn file_bytes_on_disk(store: &crate::storage::MessageStore, fid: &str
 
 /// The file card riding a verified sync item, when it may land. The item's
 /// signature binds `file_id` but not the `file_meta` blob, so the blob must
-/// describe exactly that file, and ownership is judged against the item's verified
-/// `author`, never the blob's own `sender` field.
+/// describe exactly that file (a committed id hashes from it with the item's `mid`
+/// and verified `author`), and ownership is judged against that `author`, never the
+/// blob's own `sender` field.
 pub(crate) fn synced_file_meta<'a>(
     store: &crate::storage::MessageStore,
     file_meta: Option<&'a super::types::SyncFileMetaItem>,
     signed_file_id: Option<&str>,
+    mid: Option<&str>,
     author: &str,
 ) -> Option<&'a super::types::SyncFileMetaItem> {
     let fm = file_meta?;
@@ -274,7 +276,23 @@ pub(crate) fn synced_file_meta<'a>(
         hollow_log!("[HOLLOW-SECURITY] REJECTED synced file card {} riding an item signed for {signed_file_id:?}", fm.fid);
         return None;
     }
+    if let Some(reason) = synced_card_claim_refused(fm, mid, author) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED synced file card {}: {reason}", fm.fid);
+        return None;
+    }
     file_meta_write_allowed(store, &fm.fid, author).then_some(fm)
+}
+
+/// Why a card riding a signed item (sync, a public post) may not describe its file.
+pub(crate) fn synced_card_claim_refused(
+    fm: &super::types::SyncFileMetaItem,
+    mid: Option<&str>,
+    author: &str,
+) -> Option<&'static str> {
+    let commit = fm.sha256.as_deref().zip(mid).map(|(sha256, mid)| super::file_commit::FileCommit {
+        author, mid, size: fm.size, sha256, name: &fm.name, ext: &fm.ext, vthumb: fm.vthumb.as_ref(),
+    });
+    super::file_commit::claim_refused(&fm.fid, commit.as_ref())
 }
 
 /// Handle NodeCommand::SendFile.
@@ -794,8 +812,28 @@ pub(crate) async fn finish_send_file(
         return;
     }
 
-    let file_id = file_transfer::generate_file_id();
     let file_size = final_data.len() as u64;
+    let Ok((final_data, sha256)) = tokio::task::spawn_blocking(move || {
+        let sha256 = super::file_commit::sha256_hex(&final_data);
+        (final_data, sha256)
+    })
+    .await
+    else {
+        let _ = event_tx.send(NetworkEvent::FileFailed {
+            file_id: message_id.clone(),
+            error: "Failed to hash the file".to_string(),
+        }).await;
+        return;
+    };
+    let file_id = super::file_commit::file_id_for(&super::file_commit::FileCommit {
+        author: local_peer_str,
+        mid: &message_id,
+        size: file_size,
+        sha256: &sha256,
+        name: &original_name,
+        ext: &final_ext,
+        vthumb: vthumb.as_ref(),
+    });
     let total_chunks = 0u32; // 0 = streamed transfer
     let final_mime = file_transfer::mime_from_ext(&final_ext);
 
@@ -841,7 +879,7 @@ pub(crate) async fn finish_send_file(
         &file_id, &original_name, &final_ext, &final_mime,
         file_size, total_chunks, is_image, width, height,
         &message_id, ctx_type, &ctx_id, &local_peer, timestamp,
-        vthumb.as_ref(), thumb.as_deref(), store_full_file, &final_path,
+        vthumb.as_ref(), thumb.as_deref(), &sha256, store_full_file, &final_path,
     );
 
     // Emit FileCompleted on the sender side too, so the sender's UI reloads from the
@@ -902,6 +940,7 @@ pub(crate) async fn finish_send_file(
             voice,
             message_text: &message_text,
             local_peer_str,
+            sha256: &sha256,
             total_chunks,
             device_keypair,
             device_peer_id,
@@ -916,7 +955,7 @@ pub(crate) async fn finish_send_file(
         send_channel_file(
             &sid, &cid, &signing_payload_text, timestamp, &sig, &pk,
             &message_id, &file_id, order_us, album.as_deref(), &final_data,
-            &original_name, &final_ext, &final_mime, file_size,
+            &original_name, &final_ext, &final_mime, file_size, &sha256,
             is_image, width, height, &vthumb, &thumb, voice, &share_ref, &local_peer,
             event_tx, server_states, olm, crypto_store, mls,
             ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
@@ -992,6 +1031,7 @@ fn persist_sent_file_row(
     timestamp: i64,
     vthumb: Option<&VideoThumbRef>,
     thumb: Option<&str>,
+    sha256: &str,
     store_full_file: bool,
     final_path: &std::path::Path,
 ) {
@@ -1002,7 +1042,7 @@ fn persist_sent_file_row(
             width, height,
             Some(message_id), ctx_type, ctx_id,
             local_peer, true, timestamp,
-            vthumb, thumb,
+            vthumb, thumb, Some(sha256),
         );
         if store_full_file {
             let _ = store.mark_file_complete(
@@ -1064,6 +1104,8 @@ struct DmFileMsg<'a> {
     voice: bool,
     message_text: &'a str,
     local_peer_str: &'a str,
+    /// Plaintext SHA-256 the file id commits to.
+    sha256: &'a str,
     total_chunks: u32,
     // THIS device's identity — signs the Olm KeyRequest fired when a DM file
     // targets a device we have no session with (Fix B).
@@ -1109,6 +1151,8 @@ fn build_dm_file_header(
             inline_bytes,
             thumb: msg.thumb.clone(),
             voice: msg.voice,
+            author: Some(msg.local_peer_str.to_string()),
+            sha256: Some(msg.sha256.to_string()),
         }),
     }
 }
@@ -1570,6 +1614,7 @@ async fn send_channel_file(
     final_ext: &str,
     final_mime: &str,
     file_size: u64,
+    sha256: &str,
     is_image: bool,
     width: Option<u32>,
     height: Option<u32>,
@@ -1653,6 +1698,7 @@ async fn send_channel_file(
                 sender: local_peer.to_string(),
                 vthumb: vthumb.clone(),
                 thumb: thumb.clone(),
+                sha256: Some(sha256.to_string()),
             }),
         };
         super::message_ops::send_public_channel_msg(ws_cmd_tx, sid, cid, &msg);
@@ -1706,6 +1752,8 @@ async fn send_channel_file(
             inline_bytes: None,
             thumb: thumb.clone(),
             voice,
+            author: Some(local_peer.to_string()),
+            sha256: Some(sha256.to_string()),
         }),
     };
     let header_json = serde_json::to_string(&header).unwrap_or_default();
@@ -2415,21 +2463,40 @@ async fn handle_file_stream_complete(
         return;
     };
 
-    // Outcome of the decrypt attempt: Ok(disk_path) on success, Err(reason) on
-    // any failure (read error, bad key length, or GCM auth failure).
     match try_decrypt_file_stream(request, &pfs, db_path, db_passphrase).await {
-        Ok(disk_path) => {
-            // Success — consume the assembled stream.
+        StreamOutcome::Done(disk_path) => {
             let _ = tokio::fs::remove_file(&request.temp_path).await;
             let _ = event_tx.send(NetworkEvent::FileCompleted { file_id, disk_path }).await;
         }
-        Err(fail_reason) => {
+        StreamOutcome::WrongKey(fail_reason) => {
             hold_early_arrival_and_retry(
                 &file_id, &fail_reason, request, sender_peer, pfs,
                 pending_file_streams, early_file_streams, ws_cmd_tx, ws_room_peers,
             );
         }
+        StreamOutcome::Forged(reason) => {
+            // The bytes decrypted, so no later header makes them right: drop them.
+            hollow_log!("[HOLLOW-SECURITY] DROPPED the bytes {sender_peer} delivered for {file_id}: {reason}");
+            let _ = tokio::fs::remove_file(&request.temp_path).await;
+            let _ = event_tx.send(NetworkEvent::FileFailed {
+                file_id,
+                error: FORGED_FILE_ERROR.to_string(),
+            }).await;
+        }
     }
+}
+
+/// What a person sees when delivered bytes are not the file its id commits to.
+pub(crate) const FORGED_FILE_ERROR: &str = "The file that arrived is not the one that was sent";
+
+/// How an assembled inbound stream ended.
+enum StreamOutcome {
+    /// Written and marked complete at this path.
+    Done(String),
+    /// Unreadable under this pending stream's key (usually a header still in flight).
+    WrongKey(String),
+    /// Decrypted, but not the bytes the file id commits to.
+    Forged(&'static str),
 }
 
 /// Decrypt an assembled inbound file stream against its pending FileHeader key and
@@ -2441,19 +2508,43 @@ async fn try_decrypt_file_stream(
     pfs: &PendingFileStream,
     db_path: &str,
     db_passphrase: &str,
-) -> Result<String, String> {
+) -> StreamOutcome {
     let Ok(ciphertext) = tokio::fs::read(&request.temp_path).await else {
-        return Err("unreadable stream".to_string());
+        return StreamOutcome::WrongKey("unreadable stream".to_string());
     };
     let key_bytes = hex::decode(&pfs.aes_key).unwrap_or_default();
     let nonce_bytes = hex::decode(&pfs.aes_nonce).unwrap_or_default();
     if key_bytes.len() != 32 || nonce_bytes.len() != 12 {
-        return Err("invalid AES key/nonce length".to_string());
+        return StreamOutcome::WrongKey("invalid AES key/nonce length".to_string());
     }
     let key: [u8; 32] = key_bytes.try_into().unwrap();
     let nonce: [u8; 12] = nonce_bytes.try_into().unwrap();
-    let plaintext = crate::vault::pipeline::aes_decrypt(&ciphertext, &key, &nonce)
-        .map_err(|e| format!("decrypt failed: {e}"))?;
+    let plaintext = match crate::vault::pipeline::aes_decrypt(&ciphertext, &key, &nonce) {
+        Ok(p) => p,
+        Err(e) => return StreamOutcome::WrongKey(format!("decrypt failed: {e}")),
+    };
+    let (plaintext, sha256) = if super::file_commit::is_committed_id(&request.id) {
+        match tokio::task::spawn_blocking(move || {
+            let sha256 = super::file_commit::sha256_hex(&plaintext);
+            (plaintext, sha256)
+        })
+        .await
+        {
+            Ok(hashed) => hashed,
+            Err(e) => return StreamOutcome::WrongKey(format!("hash task failed: {e}")),
+        }
+    } else {
+        (plaintext, String::new())
+    };
+    let refusal = match crate::storage::MessageStore::open(db_path, db_passphrase) {
+        Ok(store) => super::file_commit::completion_refused_hashed(
+            &store, &request.id, plaintext.len() as u64, &sha256,
+        ),
+        Err(_) => Some("the store could not be opened"),
+    };
+    if let Some(reason) = refusal {
+        return StreamOutcome::Forged(reason);
+    }
     let final_path = file_transfer::final_file_path(&request.id, &pfs.ext);
     let dest = final_path.clone();
     if tokio::task::spawn_blocking(move || crate::node::at_rest::write_all(&dest, &plaintext))
@@ -2461,14 +2552,14 @@ async fn try_decrypt_file_stream(
         .unwrap_or_else(|e| Err(format!("write task failed: {e}")))
         .is_err()
     {
-        return Err("failed to write decrypted file".to_string());
+        return StreamOutcome::WrongKey("failed to write decrypted file".to_string());
     }
     let disk_path = final_path.to_string_lossy().to_string();
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.mark_file_complete(&request.id, &disk_path);
     }
     hollow_log!("[HOLLOW-STREAM] File {} complete: {disk_path}", request.id);
-    Ok(disk_path)
+    StreamOutcome::Done(disk_path)
 }
 
 /// The ciphertext is intact but did not decrypt against THIS pending stream's key.
@@ -2590,7 +2681,7 @@ async fn handle_shard_stream_complete(
                 hollow_log!("[HOLLOW-VAULT] Shard arrived for pending download — attempting reconstruction: {content_id}");
                 attempt_vault_reconstruction(
                     content_store, pending_vault_downloads, event_tx,
-                    &content_id, dl_server_id, dl_k,
+                    &content_id, dl_server_id, dl_k, db_path, db_passphrase,
                 ).await;
             }
         }
@@ -2604,6 +2695,7 @@ async fn handle_shard_stream_complete(
 ///
 /// Takes the ContentStore by VALUE (last use in the shard arm): an owned store is
 /// Send across .await points, while a `&ContentStore` is not.
+#[allow(clippy::too_many_arguments)]
 async fn attempt_vault_reconstruction(
     content_store: crate::vault::content_store::ContentStore,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
@@ -2611,6 +2703,8 @@ async fn attempt_vault_reconstruction(
     content_id: &str,
     dl_server_id: String,
     dl_k: usize,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     // The caller already removed the pending-download registration — bailing
     // out here without rolling it back would wedge this content_id forever
@@ -2660,7 +2754,16 @@ async fn attempt_vault_reconstruction(
         return;
     }
     let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
-    match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
+    let reconstructed = crate::vault::pipeline::reconstruct_file(&manifest, &packed).and_then(|plaintext| {
+        match crate::storage::MessageStore::open(db_path, db_passphrase) {
+            Ok(store) => match super::file_commit::vault_plaintext_refused(&store, content_id, &plaintext) {
+                Some(reason) => Err(format!("{FORGED_FILE_ERROR} ({reason})")),
+                None => Ok(plaintext),
+            },
+            Err(e) => Err(e),
+        }
+    });
+    match reconstructed {
         Ok(plaintext) => {
             if let Ok(path) = crate::vault::pipeline::write_to_cache(content_id, &ext, &plaintext) {
                 let disk_path = path.to_string_lossy().to_string();
@@ -2862,6 +2965,8 @@ pub(crate) async fn handle_envelope_file_header(
     share_ref: Option<super::types::ShareRef>,
     thumb: Option<String>,
     voice: bool,
+    author: Option<String>,
+    sha256: Option<String>,
     // The answer to a guest pull, from the peer we asked (the caller checked the
     // receipt): we hold no membership to judge the channel by.
     from_guest_pull: bool,
@@ -2878,11 +2983,19 @@ pub(crate) async fn handle_envelope_file_header(
     let judged_sid = if from_guest_pull { None } else { sid.as_deref() };
     if let Some(reason) = file_header_refused(
         &store, server_states, &fid, judged_sid, cid.as_deref(), &sender_peer_id, from_guest_pull,
-    ) {
+    ).or_else(|| super::file_commit::header_claim_refused(
+        &fid, author.as_deref(), mid.as_deref(), size, sha256.as_deref(), &name, &ext,
+        vthumb.as_ref(), &sender_peer_id, from_guest_pull,
+    )) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {sender_peer_id}: {reason}");
         return;
     }
     let complete = file_bytes_on_disk(&store, &fid);
+    // A committed card belongs to the author its id names, whoever delivered it.
+    let card_owner = match author.as_deref() {
+        Some(a) if super::file_commit::is_committed_id(&fid) => a.to_string(),
+        _ => sender_peer_id.clone(),
+    };
 
     // Explicit pull — bypasses the size cap and the auto-download gate
     // (mirrors the DM/Olm header arm in swarm.rs; issue #41).
@@ -2926,8 +3039,8 @@ pub(crate) async fn handle_envelope_file_header(
             size, chunks, img,
             w, h,
             mid.as_deref(), ctx_type, &ctx_id,
-            &sender_peer_id, false, ts,
-            vthumb.as_ref(), thumb.as_deref(),
+            &card_owner, false, ts,
+            vthumb.as_ref(), thumb.as_deref(), sha256.as_deref(),
         );
         // Persist the share back-reference (issue #41) so a manual
         // download can rejoin the share swarm after a restart.
@@ -3172,7 +3285,7 @@ mod tests {
             "srv", sender.to_string(),
             fid.to_string(), "a.png".into(), "png".into(), "image/png".into(), 10, 0, true, None, None,
             Some("m1".into()), Some("srv".into()), Some("srv-general".into()), 1,
-            Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, false,
+            Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, None, None, false,
             &mut receipts, &mut std::collections::HashSet::new(), &ws_tx, &HashMap::new(),
             path, pass,
         ).await;
@@ -3225,7 +3338,7 @@ mod tests {
         let store = || crate::storage::MessageStore::open(&path, &pass).unwrap();
         store().insert_file_metadata(
             "f1", "a.png", "png", "image/png", 10, 0, true, None, None, Some("m1"),
-            "channel", "srv:srv-general", &bob, false, 1, None, None,
+            "channel", "srv:srv-general", &bob, false, 1, None, None, None,
         ).unwrap();
         let mut pending = HashMap::new();
 
@@ -3246,6 +3359,38 @@ mod tests {
         store().mark_file_complete("f1", &bytes.to_string_lossy()).unwrap();
         deliver_header(&states, &mut pending, &bob, "f1", &path, &pass).await;
         assert!(!pending.contains_key("f1"), "a completed file took a new key");
+    }
+
+    /// A-D2: a card riding a signed item must describe the file its committed id
+    /// hashes from, so a sync responder cannot rename or resize someone's file.
+    #[test]
+    fn authz_a_synced_card_cannot_relabel_a_committed_file() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::storage::MessageStore::open(
+            &tmp.path().join("s.db").to_string_lossy(), &"ab".repeat(32),
+        ).unwrap();
+        let sha = super::super::file_commit::sha256_hex(b"invoice");
+        let fid = super::super::file_commit::file_id_for(&super::super::file_commit::FileCommit {
+            author: "bob", mid: "m1", size: 7, sha256: &sha, name: "invoice.pdf", ext: "pdf", vthumb: None,
+        });
+        let card = super::super::types::SyncFileMetaItem {
+            fid: fid.clone(), name: "invoice.pdf".into(), ext: "pdf".into(), mime: "application/pdf".into(),
+            size: 7, img: false, w: None, h: None, mid: Some("m1".into()), ts: 1, sender: "bob".into(),
+            vthumb: None, thumb: None, sha256: Some(sha.clone()),
+        };
+        let lands = |fm: &super::super::types::SyncFileMetaItem, mid: &str, author: &str| {
+            synced_file_meta(&store, Some(fm), Some(&fid), Some(mid), author).is_some()
+        };
+        assert!(lands(&card, "m1", "bob"));
+        let renamed = super::super::types::SyncFileMetaItem { name: "invoice.exe".into(), ..card.clone() };
+        assert!(!lands(&renamed, "m1", "bob"), "a renamed card");
+        let resized = super::super::types::SyncFileMetaItem { size: 8, ..card.clone() };
+        assert!(!lands(&resized, "m1", "bob"), "a resized card");
+        let bare = super::super::types::SyncFileMetaItem { sha256: None, ..card.clone() };
+        assert!(!lands(&bare, "m1", "bob"), "a card without its hash");
+        assert!(!lands(&card, "m1", "mallory"), "another author's item");
+        assert!(!lands(&card, "m2", "bob"), "another message");
     }
 
     /// FILE-2 regression. The auto-download exemption is the one way a pushed

@@ -211,6 +211,9 @@ pub(crate) struct StoredFile {
     /// Tiny base64 WebP placeholder, rendered blurred under the Download button while
     /// the real bytes are gated or undownloaded.
     pub thumb_b64: Option<String>,
+    /// Plaintext SHA-256 a committed file id hashes from (`node::file_commit`), kept
+    /// so a card can be re-served with its commitment.
+    pub sha256: Option<String>,
 }
 
 /// One sticker of the user's personal vault. `pack` is a free-form group name (`""`
@@ -346,7 +349,7 @@ fn dm_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessag
 }
 
 /// Column list every files query selects, in [`stored_file_from_row`] order.
-const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at, share_ref_json, thumb_b64";
+const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at, share_ref_json, thumb_b64, sha256";
 
 /// Map one row selected via [`FILE_COLS`] to a StoredFile.
 fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile> {
@@ -376,6 +379,7 @@ fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile>
             .get::<_, Option<String>>(21)?
             .and_then(|s| serde_json::from_str(&s).ok()),
         thumb_b64: row.get(22)?,
+        sha256: row.get(23)?,
     })
 }
 
@@ -837,6 +841,9 @@ impl MessageStore {
         // Tiny base64 WebP placeholder, rendered blurred under the Download button while
         // the real bytes are gated or undownloaded.
         migrate(conn, "ALTER TABLE files ADD COLUMN thumb_b64 TEXT;");
+
+        // Plaintext SHA-256 of a file whose id commits to it (`node::file_commit`).
+        migrate(conn, "ALTER TABLE files ADD COLUMN sha256 TEXT;");
 
         ddl(conn, "file_chunks table",
             "CREATE TABLE IF NOT EXISTS file_chunks (
@@ -5291,6 +5298,7 @@ impl MessageStore {
         created_at: i64,
         video_thumb: Option<&crate::node::VideoThumbRef>,
         thumb_b64: Option<&str>,
+        sha256: Option<&str>,
     ) -> Result<(), String> {
         let vthumb_json = video_thumb
             .and_then(|v| serde_json::to_string(v).ok());
@@ -5306,8 +5314,8 @@ impl MessageStore {
                  (file_id, file_name, file_ext, mime_type, size_bytes,
                   chunk_count, is_image, width, height, message_id,
                   context_type, context_id, sender_id, is_mine, created_at,
-                  video_thumb_json, thumb_b64)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                  video_thumb_json, thumb_b64, sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                  ON CONFLICT(file_id) DO UPDATE SET
                    file_name      = excluded.file_name,
                    file_ext       = excluded.file_ext,
@@ -5319,13 +5327,14 @@ impl MessageStore {
                    height         = excluded.height,
                    message_id     = COALESCE(files.message_id, excluded.message_id),
                    video_thumb_json = COALESCE(excluded.video_thumb_json, files.video_thumb_json),
-                   thumb_b64      = COALESCE(excluded.thumb_b64, files.thumb_b64)",
+                   thumb_b64      = COALESCE(excluded.thumb_b64, files.thumb_b64),
+                   sha256         = COALESCE(files.sha256, excluded.sha256)",
                 params![
                     file_id, file_name, file_ext, mime_type,
                     size_bytes as i64, chunk_count, is_image as i32,
                     width.map(|w| w as i64), height.map(|h| h as i64),
                     message_id, context_type, context_id, sender_id,
-                    is_mine as i32, created_at, vthumb_json, thumb_b64,
+                    is_mine as i32, created_at, vthumb_json, thumb_b64, sha256,
                 ],
             )
             .map_err(|e| format!("Failed to insert file metadata: {e}"))?;
@@ -5943,6 +5952,19 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to set file content_id: {e}"))?;
         Ok(())
+    }
+
+    /// Every file card linked to a vault content id.
+    pub fn files_with_content_id(&self, content_id: &str) -> Result<Vec<StoredFile>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {FILE_COLS} FROM files WHERE content_id = ?1"))
+            .map_err(|e| format!("Failed to prepare content file query: {e}"))?;
+        let rows = stmt
+            .query_map(params![content_id], stored_file_from_row)
+            .map_err(|e| format!("Failed to query content files: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read content file: {e}"))
     }
 
     /// The vault content_id for a file, `None` when it has none (DM files, small
@@ -6796,7 +6818,7 @@ mod tests {
         store
             .insert_file_metadata(
                 file_id, file_id, "bin", "application/octet-stream", size,
-                1, false, None, None, None, ctype, cid, "sender", false, 1000, None, None,
+                1, false, None, None, None, ctype, cid, "sender", false, 1000, None, None, None,
             )
             .unwrap();
         store.mark_file_complete(file_id, disk_path).unwrap();
@@ -6814,7 +6836,7 @@ mod tests {
         store
             .insert_file_metadata(
                 "f4", "f4", "bin", "application/octet-stream", 999,
-                1, false, None, None, None, "dm", "alice", "sender", false, 1000, None, None,
+                1, false, None, None, None, "dm", "alice", "sender", false, 1000, None, None, None,
             )
             .unwrap();
 
@@ -6920,7 +6942,7 @@ mod tests {
             .insert_file_metadata(
                 file_id, &format!("{file_id}.{ext}"), ext, "application/octet-stream",
                 10, 1, is_image, None, None, message_id, ctype, cid, "sender", false,
-                created_at, None, None,
+                created_at, None, None, None,
             )
             .unwrap();
         if complete {

@@ -54,6 +54,7 @@ pub(crate) async fn handle_vault_download_file(
                 let shard_data = cs.read_shard_unchecked(&server_id, &record.shard_key)?;
                 let packed: Vec<Option<Vec<u8>>> = vec![Some(shard_data)];
                 let plaintext = crate::vault::pipeline::reconstruct_file(&manifest, &packed)?;
+                vault_bytes_checked(&content_id, &plaintext, db_path, db_passphrase)?;
                 let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
                 return Ok(path.to_string_lossy().to_string());
             }
@@ -77,6 +78,7 @@ pub(crate) async fn handle_vault_download_file(
             let available = packed.iter().filter(|s| s.is_some()).count();
             if available >= k {
                 let plaintext = crate::vault::pipeline::reconstruct_file(&manifest, &packed)?;
+                vault_bytes_checked(&content_id, &plaintext, db_path, db_passphrase)?;
                 let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
                 Ok(path.to_string_lossy().to_string())
             } else {
@@ -900,6 +902,18 @@ pub(crate) async fn handle_shard_delete(
     }).await;
 }
 
+/// `Err` when a reconstructed vault file is not the one its cards commit to.
+fn vault_bytes_checked(content_id: &str, plaintext: &[u8], db_path: &str, db_passphrase: &str) -> Result<(), String> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase)?;
+    match super::file_commit::vault_plaintext_refused(&store, content_id, plaintext) {
+        Some(reason) => {
+            hollow_log!("[HOLLOW-SECURITY] REFUSED vault content {content_id}: {reason}");
+            Err(super::file_handler::FORGED_FILE_ERROR.to_string())
+        }
+        None => Ok(()),
+    }
+}
+
 /// A vault manifest from a peer. It carries the file's key and names the message
 /// whose card it backs, so it lands only from the member who created it, never over
 /// another creator's manifest, and relinks only that creator's own file card.
@@ -1089,7 +1103,7 @@ mod tests {
         let store = || crate::storage::MessageStore::open(&db, &pass).unwrap();
         store().insert_file_metadata(
             "f-bob", "a.png", "png", "image/png", 4, 0, true, None, None, Some("m-bob"),
-            "channel", "srv:srv-general", &bob, false, 1, None, None,
+            "channel", "srv:srv-general", &bob, false, 1, None, None, None,
         ).unwrap();
         let home = |cid: &str| {
             ContentStore::open(&db, &pass, std::path::Path::new("unused")).unwrap().manifest_home(cid).unwrap()
