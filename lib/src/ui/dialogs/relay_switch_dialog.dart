@@ -67,12 +67,13 @@ Future<bool> ensureRelayForInviteId(
   required HollowLinkType type,
   required String id,
   required String? relay,
+  String? owner,
 }) async {
   if (relay == null) return true;
   final built = switch (type) {
     HollowLinkType.conference => webConferenceInviteLink(id, relay: relay),
     HollowLinkType.roomInvite => roomInviteLink(id, relay: relay),
-    _ => webServerInviteLink(id, relay: relay),
+    _ => webServerInviteLink(id, relay: relay, owner: owner),
   };
   final link = classifyHollowLink(built);
   if (link == null) return true;

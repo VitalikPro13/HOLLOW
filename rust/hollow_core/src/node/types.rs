@@ -770,6 +770,9 @@ pub(crate) struct PendingJoin {
     /// rides the PARKED ring copy so an admitter can seat the LEAF in the same
     /// batch that admits the membership, with the joiner nowhere near.
     pub(crate) key_package: Option<String>,
+    /// The owner the invite pinned (`owner=` on a link to a pre-0.12 server): the only
+    /// owner a snapshot, founding op or checkpoint may name while this join completes.
+    pub(crate) owner_pin: Option<String>,
 }
 
 /// How often a still-parked join re-deposits its copy into the `~join` ring.
@@ -823,7 +826,7 @@ pub(crate) enum NodeCommand {
     RenameChannel { server_id: String, channel_id: String, new_name: String },
     UpdateServerSetting { server_id: String, key: String, value: String },
     DeleteServer { server_id: String },
-    JoinServer { server_id: String, twitch_proof_json: Option<String>, nsfw_confirmed: bool },
+    JoinServer { server_id: String, twitch_proof_json: Option<String>, nsfw_confirmed: bool, owner_pin: Option<String> },
     RequestChannelSync { server_id: String, channel_id: String },
     ChangeRole { server_id: String, peer_id: String, new_role: String },
     KickMember { server_id: String, peer_id: String },

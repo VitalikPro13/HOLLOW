@@ -375,7 +375,7 @@ class ChannelSidebar extends StatelessWidget {
                   onTap: () {
                     // Web form: clickable anywhere, since the browser bounces
                     // into the app, and new clients still render a Join card.
-                    final link = webServerInviteLink(selectedServer!.serverId,
+                    final link = serverInviteLinkFor(selectedServer!.serverId,
                         relay: ref.read(relayDomainProvider));
                     showInviteDialog(
                         context, link, selectedServer!.serverId);
@@ -594,7 +594,7 @@ class _ServerContentState extends State<_ServerContent> {
                 onOpenSettings: w.onOpenSettings,
                 onInvite: () {
                   // The same web-form link the header's invite button copies.
-                  final link = webServerInviteLink(w.serverId,
+                  final link = serverInviteLinkFor(w.serverId,
                       relay: ref.read(relayDomainProvider));
                   showInviteDialog(context, link, w.serverId);
                 },

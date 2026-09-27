@@ -115,18 +115,19 @@ async fn deny(event_tx: &EventTx, message: &str) -> bool {
     true
 }
 
-/// Author one CRDT op: create → apply locally → persist (op log + snapshot).
+/// Author one CRDT op: create, judge by the SAME rule every receiver runs
+/// (`op_allowed`), apply locally, persist (op log + snapshot). `None` = our own
+/// rules refuse it, and nothing was applied or stored.
 fn author_op(
     state: &mut ServerState,
     crdt_store: &CrdtStore,
     server_id: &str,
     payload: CrdtPayload,
-) -> crate::crdt::operations::CrdtOp {
-    let op = state.create_op(payload);
-    let _ = state.apply_op(&op);
+) -> Option<crate::crdt::operations::CrdtOp> {
+    let op = state.author_checked(payload)?;
     crdt_store.insert_op(op.clone());
     crdt_store.save_state_snapshot(server_id.to_string(), state);
-    op
+    Some(op)
 }
 
 /// Broadcast an authored op MLS-first, then ALWAYS also as the plaintext
@@ -259,7 +260,12 @@ async fn author_broadcast_op(
         return true;
     }
     hollow_log!("[HOLLOW-CRDT] {log_label} in {server_id}");
-    let op = author_op(state, crdt_store, server_id, payload);
+    let Some(op) = author_op(state, crdt_store, server_id, payload) else {
+        return match denied_msg {
+            Some(msg) => deny(event_tx, msg).await,
+            None => true,
+        };
+    };
     let _ = event_tx.send(event).await;
     match broadcast {
         OpBroadcast::MlsFirst { mls, crypto_store } => broadcast_op_mls_first(
@@ -270,6 +276,56 @@ async fn author_broadcast_op(
         ),
     }
     false
+}
+
+// ── Owner checkpoints (design E) ─────────────────────────────────────
+
+/// Author every checkpoint we owe as an owner: once per existing server to move it
+/// onto the fold, and a compaction one when an anchored log grows long. Broadcast
+/// like any op; members rebase on it and drop the rows it overwrote.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn author_due_checkpoints(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    event_tx: &EventTx,
+    local_peer_str: &str,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) {
+    let now = crate::crdt::hlc::wall_clock_ms();
+    let due: Vec<String> = server_states
+        .iter()
+        .filter(|(_, s)| s.checkpoint_due(local_peer_str, now))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for server_id in due {
+        let legacy = server_states.get(&server_id)
+            .is_some_and(|s| s.anchor() == crate::crdt::server_state::Anchor::Legacy);
+        let past_authors: Vec<String> = if legacy {
+            let mut authors: Vec<String> = crdt_store.channel_authors(server_id.clone()).await
+                .iter()
+                .map(|a| super::resolver::resolve(a))
+                .collect();
+            authors.sort();
+            authors.dedup();
+            authors
+        } else {
+            Vec::new()
+        };
+        let Some(state) = server_states.get_mut(&server_id) else { continue };
+        let covers = state.horizon();
+        let Some(json) = state.checkpoint_json(local_peer_str, &past_authors, now) else { continue };
+        let Some(op) = state.author_checked(CrdtPayload::ServerCheckpoint { state: json, covers }) else { continue };
+        hollow_log!("[HOLLOW-CRDT] Checkpointed {server_id} ({} ops kept)", state.op_log.len());
+        crdt_store.persist_admitted(vec![op.clone()], state.checkpoint_hlc.clone());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
+        broadcast_op_mls_first(
+            mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op, crypto_store,
+        );
+    }
 }
 
 // ── Shared member-removal plumbing (kick / ban / leave) ───────────────
@@ -612,27 +668,16 @@ pub(crate) async fn handle_create_server(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) {
-    let local_peer = local_peer_str.to_string();
-    let server_id = hex::encode(&{
-        let mut buf = [0u8; 16];
-        getrandom::fill(&mut buf).expect("system RNG unavailable — cannot generate secure random bytes");
-        buf
-    });
-    hollow_log!("[HOLLOW-CRDT] Creating server '{name}' id={server_id}");
-
-    let mut state = ServerState::new(
-        server_id.clone(),
-        name.clone(),
-        local_peer.clone(),
+    // A self-certifying id: our master key and the founding op's nonce hash to it,
+    // so any joiner can prove who owns the server without trusting who answers.
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(bundle_keypair.public_key_protobuf());
+    let (state, founding) = ServerState::found(
+        name.clone(), local_peer_str.to_string(), bundle_keypair.clone(), pk_b64,
     );
-    // Every op this state authors is signed with our MASTER key (goes with
-    // the HLC `ServerState::new` seeded).
-    super::swarm::install_op_signer(&mut state, bundle_keypair);
-
-    author_op(&mut state, crdt_store, &server_id, CrdtPayload::ServerCreated {
-        name: name.clone(),
-        owner_peer_id: local_peer,
-    });
+    let server_id = state.server_id.clone();
+    hollow_log!("[HOLLOW-CRDT] Creating server '{name}' id={server_id}");
+    crdt_store.insert_op(founding);
+    crdt_store.save_state_snapshot(server_id.clone(), &state);
 
     server_states.insert(server_id.clone(), state);
 
@@ -651,7 +696,7 @@ pub(crate) async fn handle_create_server(
     // Auto-pledge default storage (512 MB) for the owner
     if let Some(state) = server_states.get_mut(&server_id) {
         let default_pledge = 512u64 * 1024 * 1024;
-        author_op(state, crdt_store, &server_id, CrdtPayload::StoragePledgeChanged {
+        let _ = author_op(state, crdt_store, &server_id, CrdtPayload::StoragePledgeChanged {
             peer_id: local_peer_str.to_string(),
             pledge_bytes: default_pledge,
         });
@@ -845,12 +890,14 @@ pub(crate) async fn handle_create_channel(
         // would leave the layout pointing at a channel that never exists.
         hollow_log!("[HOLLOW-CRDT] Creating channel '{name}' id={channel_id} in server {server_id}");
 
-        let op = author_op(state, crdt_store, &server_id, CrdtPayload::ChannelAdded {
+        let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::ChannelAdded {
             channel_id: channel_id.clone(),
             name: name.clone(),
             category: category.clone(),
             channel_type: channel_type.clone(),
-        });
+        }) else {
+            return deny(event_tx, "Permission denied: cannot manage channels").await;
+        };
 
         let _ = event_tx.send(NetworkEvent::ChannelAdded {
             server_id: server_id.clone(),
@@ -1155,6 +1202,7 @@ pub(crate) fn pending_join_row(
         // own; this is the public half the ring copy carries, and it has to survive
         // with it or a restarted joiner deposits a DIFFERENT package.
         key_package: pending.key_package.clone(),
+        owner_pin: pending.owner_pin.clone(),
     }
 }
 
@@ -1372,6 +1420,7 @@ pub(crate) async fn handle_join_server(
     server_id: String,
     twitch_proof_json: Option<String>,
     nsfw_confirmed: bool,
+    owner_pin: Option<String>,
     crdt_store: &CrdtStore,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -1412,6 +1461,10 @@ pub(crate) async fn handle_join_server(
             }
         }
     });
+    // A self-certifying id pins its own owner; a pin on one would only be noise.
+    let owner_pin = owner_pin
+        .filter(|_| !crate::crdt::anchor::is_genesis_id(&server_id))
+        .or_else(|| pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone()));
     let pending = PendingJoin {
         twitch_proof_json: twitch_proof_json.clone(),
         nsfw_confirmed,
@@ -1420,6 +1473,7 @@ pub(crate) async fn handle_join_server(
         last_deposited_at: 0,
         device_list,
         key_package,
+        owner_pin,
     };
     // Persist BEFORE anything can go wrong: a crash inside the 15s live window
     // still leaves a row the boot path picks up, and a join that completes
@@ -1549,11 +1603,13 @@ pub(crate) async fn handle_change_role(
         // priority-first; current merge is pure HLC LWW, so demotions land because
         // the op is later, and `can_change_role` carries the authority.
         let author_role = state.get_role(&local_peer);
-        let op = author_op(state, crdt_store, &server_id, CrdtPayload::RoleChanged {
+        let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::RoleChanged {
             peer_id: peer_id.clone(),
             role: new_member_role,
             priority: author_role.priority(),
-        });
+        }) else {
+            return deny(event_tx, &format!("Permission denied: cannot change role to {new_role}")).await;
+        };
 
         let _ = event_tx.send(NetworkEvent::RoleChanged {
             server_id: server_id.clone(),
@@ -1596,9 +1652,11 @@ pub(crate) async fn handle_kick_member(
         hollow_log!("[HOLLOW-CRDT] Kicking member {peer_id} from {server_id}");
         // Collect broadcast targets BEFORE apply_op removes the member.
         let targets = other_member_targets(state, local_peer_str);
-        let op = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
+        let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
             peer_id: peer_id.clone(),
-        });
+        }) else {
+            return deny(event_tx, "Permission denied: cannot kick this member").await;
+        };
 
         let _ = event_tx.send(NetworkEvent::MemberLeft {
             server_id: server_id.clone(),
@@ -1791,9 +1849,11 @@ pub(crate) async fn handle_leave_server(
         hollow_log!("[HOLLOW-CRDT] Leaving server {server_id}");
         // Collect broadcast targets BEFORE apply_op removes us.
         let targets = other_member_targets(state, local_peer_str);
-        let op = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
+        let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberRemoved {
             peer_id: local_peer_str.to_string(),
-        });
+        }) else {
+            return deny(event_tx, "You can't leave this server right now").await;
+        };
 
         // Leaving is an identity-level action: `skip: None`, so the fan also sends
         // the self-removal op to our OWN siblings, each applying it because
@@ -1865,9 +1925,11 @@ pub(crate) async fn handle_ban_member(
         hollow_log!("[HOLLOW-CRDT] Banning member {peer_id} from {server_id}");
         // Collect broadcast targets BEFORE apply_op removes the member.
         let targets = other_member_targets(state, local_peer_str);
-        let op = author_op(state, crdt_store, &server_id, CrdtPayload::MemberBanned {
+        let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::MemberBanned {
             peer_id: peer_id.clone(),
-        });
+        }) else {
+            return deny(event_tx, "Permission denied: cannot ban this member").await;
+        };
 
         let _ = event_tx.send(NetworkEvent::MemberLeft {
             server_id: server_id.clone(),
@@ -2152,7 +2214,9 @@ pub(crate) async fn handle_emote_op(
             }
         }
 
-        let op = author_op(state, crdt_store, &server_id, payload);
+        let Some(op) = author_op(state, crdt_store, &server_id, payload) else {
+            return deny(event_tx, "Permission denied: cannot manage emotes").await;
+        };
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -2972,20 +3036,20 @@ pub(crate) async fn handle_envelope_crdt_op(
 ) {
     let Some(state) = server_states.get_mut(&sid) else { return };
     let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) else { return };
-    // The ONE admission gate (ServerState::admit_remote_op): the author's
+    // The ONE ingest (ServerState::ingest_remote): the author's
     // signature, the clock bound, then the shared permission matrix. It
     // validates op.author (the creator), never the transport sender.
-    if let Err(reason) = state.admit_remote_op(&op) {
-        hollow_log!(
-            "[HOLLOW-SECURITY] REJECTED MLS CrdtOp {} for {sid} from {}: {reason}",
-            crate::crdt::sync::payload_name(&op.payload),
-            op.author,
-        );
+    let ingested = state.ingest_remote(std::slice::from_ref(&op));
+    if ingested.admitted.is_empty() && !ingested.rebuilt {
         return;
     }
-    if let Ok(true) = state.apply_op(&op) {
-        crdt_store.insert_op(op.clone());
-        crdt_store.save_state_snapshot(sid.clone(), state);
+    let op_is_new = ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc);
+    crdt_store.persist_admitted(ingested.admitted, state.checkpoint_hlc.clone());
+    crdt_store.save_state_snapshot(sid.clone(), state);
+    if ingested.rebuilt {
+        let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: sid.clone() }).await;
+    }
+    if op_is_new {
         emit_crdt_apply_event(event_tx, ws_cmd_tx, state, &sid, &op).await;
     }
 }
@@ -3068,6 +3132,7 @@ async fn emit_crdt_apply_event(
                 }
             }
             CrdtPayload::ServerSettingChanged { .. }
+            | CrdtPayload::ServerCheckpoint { .. }
             | CrdtPayload::ServerRenamed { .. }
             | CrdtPayload::RolePermissionsChanged { .. }
             | CrdtPayload::MemberBanned { .. }

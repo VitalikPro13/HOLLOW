@@ -133,9 +133,25 @@ impl CrdtOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CrdtPayload {
     // Server-level
+    /// The founding op. A non-empty `nonce` makes the server id self-certifying
+    /// (`anchor::derive_server_id`); empty on every server founded before 0.12, and
+    /// skipped when empty so those ops keep the bytes their signature covers.
     ServerCreated {
         name: String,
         owner_peer_id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        nonce: String,
+    },
+    /// The owner's full materialized state, which REPLACES everything folded before it:
+    /// the anchor an existing server rebuilds on, and the compaction point of any
+    /// server. JSON of a `ServerState` without its op log, clock or signer.
+    ///
+    /// It sits in the fold at `covers`, the newest clock the state reflects, never at
+    /// its own: ops newer than that, including ones the owner had not seen, fold on
+    /// top of it rather than vanishing under it.
+    ServerCheckpoint {
+        state: String,
+        covers: HlcTimestamp,
     },
     ServerRenamed {
         new_name: String,
@@ -168,9 +184,13 @@ pub enum CrdtPayload {
     },
 
     // Member operations
+    /// `follow` is the joiner's Twitch follow credential, copied in by the admitter
+    /// so every member re-checks the gate; absent (and not serialized) otherwise.
     MemberAdded {
         peer_id: String,
         display_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow: Option<String>,
     },
     MemberRemoved {
         peer_id: String,

@@ -3217,6 +3217,7 @@ mod tests {
             let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberAdded {
                 peer_id: id.clone(),
                 display_name: "m".into(),
+                follow: None,
             });
             state.apply_op(&op).unwrap();
         }

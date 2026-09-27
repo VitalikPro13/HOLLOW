@@ -87,6 +87,7 @@ class _Api implements RustLibApi {
     required String serverId,
     String? twitchProofJson,
     required bool nsfwConfirmed,
+    String? ownerPin,
   }) async {
     if (joinServerError != null) throw joinServerError!;
     joined.add(serverId);

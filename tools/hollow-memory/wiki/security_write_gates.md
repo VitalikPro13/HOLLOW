@@ -88,20 +88,21 @@ and sender.
 
 ## 4. Gated by the CRDT author (not the transport sender)
 
-**The one gate: `ServerState::admit_remote_op`.** It runs, in order, the
-author's signature (`CrdtOp::verify_author`), the clock bound
-(`hlc::MAX_DRIFT_MS` ahead of the wall clock), and then the permission matrix
-(`op_allowed`) against `op.author`. There are exactly FOUR remote ingest sites
-and every one of them calls it BEFORE `apply_op`:
+**The one gate: `ServerState::ingest_remote` (design E, 2026-09-27).** Per op it
+runs the author's signature (`CrdtOp::verify_author`) and the clock bound
+(`hlc::MAX_DRIFT_MS` ahead of the wall clock), then the FOLD: the state is a pure
+function of every retained signed op, folded in HLC order, each judged by the
+permission matrix (`op_allowed`, against `op.author`) at its own point. An op newer
+than the log's tail applies at the tail; an older one rebuilds from the anchor
+(section 17). Every remote ingest site calls it:
 
 1. `swarm::apply_remote_crdt_op`, the plaintext `CrdtOpBroadcast`, which the
    gossip re-flood and the `ServerJoinResolved` arm also funnel through.
 2. `sync_handler::handle_envelope_crdt_op`, the MLS `MessageEnvelope::CrdtOp`.
-3. The Olm-fallback single op in `swarm.rs` (`MessageEnvelope::CrdtOp` arriving
-   over Olm when MLS is skewed).
-4. Inside `crdt::sync::merge_ops`, per op, which covers all THREE
-   `SyncResponse` paths (plaintext, Olm fallback, MLS `SyncResp`) at once, and
-   only ops it admitted reach `insert_crdt_op`.
+3. `crdt::sync::merge_ops_with`, which covers every `SyncResponse` path, and only
+   ops that entered the log reach `insert_crdt_op` (`persist_admitted_ops`).
+
+(The Olm-fallback CRDT arms are ignored since HOL-SEC-019.)
 
 Until 2026-09-03 this section claimed `op_allowed` ran at every ingest. It did
 not: `merge_ops` applied every payload except `ServerDeleted` with no check at
@@ -120,8 +121,8 @@ window on a public repo is a published hole.
 
 | Write | Gate |
 |---|---|
-| `insert_crdt_op`, server state mutations | `ServerState::admit_remote_op` at all four ingest sites. The signature binds `op.author` to a key; `op_allowed` validates that author, never the peer that delivered it |
-| Any op stamped in the far future | `admit_remote_op` refuses `physical_ms > now + MAX_DRIFT_MS`. `AdminLwwReg::merge` is pure HLC LWW, so `u64::MAX` on a register would win every later comparison and lock the field permanently (audit CRDT-2). `Hlc::witness`'s drift check only ever protected our own clock |
+| `insert_crdt_op`, server state mutations | `ServerState::ingest_remote` at every ingest site. The signature binds `op.author` to a key; `op_allowed` validates that author, never the peer that delivered it, at the op's own point in the fold |
+| Any op stamped in the far future | `ingest_remote` refuses `physical_ms > now + MAX_DRIFT_MS`. `AdminLwwReg::merge` is pure HLC LWW, so `u64::MAX` on a register would win every later comparison and lock the field permanently (audit CRDT-2). `Hlc::witness`'s drift check only ever protected our own clock |
 | `ServerCreated` on a server we already hold | allowed ONLY when the state has NO Owner (a join skeleton replaying an op log) AND `op.author == owner_peer_id`. The real owner's own re-send is admitted and `apply_op` makes it a no-op. It used to return `true` unconditionally, which let any member mint itself Owner of anyone's server |
 | `save_server_state` after a `ServerStateSnapshot` | `clamp_future_hlcs` pulls every LWW register back to `now + MAX_DRIFT_MS` on adoption. A snapshot is taken wholesale from ONE responder, so its registers are only as honest as that peer; clamping bounds a poisoned one instead of letting it lock the field. Whether to trust a snapshot's CONTENT at all is a separate open design question |
 | `delete_server_state` | `ServerDeleted` tombstone, owner-author validated at EVERY ingest, now via `op_allowed`'s own `sender_role == Owner` arm inside `admit_remote_op`. The two ad hoc tombstone filters in the sync handlers were removed rather than duplicated |
@@ -444,6 +445,24 @@ Design: `reports/planned/security/audit/design_D_mls_authority.md`. The rules li
 | Mint a KeyPackage for a requester | swarm `MlsKeyPackageRequest` arm | Our server only (no meeting, no pending join), requester a current member, subgroup only if we qualify, once per group per 10 s, and while we hold a leaf only for `crypto_handler::may_repair_our_leaf` (owner, our catch-up responder, subgroup coordinator). HOL-SEC-043 |
 | Drop a group | everywhere | Only on an authenticated event (an accepted commit that evicts us, an accepted Welcome) or our own CRDT state. Decrypt and commit failures never drop: garbage is ignored, anything else probes; probes carry `epoch_auth_digest`, and the answering member repairs a same-epoch fork. HOL-SEC-044 |
 | Voice signaling decrypted from a group | swarm MLS arm, `VoiceChannel*` | Dropped unless the encrypting leaf is the relay-stamped device. HOL-SEC-045 |
+
+## 17. CRDT state authority: anchors, the fold, admission, history (design E, security audit session 9, 2026-09-27)
+
+Design: `reports/planned/security/audit/design_E_crdt_authority.md`. The fold lives in
+`crdt/fold.rs`, self-certifying ids in `crdt/anchor.rs`, the rules in
+`ServerState::op_allowed`.
+
+| Write | Where | Gate |
+|---|---|---|
+| Any remote op | `ServerState::ingest_remote` | Stateless checks, dedup against the retained log and the held pool, then the fold: tail-apply when newer than the log's tail, else a rebuild from the anchor. Refused-for-authority ops wait in `held` (256, 10 min) and are re-judged at the next rebuild. HOL-SEC-047 |
+| The anchor of a new server | `ServerState::found`, `op_allowed` founding rule | 40-hex id = `SHA-256("hollow-server1:{owner}:{nonce}")[..40]`; a founding op lands only on an ownerless state, from the key that hashes to the id. HOL-SEC-046 |
+| The anchor of a pre-0.12 server | `ServerCheckpoint { state, covers }`, `checkpoint_allowed`, `sync_handler::author_due_checkpoints` | Only from the anchor owner (`owner_pin`, else the current owner; trust on first use for an unpinned 32-hex joiner), `covers` no later than its own clock and past the current checkpoint's, a state of this server whose one Owner is its author. It sits in the fold at `covers` (`fold_order`): it replaces what came before, ops after `covers` fold on top; ops up to `covers` are pruned (DB too), except a self-certifying id's founding op. The owner authors one per existing server, then per 2000 ops, at most hourly. HOL-SEC-046/047 |
+| A joiner's starting state | swarm `ServerStateSnapshot` -> `ServerState::accept_join_snapshot`; SyncResponse skeleton | No snapshot for a 40-hex id, none that replaces an anchored state, and with an invite pin (`owner=`, `PendingJoin.owner_pin`) only one owned by the pin. An anchored join completes only when the fold admitted our own `MemberAdded`. HOL-SEC-046 |
+| `MemberAdded` | `op_allowed` -> `admission_allowed` | Author a current member; target not banned; not private; under the cap; owner-verify admits only through the owner; Twitch gate needs the carried `follow` credential, verified for the target at the op's own time. HOL-SEC-049 |
+| Any op's author | `op_allowed` -> `author_role` | Read by its own id (never the resolver) and only while a current member. HOL-SEC-050 |
+| Device-keyed registers | `canonicalize_members` (legacy servers only) | Adopt-only: never onto a master with its own register or the Owner, never Owner, no ban or mute onto a Moderator+. HOL-SEC-051 |
+| Moderation edges and ownership | `op_allowed`, `role_change_allowed`, `kick_allowed`, `lifts_register`; authoring via `author_checked` | Unban/unmute need the setter's rank; nickname-class edits of others only over lower ranks; role permissions only admin/moderator/member and only bits held; nothing makes anyone Owner or touches the Owner; our own ops go through the same predicate. HOL-SEC-052 |
+| Backfilled channel posts | both `ChannelSyncBatch` arms -> `crypto_handler::backfill_author_allowed` | The author (master) must have been a member at the post's time per `member_record` (10 min slack); legacy-anchored servers are not judged until their checkpoint. HOL-SEC-048 |
 
 ---
 

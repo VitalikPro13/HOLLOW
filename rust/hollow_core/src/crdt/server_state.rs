@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::admin_lww::AdminLwwReg;
 use super::hlc::{Hlc, HlcTimestamp};
-use super::operations::{CrdtOp, CrdtPayload, MemberRole, OpReject, Permission};
+use super::operations::{CrdtOp, CrdtPayload, MemberRole, Permission};
+#[cfg(test)]
+use super::operations::OpReject;
 use crate::identity::native_identity::NativeKeypair;
 
 /// The MASTER keypair this replica authors ops with, plus its base64 protobuf public
@@ -197,6 +199,30 @@ pub struct MemberInfo {
     pub display_name: String,
 }
 
+/// One stretch of time an identity was a member, in epoch ms from its admitting op's
+/// clock to its removal's (`u64::MAX` while still a member).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MemberSpan {
+    pub from_ms: u64,
+    pub until_ms: u64,
+}
+
+/// Slack either side of a membership span when judging a post's time: post clocks
+/// are the author's own, span ends are the admitter's or remover's.
+pub const MEMBER_SPAN_SLACK_MS: u64 = 10 * 60 * 1000;
+
+/// What a replica's state is rebuilt from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    /// An existing (32-hex) server no checkpoint has reached yet: ops apply
+    /// incrementally in arrival order, and there is nothing to rebuild from.
+    Legacy,
+    /// A self-certifying id: rebuilt from its founding op.
+    Genesis,
+    /// Rebuilt from the owner's latest checkpoint.
+    Checkpoint,
+}
+
 /// The full CRDT state of a Hollow server: operation-based, so every mutation goes
 /// through `apply_op()`, which is commutative and idempotent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,17 +274,38 @@ pub struct ServerState {
     /// Monotonic delete-wins: there is no un-delete op.
     #[serde(default)]
     pub deleted: bool,
+    /// Every stretch each identity (master) was a member: the provable record channel
+    /// backfill judges a post's author against. Carried by checkpoints.
+    #[serde(default)]
+    pub member_record: HashMap<String, Vec<MemberSpan>>,
+    /// The owner this replica is anchored to: the founder of a self-certifying id,
+    /// the pin an invite carried, or the owner of the first checkpoint or snapshot we
+    /// accepted. The owner never changes, so neither does this once set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pin: Option<String>,
+    /// Clock of the checkpoint this state was last rebased on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_hlc: Option<HlcTimestamp>,
+    /// Admitted ops since the anchor, HLC-sorted. Persisted in `crdt_ops`, never in
+    /// the state JSON. Capped at `LEGACY_OP_LOG_CAP` only while `Anchor::Legacy`.
     #[serde(default, skip_serializing)]
     pub op_log: Vec<CrdtOp>,
     #[serde(skip)]
     pub hlc: Option<Hlc>,
     #[serde(skip)]
-    op_log_dedup: HashSet<(String, HlcTimestamp)>,
+    pub(super) op_log_dedup: HashSet<(String, HlcTimestamp)>,
+    /// Signed ops refused only for authority, re-judged at the next rebuild: an op
+    /// can race ahead of the role grant or admission it depends on.
+    #[serde(skip)]
+    pub(super) held: Vec<(CrdtOp, std::time::Instant)>,
     /// Set by the node right after `set_hlc` on any state that authors ops.
     /// Never persisted and never sent: it is our own secret.
     #[serde(skip)]
     signer: Option<OpSigner>,
 }
+
+/// The op-log cap of a legacy-anchored server, which has no base to rebuild from.
+pub(super) const LEGACY_OP_LOG_CAP: usize = 1000;
 
 impl ServerState {
     /// A serialization-only clone: everything the persisted JSON contains, with the
@@ -273,7 +320,8 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            op_log: _, hlc: _, op_log_dedup: _, signer: _,
+            member_record, owner_pin, checkpoint_hlc,
+            op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
         } = self;
         ServerState {
             server_id: server_id.clone(),
@@ -296,59 +344,26 @@ impl ServerState {
             emotes: emotes.clone(),
             stickers: stickers.clone(),
             deleted: *deleted,
+            member_record: member_record.clone(),
+            owner_pin: owner_pin.clone(),
+            checkpoint_hlc: checkpoint_hlc.clone(),
             op_log: Vec::new(),
             hlc: None,
             op_log_dedup: HashSet::new(),
+            held: Vec::new(),
             signer: None,
         }
     }
 
-    /// Create a new server. The creator becomes the Owner.
-    pub fn new(server_id: String, name: String, creator_peer_id: String) -> Self {
-        let mut hlc = Hlc::new(creator_peer_id.clone());
-        let ts = hlc.now();
-
-        let mut channels = HashMap::new();
-        // Every server starts with a #general channel
-        let general_id = format!("{}-general", &server_id[..8.min(server_id.len())]);
-        channels.insert(
-            general_id.clone(),
-            ChannelInfo {
-                channel_id: general_id,
-                name: "general".to_string(),
-                category: None,
-                channel_type: ChannelType::Text,
-                visibility: ChannelVisibility::Everyone,
-                posting: ChannelPosting::Everyone,
-                is_public: false,
-                slow_mode: 0,
-                media_only: false,
-                visibility_labels: Vec::new(),
-                posting_labels: Vec::new(),
-            },
-        );
-
-        let mut members = HashMap::new();
-        members.insert(
-            creator_peer_id.clone(),
-            MemberInfo {
-                peer_id: creator_peer_id.clone(),
-                display_name: short_name(&creator_peer_id),
-            },
-        );
-
-        let mut roles = HashMap::new();
-        roles.insert(
-            creator_peer_id.clone(),
-            AdminLwwReg::new(MemberRole::Owner, ts.clone(), MemberRole::Owner.priority()),
-        );
-
+    /// An ownerless, empty state for `server_id`: what a fold starts from, and what a
+    /// joiner holds before the first op lands.
+    pub fn skeleton(server_id: String) -> Self {
         Self {
             server_id,
-            name: AdminLwwReg::new(name, ts, MemberRole::Owner.priority()),
-            channels,
-            members,
-            roles,
+            name: AdminLwwReg::new(String::new(), HlcTimestamp::zero(""), 0),
+            channels: HashMap::new(),
+            members: HashMap::new(),
+            roles: HashMap::new(),
             nicknames: HashMap::new(),
             twitch_usernames: HashMap::new(),
             pinned_messages: HashMap::new(),
@@ -364,11 +379,114 @@ impl ServerState {
             emotes: HashMap::new(),
             stickers: HashMap::new(),
             deleted: false,
+            member_record: HashMap::new(),
+            owner_pin: None,
+            checkpoint_hlc: None,
             op_log: Vec::new(),
-            hlc: Some(hlc),
+            hlc: None,
             op_log_dedup: HashSet::new(),
+            held: Vec::new(),
             signer: None,
         }
+    }
+
+    /// A state seeded with its creator as Owner and #general, WITHOUT a founding op:
+    /// the shape of every server founded before 0.12, kept for tests of that shape.
+    /// New servers are founded with [`ServerState::found`].
+    #[cfg(test)]
+    pub fn new(server_id: String, name: String, creator_peer_id: String) -> Self {
+        let mut hlc = Hlc::new(creator_peer_id.clone());
+        let ts = hlc.now();
+        let mut s = Self::skeleton(server_id);
+        s.seed_founder(&name, &creator_peer_id, &ts);
+        s.hlc = Some(hlc);
+        s
+    }
+
+    /// Found a new server with a self-certifying id: the founder's signed
+    /// `ServerCreated`, already applied, is the first op of its log.
+    pub(crate) fn found(name: String, owner_peer_id: String, keypair: NativeKeypair, pk_b64: String) -> (Self, CrdtOp) {
+        let nonce = super::anchor::new_nonce();
+        let server_id = super::anchor::derive_server_id(&owner_peer_id, &nonce);
+        let mut s = Self::skeleton(server_id);
+        s.set_hlc(Hlc::new(owner_peer_id.clone()));
+        s.set_signer(keypair, pk_b64);
+        let op = s.create_op(CrdtPayload::ServerCreated { name, owner_peer_id, nonce });
+        debug_assert!(s.op_allowed(&op), "a fresh founding op must pass its own rule");
+        let _ = s.apply_op(&op);
+        (s, op)
+    }
+
+    /// The founder's seat: name, Owner role, membership span, #general, and the anchor.
+    fn seed_founder(&mut self, name: &str, owner: &str, at: &HlcTimestamp) {
+        self.name = AdminLwwReg::new(name.to_string(), at.clone(), MemberRole::Owner.priority());
+        self.members.insert(owner.to_string(), MemberInfo {
+            peer_id: owner.to_string(),
+            display_name: short_name(owner),
+        });
+        self.roles.insert(
+            owner.to_string(),
+            AdminLwwReg::new(MemberRole::Owner, at.clone(), MemberRole::Owner.priority()),
+        );
+        self.open_span(owner, at.physical_ms);
+        let general_id = format!("{}-general", &self.server_id[..8.min(self.server_id.len())]);
+        self.channels.entry(general_id.clone()).or_insert_with(|| ChannelInfo {
+            channel_id: general_id,
+            name: "general".to_string(),
+            category: None,
+            channel_type: ChannelType::Text,
+            visibility: ChannelVisibility::Everyone,
+            posting: ChannelPosting::Everyone,
+            is_public: false,
+            slow_mode: 0,
+            media_only: false,
+            visibility_labels: Vec::new(),
+            posting_labels: Vec::new(),
+        });
+        if self.owner_pin.is_none() {
+            self.owner_pin = Some(owner.to_string());
+        }
+    }
+
+    /// What this replica rebuilds from.
+    pub fn anchor(&self) -> Anchor {
+        if self.checkpoint_hlc.is_some() {
+            Anchor::Checkpoint
+        } else if super::anchor::is_genesis_id(&self.server_id) {
+            Anchor::Genesis
+        } else {
+            Anchor::Legacy
+        }
+    }
+
+    /// The owner every founding op, checkpoint and snapshot must name.
+    pub fn anchor_owner(&self) -> Option<String> {
+        self.owner_pin.clone().or_else(|| self.current_owner())
+    }
+
+    fn open_span(&mut self, master: &str, at_ms: u64) {
+        let spans = self.member_record.entry(master.to_string()).or_default();
+        if spans.last().is_none_or(|s| s.until_ms != u64::MAX) {
+            spans.push(MemberSpan { from_ms: at_ms, until_ms: u64::MAX });
+        }
+    }
+
+    fn close_span(&mut self, master: &str, at_ms: u64) {
+        if let Some(open) = self.member_record.get_mut(master)
+            .and_then(|spans| spans.last_mut())
+            .filter(|s| s.until_ms == u64::MAX)
+        {
+            open.until_ms = at_ms.max(open.from_ms);
+        }
+    }
+
+    /// Was `master` a member at `at_ms` (the author's own clock), give or take
+    /// `MEMBER_SPAN_SLACK_MS`?
+    pub fn was_member_at(&self, master: &str, at_ms: u64) -> bool {
+        self.member_record.get(master).is_some_and(|spans| spans.iter().any(|s| {
+            s.from_ms.saturating_sub(MEMBER_SPAN_SLACK_MS) <= at_ms
+                && at_ms < s.until_ms.saturating_add(MEMBER_SPAN_SLACK_MS)
+        }))
     }
 
     /// Restore from persistence (HLC set separately via `set_hlc`).
@@ -390,6 +508,12 @@ impl ServerState {
     ///
     /// LWW registers fold via `AdminLwwReg::merge` (pure HLC), while plain entries keep
     /// an existing master entry and otherwise adopt the device entry's value.
+    ///
+    /// SECURITY (E8): a device-keyed role, ban or mute register was judged against
+    /// whatever rank the device id read as when it arrived (Member, if it could not be
+    /// resolved yet), so it may only be ADOPTED by a master that has no register of its
+    /// own, never lands on the Owner, never carries Owner, and a ban or mute never lands
+    /// on a Moderator or above. Anchored servers never run this at all.
     pub fn canonicalize_members(&mut self, resolve: impl Fn(&str) -> String) -> bool {
         let mut changed = false;
 
@@ -434,12 +558,47 @@ impl ServerState {
             }
         }
 
-        changed |= fold_lww(&mut self.roles, &resolve);
+        // Adopt-only fold for the registers that carry authority over the master.
+        fn adopt_lww<V: Clone>(
+            map: &mut HashMap<String, AdminLwwReg<V>>,
+            resolve: &impl Fn(&str) -> String,
+            may_land: impl Fn(&str, &V) -> bool,
+        ) -> bool {
+            let mut changed = false;
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let master = resolve(&k);
+                if master == k || map.contains_key(&master) {
+                    continue;
+                }
+                if map.get(&k).is_some_and(|reg| may_land(&master, reg.read()))
+                    && let Some(reg) = map.remove(&k)
+                {
+                    map.insert(master, reg);
+                    changed = true;
+                }
+            }
+            changed
+        }
+
+        let owner = self.current_owner();
+        let is_owner = |m: &str| owner.as_deref() == Some(m);
+        let ranks: HashMap<String, MemberRole> = self
+            .roles
+            .iter()
+            .map(|(k, reg)| (k.clone(), reg.read().clone()))
+            .collect();
+        let below_moderator = |m: &str| {
+            ranks.get(m).is_none_or(|r| r.priority() < MemberRole::Moderator.priority())
+        };
+        changed |= adopt_lww(&mut self.roles, &resolve, |m, role| {
+            !is_owner(m) && *role != MemberRole::Owner
+        });
         changed |= fold_lww(&mut self.nicknames, &resolve);
         changed |= fold_lww(&mut self.twitch_usernames, &resolve);
         changed |= fold_lww(&mut self.storage_pledges, &resolve);
-        changed |= fold_lww(&mut self.banned_members, &resolve);
-        changed |= fold_lww(&mut self.muted_members, &resolve);
+        changed |= adopt_lww(&mut self.banned_members, &resolve, |m, _| below_moderator(m));
+        changed |= adopt_lww(&mut self.muted_members, &resolve, |m, _| below_moderator(m));
         // channel_grants: per-channel inner maps are master-keyed like mutes.
         for regs in self.channel_grants.values_mut() {
             changed |= fold_lww(regs, &resolve);
@@ -514,11 +673,10 @@ impl ServerState {
             .map(|(pid, _)| pid.clone())
     }
 
-    /// The ONE admission gate for a remotely-authored op: author signature, then the
-    /// clock bound, then the permission matrix. Every remote ingest path calls this
-    /// BEFORE `apply_op`, so a forged author, a stripped signature or a far-future
-    /// timestamp never reaches the state. Ops we author ourselves skip it: `create_op`
-    /// signs them and the local send handlers gate them.
+    /// One op's whole judgment against the current state (signature, clock bound,
+    /// permission matrix), as `ingest_remote` makes it op by op. Test-only: remote ops
+    /// enter through `ingest_remote`, which judges each at its own point in the fold.
+    #[cfg(test)]
     pub fn admit_remote_op(&self, op: &CrdtOp) -> Result<(), OpReject> {
         if op.server_id != self.server_id {
             return Err(OpReject::WrongServer);
@@ -562,7 +720,8 @@ impl ServerState {
             // write them, never through an LWW register.
             server_id: _, channels: _, members: _, pinned_messages: _,
             channel_layout: _, labels: _, label_assignments: _, emotes: _,
-            stickers: _, deleted: _, op_log: _, hlc: _, op_log_dedup: _,
+            stickers: _, deleted: _, member_record: _, owner_pin: _,
+            checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
             signer: _,
         } = self;
 
@@ -583,13 +742,14 @@ impl ServerState {
         clamped
     }
 
-    /// Apply a CRDT operation. Idempotent: a duplicate is a no-op.
+    /// Apply an op at the tail of the log, WITHOUT judging it: callers run
+    /// `op_allowed` first (remote ingest goes through `ingest_remote`). Idempotent.
     ///
     /// `Ok(true)` when the op was new here and entered the op log: the ONE signal
     /// callers persist, emit and re-flood on. The log's length cannot say it, since at
-    /// the compaction cap (where every restart restores it) each insert drains an op.
-    /// An op older than the whole retained window drains straight back out and reports
-    /// `false`, or two nodes would re-flood it to each other forever.
+    /// the legacy cap each insert drains an op. An op older than the whole retained
+    /// legacy window drains straight back out and reports `false`, or two nodes would
+    /// re-flood it to each other forever.
     pub fn apply_op(&mut self, op: &CrdtOp) -> Result<bool, String> {
         if op.server_id != self.server_id {
             return Err(format!(
@@ -597,56 +757,73 @@ impl ServerState {
                 op.server_id, self.server_id
             ));
         }
-
-        // Lazy-init dedup set from op_log (after deserialization, skip field is empty).
-        if self.op_log_dedup.is_empty() && !self.op_log.is_empty() {
-            for existing in &self.op_log {
-                self.op_log_dedup.insert((existing.author.clone(), existing.hlc.clone()));
-            }
-        }
-
-        // O(1) duplicate check (same author + same HLC = same op)
+        self.ensure_dedup();
         let dedup_key = (op.author.clone(), op.hlc.clone());
         if self.op_log_dedup.contains(&dedup_key) {
             return Ok(false);
         }
-
-        // Witness the remote timestamp to keep our HLC in sync
         if let Some(hlc) = &mut self.hlc {
             hlc.witness(&op.hlc);
         }
+        self.apply_payload(op);
+        self.log_admitted(op.clone());
+        Ok(self.op_log_dedup.contains(&dedup_key))
+    }
 
+    /// The dedup set is not persisted: rebuild it from the log on first use.
+    pub(super) fn ensure_dedup(&mut self) {
+        if self.op_log_dedup.is_empty() && !self.op_log.is_empty() {
+            self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        }
+    }
+
+    /// Enter an applied op into the log in fold order. A legacy log is capped; an
+    /// anchored one drops everything a checkpoint has overwritten instead.
+    pub(super) fn log_admitted(&mut self, op: CrdtOp) {
+        let pos = self
+            .op_log
+            .binary_search_by(|existing| fold_order(existing, &op))
+            .unwrap_or_else(|pos| pos);
+        self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()));
+        let is_checkpoint = matches!(op.payload, CrdtPayload::ServerCheckpoint { .. });
+        self.op_log.insert(pos, op);
+        if is_checkpoint {
+            self.prune_before_checkpoint();
+        } else if self.anchor() == Anchor::Legacy && self.op_log.len() > LEGACY_OP_LOG_CAP {
+            let drain = self.op_log.len() - LEGACY_OP_LOG_CAP;
+            self.op_log.drain(..drain);
+            self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+        }
+    }
+
+    /// Drop every logged op the current checkpoint overwrote, except the founding op
+    /// of a self-certifying id: a joiner needs it to prove who the owner is.
+    pub(super) fn prune_before_checkpoint(&mut self) {
+        let Some(base) = self.checkpoint_hlc.clone() else { return };
+        let genesis = super::anchor::is_genesis_id(&self.server_id);
+        self.op_log.retain(|o| match &o.payload {
+            CrdtPayload::ServerCheckpoint { covers, .. } => *covers >= base,
+            CrdtPayload::ServerCreated { .. } if genesis => true,
+            _ => o.hlc > base,
+        });
+        self.op_log_dedup = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
+    }
+
+    /// The state change an op makes, and nothing else: no dedup, no log, no judgment.
+    /// The fold replays admitted ops through this in HLC order.
+    pub(super) fn apply_payload(&mut self, op: &CrdtOp) {
         match &op.payload {
-            CrdtPayload::ServerCreated { name, owner_peer_id } => {
-                // A server has exactly one founding moment. Once an Owner exists, a
-                // second ServerCreated naming somebody ELSE is a takeover attempt, not
-                // replication: log the op so sync stays convergent, and mutate nothing.
-                // `op_allowed` refuses it at ingest; this is the twin guard for local
-                // replay paths, and it makes the real owner's own re-send idempotent.
-                let hostile_refound = self
-                    .current_owner()
-                    .is_some_and(|existing| existing != *owner_peer_id);
-                if !hostile_refound {
-                    self.name = AdminLwwReg::new(
-                        name.clone(),
-                        op.hlc.clone(),
-                        MemberRole::Owner.priority(),
-                    );
-                    self.members.insert(
-                        owner_peer_id.clone(),
-                        MemberInfo {
-                            peer_id: owner_peer_id.clone(),
-                            display_name: short_name(owner_peer_id),
-                        },
-                    );
-                    self.roles.insert(
-                        owner_peer_id.clone(),
-                        AdminLwwReg::new(
-                            MemberRole::Owner,
-                            op.hlc.clone(),
-                            MemberRole::Owner.priority(),
-                        ),
-                    );
+            CrdtPayload::ServerCreated { name, owner_peer_id, .. } => {
+                // `op_allowed` admits a founding op only on an ownerless state; the
+                // guard keeps a local replay path from re-seating anyone.
+                if self.current_owner().is_none() {
+                    self.seed_founder(name, owner_peer_id, &op.hlc);
+                }
+            }
+
+            CrdtPayload::ServerCheckpoint { state, covers } => {
+                if let Ok(base) = serde_json::from_str::<ServerState>(state) {
+                    self.rebase_on(base, &op.author, covers);
                 }
             }
 
@@ -726,8 +903,11 @@ impl ServerState {
 
             CrdtPayload::MemberAdded {
                 peer_id,
-                display_name,
+                display_name, ..
             } => {
+                if !self.members.contains_key(peer_id) {
+                    self.open_span(peer_id, op.hlc.physical_ms);
+                }
                 self.members.entry(peer_id.clone()).or_insert_with(|| {
                     MemberInfo {
                         peer_id: peer_id.clone(),
@@ -744,6 +924,7 @@ impl ServerState {
             }
 
             CrdtPayload::MemberRemoved { peer_id } => {
+                self.close_span(peer_id, op.hlc.physical_ms);
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
                 self.nicknames.remove(peer_id);
@@ -916,6 +1097,7 @@ impl ServerState {
                 let remote = AdminLwwReg::new(true, op.hlc.clone(), priority);
                 entry.merge(&remote);
                 // Also remove from server (ban = kick + prevent rejoin)
+                self.close_span(peer_id, op.hlc.physical_ms);
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
                 self.nicknames.remove(peer_id);
@@ -1052,28 +1234,80 @@ impl ServerState {
                 self.stickers.remove(hash);
             }
         }
+    }
 
-        // Append to op log (sorted insert by HLC for deterministic ordering)
-        let insert_pos = self
-            .op_log
-            .binary_search_by(|existing| existing.hlc.cmp(&op.hlc))
-            .unwrap_or_else(|pos| pos);
-        self.op_log.insert(insert_pos, op.clone());
-        self.op_log_dedup.insert(dedup_key.clone());
+    /// Replace everything materialized with a checkpoint's state. The anchor owner is
+    /// the checkpoint's author; the log, clock, signer and held ops are ours.
+    fn rebase_on(&mut self, base: ServerState, owner: &str, covers: &HlcTimestamp) {
+        let ServerState {
+            server_id: _, name, channels, members, roles, nicknames,
+            twitch_usernames, pinned_messages, channel_layout, storage_pledges,
+            settings, role_permissions, banned_members, muted_members,
+            channel_grants, labels, label_assignments, emotes, stickers, deleted,
+            member_record,
+            owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
+            held: _, signer: _,
+        } = base;
+        self.name = name;
+        self.channels = channels;
+        self.members = members;
+        self.roles = roles;
+        self.nicknames = nicknames;
+        self.twitch_usernames = twitch_usernames;
+        self.pinned_messages = pinned_messages;
+        self.channel_layout = channel_layout;
+        self.storage_pledges = storage_pledges;
+        self.settings = settings;
+        self.role_permissions = role_permissions;
+        self.banned_members = banned_members;
+        self.muted_members = muted_members;
+        self.channel_grants = channel_grants;
+        self.labels = labels;
+        self.label_assignments = label_assignments;
+        self.emotes = emotes;
+        self.stickers = stickers;
+        self.deleted = deleted;
+        self.member_record = member_record;
+        self.owner_pin = Some(owner.to_string());
+        self.checkpoint_hlc = Some(covers.clone());
+        // The owner is trusted with the values, never with timestamps that would
+        // outrank every later honest write.
+        self.clamp_future_hlcs(covers.physical_ms);
+    }
 
-        // Compact the op log to bound growth; older ops are already applied to state.
-        const MAX_OP_LOG: usize = 1000;
-        if self.op_log.len() > MAX_OP_LOG {
-            let drain_count = self.op_log.len() - MAX_OP_LOG;
-            self.op_log.drain(..drain_count);
-            // Rebuild dedup set after compaction.
-            self.op_log_dedup.clear();
-            for existing in &self.op_log {
-                self.op_log_dedup.insert((existing.author.clone(), existing.hlc.clone()));
-            }
-        }
-
-        Ok(self.op_log_dedup.contains(&dedup_key))
+    /// Everything materialized back to the ownerless skeleton, keeping the anchor
+    /// owner, the log, the clock and the signer: where a rebuild starts.
+    pub(super) fn reset_materialized(&mut self) {
+        let fresh = Self::skeleton(self.server_id.clone());
+        let ServerState {
+            server_id: _, name, channels, members, roles, nicknames,
+            twitch_usernames, pinned_messages, channel_layout, storage_pledges,
+            settings, role_permissions, banned_members, muted_members,
+            channel_grants, labels, label_assignments, emotes, stickers, deleted,
+            member_record, checkpoint_hlc,
+            owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
+        } = fresh;
+        self.name = name;
+        self.channels = channels;
+        self.members = members;
+        self.roles = roles;
+        self.nicknames = nicknames;
+        self.twitch_usernames = twitch_usernames;
+        self.pinned_messages = pinned_messages;
+        self.channel_layout = channel_layout;
+        self.storage_pledges = storage_pledges;
+        self.settings = settings;
+        self.role_permissions = role_permissions;
+        self.banned_members = banned_members;
+        self.muted_members = muted_members;
+        self.channel_grants = channel_grants;
+        self.labels = labels;
+        self.label_assignments = label_assignments;
+        self.emotes = emotes;
+        self.stickers = stickers;
+        self.deleted = deleted;
+        self.member_record = member_record;
+        self.checkpoint_hlc = checkpoint_hlc;
     }
 
     /// List all channels, sorted by name.
@@ -1195,7 +1429,8 @@ impl ServerState {
     /// Look up an author's priority from their role, resolving a DEVICE-id author to its
     /// master first so LWW priority works for replayed legacy ops. Unknown authors stay
     /// at 0, deliberately BELOW plain members, so do not route this via `get_role`, which
-    /// defaults unknowns to `Member`.
+    /// defaults unknowns to `Member`. Ban and mute registers keep it: lifting one needs
+    /// at least the rank that set it.
     fn author_priority(&self, author: &str) -> u8 {
         let key = super::resolve_identity(author);
         self.roles
@@ -1207,14 +1442,17 @@ impl ServerState {
     /// Effective permissions bitmask for a peer: Owner gets all, otherwise custom
     /// `role_permissions` first and the role defaults after.
     pub fn get_permissions(&self, peer_id: &str) -> u32 {
-        let role = self.get_role(peer_id);
-        if role == MemberRole::Owner {
+        self.permissions_of(&self.get_role(peer_id))
+    }
+
+    fn permissions_of(&self, role: &MemberRole) -> u32 {
+        if *role == MemberRole::Owner {
             return Permission::ALL;
         }
-        if let Some(reg) = self.role_permissions.get(role.as_str()) {
-            return *reg.read();
-        }
-        role.default_permissions()
+        self.role_permissions
+            .get(role.as_str())
+            .map(|reg| *reg.read())
+            .unwrap_or_else(|| role.default_permissions())
     }
 
     /// Get the permissions bitmask for a role (custom or default).
@@ -1233,43 +1471,50 @@ impl ServerState {
         self.get_permissions(peer_id) & permission != 0
     }
 
-    /// Check if `actor` can change `target`'s role to `new_role`. Owner can do anything;
-    /// anyone else only below their own rank, in both target and assigned role.
-    pub fn can_change_role(&self, actor: &str, target: &str, new_role: &MemberRole) -> bool {
-        let actor_role = self.get_role(actor);
-        if actor_role == MemberRole::Owner {
-            return true;
-        }
-        if !self.has_permission(actor, Permission::MANAGE_ROLES) {
-            return false;
-        }
-        let target_role = self.get_role(target);
-        // Can't change someone of equal or higher rank
-        if !actor_role.outranks(&target_role) {
-            return false;
-        }
-        // Can't assign a role equal to or higher than your own
-        if !actor_role.outranks(new_role) {
-            return false;
-        }
-        // Can't set someone to Owner via role change
-        if *new_role == MemberRole::Owner {
-            return false;
-        }
-        true
+    /// The role an op's author acts with, read by its OWN id and never through the
+    /// resolver: every client signs ops with its master key, so a device key has no
+    /// role (E9). `None` for anyone who is not a current member (E6).
+    fn author_role(&self, author: &str) -> Option<MemberRole> {
+        self.members.contains_key(author).then(|| {
+            self.roles
+                .get(author)
+                .map(|reg| reg.read().clone())
+                .unwrap_or(MemberRole::Member)
+        })
     }
 
-    /// Check if `actor` can kick `target`.
-    pub fn can_kick(&self, actor: &str, target: &str) -> bool {
-        let actor_role = self.get_role(actor);
-        if actor_role == MemberRole::Owner {
-            return true;
-        }
-        if !self.has_permission(actor, Permission::KICK_MEMBERS) {
+    /// Check if `actor` can change `target`'s role to `new_role`: never to or from
+    /// Owner, only for a current member, and below the actor's own rank on both ends
+    /// unless the actor is the Owner.
+    pub fn can_change_role(&self, actor: &str, target: &str, new_role: &MemberRole) -> bool {
+        let role = self.get_role(actor);
+        self.role_change_allowed(&role, self.permissions_of(&role), target, new_role)
+    }
+
+    fn role_change_allowed(&self, actor: &MemberRole, perms: u32, target: &str, new_role: &MemberRole) -> bool {
+        let target_role = self.get_role(target);
+        // The owner is fixed for the life of the server (E12).
+        if *new_role == MemberRole::Owner || target_role == MemberRole::Owner || !self.is_member(target) {
             return false;
         }
+        *actor == MemberRole::Owner
+            || (perms & Permission::MANAGE_ROLES != 0
+                && actor.outranks(&target_role)
+                && actor.outranks(new_role))
+    }
+
+    /// Check if `actor` can kick `target`: never the Owner, and otherwise KICK_MEMBERS
+    /// plus outranking the target.
+    pub fn can_kick(&self, actor: &str, target: &str) -> bool {
+        let role = self.get_role(actor);
+        self.kick_allowed(&role, self.permissions_of(&role), target)
+    }
+
+    fn kick_allowed(&self, actor: &MemberRole, perms: u32, target: &str) -> bool {
         let target_role = self.get_role(target);
-        actor_role.outranks(&target_role)
+        target_role != MemberRole::Owner
+            && (*actor == MemberRole::Owner
+                || (perms & Permission::KICK_MEMBERS != 0 && actor.outranks(&target_role)))
     }
 
     /// Check if a peer is currently banned.
@@ -1308,135 +1553,134 @@ impl ServerState {
     /// and a policy only with a value the app offers (decision 2c). Every other key is
     /// MANAGE_SERVER, override-aware.
     pub fn setting_change_allowed(&self, author: &str, key: &str, value: &str) -> bool {
+        let role = self.get_role(author);
+        self.setting_allowed_for(&role, self.permissions_of(&role), key, value)
+    }
+
+    fn setting_allowed_for(&self, role: &MemberRole, perms: u32, key: &str, value: &str) -> bool {
         match key {
             "retention_files" | "retention_messages" => {
-                self.get_role(author) == MemberRole::Owner
+                *role == MemberRole::Owner
                     && crate::vault::adaptive::RETENTION_CHOICES.contains(&value)
             }
             "retention_files_since" | "retention_messages_since" => {
-                self.get_role(author) == MemberRole::Owner && value.parse::<u64>().is_ok()
+                *role == MemberRole::Owner && value.parse::<u64>().is_ok()
             }
-            _ => self.has_permission(author, Permission::MANAGE_SERVER),
+            _ => perms & Permission::MANAGE_SERVER != 0,
         }
     }
 
     /// The ingest permission matrix: may `op.author` apply this op to this server? Shared
-    /// by BOTH remote-op ingest paths so the matrices can never drift apart.
+    /// by every remote ingest path, the fold, and our own authoring (`author_checked`),
+    /// so an honest client never authors what honest peers refuse.
     ///
     /// Validates the AUTHOR, never the transport sender: ops are legitimately relayed by
-    /// other peers during join and sync fan-out. Override-aware (`get_permissions`, not
-    /// `default_permissions()`), because local send handlers gate on `has_permission`, so
-    /// an override-granted permission would author ops the whole network rejects while an
-    /// override-REVOKED one would still pass ingest.
+    /// other peers during join and sync fan-out. Override-aware (`permissions_of`, not
+    /// `default_permissions()`).
     pub fn op_allowed(&self, op: &CrdtOp) -> bool {
-        let sender_role = self.get_role(&op.author);
-        let sender_perms = self.get_permissions(&op.author);
         match &op.payload {
+            CrdtPayload::ServerCreated { owner_peer_id, nonce, .. } => {
+                return self.founding_allowed(op, owner_peer_id, nonce);
+            }
+            CrdtPayload::ServerCheckpoint { state, covers } => {
+                return self.checkpoint_allowed(op, state, covers);
+            }
+            _ => {}
+        }
+        let Some(role) = self.author_role(&op.author) else { return false };
+        let perms = self.permissions_of(&role);
+        let has = |bits: u32| perms & bits != 0;
+        match &op.payload {
+            CrdtPayload::ServerCreated { .. } | CrdtPayload::ServerCheckpoint { .. } => false,
             CrdtPayload::ChannelAdded { .. }
             | CrdtPayload::ChannelRemoved { .. }
             | CrdtPayload::ChannelRenamed { .. }
-            | CrdtPayload::ChannelLayoutUpdated { .. } => {
-                (sender_perms & Permission::MANAGE_CHANNELS) != 0
-            }
-            CrdtPayload::RoleChanged { peer_id, role, .. } => {
-                self.can_change_role(&op.author, peer_id, role)
-            }
-            // Permission-based (override-aware), NOT role-based: the local send handlers
-            // gate on MANAGE_SERVER, so ingest must match or an override-granted author
-            // forks from the network.
-            CrdtPayload::ServerRenamed { .. } => {
-                (sender_perms & Permission::MANAGE_SERVER) != 0
-            }
-            CrdtPayload::ServerSettingChanged { key, value } => {
-                self.setting_change_allowed(&op.author, key, value)
-            }
-            // Self-removal (voluntary leave) is always allowed; kicking
-            // someone ELSE needs moderator+ and outranking.
-            CrdtPayload::MemberRemoved { peer_id } => {
-                let target_role = self.get_role(peer_id);
-                peer_id == &op.author
-                    || ((sender_perms & Permission::KICK_MEMBERS) != 0
-                        && sender_role.outranks(&target_role))
-            }
-            CrdtPayload::MemberAdded { .. } => {
-                // is_member (resolver-aware), not raw contains_key: a legacy op
-                // authored under a DEVICE id must still validate.
-                self.is_member(&op.author)
-            }
-            CrdtPayload::NicknameChanged { peer_id, .. }
-            | CrdtPayload::TwitchUsernameChanged { peer_id, .. }
-            | CrdtPayload::StoragePledgeChanged { peer_id, .. } => {
-                peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
-            }
-            CrdtPayload::MessagePinned { .. }
-            | CrdtPayload::MessageUnpinned { .. } => {
-                (sender_perms & Permission::MANAGE_CHANNELS) != 0
-            }
-            CrdtPayload::RolePermissionsChanged { role, .. } => {
-                let target = MemberRole::from_str(role);
-                (sender_perms & Permission::MANAGE_ROLES) != 0
-                    && sender_role.outranks(&target)
-            }
-            CrdtPayload::MemberBanned { peer_id } => {
-                let target_role = self.get_role(peer_id);
-                (sender_perms & Permission::KICK_MEMBERS) != 0
-                    && sender_role.outranks(&target_role)
-            }
-            CrdtPayload::MemberUnbanned { .. } => {
-                (sender_perms & Permission::KICK_MEMBERS) != 0
-            }
-            CrdtPayload::MemberMuted { peer_id, .. } => {
-                let target_role = self.get_role(peer_id);
-                (sender_perms & Permission::KICK_MEMBERS) != 0
-                    && sender_role.outranks(&target_role)
-            }
-            CrdtPayload::MemberUnmuted { .. } => {
-                (sender_perms & Permission::KICK_MEMBERS) != 0
-            }
-            CrdtPayload::ChannelPublicChanged { channel_id, .. } => {
-                // MANAGE_CHANNELS + text channels only — voice channels can
-                // never be public (#44). Unknown channel id passes (apply is a
-                // no-op there); the apply guard is the backstop.
-                (sender_perms & Permission::MANAGE_CHANNELS) != 0
-                    && self
-                        .channels
-                        .get(channel_id)
-                        .map_or(true, |ch| ch.channel_type == ChannelType::Text)
-            }
-            CrdtPayload::ChannelVisibilityChanged { .. }
+            | CrdtPayload::ChannelLayoutUpdated { .. }
+            | CrdtPayload::MessagePinned { .. }
+            | CrdtPayload::MessageUnpinned { .. }
+            | CrdtPayload::ChannelVisibilityChanged { .. }
             | CrdtPayload::ChannelPostingChanged { .. }
             | CrdtPayload::ChannelSlowModeChanged { .. }
             | CrdtPayload::ChannelMediaOnlyChanged { .. }
             | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
             | CrdtPayload::ChannelPostingLabelsChanged { .. }
             | CrdtPayload::ChannelGrantSet { .. }
-            | CrdtPayload::ChannelGrantRevoked { .. } => {
-                (sender_perms & Permission::MANAGE_CHANNELS) != 0
+            | CrdtPayload::ChannelGrantRevoked { .. } => has(Permission::MANAGE_CHANNELS),
+            CrdtPayload::RoleChanged { peer_id, role: new_role, .. } => {
+                self.role_change_allowed(&role, perms, peer_id, new_role)
+            }
+            CrdtPayload::ServerRenamed { .. } => has(Permission::MANAGE_SERVER),
+            CrdtPayload::ServerSettingChanged { key, value } => {
+                self.setting_allowed_for(&role, perms, key, value)
+            }
+            // Voluntary leave for everyone but the Owner, who deletes instead.
+            CrdtPayload::MemberRemoved { peer_id } if *peer_id == op.author => {
+                role != MemberRole::Owner
+            }
+            CrdtPayload::MemberRemoved { peer_id }
+            | CrdtPayload::MemberBanned { peer_id }
+            | CrdtPayload::MemberMuted { peer_id, .. } => self.kick_allowed(&role, perms, peer_id),
+            CrdtPayload::MemberUnbanned { peer_id } => {
+                has(Permission::KICK_MEMBERS)
+                    && self.lifts_register(&role, self.banned_members.get(&super::resolve_identity(peer_id)))
+            }
+            CrdtPayload::MemberUnmuted { peer_id } => {
+                self.kick_allowed(&role, perms, peer_id)
+                    && self.lifts_register(&role, self.muted_members.get(&super::resolve_identity(peer_id)))
+            }
+            CrdtPayload::MemberAdded { peer_id, follow, .. } => {
+                self.admission_allowed(&role, op, peer_id, follow.as_deref())
+            }
+            // Self, or Owner/Admin over a member ranked below them (never the Owner).
+            CrdtPayload::NicknameChanged { peer_id, .. }
+            | CrdtPayload::TwitchUsernameChanged { peer_id, .. }
+            | CrdtPayload::StoragePledgeChanged { peer_id, .. } => {
+                *peer_id == op.author
+                    || (matches!(role, MemberRole::Owner | MemberRole::Admin)
+                        && self.is_member(peer_id)
+                        && role.outranks(&self.get_role(peer_id)))
+            }
+            // A named role below the author's own, granting only bits the author holds.
+            CrdtPayload::RolePermissionsChanged { role: target, permissions } => {
+                let target = match target.as_str() {
+                    "admin" => MemberRole::Admin,
+                    "moderator" => MemberRole::Moderator,
+                    "member" => MemberRole::Member,
+                    _ => return false,
+                };
+                has(Permission::MANAGE_ROLES)
+                    && role.outranks(&target)
+                    && permissions & !perms == 0
+            }
+            CrdtPayload::ChannelPublicChanged { channel_id, .. } => {
+                // Voice channels can never be public (#44). Unknown channel id passes
+                // (apply is a no-op there); the apply guard is the backstop.
+                has(Permission::MANAGE_CHANNELS)
+                    && self
+                        .channels
+                        .get(channel_id)
+                        .is_none_or(|ch| ch.channel_type == ChannelType::Text)
             }
             CrdtPayload::LabelCreated { .. }
             | CrdtPayload::LabelDeleted { .. }
-            | CrdtPayload::LabelUpdated { .. } => {
-                (sender_perms & Permission::MANAGE_ROLES) != 0
+            | CrdtPayload::LabelUpdated { .. } => has(Permission::MANAGE_ROLES),
+            // Self-toggle only for existing COSMETIC labels; access labels and unknown
+            // ids need MANAGE_ROLES. An assignment lands only on a current member.
+            CrdtPayload::LabelAssigned { label_id, peer_id } => {
+                self.is_member(peer_id)
+                    && (self.self_toggles(&op.author, peer_id, label_id) || has(Permission::MANAGE_ROLES))
             }
-            CrdtPayload::LabelAssigned { label_id, peer_id }
-            | CrdtPayload::LabelUnassigned { label_id, peer_id } => {
-                // Self-toggle only for existing COSMETIC labels; access labels and
-                // unknown ids require MANAGE_ROLES, the same rule as the authoring
-                // gate. Ingest weaker than send is a fork generator.
-                self.can_self_toggle_label(&op.author, peer_id, label_id)
-                    || (sender_perms & Permission::MANAGE_ROLES) != 0
+            CrdtPayload::LabelUnassigned { label_id, peer_id } => {
+                self.self_toggles(&op.author, peer_id, label_id) || has(Permission::MANAGE_ROLES)
             }
             CrdtPayload::EmojiAdded { name, hash, .. } => {
-                (sender_perms & Permission::MANAGE_EMOTES) != 0
+                has(Permission::MANAGE_EMOTES)
                     && super::valid_emote_name(name)
                     && super::valid_emote_hash(hash)
             }
-            CrdtPayload::EmojiRemoved { .. } => {
-                (sender_perms & Permission::MANAGE_EMOTES) != 0
-            }
             // Stickers reuse MANAGE_EMOTES rather than adding a permission bit.
             CrdtPayload::StickerAdded { hash, name, pack, w, h, .. } => {
-                (sender_perms & Permission::MANAGE_EMOTES) != 0
+                has(Permission::MANAGE_EMOTES)
                     && super::valid_emote_hash(hash)
                     && valid_sticker_label(name)
                     && valid_sticker_label(pack)
@@ -1446,22 +1690,80 @@ impl ServerState {
                     && (1..=4096).contains(w)
                     && (1..=4096).contains(h)
             }
-            CrdtPayload::StickerRemoved { .. } => {
-                (sender_perms & Permission::MANAGE_EMOTES) != 0
+            CrdtPayload::EmojiRemoved { .. } | CrdtPayload::StickerRemoved { .. } => {
+                has(Permission::MANAGE_EMOTES)
             }
-            // Only the Owner can delete a server (tombstone).
-            CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
-            // Founding op. Legal only while the server has NO Owner yet (a fresh
-            // join skeleton replaying the op log) and only from the peer it names as
-            // owner: the signature binds `author` to a key, so this is the one place
-            // ownership can enter a state.
-            CrdtPayload::ServerCreated { owner_peer_id, .. } => {
-                &op.author == owner_peer_id
-                    && self
-                        .current_owner()
-                        .is_none_or(|existing| existing == *owner_peer_id)
+            CrdtPayload::ServerDeleted { .. } => role == MemberRole::Owner,
+        }
+    }
+
+    /// Lifting a ban or mute needs at least the rank that set it.
+    fn lifts_register<V: Clone>(&self, role: &MemberRole, reg: Option<&AdminLwwReg<V>>) -> bool {
+        reg.is_none_or(|r| role.priority() >= r.priority())
+    }
+
+    fn self_toggles(&self, author: &str, target: &str, label_id: &str) -> bool {
+        author == target && self.labels.get(label_id).is_some_and(|l| !l.access)
+    }
+
+    /// E7: the join gates the admitter ran, re-checked by every member against the
+    /// state at the op's own point in the fold. Any member may admit (owner-offline
+    /// joins keep working); nobody admits past a ban, a private server, the member
+    /// cap, owner-verify or the Twitch follow gate.
+    fn admission_allowed(&self, author: &MemberRole, op: &CrdtOp, target: &str, follow: Option<&str>) -> bool {
+        if self.is_banned(target) {
+            return false;
+        }
+        if self.is_member(target) {
+            return true;
+        }
+        if self.is_private() || self.max_members().is_some_and(|max| self.members.len() as u32 >= max) {
+            return false;
+        }
+        match crate::node::twitch::TwitchServerSettings::from_server_state(self) {
+            None => true,
+            Some(tw) => {
+                (!tw.owner_verify || *author == MemberRole::Owner)
+                    && follow.is_some_and(|entry| {
+                        crate::node::twitch::follow_credential_admits_at(entry, target, &tw, op.hlc.physical_ms)
+                    })
             }
         }
+    }
+
+    /// The founding op: only on an ownerless state, only from the owner it names, and
+    /// only for the anchor, which for a self-certifying id is the key that hashes to it
+    /// and otherwise the pinned owner, when there is one.
+    fn founding_allowed(&self, op: &CrdtOp, owner: &str, nonce: &str) -> bool {
+        op.author == owner
+            && self.current_owner().is_none()
+            && if super::anchor::is_genesis_id(&self.server_id) {
+                super::anchor::derive_server_id(owner, nonce) == self.server_id
+            } else {
+                self.owner_pin.as_deref().is_none_or(|pin| pin == owner)
+            }
+    }
+
+    /// A checkpoint: only from the anchor owner (first use, on a 32-hex id with nothing
+    /// known, is trust on first use), covering no later than its own clock and more
+    /// than the one we stand on, and a state of THIS server whose one Owner is its author.
+    fn checkpoint_allowed(&self, op: &CrdtOp, state: &str, covers: &HlcTimestamp) -> bool {
+        match self.anchor_owner() {
+            Some(owner) if owner != op.author => return false,
+            None if super::anchor::is_genesis_id(&self.server_id) => return false,
+            _ => {}
+        }
+        if *covers > op.hlc || self.checkpoint_hlc.as_ref().is_some_and(|base| covers <= base) {
+            return false;
+        }
+        let Ok(base) = serde_json::from_str::<ServerState>(state) else { return false };
+        let owners: Vec<&String> = base
+            .roles
+            .iter()
+            .filter(|(_, reg)| *reg.read() == MemberRole::Owner)
+            .map(|(id, _)| id)
+            .collect();
+        base.server_id == self.server_id && !base.deleted && owners == [&op.author]
     }
 
     /// Check if a peer is muted at `now_ms` (epoch ms). Expired mutes read as
@@ -1682,6 +1984,18 @@ impl ServerState {
     }
 }
 
+/// Where an op sits in the fold: its clock, except a checkpoint, which sits at what it
+/// covers and after any op at that same clock (the op it covered).
+pub(super) fn fold_order(a: &CrdtOp, b: &CrdtOp) -> std::cmp::Ordering {
+    fn key(op: &CrdtOp) -> (&HlcTimestamp, bool) {
+        match &op.payload {
+            CrdtPayload::ServerCheckpoint { covers, .. } => (covers, true),
+            _ => (&op.hlc, false),
+        }
+    }
+    key(a).cmp(&key(b))
+}
+
 /// Current wall clock in epoch ms (the time base for mute + grant expiry).
 fn epoch_ms_now() -> u64 {
     std::time::SystemTime::now()
@@ -1734,6 +2048,7 @@ mod tests {
             let op = s.create_op(CrdtPayload::MemberAdded {
                 peer_id: id.into(),
                 display_name: id.into(),
+                follow: None,
             });
             let _ = s.apply_op(&op);
         }
@@ -1778,8 +2093,8 @@ mod tests {
             ("moder", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, true),
             ("moder", CrdtPayload::MemberRemoved { peer_id: "admin".into() }, false),
             // MemberAdded: any current member (invite), stranger no.
-            ("alice", CrdtPayload::MemberAdded { peer_id: "carol".into(), display_name: "c".into() }, true),
-            ("stranger", CrdtPayload::MemberAdded { peer_id: "dave".into(), display_name: "d".into() }, false),
+            ("alice", CrdtPayload::MemberAdded { peer_id: "carol".into(), display_name: "c".into(), follow: None, }, true),
+            ("stranger", CrdtPayload::MemberAdded { peer_id: "dave".into(), display_name: "d".into(), follow: None, }, false),
             // Nickname / Twitch / pledge: self or Owner/Admin.
             ("alice", CrdtPayload::NicknameChanged { peer_id: "alice".into(), nickname: "a".into() }, true),
             ("alice", CrdtPayload::NicknameChanged { peer_id: "bob".into(), nickname: "x".into() }, false),
@@ -1842,14 +2157,12 @@ mod tests {
             ("owner", CrdtPayload::ServerDeleted { deleted_at: 1 }, true),
             ("admin", CrdtPayload::ServerDeleted { deleted_at: 1 }, false),
             // ServerCreated on a server that ALREADY has an Owner is refused for
-            // everyone but that same Owner, whose re-send is a no-op. CRDT-1: this row
-            // used to read `true`, so any member could mint itself Owner of somebody
-            // else's server. Naming the REAL owner does not help, because the author
-            // is not them.
-            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "stranger".into() }, false),
-            ("admin", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "admin".into() }, false),
-            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into() }, false),
-            ("owner", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into() }, true),
+            // everyone, the Owner included: a replayed founding op used to reset the
+            // name (E15). Naming the REAL owner does not help a stranger either.
+            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "stranger".into(), nonce: String::new(), }, false),
+            ("admin", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "admin".into(), nonce: String::new(), }, false),
+            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into(), nonce: String::new(), }, false),
+            ("owner", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into(), nonce: String::new(), }, false),
         ];
         for (author, payload, expect) in cases {
             let op = op_by(&mut s, author, payload);
@@ -1877,14 +2190,16 @@ mod tests {
 
         // ServerCreated on an OWNERLESS state (the join skeleton replaying an
         // op log) is the one shape that founds a server: the author must be
-        // the peer it names as owner.
-        let mut skeleton = test_state("s2".into(), "".into(), "seed".into());
-        skeleton.members.remove("seed");
-        skeleton.roles.remove("seed");
+        // the peer it names as owner, and the pin when the invite carried one.
+        let mut skeleton = ServerState::skeleton("s2".into());
+        let (kp, _, pk) = keys(9);
+        skeleton.set_hlc(Hlc::new("seed".into()));
+        skeleton.set_signer(kp, pk);
         assert!(skeleton.current_owner().is_none(), "skeleton starts ownerless");
         let founding = op_by(&mut skeleton, "founder", CrdtPayload::ServerCreated {
             name: "S2".into(),
             owner_peer_id: "founder".into(),
+            nonce: String::new(),
         });
         assert!(
             skeleton.op_allowed(&founding),
@@ -1893,11 +2208,20 @@ mod tests {
         let hijack = op_by(&mut skeleton, "thief", CrdtPayload::ServerCreated {
             name: "S2".into(),
             owner_peer_id: "founder".into(),
+            nonce: String::new(),
         });
         assert!(
             !skeleton.op_allowed(&hijack),
             "a founding op must be authored by the owner it names"
         );
+        skeleton.owner_pin = Some("founder".into());
+        let other = op_by(&mut skeleton, "other", CrdtPayload::ServerCreated {
+            name: "S2".into(),
+            owner_peer_id: "other".into(),
+            nonce: String::new(),
+        });
+        assert!(!skeleton.op_allowed(&other), "a pinned joiner takes only the pinned owner");
+        assert!(skeleton.op_allowed(&founding));
     }
 
     #[test]
@@ -1909,6 +2233,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "joiner_device".into(),
             display_name: "joiner".into(),
+            follow: None,
         });
         let _ = state.apply_op(&op);
         assert!(state.members.contains_key("joiner_device"));
@@ -1940,6 +2265,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bob".into(),
             display_name: "bob".into(),
+            follow: None,
         });
         let _ = state.apply_op(&op);
         assert!(!state.canonicalize_members(|id| id.to_string()));
@@ -1948,16 +2274,17 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_merges_roles_keeping_latest() {
-        // A human's device leaf holds Admin (written later) while the master
-        // entry is Member — folding is pure HLC LWW, so the latest write
-        // (Admin) survives.
+    fn canonicalize_never_overwrites_a_masters_role() {
+        // A device-keyed role register was judged against whatever the device id read
+        // as when it arrived, so it may only be ADOPTED by a master without a register
+        // of its own, never overwrite one (E8), however late it was written.
         let mut state = test_state("s1".into(), "S".into(), "owner".into());
 
         // master entry as Member.
         let op1 = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "x_master".into(),
             display_name: "x".into(),
+            follow: None,
         });
         let _ = state.apply_op(&op1);
 
@@ -1965,6 +2292,7 @@ mod tests {
         let op2 = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "x_device".into(),
             display_name: "x".into(),
+            follow: None,
         });
         let _ = state.apply_op(&op2);
         let op3 = state.create_op(CrdtPayload::RoleChanged {
@@ -1979,7 +2307,7 @@ mod tests {
         };
         assert!(state.canonicalize_members(resolve));
         assert!(!state.members.contains_key("x_device"));
-        assert_eq!(state.get_role("x_master"), MemberRole::Admin);
+        assert_eq!(state.get_role("x_master"), MemberRole::Member);
     }
 
     #[test]
@@ -1997,6 +2325,7 @@ mod tests {
         // Add Bob (master-keyed) + promote him to Admin, and ban a third identity.
         let add = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bob_master".into(), display_name: "bob".into(),
+            follow: None,
         });
         let _ = state.apply_op(&add);
         let role = state.create_op(CrdtPayload::RoleChanged {
@@ -2050,6 +2379,7 @@ mod tests {
         let op2 = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "Bob".into(),
+            follow: None,
         });
         state.apply_op(&op2).unwrap();
 
@@ -2096,6 +2426,7 @@ mod tests {
         let op_a = state_a.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "Bob".into(),
+            follow: None,
         });
 
         // B adds channel (concurrently, doesn't know about op_a yet)
@@ -2126,6 +2457,7 @@ mod tests {
         let add = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "admin_peer".into(),
             display_name: "A".into(),
+            follow: None,
         });
         state.apply_op(&add).unwrap();
         let promote = state.create_op(CrdtPayload::RoleChanged {
@@ -2258,6 +2590,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2275,6 +2608,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "admin".into(),
             display_name: "A".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         // Owner (priority 3) promotes admin — uses author's priority
@@ -2288,6 +2622,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2311,6 +2646,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "mod".into(),
             display_name: "Mod".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         // Owner (priority 3) promotes moderator — uses author's priority
@@ -2324,6 +2660,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2348,6 +2685,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         assert_eq!(state.get_role("peer_b"), MemberRole::Member);
@@ -2419,6 +2757,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2576,6 +2915,7 @@ mod tests {
             let op = s.create_op(CrdtPayload::MemberAdded {
                 peer_id: id.into(),
                 display_name: id.into(),
+                follow: None,
             });
             s.apply_op(&op).unwrap();
             if let Some(r) = role {
@@ -2847,6 +3187,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bad_peer".into(),
             display_name: "Bad".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2882,6 +3223,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2923,11 +3265,13 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "mod".into(),
             display_name: "Mod".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::RoleChanged {
@@ -2974,6 +3318,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3052,6 +3397,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         // Non-owner gets false for a channel that doesn't exist
@@ -3174,6 +3520,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3275,6 +3622,7 @@ mod tests {
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
+            follow: None,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::NicknameChanged {
@@ -3437,6 +3785,7 @@ mod tests {
             payload: CrdtPayload::ServerCreated {
                 name: "Real Name".into(),
                 owner_peer_id: "new_owner".into(),
+                nonce: String::new(),
             },
             auth: None,
         };
@@ -3461,6 +3810,7 @@ mod tests {
         let add = state.create_op(CrdtPayload::MemberAdded {
             peer_id: member.1.clone(),
             display_name: "M".into(),
+            follow: None,
         });
         state.apply_op(&add).unwrap();
         (state, owner_id, member)
@@ -3593,6 +3943,7 @@ mod tests {
         let op = hostile.create_op(CrdtPayload::ServerCreated {
             name: "Real Server".into(),
             owner_peer_id: member.1.clone(),
+            nonce: String::new(),
         });
         assert!(op.verify_author().is_ok(), "the attacker really does hold this key");
         assert_eq!(state.admit_remote_op(&op), Err(OpReject::NotAllowed));
@@ -3613,7 +3964,7 @@ mod tests {
         let (mut state, owner_id) = owned_state("s1", "Server", 1);
         let (_, member_id, _) = keys(2);
         for payload in [
-            CrdtPayload::MemberAdded { peer_id: member_id.clone(), display_name: "M".into() },
+            CrdtPayload::MemberAdded { peer_id: member_id.clone(), display_name: "M".into(), follow: None, },
             CrdtPayload::RoleChanged {
                 peer_id: member_id.clone(),
                 role: MemberRole::Moderator,
@@ -3745,5 +4096,175 @@ mod tests {
         assert!(!accepted(Some(&s), true, "s1", "missing"), "a channel we do not have");
         assert!(!accepted(None, false, "s1", "ch"), "a server we neither hold nor view");
         assert!(accepted(None, true, "s1", "ch"), "the guest preview");
+    }
+
+    /// A legacy-shaped server: owner, an admin, a moderator and two members, with the
+    /// signer installed so tests can author as the owner and override `op.author`.
+    fn ranked_fixture() -> ServerState {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        for id in ["admin", "moder", "alice", "bob"] {
+            let op = s.create_op(CrdtPayload::MemberAdded {
+                peer_id: id.into(), display_name: id.into(), follow: None,
+            });
+            s.apply_op(&op).unwrap();
+        }
+        for (id, role) in [("admin", MemberRole::Admin), ("moder", MemberRole::Moderator)] {
+            let op = s.create_op(CrdtPayload::RoleChanged { peer_id: id.into(), role, priority: 3 });
+            s.apply_op(&op).unwrap();
+        }
+        s
+    }
+
+    fn allowed(s: &mut ServerState, author: &str, payload: CrdtPayload) -> bool {
+        let op = op_by(s, author, payload);
+        s.op_allowed(&op)
+    }
+
+    fn apply_as(s: &mut ServerState, author: &str, payload: CrdtPayload) {
+        let op = op_by(s, author, payload);
+        assert!(s.op_allowed(&op), "setup op refused: {:?}", op.payload);
+        s.apply_op(&op).unwrap();
+    }
+
+    /// E6 + E9: only a current member authors anything, and it acts by its OWN id. A
+    /// stranger, a kicked member and a device key standing in for its master get
+    /// nothing, where each used to read as a Member (or as the master).
+    #[test]
+    fn authz_ops_need_a_member_author_acting_by_its_own_id() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update("owner_dev", "owner");
+        crate::crdt::set_identity_resolver(crate::node::resolver::resolve);
+
+        let mut s = ranked_fixture();
+        let nick = |id: &str| CrdtPayload::NicknameChanged { peer_id: id.into(), nickname: "x".into() };
+        assert!(allowed(&mut s, "alice", nick("alice")));
+        assert!(!allowed(&mut s, "stranger", nick("stranger")), "a stranger's self op");
+        assert!(!allowed(&mut s, "stranger", CrdtPayload::MemberRemoved { peer_id: "stranger".into() }));
+        assert!(!allowed(&mut s, "stranger", CrdtPayload::LabelUnassigned {
+            label_id: "l".into(), peer_id: "stranger".into(),
+        }));
+
+        apply_as(&mut s, "moder", CrdtPayload::MemberRemoved { peer_id: "bob".into() });
+        assert!(!allowed(&mut s, "bob", nick("bob")), "a kicked member's self op");
+
+        let rename = CrdtPayload::ServerRenamed { new_name: "Mine".into() };
+        assert!(allowed(&mut s, "owner", rename.clone()));
+        assert!(!allowed(&mut s, "owner_dev", rename), "a device key has no role of its own");
+
+        crate::node::resolver::clear_all();
+    }
+
+    /// E7: every member re-checks the join gates on `MemberAdded`. Any member may admit,
+    /// never past a ban, a private server, the cap, owner-verify or the Twitch gate.
+    #[test]
+    fn authz_member_added_rechecks_the_join_gates() {
+        let add = |id: &str, follow: Option<String>| CrdtPayload::MemberAdded {
+            peer_id: id.into(), display_name: id.into(), follow,
+        };
+        let setting = |k: &str, v: &str| CrdtPayload::ServerSettingChanged { key: k.into(), value: v.into() };
+
+        let mut s = ranked_fixture();
+        assert!(allowed(&mut s, "alice", add("carol", None)), "any member admits");
+        assert!(allowed(&mut s, "alice", add("bob", None)), "re-adding a member is a no-op");
+        apply_as(&mut s, "moder", CrdtPayload::MemberBanned { peer_id: "mallory".into() });
+        assert!(!allowed(&mut s, "alice", add("mallory", None)), "a banned identity");
+
+        apply_as(&mut s, "owner", setting("max_members", "5"));
+        assert!(!allowed(&mut s, "alice", add("carol", None)), "the cap is reached");
+        apply_as(&mut s, "owner", setting("max_members", "0"));
+        apply_as(&mut s, "owner", setting("is_private", "true"));
+        assert!(!allowed(&mut s, "owner", add("carol", None)), "a private server");
+        apply_as(&mut s, "owner", setting("is_private", "false"));
+
+        apply_as(&mut s, "owner", setting("twitch_verification_enabled", "true"));
+        apply_as(&mut s, "owner", setting("twitch_channel_id", "12345"));
+        assert!(!allowed(&mut s, "alice", add("carol", None)), "no follow credential");
+        let at_ms = s.hlc.as_mut().unwrap().now().physical_ms;
+        let period = crate::node::support_creds::period_of(at_ms / 1000);
+        let mint = |master: &str, channel: &str| {
+            let entry = crate::node::support_creds::testing::mint_follow_for(master, channel, 30, "0", period);
+            Some(serde_json::to_string(&entry).unwrap())
+        };
+        assert!(allowed(&mut s, "alice", add("carol", mint("carol", "12345"))));
+        assert!(!allowed(&mut s, "alice", add("carol", mint("dave", "12345"))), "someone else's credential");
+        assert!(!allowed(&mut s, "alice", add("carol", mint("carol", "999"))), "another channel's");
+
+        apply_as(&mut s, "owner", setting("twitch_owner_verify", "true"));
+        assert!(!allowed(&mut s, "admin", add("carol", mint("carol", "12345"))), "owner-verify");
+        assert!(allowed(&mut s, "owner", add("carol", mint("carol", "12345"))));
+    }
+
+    /// E11: lifting a ban or mute needs the rank that set it, nickname-class edits of
+    /// others reach only lower ranks, and role permissions grant only what the author
+    /// holds, for a role that exists.
+    #[test]
+    fn authz_moderation_edges_respect_rank() {
+        let mut s = ranked_fixture();
+        apply_as(&mut s, "admin", CrdtPayload::MemberBanned { peer_id: "mallory".into() });
+        assert!(!allowed(&mut s, "moder", CrdtPayload::MemberUnbanned { peer_id: "mallory".into() }));
+        assert!(allowed(&mut s, "admin", CrdtPayload::MemberUnbanned { peer_id: "mallory".into() }));
+        apply_as(&mut s, "admin", CrdtPayload::MemberMuted { peer_id: "alice".into(), expires_at: u64::MAX });
+        assert!(!allowed(&mut s, "moder", CrdtPayload::MemberUnmuted { peer_id: "alice".into() }));
+        assert!(allowed(&mut s, "admin", CrdtPayload::MemberUnmuted { peer_id: "alice".into() }));
+
+        let op = s.create_op(CrdtPayload::MemberAdded {
+            peer_id: "admin2".into(), display_name: "a2".into(), follow: None,
+        });
+        s.apply_op(&op).unwrap();
+        apply_as(&mut s, "owner", CrdtPayload::RoleChanged {
+            peer_id: "admin2".into(), role: MemberRole::Admin, priority: 3,
+        });
+        let nick = |id: &str| CrdtPayload::NicknameChanged { peer_id: id.into(), nickname: "x".into() };
+        let pledge = |id: &str| CrdtPayload::StoragePledgeChanged { peer_id: id.into(), pledge_bytes: 1 };
+        assert!(allowed(&mut s, "admin", nick("alice")));
+        assert!(!allowed(&mut s, "admin", nick("admin2")), "an equal rank");
+        assert!(!allowed(&mut s, "admin", pledge("admin2")));
+        assert!(!allowed(&mut s, "admin", nick("stranger")), "not a member");
+
+        let perms = |role: &str, bits: u32| CrdtPayload::RolePermissionsChanged { role: role.into(), permissions: bits };
+        apply_as(&mut s, "owner", perms("admin", Permission::MANAGE_ROLES | Permission::SEND_MESSAGES));
+        assert!(allowed(&mut s, "admin", perms("moderator", Permission::SEND_MESSAGES)));
+        assert!(!allowed(&mut s, "admin", perms("moderator", Permission::KICK_MEMBERS)), "a bit it lacks");
+        assert!(!allowed(&mut s, "owner", perms("moderator", 1 << 20)), "a bit that does not exist");
+        assert!(!allowed(&mut s, "owner", perms("owner", 0)));
+        assert!(!allowed(&mut s, "owner", perms("superadmin", 0)), "a role that does not exist");
+    }
+
+    /// E12: the owner is fixed for the life of the server.
+    #[test]
+    fn authz_the_owner_is_fixed() {
+        let mut s = ranked_fixture();
+        let role = |id: &str, r: MemberRole| CrdtPayload::RoleChanged { peer_id: id.into(), role: r, priority: 3 };
+        assert!(!allowed(&mut s, "owner", role("admin", MemberRole::Owner)), "no co-owners");
+        assert!(!allowed(&mut s, "owner", role("owner", MemberRole::Admin)), "no self-demotion");
+        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberRemoved { peer_id: "owner".into() }));
+        assert!(!allowed(&mut s, "admin", CrdtPayload::MemberBanned { peer_id: "owner".into() }));
+        assert!(!allowed(&mut s, "admin", CrdtPayload::MemberMuted { peer_id: "owner".into(), expires_at: 1 }));
+        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberBanned { peer_id: "owner".into() }), "nor itself");
+        assert!(!allowed(&mut s, "owner", CrdtPayload::MemberMuted { peer_id: "owner".into(), expires_at: 1 }));
+        assert!(!allowed(&mut s, "admin", CrdtPayload::NicknameChanged { peer_id: "owner".into(), nickname: "x".into() }));
+        assert!(!allowed(&mut s, "owner", CrdtPayload::ServerCreated {
+            name: "S".into(), owner_peer_id: "owner".into(), nonce: String::new(),
+        }), "a founding op on a state that has its owner");
+        assert!(!allowed(&mut s, "owner", role("stranger", MemberRole::Admin)), "a role for a non-member");
+    }
+
+    /// E8: on a legacy server, a device-keyed role, ban or mute register never demotes,
+    /// bans or mutes the Owner or a Moderator+ when its device is later resolved. A
+    /// plain member's device-keyed ban is still adopted.
+    #[test]
+    fn authz_device_registers_never_demote_ban_or_mute_the_owner_or_a_moderator() {
+        let mut s = ranked_fixture();
+        let hlc = s.hlc.as_mut().unwrap().now();
+        s.roles.insert("owner_dev".into(), AdminLwwReg::new(MemberRole::Member, hlc.clone(), 2));
+        s.muted_members.insert("owner_dev".into(), AdminLwwReg::new(u64::MAX, hlc.clone(), 2));
+        s.banned_members.insert("moder_dev".into(), AdminLwwReg::new(true, hlc.clone(), 2));
+        s.banned_members.insert("alice_dev".into(), AdminLwwReg::new(true, hlc, 2));
+        s.canonicalize_members(|id| id.strip_suffix("_dev").unwrap_or(id).to_string());
+        assert_eq!(s.get_role("owner"), MemberRole::Owner);
+        assert!(!s.is_muted("owner", 0));
+        assert!(!s.is_banned("moder"));
+        assert!(s.is_banned("alice"), "a plain member's device-keyed ban is adopted");
     }
 }

@@ -215,7 +215,9 @@ class _ServerInviteCard extends ConsumerWidget {
   Future<void> _handleJoin(BuildContext context, WidgetRef ref) async {
     if (!await ensureRelayForInvite(context, ref, link)) return;
     if (!context.mounted) return;
-    crdt_api.joinServer(serverId: link.id, nsfwConfirmed: false)
+    crdt_api
+        .joinServer(
+            serverId: link.id, nsfwConfirmed: false, ownerPin: link.owner)
         .catchError((_) {});
     HollowToast.show(context, 'Joining server...', type: HollowToastType.info);
   }

@@ -331,6 +331,36 @@ void main() {
       expect(parsed.id, conf);
       expect(parsed.relay, isNull);
     });
+
+    test('a pinned invite carries its owner through every form', () {
+      const owner = '12D3KooWLZCnNzaowZ8gE1jRKmKznnB5ykAjZY86YcWpUEXMs4qs';
+      final web = webServerInviteLink('abc123', relay: 'r.example.com', owner: owner);
+      expect(web, contains('owner=$owner'));
+      final parsed = inviteFromInput(web, HollowLinkType.serverInvite);
+      expect(parsed.id, 'abc123');
+      expect(parsed.owner, owner);
+      final link = classifyHollowLink(web)!;
+      expect(classifyHollowLink(link.fullUrl)!.owner, owner,
+          reason: 'the canonical form keeps the pin');
+    });
+
+    test('an owner that is not a peer id is dropped', () {
+      final parsed = inviteFromInput(
+          'hollow://join?server=abc123&owner=%3Cscript%3E',
+          HollowLinkType.serverInvite);
+      expect(parsed.owner, isNull);
+      expect(webServerInviteLink('abc', relay: 'r.example.com', owner: 'O0Il'),
+          isNot(contains('owner=')));
+    });
+  });
+
+  group('isServerIdShape', () {
+    test('takes both the old and the self-certifying id', () {
+      expect(isServerIdShape('a' * 32), isTrue);
+      expect(isServerIdShape('b' * 40), isTrue);
+      expect(isServerIdShape('c' * 36), isFalse);
+      expect(isServerIdShape('g' * 40), isFalse);
+    });
   });
 
   group('normalizeRelayHost', () {

@@ -1129,6 +1129,8 @@ impl MessageStore {
         // The carried KeyPackage, nullable: an older row falls back to bootstrapping on
         // co-presence.
         migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN key_package TEXT;");
+        // The owner an invite pinned (a link to a pre-0.12 server carries `owner=`).
+        migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN owner_pin TEXT;");
 
         // Art imported from a `.hollowpack`, keyed by the art's HASH because that is its
         // identity everywhere else. The bytes live in `emote_blobs` under the ordinary
@@ -1961,18 +1963,48 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Prune old CRDT ops, keeping the most recent `keep_count` per server.
-    pub fn prune_crdt_ops(&self, keep_count: usize) -> Result<usize, String> {
+    /// Persist ops the fold admitted, and when one is a checkpoint, drop every row it
+    /// overwrote (the founding op stays: a joiner of a self-certifying id needs it).
+    pub fn persist_admitted_ops(&self, ops: &[CrdtOp], checkpoint: Option<&crate::crdt::hlc::HlcTimestamp>) {
+        for op in ops {
+            let _ = self.insert_crdt_op(op);
+        }
+        let rebased = ops.iter().any(|o| {
+            matches!(o.payload, crate::crdt::operations::CrdtPayload::ServerCheckpoint { .. })
+        });
+        if let (true, Some(base), Some(first)) = (rebased, checkpoint, ops.first()) {
+            let _ = self.conn.execute(
+                "DELETE FROM crdt_ops WHERE server_id = ?1
+                   AND (hlc_ms < ?2 OR (hlc_ms = ?2 AND hlc_counter < ?3))
+                   AND op_json NOT LIKE '%\"ServerCreated\"%'",
+                params![first.server_id, base.physical_ms as i64, base.counter as i64],
+            );
+        }
+    }
+
+    /// Every distinct author of a channel post we hold in `server_id`, as stored.
+    pub fn channel_authors(&self, server_id: &str) -> Vec<String> {
+        let Ok(mut stmt) = self.conn.prepare_cached(
+            "SELECT DISTINCT sender_id FROM channel_messages WHERE server_id = ?1",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![server_id], |row| row.get::<_, String>(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Prune a LEGACY-anchored server's ops to its newest `keep_count`. Anchored servers
+    /// are never pruned by count: their state is rebuilt from every op since the anchor,
+    /// and only a checkpoint drops rows (`persist_admitted_ops`).
+    pub fn prune_crdt_ops(&self, server_id: &str, keep_count: usize) -> Result<usize, String> {
         let deleted = self.conn
             .execute(
-                "DELETE FROM crdt_ops WHERE id IN (
-                    SELECT id FROM (
-                        SELECT id, ROW_NUMBER() OVER (
-                            PARTITION BY server_id ORDER BY hlc_ms DESC, hlc_counter DESC
-                        ) AS rn FROM crdt_ops
-                    ) WHERE rn > ?1
+                "DELETE FROM crdt_ops WHERE server_id = ?1 AND id NOT IN (
+                    SELECT id FROM crdt_ops WHERE server_id = ?1
+                    ORDER BY hlc_ms DESC, hlc_counter DESC LIMIT ?2
                 )",
-                params![keep_count as i64],
+                params![server_id, keep_count as i64],
             )
             .map_err(|e| format!("Failed to prune crdt_ops: {e}"))?;
         Ok(deleted)
@@ -2016,22 +2048,22 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Load CRDT ops for a server, HLC-ordered and bounded to the NEWEST 1000 (matching
-    /// ServerState::MAX_OP_LOG). The table only prunes on the 30-min rebalance timer, so
-    /// loading everything was O(all history) JSON parsing for ops the compactor drops.
-    pub fn load_ops_for_server(&self, server_id: &str) -> Result<Vec<CrdtOp>, String> {
+    /// Load CRDT ops for a server, HLC-ordered: the newest `limit` (a legacy-anchored
+    /// server, whose log is capped), or every row (an anchored one, rebuilt from them).
+    pub fn load_ops_for_server(&self, server_id: &str, limit: Option<usize>) -> Result<Vec<CrdtOp>, String> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT op_json FROM (
                      SELECT op_json, hlc_ms, hlc_counter, author FROM crdt_ops
                      WHERE server_id = ?1
-                     ORDER BY hlc_ms DESC, hlc_counter DESC, author DESC LIMIT 1000
+                     ORDER BY hlc_ms DESC, hlc_counter DESC, author DESC LIMIT ?2
                  ) ORDER BY hlc_ms, hlc_counter, author",
             )
             .map_err(|e| format!("Failed to prepare crdt_ops query: {e}"))?;
+        let limit = limit.map_or(-1, |n| n as i64);
         let rows = stmt
-            .query_map(params![server_id], |row| row.get::<_, String>(0))
+            .query_map(params![server_id, limit], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query crdt_ops: {e}"))?;
         let mut ops = Vec::new();
         for row in rows {
@@ -3997,8 +4029,8 @@ impl MessageStore {
             .execute(
                 "INSERT INTO pending_server_joins
                     (server_id, requested_at, nsfw_confirmed, twitch_proof_json,
-                     state, reason, last_deposited_at, created_at, key_package)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     state, reason, last_deposited_at, created_at, key_package, owner_pin)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(server_id) DO UPDATE SET
                     requested_at      = excluded.requested_at,
                     nsfw_confirmed    = excluded.nsfw_confirmed,
@@ -4006,7 +4038,8 @@ impl MessageStore {
                     state             = excluded.state,
                     reason            = excluded.reason,
                     last_deposited_at = excluded.last_deposited_at,
-                    key_package       = excluded.key_package",
+                    key_package       = excluded.key_package,
+                    owner_pin         = excluded.owner_pin",
                 params![
                     row.server_id,
                     row.requested_at,
@@ -4017,6 +4050,7 @@ impl MessageStore {
                     row.last_deposited_at,
                     row.created_at,
                     row.key_package,
+                    row.owner_pin,
                 ],
             )
             .map_err(|e| format!("Failed to upsert pending join: {e}"))?;
@@ -4037,7 +4071,7 @@ impl MessageStore {
             .conn
             .prepare(
                 "SELECT server_id, requested_at, nsfw_confirmed, twitch_proof_json,
-                        state, reason, last_deposited_at, created_at, key_package
+                        state, reason, last_deposited_at, created_at, key_package, owner_pin
                  FROM pending_server_joins ORDER BY requested_at DESC",
             )
             .map_err(|e| format!("Failed to prepare pending join query: {e}"))?;
@@ -4053,6 +4087,7 @@ impl MessageStore {
                     last_deposited_at: row.get(6)?,
                     created_at: row.get(7)?,
                     key_package: row.get(8)?,
+                    owner_pin: row.get(9)?,
                 })
             })
             .map_err(|e| format!("Failed to query pending joins: {e}"))?;
@@ -6121,6 +6156,8 @@ pub struct PendingJoinRow {
     /// row or a join that never parked. Persisted because the private half lives in the
     /// MLS store and the answer can arrive days later.
     pub key_package: Option<String>,
+    /// The owner the invite pinned; `None` for a link without one.
+    pub owner_pin: Option<String>,
 }
 
 /// Persisted conference room (host-local; reports/shipped/voice-and-media/CONFERENCES_PLAN.md).

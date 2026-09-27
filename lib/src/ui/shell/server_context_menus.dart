@@ -95,7 +95,7 @@ List<HollowMenuEntry> _serverIconEntries(
       onTap: () =>
           showInviteDialog(
               context,
-              webServerInviteLink(serverId,
+              serverInviteLinkFor(serverId,
                   relay: menuRef.read(relayDomainProvider)),
               serverId),
     ),

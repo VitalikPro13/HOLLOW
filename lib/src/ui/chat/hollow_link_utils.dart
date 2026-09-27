@@ -1,3 +1,5 @@
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+
 /// Base for web-form invite links. The server id rides the FRAGMENT, which
 /// never leaves the browser, so the website and any link-preview bot see only
 /// `/join` and no log of which servers exist accumulates anywhere.
@@ -5,9 +7,26 @@ const String hollowWebJoinBase = 'https://hollow.anonlisten.com/join';
 
 /// Canonical shareable server invite. Hollow renders it as a Join card, a
 /// browser bounces it to hollow://, and anyone without Hollow gets a download
-/// page.
-String webServerInviteLink(String serverId, {required String relay}) =>
-    '$hollowWebJoinBase#server=$serverId${_relayParam(relay, '&')}';
+/// page. [owner] pins the owner of a server founded before 0.12 (a newer id
+/// proves its owner by itself), so the joiner refuses a state anyone else hands
+/// it; pass `serverInviteOwner(serverId:)`.
+String webServerInviteLink(String serverId,
+        {required String relay, String? owner}) =>
+    '$hollowWebJoinBase#server=$serverId${_ownerParam(owner)}${_relayParam(relay, '&')}';
+
+/// The invite link to a server we hold, pinning its owner when its id cannot.
+String serverInviteLinkFor(String serverId, {required String relay}) {
+  String? owner;
+  try {
+    owner = crdt_api.serverInviteOwner(serverId: serverId);
+  } catch (_) {
+    // No Rust library (a widget test): the link just goes out unpinned.
+  }
+  return webServerInviteLink(serverId, relay: relay, owner: owner);
+}
+
+String _ownerParam(String? owner) =>
+    owner != null && _peerIdRegex.hasMatch(owner) ? '&owner=$owner' : '';
 
 /// Canonical shareable conference invite, on the same fragment rule: the conf
 /// id never reaches any server log.
@@ -28,6 +47,9 @@ final _hollowLinkRegex = RegExp(r'hollow://[^\s<>"' "'" r')\]}]+');
 final _webJoinRegex =
     RegExp(r'https://hollow\.anonlisten\.com/join[^\s<>"' "'" r')\]}]*');
 final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
+
+/// A master peer id: base58, so no 0, O, I or l.
+final _peerIdRegex = RegExp(r'^[1-9A-HJ-NP-Za-km-z]{20,128}$');
 
 /// A Hollow Shop support code. Longer floor than an invite id, because these
 /// are typed out of a receipt email and a two-character code is a typo.
@@ -126,11 +148,15 @@ class HollowLink {
   /// relay": every invite Hollow builds stamps its sender's current relay.
   final String? relay;
 
+  /// The owner a server invite pins, for a server founded before 0.12.
+  final String? owner;
+
   const HollowLink({
     required this.type,
     required this.fullUrl,
     required this.id,
     this.relay,
+    this.owner,
   });
 }
 
@@ -147,6 +173,11 @@ HollowLink? classifyHollowLink(String url) {
     return normalizeRelayHost(raw);
   }
 
+  String? ownerOf(Map<String, String> params) {
+    final raw = params['owner'];
+    return raw != null && _peerIdRegex.hasMatch(raw) ? raw : null;
+  }
+
   if (uri.scheme == 'hollow') {
     final params = uri.queryParameters;
     final relay = relayOf(params);
@@ -160,11 +191,14 @@ HollowLink? classifyHollowLink(String url) {
       final serverId = params['server'];
       final roomCode = params['room'];
       if (serverId != null && serverId.isNotEmpty) {
+        final owner = ownerOf(params);
         return HollowLink(
           type: HollowLinkType.serverInvite,
-          fullUrl: 'hollow://join?server=$serverId${_relayParam(relay, '&')}',
+          fullUrl:
+              'hollow://join?server=$serverId${_ownerParam(owner)}${_relayParam(relay, '&')}',
           id: serverId,
           relay: relay,
+          owner: owner,
         );
       } else if (roomCode != null && roomCode.isNotEmpty) {
         return HollowLink(
@@ -224,11 +258,14 @@ HollowLink? classifyHollowLink(String url) {
     final serverId = params['server'];
     final roomCode = params['room'];
     if (serverId != null && _inviteIdRegex.hasMatch(serverId)) {
+      final owner = ownerOf(params);
       return HollowLink(
         type: HollowLinkType.serverInvite,
-        fullUrl: 'hollow://join?server=$serverId${_relayParam(relay, '&')}',
+        fullUrl:
+            'hollow://join?server=$serverId${_ownerParam(owner)}${_relayParam(relay, '&')}',
         id: serverId,
         relay: relay,
+        owner: owner,
       );
     }
     if (roomCode != null && _inviteIdRegex.hasMatch(roomCode)) {
@@ -263,23 +300,24 @@ HollowLink? classifyHollowLink(String url) {
 String inviteIdFromInput(String input, HollowLinkType type) =>
     inviteFromInput(input, type).id;
 
-/// [inviteIdFromInput] plus the relay the link named, for the join paths that
-/// must offer a relay switch before they can reach the invite at all.
-({String id, String? relay}) inviteFromInput(String input, HollowLinkType type) {
+/// [inviteIdFromInput] plus the relay and owner pin the link named, for the join
+/// paths that must offer a relay switch before they can reach the invite at all.
+({String id, String? relay, String? owner}) inviteFromInput(
+    String input, HollowLinkType type) {
   final trimmed = input.trim();
   final link = classifyHollowLink(trimmed);
   if (link != null && link.type == type) {
-    return (id: link.id, relay: link.relay);
+    return (id: link.id, relay: link.relay, owner: link.owner);
   }
-  return (id: trimmed, relay: null);
+  return (id: trimmed, relay: null, owner: null);
 }
 
-/// Whether [id] has the shape of a server id: 32 hex characters, the 16 random
-/// bytes `CreateServer` mints. A pasted typo fails here instead of parking a
-/// join that no member can ever answer.
+/// Whether [id] has the shape of a server id: 40 hex characters for a server
+/// founded on 0.12 or later (derived from its owner), 32 for an older one. A
+/// pasted typo fails here instead of parking a join no member can ever answer.
 bool isServerIdShape(String id) => _serverIdShape.hasMatch(id);
 
-final _serverIdShape = RegExp(r'^[0-9a-fA-F]{32}$');
+final _serverIdShape = RegExp(r'^([0-9a-fA-F]{32}|[0-9a-fA-F]{40})$');
 
 List<HollowLink> extractHollowLinks(String text) {
   final results = <HollowLink>[];

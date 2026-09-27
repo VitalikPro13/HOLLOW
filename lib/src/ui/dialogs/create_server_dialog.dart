@@ -67,12 +67,15 @@ class _AddServerDialogState extends ConsumerState<_AddServerDialog> {
       if (!await ensureRelayForInviteId(context, ref,
           type: HollowLinkType.serverInvite,
           id: invite.id,
-          relay: invite.relay)) {
+          relay: invite.relay,
+          owner: invite.owner)) {
         if (mounted) setState(() => _joining = false);
         return;
       }
       await crdt_api.joinServer(
-          serverId: invite.id.toLowerCase(), nsfwConfirmed: false);
+          serverId: invite.id.toLowerCase(),
+          nsfwConfirmed: false,
+          ownerPin: invite.owner);
     } catch (e) {
       if (mounted) {
         setState(() {

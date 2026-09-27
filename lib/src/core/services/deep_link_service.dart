@@ -167,7 +167,8 @@ class DeepLinkService {
     if (confirmed != true) return;
 
     try {
-      await crdt_api.joinServer(serverId: link.id, nsfwConfirmed: false);
+      await crdt_api.joinServer(
+          serverId: link.id, nsfwConfirmed: false, ownerPin: link.owner);
       _toast('Joining server...', HollowToastType.info);
     } catch (e) {
       _toast('Failed to join server: $e', HollowToastType.error);

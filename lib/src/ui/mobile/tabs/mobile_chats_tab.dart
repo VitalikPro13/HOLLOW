@@ -250,7 +250,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
             _sheetRow(sheetContext, LucideIcons.userPlus, 'Invite people',
                 () => showInviteDialog(
                     context,
-                    webServerInviteLink(serverId,
+                    serverInviteLinkFor(serverId,
                         relay: ref.read(relayDomainProvider)),
                     serverId)),
             if (canManageChannels)

@@ -410,6 +410,28 @@ pub(crate) fn validate_follow_credential(
     joiner_master: &str,
     settings: &TwitchServerSettings,
 ) -> Result<(), String> {
+    validate_follow_credential_at(entry_json, joiner_master, settings, support_creds::now_period())
+}
+
+/// Whether a `MemberAdded` op's carried credential passes the gate, judged at the op's
+/// own time so every member, and every later rebuild of the fold, reaches the verdict
+/// the admitter reached.
+pub(crate) fn follow_credential_admits_at(
+    entry_json: &str,
+    joiner_master: &str,
+    settings: &TwitchServerSettings,
+    at_ms: u64,
+) -> bool {
+    let period = support_creds::period_of(at_ms / 1000);
+    validate_follow_credential_at(entry_json, joiner_master, settings, period).is_ok()
+}
+
+fn validate_follow_credential_at(
+    entry_json: &str,
+    joiner_master: &str,
+    settings: &TwitchServerSettings,
+    period: u32,
+) -> Result<(), String> {
     // An old-shape proof deserializes into an entry of all defaults (`t` 0),
     // so one check covers both "not a credential" and "not a follow one".
     let entry: CredentialEntry =
@@ -417,8 +439,8 @@ pub(crate) fn validate_follow_credential(
     if entry.t != T_TWITCH_FOLLOW {
         return Err(OLD_PROOF_SENTENCE.to_string());
     }
-    let verified = support_creds::verify_entry(
-        &entry, joiner_master, &support_creds::root_verifying_key(),
+    let verified = support_creds::verify_entry_at(
+        &entry, joiner_master, &support_creds::root_verifying_key(), period,
     )
     .map_err(|_| {
         format!(

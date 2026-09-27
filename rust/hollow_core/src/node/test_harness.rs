@@ -482,6 +482,11 @@ impl MockRelay {
         self.inner.lock().unwrap().swallowed_directs.insert((from.to_string(), target.to_string()));
     }
 
+    /// Undo [`Self::swallow_direct`].
+    pub(crate) fn release_direct(&self, from: &str, target: &str) {
+        self.inner.lock().unwrap().swallowed_directs.remove(&(from.to_string(), target.to_string()));
+    }
+
     pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
         let mut inner = self.inner.lock().unwrap();
         if deaf {
@@ -2216,7 +2221,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
 
@@ -2375,7 +2380,7 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -2498,6 +2503,7 @@ async fn nsfw_server_gates_join_until_confirmed() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -2519,6 +2525,7 @@ async fn nsfw_server_gates_join_until_confirmed() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: true,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -2564,7 +2571,7 @@ async fn channel_typing_roundtrips_master_attributed() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -4613,6 +4620,7 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
                 server_id: server_id.clone(),
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -4799,6 +4807,7 @@ async fn expired_answer_is_verified_locally_before_marking_our_row() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -5423,7 +5432,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
     // J joins the server (so both hold server_states with each other as members —
     // the precondition for the plaintext VC path; MLS-formed not required here).
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -5616,7 +5625,7 @@ async fn vc_self_participant_is_device_keyed_no_self_dial() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -5777,7 +5786,7 @@ async fn vc_screen_origin_attribution_round_trip() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6012,7 +6021,7 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6139,7 +6148,7 @@ async fn vc_leg_restart_signal_round_trips() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6388,7 +6397,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     sleep_ms(200).await;
 
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -6447,7 +6456,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     sleep_ms(500).await; // let C re-run its connect flow
 
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -6532,7 +6541,7 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     let general = general_channel_of(&server_id);
     sleep_ms(300).await;
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6595,7 +6604,7 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     relay.set_online(&j.device_id, true);
     sleep_ms(700).await; // let J re-run connect + re-register the sync coordinator
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     // STAYS A SLEEP, and this one was measured. Polling
@@ -6658,7 +6667,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     sleep_ms(500).await;
 
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let v_joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -6669,7 +6678,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     sleep_ms(2500).await;
 
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -6797,7 +6806,7 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     sleep_ms(500).await;
 
     a.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let a_joined = wait_event(&mut a, std::time::Duration::from_secs(8), |ev| {
@@ -6807,7 +6816,7 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     assert!(a_joined, "admin-to-be A should join the server");
     sleep_ms(1500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let m_joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -7014,7 +7023,7 @@ async fn sibling_nickname_fans_directly_with_no_relayer() {
     let server_id = create_server_and_wait(&mut b, "Solo Server").await;
     sleep_ms(500).await;
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -7075,7 +7084,7 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     let server_id = create_server_and_wait(&mut o, "Doomed Server").await;
     sleep_ms(300).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -7408,7 +7417,7 @@ async fn restricted_channel_subgroup_enforces_visibility() {
 
     for (node, who) in [(&mut a, "A"), (&mut m, "M")] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -7609,7 +7618,7 @@ async fn label_gated_channel_subgroup_and_fallback() {
     sleep_ms(500).await;
     for (node, who) in [(&mut v, "V"), (&mut m, "M")] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -7846,7 +7855,7 @@ async fn access_label_self_assign_locked() {
     let server_id = create_server_and_wait(&mut o, "Lockdown Server").await;
     sleep_ms(500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -7968,7 +7977,7 @@ async fn channel_grant_lifecycle_mls() {
     let server_id = create_server_and_wait(&mut o, "Grant Server").await;
     sleep_ms(500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -8092,7 +8101,7 @@ async fn channel_grant_expiry_sweep() {
     let server_id = create_server_and_wait(&mut o, "Expiry Server").await;
     sleep_ms(500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -8244,7 +8253,7 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
 
     for (node, who) in [(&mut a, "A"), (&mut m, "M")] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -8475,7 +8484,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     let server_id = create_server_and_wait(&mut o, "Vis Server").await;
     sleep_ms(500).await;
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -8586,7 +8595,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
 
     let mut v2 = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
     v2.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let mut caught_up = false;
@@ -8628,7 +8637,7 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     let server_id = create_server_and_wait(&mut o, "Mod Server").await;
     sleep_ms(500).await;
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -10490,6 +10499,7 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -10703,7 +10713,7 @@ async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -10842,7 +10852,7 @@ async fn channel_relay_catchup_covers_all_channels() {
     let second_cid = second_cid.expect("second channel id");
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -10950,7 +10960,7 @@ async fn channel_relay_catchup_delivers_public_channel_file_caption() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11085,7 +11095,7 @@ async fn channel_relay_catchup_survives_subscribe_before_room_join() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11215,7 +11225,7 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11331,7 +11341,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
 
     for (label, node) in [("B", &mut b), ("C", &mut c)] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -12063,6 +12073,7 @@ async fn scaling_benchmark_mls_fanout() {
                     server_id: server_id.clone(),
                     twitch_proof_json: None,
                     nsfw_confirmed: false,
+                    owner_pin: None,
                 })
                 .await
                 .unwrap();
@@ -12185,7 +12196,7 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -12587,7 +12598,7 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -12848,6 +12859,7 @@ async fn asset_request_not_answered_for_unrequested_hash() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -12920,7 +12932,7 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13057,7 +13069,7 @@ async fn banner_write_rejected_without_manage_server() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13422,7 +13434,7 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13840,7 +13852,7 @@ async fn synced_channel_deletion_hides_for_late_joiner() {
     // B joins fresh; the join-time channel sync must deliver BOTH messages,
     // one of them hidden — with the proof verifying on B.
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -13935,7 +13947,7 @@ async fn synced_channel_deletion_rejects_unproven_hidden_flags() {
     // B joins fresh and syncs the channel — both hidden flags must be DROPPED
     // (messages visible), while the rows themselves still replicate.
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -14087,6 +14099,7 @@ async fn setup_sframe_heal_pair(
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -14291,6 +14304,7 @@ async fn setup_epoch_race_trio(
                 server_id: server_id.clone(),
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -14957,6 +14971,7 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -15241,7 +15256,7 @@ async fn album_files_over_channel_reach_live_and_backfilled_members() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -15286,7 +15301,7 @@ async fn album_files_over_channel_reach_live_and_backfilled_members() {
     );
     drain_events(&mut k);
     k.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut k, std::time::Duration::from_secs(10), |ev| {
@@ -15726,7 +15741,7 @@ async fn channel_member_fills_a_gap_behind_its_newest_message() {
     let server_id = create_server_and_wait(&mut a, "Gap Server").await;
     let general = general_channel_of(&server_id);
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     assert!(
@@ -15738,10 +15753,12 @@ async fn channel_member_fills_a_gap_behind_its_newest_message() {
     );
     expect_mls_leaf(&a, &server_id, &j.device_id, 15).await;
 
-    // A holds an old message and a newer one; J holds only the newer one.
+    // A holds an old message and a newer one; J holds only the newer one. Both
+    // inside the server's life: backfill refuses a post from before its author
+    // was a member (E4), and the server was founded moments ago.
     let now = super::types::now_ms();
-    let newest_ts = now - 60 * 60 * 1000;
-    let missed_ts = now - 3 * 60 * 60 * 1000;
+    let newest_ts = now - 60 * 1000;
+    let missed_ts = now - 2 * 60 * 1000;
     plant_signed_channel_message(&a, A, &server_id, &general, true, missed_ts, "ch-gap-old", "missed");
     for (node, mine) in [(&a, true), (&j, false)] {
         plant_signed_channel_message(node, A, &server_id, &general, mine, newest_ts, "ch-gap-new", "newest");
@@ -16082,7 +16099,7 @@ async fn vc_screen_assign_and_route_round_trip() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -16285,6 +16302,7 @@ async fn join_succeeds_while_owner_is_offline() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -16316,6 +16334,7 @@ async fn join_succeeds_while_owner_is_offline() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -16405,6 +16424,7 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -16434,6 +16454,7 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -16552,6 +16573,7 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -16580,6 +16602,7 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -18534,6 +18557,7 @@ async fn parked_join_completes_with_zero_overlap() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -18570,6 +18594,7 @@ async fn parked_join_completes_with_zero_overlap() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -18826,6 +18851,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -18857,6 +18883,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -18996,6 +19023,7 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19096,6 +19124,7 @@ async fn empty_server_join_parks_within_the_short_window() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19171,6 +19200,7 @@ async fn join_with_a_silent_member_present_keeps_the_long_window() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19257,6 +19287,7 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19348,6 +19379,7 @@ async fn late_member_does_not_reserve_a_parked_join() {
                 server_id: server_id.clone(),
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -19386,6 +19418,7 @@ async fn late_member_does_not_reserve_a_parked_join() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19471,6 +19504,7 @@ async fn parked_join_redeposit_is_interval_bounded() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19548,6 +19582,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19673,6 +19708,7 @@ async fn discarded_parked_join_ignores_a_late_answer() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19700,6 +19736,7 @@ async fn discarded_parked_join_ignores_a_late_answer() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19833,6 +19870,7 @@ async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity()
             server_id: server_id.clone(),
             twitch_proof_json: Some(proof),
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -19958,6 +19996,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20036,6 +20075,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: true,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20092,6 +20132,7 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20121,6 +20162,7 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20263,6 +20305,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20354,6 +20397,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20453,6 +20497,7 @@ async fn vc_state_signal_reaches_a_deaf_member() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20561,6 +20606,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -20785,6 +20831,7 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
                 server_id: server_id.clone(),
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -20988,6 +21035,7 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
                 server_id: server_id.clone(),
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -21309,7 +21357,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-09-27: the design D tests added absence proofs (a KeyPackage nobody seats,
     // commits nobody merges, requests nobody answers, a Welcome nobody installs), the
     // garbage spacing past the old failure window, and the persisted-MLS poll (13.3 s).
-    const BUDGET_MS: u64 = 639_200;
+    // 2026-09-27: the design E admission test added one absence proof, admissions
+    // nobody applies (1.5 s).
+    const BUDGET_MS: u64 = 640_700;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -21538,6 +21588,7 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
                 server_id: server_id.to_string(),
                 twitch_proof_json: Some(proof),
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -22310,6 +22361,7 @@ async fn three_member_server(
                 server_id: server_id.clone(),
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
+                owner_pin: None,
             })
             .await
             .unwrap();
@@ -22410,6 +22462,7 @@ async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
                     crate::crdt::operations::CrdtPayload::ServerCreated {
                         name: "PWNED".into(),
                         owner_peer_id: m_master.clone(),
+                        nonce: String::new(),
                     },
                     AHEAD,
                     Some(&m.master_kp),
@@ -23480,6 +23533,7 @@ async fn at_rest_channel_file_served_from_encrypted_copy_after_migration() {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
+            owner_pin: None,
         })
         .await
         .unwrap();
@@ -24749,4 +24803,271 @@ async fn a_same_epoch_fork_heals_through_the_probe() {
     }
     assert!(healed, "the forked member was repaired and reads the owner again");
     drain_events(&mut o);
+}
+
+// ---------------------------------------------------------------------------
+// Design E: CRDT state authority (E1..E15).
+// ---------------------------------------------------------------------------
+
+/// Owner O creates a server, member M joins; J is a stranger friended with both.
+async fn owner_member_and_joiner(
+    relay: &MockRelay,
+    o_tag: u8,
+    m_tag: u8,
+    j_tag: u8,
+) -> (TestNode, TestNode, TestNode, String) {
+    let ids: Vec<String> = [o_tag, m_tag, j_tag].iter().map(|t| keys(*t).peer_id()).collect();
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&ids[1], &ids[2]]).await;
+    let mut m = spawn_node_with_friends(relay, m_tag, m_tag, &[&ids[0], &ids[2]]).await;
+    let j = spawn_node_with_friends(relay, j_tag, j_tag, &[&ids[0], &ids[1]]).await;
+    expect_dm_pair_ready(relay, &o, &m, 15).await;
+    expect_dm_pair_ready(relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Real Server").await;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "M must join"
+    );
+    drain_events(&mut o);
+    (o, m, j, server_id)
+}
+
+/// E1, E2: while J's join is pending, a member hands it a forged snapshot naming
+/// itself owner and a forged founding op of its own. J takes neither (the id proves
+/// who founded the server), and completes the join only from the real owner's ops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 181, 182, 183).await;
+    assert!(crate::crdt::anchor::is_genesis_id(&server_id), "0.12 servers are self-certifying");
+
+    // Only M's forged frames reach J.
+    relay.swallow_direct(&o.device_id, &j.device_id);
+    relay.swallow_direct(&m.device_id, &j.device_id);
+    let join = || NodeCommand::JoinServer {
+        server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None,
+    };
+    j.cmd_tx.send(join()).await.unwrap();
+    assert!(
+        wait_until(10, async || relay.room_devices(&server_id).contains(&j.device_id)).await,
+        "J must be in the server room"
+    );
+
+    let mut taken = ServerState::new(server_id.clone(), "Taken".into(), m.master_id.clone());
+    taken.members.insert(j.master_id.clone(), crate::crdt::server_state::MemberInfo {
+        peer_id: j.master_id.clone(), display_name: "j".into(),
+    });
+    let snapshot = frame(&super::types::HavenMessage::ServerStateSnapshot {
+        server_id: server_id.clone(),
+        state_json: serde_json::to_string(&taken).unwrap(),
+    });
+    let founding = forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::ServerCreated {
+        name: "Taken".into(), owner_peer_id: m.master_id.clone(), nonce: "00".into(),
+    }, 0, Some(&m.master_kp));
+    let admit = forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+    }, 1, Some(&m.master_kp));
+    // The snapshot alone first (with M's admission of J), then the founding op.
+    for frames in [
+        vec![snapshot, sync_response_frame(&server_id, &[admit])],
+        vec![sync_response_frame(&server_id, &[founding])],
+    ] {
+        for f in frames {
+            relay.inject(&server_id, &m.device_id, &j.device_id, f);
+        }
+        // ABSENCE: nothing to poll for; the frames are handled in well under this.
+        assert!(
+            !wait_event(&mut j, std::time::Duration::from_millis(1500), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+            })
+            .await,
+            "a forged snapshot or founding op must not complete J's join"
+        );
+        assert_ne!(j.live_owner(&server_id).await.as_deref(), Some(m.master_id.as_str()));
+    }
+
+    relay.release_direct(&o.device_id, &j.device_id);
+    relay.release_direct(&m.device_id, &j.device_id);
+    j.cmd_tx.send(join()).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "J joins from the real owner's ops"
+    );
+    assert_eq!(j.live_owner(&server_id).await.as_deref(), Some(o.master_id.as_str()));
+    assert_eq!(j.live_server_name(&server_id).await, "Real Server");
+    drop((o, m));
+}
+
+/// E7: a member re-adding a banned identity, or admitting anyone into a private
+/// server, is refused by every other member. An ordinary admission still lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_cannot_admit_past_the_join_gates() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 184, 185, 186).await;
+    let (banned, open, closed) = (keys(187).peer_id(), keys(188).peer_id(), keys(189).peer_id());
+    let admit = |who: &str| crdt_broadcast_frame(&server_id, &forge_crdt_op(
+        &server_id, &m.master_id,
+        crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: who.into(), display_name: "z".into(), follow: None },
+        0, Some(&m.master_kp),
+    ));
+    let deliver = |f: Vec<u8>| for target in [&o, &x] {
+        relay.inject(&server_id, &m.device_id, &target.device_id, f.clone());
+    };
+
+    o.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: banned.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_banned(&banned))).await,
+        "X must see the ban"
+    );
+    deliver(admit(&banned));
+    deliver(admit(&open));
+    assert!(
+        wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&open))).await,
+        "any member may admit into an open server"
+    );
+
+    o.cmd_tx.send(NodeCommand::UpdateServerSetting {
+        server_id: server_id.clone(), key: "is_private".into(), value: "true".into(),
+    }).await.unwrap();
+    assert!(
+        wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_private())).await,
+        "X must see the server go private"
+    );
+    deliver(admit(&closed));
+    // ABSENCE: the admissions above landed within this window.
+    sleep_ms(1500).await;
+    for (node, who) in [(&o, "O"), (&x, "X")] {
+        let state = node.live_server_state(&server_id).await.unwrap();
+        assert!(!state.is_member(&banned), "{who} re-admitted a banned identity");
+        assert!(!state.is_member(&closed), "{who} admitted someone into a private server");
+    }
+}
+
+/// E4: a member backfills a channel post signed by someone who was never a member.
+/// It verifies, but the receiver's membership record refuses it; the member's own
+/// post in the same batch lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_backfill_refuses_a_post_by_someone_never_a_member() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const M: u8 = 191;
+    const STRANGER: u8 = 193;
+    let (o, m, mut x, server_id) = three_member_server(&relay, 190, M, 192).await;
+    let general = general_channel_of(&server_id);
+    let ts = super::types::now_ms() - 30_000;
+    for node in [&o, &m] {
+        plant_signed_channel_message(node, STRANGER, &server_id, &general, false, ts, "e4-stranger", "from outside");
+        plant_signed_channel_message(node, M, &server_id, &general, false, ts + 1, "e4-member", "from inside");
+    }
+
+    drain_events(&mut x);
+    let mut filled = false;
+    for _ in 0..4 {
+        x.cmd_tx
+            .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
+            .await
+            .unwrap();
+        filled = wait_event(&mut x, std::time::Duration::from_secs(6), |ev| {
+            matches!(ev, NetworkEvent::MessageSyncCompleted { server_id: sid, new_message_count }
+                if *sid == server_id && *new_message_count > 0)
+        })
+        .await;
+        if filled {
+            break;
+        }
+    }
+    assert!(filled, "the member's post must backfill");
+    let texts: Vec<String> = x.channel_messages(&server_id, &general).into_iter().map(|m| m.text).collect();
+    assert!(texts.contains(&"from inside".to_string()));
+    assert!(!texts.contains(&"from outside".to_string()), "a never-member's post was backfilled");
+}
+
+/// A pre-0.12 server (32-hex id, no founding op anyone can prove): its owner's node
+/// checkpoints it at start, every member rebases on that, and a joiner whose invite
+/// pins the owner builds from the checkpoint alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 194;
+    const B: u8 = 195;
+    const J: u8 = 196;
+    let ids: Vec<String> = [O, B, J].iter().map(|t| keys(*t).peer_id()).collect();
+    let o = spawn_node_with_friends(&relay, O, O, &[&ids[1], &ids[2]]).await;
+    let b = spawn_node_with_friends(&relay, B, B, &[&ids[0], &ids[2]]).await;
+    let mut j = spawn_node_with_friends(&relay, J, J, &[&ids[0], &ids[1]]).await;
+    expect_dm_pair_ready(&relay, &o, &b, 15).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    // The shape every server had before 0.12: a random id, a seeded owner, no pin.
+    let server_id = "5e1f".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Server".into(), ids[0].clone());
+    super::swarm::install_op_signer(&mut legacy, &keys(O));
+    let add_b = legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: ids[1].clone(), display_name: "b".into(), follow: None,
+    }).unwrap();
+    legacy.owner_pin = None;
+    let json = serde_json::to_string(&legacy).unwrap();
+    for node in [&o, &b] {
+        let store = node.store();
+        store.save_server_state(&server_id, &json).unwrap();
+        store.insert_crdt_op(&add_b).unwrap();
+    }
+    let o = restart_node(&relay, o, O, O).await;
+    let b = restart_node(&relay, b, B, B).await;
+
+    let rebased = wait_until(20, async || {
+        b.live_server_state(&server_id).await.is_some_and(|s| {
+            s.anchor() == crate::crdt::server_state::Anchor::Checkpoint
+                && s.owner_pin.as_deref() == Some(ids[0].as_str())
+        })
+    })
+    .await;
+    assert!(rebased, "B must rebase on the owner's checkpoint");
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false,
+            owner_pin: Some(ids[0].clone()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "J joins the migrated server"
+    );
+    let state = j.live_server_state(&server_id).await.unwrap();
+    assert_eq!(state.anchor(), crate::crdt::server_state::Anchor::Checkpoint);
+    assert_eq!(state.current_owner().as_deref(), Some(ids[0].as_str()));
+    assert!(state.is_member(&ids[1]) && state.is_member(&ids[2]));
+    assert_eq!(state.name(), "Old Server");
+    drop((o, b));
 }

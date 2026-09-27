@@ -18,7 +18,10 @@ pub(crate) enum CrdtStoreCmd {
     /// runs ON the event loop, and `MessageStore::open` there is a fresh handle.
     UpsertPendingJoin(Box<crate::storage::messages::PendingJoinRow>),
     DeletePendingJoin(String),
-    PruneOps(usize),
+    /// Keep only the newest N ops of each named LEGACY-anchored server.
+    PruneLegacyOps { server_ids: Vec<String>, keep: usize },
+    /// Ops the fold admitted, plus the checkpoint they may have rebased on.
+    PersistAdmitted { ops: Vec<CrdtOp>, checkpoint: Option<crate::crdt::hlc::HlcTimestamp> },
     /// READ-ONLY: newest stored message timestamp (ms) per channel, for the relay
     /// catch-up window. Answered on the actor's long-lived connection so the
     /// caller never opens a transient SQLCipher handle.
@@ -26,6 +29,12 @@ pub(crate) enum CrdtStoreCmd {
         server_id: String,
         channel_ids: Vec<String>,
         reply: tokio::sync::oneshot::Sender<HashMap<String, i64>>,
+    },
+    /// READ-ONLY: every author of a channel post we hold, for the owner's first
+    /// checkpoint of an existing server (it seeds the membership record).
+    ChannelAuthors {
+        server_id: String,
+        reply: tokio::sync::oneshot::Sender<Vec<String>>,
     },
     /// READ-ONLY: one parked-join row, for the "Request again" action. Answered
     /// on the actor's connection: the caller is the swarm event loop.
@@ -96,6 +105,9 @@ impl CrdtStore {
                                 }
                             }
                             let _ = reply.send(out);
+                        }
+                        CrdtStoreCmd::ChannelAuthors { server_id, reply } => {
+                            let _ = reply.send(store.channel_authors(&server_id));
                         }
                         CrdtStoreCmd::LoadPendingJoin { server_id, reply } => {
                             let row = store
@@ -186,13 +198,20 @@ impl CrdtStore {
             }
             // Read-only: split out in the drain loop before the transaction
             // opens, so it never reaches here.
-            CrdtStoreCmd::ChannelWatermarks { .. } | CrdtStoreCmd::LoadPendingJoin { .. } => {}
-            CrdtStoreCmd::PruneOps(keep) => {
-                match store.prune_crdt_ops(keep) {
-                    Ok(n) if n > 0 => hollow_log!("[HOLLOW-CRDT] Pruned {n} old crdt_ops rows"),
-                    Err(e) => hollow_log!("[HOLLOW-CRDT] Failed to prune crdt_ops: {e}"),
-                    _ => {}
+            CrdtStoreCmd::ChannelWatermarks { .. }
+            | CrdtStoreCmd::LoadPendingJoin { .. }
+            | CrdtStoreCmd::ChannelAuthors { .. } => {}
+            CrdtStoreCmd::PruneLegacyOps { server_ids, keep } => {
+                for sid in server_ids {
+                    match store.prune_crdt_ops(&sid, keep) {
+                        Ok(n) if n > 0 => hollow_log!("[HOLLOW-CRDT] Pruned {n} old crdt_ops rows of {sid}"),
+                        Err(e) => hollow_log!("[HOLLOW-CRDT] Failed to prune crdt_ops: {e}"),
+                        _ => {}
+                    }
                 }
+            }
+            CrdtStoreCmd::PersistAdmitted { ops, checkpoint } => {
+                store.persist_admitted_ops(&ops, checkpoint.as_ref());
             }
         }
     }
@@ -237,9 +256,25 @@ impl CrdtStore {
         let _ = self.cmd_tx.send(CrdtStoreCmd::DeletePendingJoin(server_id));
     }
 
-    /// Fire-and-forget: prune old CRDT ops, keeping `keep_count` per server.
-    pub fn prune_ops(&self, keep_count: usize) {
-        let _ = self.cmd_tx.send(CrdtStoreCmd::PruneOps(keep_count));
+    /// Fire-and-forget: prune each named legacy-anchored server to its newest ops.
+    pub fn prune_legacy_ops(&self, server_ids: Vec<String>, keep: usize) {
+        let _ = self.cmd_tx.send(CrdtStoreCmd::PruneLegacyOps { server_ids, keep });
+    }
+
+    /// Every author of a channel post we hold in `server_id` (empty if the actor is gone).
+    pub async fn channel_authors(&self, server_id: String) -> Vec<String> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self.cmd_tx.send(CrdtStoreCmd::ChannelAuthors { server_id, reply }).is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fire-and-forget: persist what an ingest admitted, pruning below a new checkpoint.
+    pub fn persist_admitted(&self, ops: Vec<CrdtOp>, checkpoint: Option<crate::crdt::hlc::HlcTimestamp>) {
+        if !ops.is_empty() {
+            let _ = self.cmd_tx.send(CrdtStoreCmd::PersistAdmitted { ops, checkpoint });
+        }
     }
 
     /// One parked-join row by server id, or `None` when there is no such row

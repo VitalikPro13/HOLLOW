@@ -967,6 +967,7 @@ mod tests {
         ops.extend(members.iter().map(|id| CrdtPayload::MemberAdded {
             peer_id: id.to_string(),
             display_name: "m".into(),
+            follow: None,
         }));
         for payload in ops {
             let op = state.create_op(payload);

@@ -654,12 +654,14 @@ pub fn get_server_banner(server_id: String) -> Result<Option<ServerBannerData>, 
 }
 
 /// Join a server via invite link. Connects to the server's signaling room and
-/// requests membership from existing members.
+/// requests membership from existing members. `owner_pin` is the `owner=` a link to
+/// a pre-0.12 server carries: the only owner the joiner will accept its state from.
 #[frb]
 pub fn join_server(
     server_id: String,
     twitch_proof_json: Option<String>,
     nsfw_confirmed: bool,
+    owner_pin: Option<String>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -669,7 +671,7 @@ pub fn join_server(
     rt.block_on(
         state
             .cmd_tx
-            .send(node::NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed }),
+            .send(node::NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed, owner_pin }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
@@ -692,6 +694,29 @@ pub fn get_my_role(server_id: String) -> Result<String, String> {
 
     let peer_id = super::storage::get_peer_id()?;
     Ok(state.get_role(peer_id).as_str().to_string())
+}
+
+/// The owner an invite link to this server must carry (`owner=`), so a joiner can
+/// refuse a state anyone else hands it. `None` for a self-certifying id, which pins
+/// its owner by itself, and for a server we know no owner of.
+#[frb(sync)]
+pub fn server_invite_owner(server_id: String) -> Option<String> {
+    if crate::crdt::anchor::is_genesis_id(&server_id) {
+        return None;
+    }
+    let store_guard = super::storage::get_store().lock().ok()?;
+    let store = store_guard.as_ref()?;
+    if let Some(json) = store.load_server_state(&server_id).ok().flatten() {
+        return serde_json::from_str::<crate::crdt::server_state::ServerState>(&json)
+            .ok()
+            .and_then(|state| state.anchor_owner());
+    }
+    store
+        .load_pending_joins()
+        .ok()?
+        .into_iter()
+        .find(|row| row.server_id == server_id)
+        .and_then(|row| row.owner_pin)
 }
 
 /// Get the local user's permissions bitmask in a server.

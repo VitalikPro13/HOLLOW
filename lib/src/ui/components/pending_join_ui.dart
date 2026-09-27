@@ -205,7 +205,7 @@ class _PendingJoinSheet extends ConsumerWidget {
 void copyPendingJoinInvite(
     BuildContext context, WidgetRef ref, String serverId) {
   Clipboard.setData(ClipboardData(
-      text: webServerInviteLink(serverId,
+      text: serverInviteLinkFor(serverId,
           relay: ref.read(relayDomainProvider))));
   HollowToast.show(context, 'Invite link copied',
       type: HollowToastType.success);

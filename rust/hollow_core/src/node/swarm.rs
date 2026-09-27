@@ -846,15 +846,18 @@ async fn run_event_loop(
                                 state.set_hlc(Hlc::new(local_peer_str.to_string()));
                                 install_op_signer(&mut state, &bundle_keypair);
                                 // Restore op_log from crdt_ops table (no longer serialized in state JSON).
+                                // An anchored server is rebuilt from every op since its anchor.
+                                let legacy = state.anchor() == crate::crdt::server_state::Anchor::Legacy;
                                 if state.op_log.is_empty() {
-                                    if let Ok(ops) = store.load_ops_for_server(&server_id) {
+                                    if let Ok(ops) = store.load_ops_for_server(&server_id, legacy.then_some(1000)) {
                                         state.restore_op_log(ops);
                                     }
                                 }
                                 // Fold any legacy device-keyed member entries into
                                 // their master identity (the resolver was warmed just
-                                // above). A no-op for single-device.
-                                if state.canonicalize_members(|id| super::resolver::resolve(id)) {
+                                // above). A no-op for single-device, and never on an
+                                // anchored server, whose ops are master-keyed.
+                                if legacy && state.canonicalize_members(|id| super::resolver::resolve(id)) {
                                     if let Ok(json) = serde_json::to_string(&state) {
                                         let _ = store.save_server_state(&server_id, &json);
                                     }
@@ -1086,6 +1089,7 @@ async fn run_event_loop(
                         // private half came back with the MLS store, so a
                         // re-deposit after a restart is the SAME leaf request.
                         key_package: row.key_package,
+                        owner_pin: row.owner_pin,
                     });
                     restored += 1;
                 }
@@ -1363,11 +1367,11 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed } => {
+                    NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed, owner_pin } => {
                         sync_handler::handle_join_server(
                             &mut pending_server_joins, &ws_cmd_tx,
                             &ws_room_peers, &cmd_tx,
-                            server_id, twitch_proof_json, nsfw_confirmed,
+                            server_id, twitch_proof_json, nsfw_confirmed, owner_pin,
                             &crdt_store, &master_keypair, &device_peer_id,
                             &mls, &crypto_store, None,
                             &db_path, &db_passphrase,
@@ -2858,7 +2862,7 @@ async fn run_event_loop(
                                 sync_handler::handle_join_server(
                                     &mut pending_server_joins, &ws_cmd_tx,
                                     &ws_room_peers, &cmd_tx,
-                                    server_id, row.twitch_proof_json, row.nsfw_confirmed,
+                                    server_id, row.twitch_proof_json, row.nsfw_confirmed, row.owner_pin,
                                     &crdt_store, &master_keypair, &device_peer_id,
                                     &mls, &crypto_store, row.key_package,
                                     &db_path, &db_passphrase,
@@ -4952,6 +4956,11 @@ async fn run_event_loop(
             // MLS batch timer — process queued removals then additions (2 epochs max for N peers).
             _ = mls_batch_timer.tick() => {
                 arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
+                // Owner checkpoints (design E): one comparison per server when none is due.
+                sync_handler::author_due_checkpoints(
+                    &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
+                    &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store,
+                ).await;
                 if let Some(ref mut mls_mgr) = mls {
                     // Phase 0: the Welcome grace. A commit that evicted our own leaf while we
                     // are still a member is half of a remove + re-add, and the Welcome half is
@@ -5418,7 +5427,13 @@ async fn run_event_loop(
             // -- Vault rebalance + retention enforcement (every 30 min) --
             _ = rebalance_timer.tick() => {
                 arm_started = Some(("timer", "rebalance", std::time::Instant::now()));
-                crdt_store.prune_ops(1000);
+                crdt_store.prune_legacy_ops(
+                    server_states.iter()
+                        .filter(|(_, s)| s.anchor() == crate::crdt::server_state::Anchor::Legacy)
+                        .map(|(id, _)| id.clone())
+                        .collect(),
+                    1000,
+                );
                 hollow_log!("[HOLLOW-VAULT] Running rebalance + retention check");
                 let local_peer = local_peer_str.to_string();
                 let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
@@ -6202,29 +6217,28 @@ async fn apply_remote_crdt_op(
             hollow_log!("[HOLLOW-CRDT] Note: CrdtOpBroadcast author '{}' differs from sender '{peer_str}' (relay)", op.author);
         }
 
-        // SECURITY: the ONE admission gate (`ServerState::admit_remote_op`): the
-        // author's signature, the clock bound, then the shared permission matrix. It
-        // validates op.author, never the sender, who may legitimately be relaying.
-        {
-            let state = server_states.get(&server_id).unwrap();
-            if let Err(reason) = state.admit_remote_op(&op) {
-                hollow_log!(
-                    "[HOLLOW-SECURITY] REJECTED CrdtOp {} for {server_id} from {peer_str}: {reason}",
-                    crate::crdt::sync::payload_name(&op.payload),
-                );
-                return;
-            }
-        }
-
+        // SECURITY: the ONE ingest (`ServerState::ingest_remote`): the author's
+        // signature, the clock bound, then the fold, which judges the op by the shared
+        // permission matrix at its own point in HLC order. It validates op.author, never
+        // the sender, who may legitimately be relaying.
         let state = server_states.get_mut(&server_id).unwrap();
-
-        if let Ok(true) = state.apply_op(&op) {
+        let ingested = state.ingest_remote(std::slice::from_ref(&op));
+        if !ingested.admitted.is_empty() || ingested.rebuilt {
             if let Ok(json) = serde_json::to_string(&state) {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.save_server_state(&server_id, &json);
-                    let _ = store.insert_crdt_op(&op);
+                    store.persist_admitted_ops(&ingested.admitted, state.checkpoint_hlc.as_ref());
                 }
             }
+        }
+        if ingested.rebuilt {
+            // A rebuild can change anything: the UI reloads the whole server.
+            let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                server_id: server_id.clone(),
+            }).await;
+        }
+
+        if ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc) {
 
             // Forward the validated, NEW op onward, preferring the WebRTC mesh: the old
             // per-member SendDirect re-forward made every receiving node pay
@@ -7158,11 +7172,12 @@ async fn handle_incoming_request(
                         db_path, db_passphrase,
                     ).await;
                 }
-                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. }) => {
+                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
                     if !crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), peer_str, &cid) {
                         return;
                     }
+                    messages.retain(|m| crypto_handler::backfill_author_allowed(server_states.get(&sid), &m.s, m.ts));
                     let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
@@ -8841,16 +8856,22 @@ async fn handle_incoming_request(
             // SECURITY: only honored while a join WE initiated is pending —
             // an established member must never let another peer overwrite
             // its server state wholesale.
-            if !pending_server_joins.contains_key(&server_id) {
+            let Some(owner_pin) = pending_server_joins.get(&server_id).map(|p| p.owner_pin.clone()) else {
                 hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id} (no pending join)");
                 return;
+            };
+            // Never replaces a state already rebased on the owner's checkpoint.
+            if server_states.get(&server_id).is_some_and(|s| s.anchor() != crate::crdt::server_state::Anchor::Legacy) {
+                hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id}: already anchored");
+                return;
             }
-            match serde_json::from_str::<ServerState>(&state_json) {
+            // SECURITY (E1): the anchor rules (`accept_join_snapshot`): no snapshot for
+            // a self-certifying id, and with an invite pin only one owned by the pin.
+            let parsed = serde_json::from_str::<ServerState>(&state_json).map_err(|e| e.to_string())
+                .and_then(|snap| ServerState::accept_join_snapshot(snap, &server_id, owner_pin.as_deref())
+                    .map_err(str::to_string));
+            match parsed {
                 Ok(mut snap) => {
-                    if snap.server_id != server_id {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED ServerStateSnapshot from {peer_str} — server_id mismatch");
-                        return;
-                    }
                     snap.set_hlc(Hlc::new(local_peer_str.to_string()));
                     install_op_signer(&mut snap, bundle_keypair);
                     // SECURITY (CRDT-2): a snapshot is adopted wholesale from ONE
@@ -8877,7 +8898,7 @@ async fn handle_incoming_request(
                     server_states.insert(server_id, snap);
                 }
                 Err(e) => {
-                    hollow_log!("[HOLLOW-CRDT] Invalid ServerStateSnapshot for {server_id}: {e}");
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED ServerStateSnapshot for {server_id} from {peer_str}: {e}");
                 }
             }
         }
@@ -8900,18 +8921,11 @@ async fn handle_incoming_request(
             let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
             if !incoming_ops.is_empty() {
                 let state = server_states.entry(server_id.clone()).or_insert_with(|| {
-                    // Skeleton for a pending join. The responder is just our sync
-                    // source, and when the owner is offline that is the MLS
-                    // coordinator, a plain Member. Strip the creator seeding and zero
-                    // the name register's HLC, so the real name and owner win the merge.
-                    let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.to_string());
-                    s.members.remove(peer_str);
-                    s.roles.remove(peer_str);
-                    s.name = crate::crdt::admin_lww::AdminLwwReg::new(
-                        String::new(),
-                        crate::crdt::hlc::HlcTimestamp::zero(peer_str),
-                        0,
-                    );
+                    // Skeleton for a pending join: ownerless, so only the anchor can
+                    // found it (the op a self-certifying id proves, or the invite's
+                    // pinned owner). The responder is just our sync source.
+                    let mut s = ServerState::skeleton(server_id.clone());
+                    s.owner_pin = pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone());
                     s.set_hlc(Hlc::new(local_peer_str.to_string()));
                     install_op_signer(&mut s, bundle_keypair);
                     s
@@ -8948,13 +8962,21 @@ async fn handle_incoming_request(
                     // Run even when 0 ops applied if a join is pending: the joiner
                     // may have adopted a ServerStateSnapshot already (the
                     // responder's op log can be compacted), and the join must complete.
-                    Ok(report) if report.applied > 0 || pending_server_joins.contains_key(&server_id) => {
+                    // An anchored joiner completes only once the fold admitted us: a
+                    // batch that founds nothing or admits someone else is no join.
+                    Ok(report) if (report.applied > 0 || pending_server_joins.contains_key(&server_id))
+                        && (!pending_server_joins.contains_key(&server_id)
+                            || state.anchor() == crate::crdt::server_state::Anchor::Legacy
+                            || state.is_member(local_peer_str)) => {
                         let applied = report.applied;
                         hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
 
                         // Multi-device (Step 6): fold any device-keyed members a
                         // not-yet-upgraded peer's ops introduced into their master.
-                        state.canonicalize_members(|id| super::resolver::resolve(id));
+                        // Anchored servers are master-keyed from their first op.
+                        if state.anchor() == crate::crdt::server_state::Anchor::Legacy {
+                            state.canonicalize_members(|id| super::resolver::resolve(id));
+                        }
 
                         if let Ok(json) = serde_json::to_string(&state) {
                             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -9029,14 +9051,17 @@ async fn handle_incoming_request(
 
                             {
                                 let local_peer = local_peer_str.to_string();
-                                if state.get_storage_pledge(&local_peer) == 0 {
-                                    let min_pledge_bytes = state.min_pledge_mb() * 1024 * 1024;
-                                    hollow_log!("[HOLLOW-VAULT] Auto-pledging {} MB for server {server_id}", min_pledge_bytes / (1024 * 1024));
-                                    let pledge_op = state.create_op(CrdtPayload::StoragePledgeChanged {
-                                        peer_id: local_peer.clone(),
-                                        pledge_bytes: min_pledge_bytes,
-                                    });
-                                    let _ = state.apply_op(&pledge_op);
+                                let pledge_op = (state.get_storage_pledge(&local_peer) == 0)
+                                    .then(|| {
+                                        let min_pledge_bytes = state.min_pledge_mb().saturating_mul(1024 * 1024);
+                                        hollow_log!("[HOLLOW-VAULT] Auto-pledging {} MB for server {server_id}", min_pledge_bytes / (1024 * 1024));
+                                        state.author_checked(CrdtPayload::StoragePledgeChanged {
+                                            peer_id: local_peer.clone(),
+                                            pledge_bytes: min_pledge_bytes,
+                                        })
+                                    })
+                                    .flatten();
+                                if let Some(pledge_op) = pledge_op {
 
                                     if let Ok(json) = serde_json::to_string(&state) {
                                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -9517,11 +9542,18 @@ async fn handle_incoming_request(
                     // Add the new member via CRDT op, keyed by the MASTER identity.
                     // The short display label is derived from the master id.
                     let display_name = format!("{}...{}", &member_master[..4.min(member_master.len())], &member_master[member_master.len().saturating_sub(4)..]);
-                    let op = state.create_op(CrdtPayload::MemberAdded {
+                    // Authored through the SAME rules every member re-checks (E7), so
+                    // the Twitch credential rides along for them to verify.
+                    let follow = twitch::TwitchServerSettings::from_server_state(state)
+                        .and(twitch_proof_json.clone());
+                    let Some(op) = state.author_checked(CrdtPayload::MemberAdded {
                         peer_id: member_master.clone(),
                         display_name,
-                    });
-                    let _ = state.apply_op(&op);
+                        follow,
+                    }) else {
+                        hollow_log!("[HOLLOW-CRDT] Not admitting {member_master} to {server_id}: the admission rules refuse it here");
+                        return;
+                    };
 
                     // A follow credential names no Twitch account at all, by
                     // design, so there is nothing to mint here and nothing to
@@ -9650,16 +9682,17 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Send a full STATE snapshot first: op logs can be incomplete
-                // (history loss, 1000-op compaction), so the joiner must not depend
-                // on op replay alone to reconstruct channels, layout and name. WS
-                // delivery is FIFO, so it lands before the SyncResponse.
+                // A LEGACY server's log is capped and predates signing, so the
+                // joiner needs a STATE snapshot first; an anchored one is rebuilt from
+                // its founding op or checkpoint, and gets none. WS delivery is FIFO,
+                // so it lands before the SyncResponse.
                 //
                 // Both go to the DETERMINISTIC server room, not through a presence
                 // lookup: the joiner of a PARKED request is not here, and a targeted
                 // frame into a room the target is not in is what the relay buffers
                 // and replays. That buffered pair IS how a parked join completes.
-                if let Ok(state_json) = serde_json::to_string(&state) {
+                let legacy = state.anchor() == crate::crdt::server_state::Anchor::Legacy;
+                if let Some(state_json) = legacy.then(|| serde_json::to_string(&state).ok()).flatten() {
                     send_message_to_peer_in_room(
                         ws_cmd_tx, &server_id,
                         &peer_str, HavenMessage::ServerStateSnapshot {
@@ -10535,8 +10568,9 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. } => {
+                            MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. } => {
                                 if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
+                                    messages.retain(|m| crypto_handler::backfill_author_allowed(server_states.get(&sid), &m.s, m.ts));
                                     sync_handler::handle_envelope_channel_sync_batch(
                                         olm, bundle_keypair, event_tx, ws_cmd_tx,
                                         ws_room_peers, &local_peer, &sender_peer_id,

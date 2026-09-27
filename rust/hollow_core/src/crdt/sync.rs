@@ -58,50 +58,39 @@ pub fn compute_delta<'a>(our_ops: &'a [CrdtOp], their_vector: &StateVector) -> V
 /// What a sync-batch merge did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MergeReport {
-    /// Ops that were new to this replica and changed the op log.
+    /// Ops that were new to this replica and entered the op log.
     pub applied: usize,
-    /// Ops refused by `admit_remote_op` (forged author, no signature, a
-    /// timestamp past the drift bound, or a payload the author may not write).
+    /// Ops refused (forged author, no signature, a timestamp past the drift bound, or
+    /// a payload the author may not write at its point in the fold).
     pub rejected: usize,
+    /// The state was rebuilt from its anchor.
+    pub rebuilt: bool,
 }
 
-/// Apply incoming ops to a server state. Skips duplicates (idempotent).
+/// Apply incoming ops to a server state through the fold (`ServerState::ingest_remote`).
 ///
-/// SECURITY: every op passes `ServerState::admit_remote_op` first, the gate for ALL
-/// THREE SyncResponse ingest paths. A sync batch is the easiest place to smuggle a
-/// forged op in, because its sender is not its author and never had to be.
-///
-/// An op that fails to apply is skipped rather than aborting the merge: one foreign op
-/// must not block the rest of a sync.
+/// SECURITY: a sync batch is the easiest place to smuggle a forged op in, because its
+/// sender is not its author and never had to be; every op is judged on its own.
 pub fn merge_ops(state: &mut ServerState, incoming_ops: &[CrdtOp]) -> Result<MergeReport, String> {
     merge_ops_with(state, incoming_ops, |_| {})
 }
 
-/// `merge_ops` with a hook that fires for every ADMITTED op in batch order, before it
-/// is applied, so callers persist only ops that passed the gate.
+/// `merge_ops` with a hook that fires for every op that entered the log, in log order,
+/// so callers persist exactly those.
 pub fn merge_ops_with(
     state: &mut ServerState,
     incoming_ops: &[CrdtOp],
     mut on_admitted: impl FnMut(&CrdtOp),
 ) -> Result<MergeReport, String> {
-    let mut report = MergeReport::default();
-    for op in incoming_ops {
-        if let Err(reason) = state.admit_remote_op(op) {
-            report.rejected += 1;
-            hollow_log!(
-                "[HOLLOW-SECURITY] REJECTED synced CrdtOp {} for {} from {}: {reason}",
-                payload_name(&op.payload),
-                op.server_id,
-                op.author,
-            );
-            continue;
-        }
+    let ingested = state.ingest_remote(incoming_ops);
+    for op in &ingested.admitted {
         on_admitted(op);
-        if let Ok(true) = state.apply_op(op) {
-            report.applied += 1;
-        }
     }
-    Ok(report)
+    Ok(MergeReport {
+        applied: ingested.admitted.len(),
+        rejected: ingested.rejected,
+        rebuilt: ingested.rebuilt,
+    })
 }
 
 /// Variant name for a rejection log line, never the payload: an op's contents can carry
@@ -110,6 +99,7 @@ pub fn payload_name(payload: &super::operations::CrdtPayload) -> &'static str {
     use super::operations::CrdtPayload as P;
     match payload {
         P::ServerCreated { .. } => "ServerCreated",
+        P::ServerCheckpoint { .. } => "ServerCheckpoint",
         P::ServerRenamed { .. } => "ServerRenamed",
         P::ServerSettingChanged { .. } => "ServerSettingChanged",
         P::ServerDeleted { .. } => "ServerDeleted",
@@ -167,6 +157,7 @@ mod tests {
         let add_b = state_a.create_op(CrdtPayload::MemberAdded {
             peer_id: b_id.clone(),
             display_name: "Bob".into(),
+            follow: None,
         });
         state_a.apply_op(&add_b).unwrap();
 
@@ -261,13 +252,13 @@ mod tests {
         let sv_b = StateVector::from_server_state(&state_b);
         let delta_a_to_b = compute_delta(&state_a.op_log, &sv_b);
         let report_b = merge_ops(&mut state_b, &delta_a_to_b.into_iter().cloned().collect::<Vec<_>>()).unwrap();
-        assert_eq!(report_b, MergeReport { applied: 1, rejected: 0 });
+        assert_eq!(report_b, MergeReport { applied: 1, rejected: 0, rebuilt: false });
 
         // Sync: B → A
         let sv_a = StateVector::from_server_state(&state_a);
         let delta_b_to_a = compute_delta(&state_b.op_log, &sv_a);
         let report_a = merge_ops(&mut state_a, &delta_b_to_a.into_iter().cloned().collect::<Vec<_>>()).unwrap();
-        assert_eq!(report_a, MergeReport { applied: 1, rejected: 0 });
+        assert_eq!(report_a, MergeReport { applied: 1, rejected: 0, rebuilt: false });
 
         // Both have the same state
         assert_eq!(state_a.channels.len(), state_b.channels.len());
@@ -291,7 +282,7 @@ mod tests {
 
         // Try to merge the same op again
         let report = merge_ops(&mut state, &[op]).unwrap();
-        assert_eq!(report, MergeReport { applied: 0, rejected: 0 });
+        assert_eq!(report, MergeReport { applied: 0, rejected: 0, rebuilt: false });
     }
 
     /// The sync batch is where a forged op is easiest to smuggle in, since its sender is
@@ -307,7 +298,7 @@ mod tests {
         forged.author = a_id.clone();
 
         let report = merge_ops(&mut state_a, &[forged]).unwrap();
-        assert_eq!(report, MergeReport { applied: 0, rejected: 1 });
+        assert_eq!(report, MergeReport { applied: 0, rejected: 1, rebuilt: false });
         assert_eq!(state_a.name(), "Test", "a forged rename must not land");
     }
 
@@ -329,9 +320,9 @@ mod tests {
 
         let fresh = state_a.create_op(CrdtPayload::ServerRenamed { new_name: "Fresh".into() });
         let report = merge_ops(&mut state_b, std::slice::from_ref(&fresh)).unwrap();
-        assert_eq!(report, MergeReport { applied: 1, rejected: 0 });
+        assert_eq!(report, MergeReport { applied: 1, rejected: 0, rebuilt: false });
         assert_eq!(state_b.name(), "Fresh");
         let again = merge_ops(&mut state_b, &[fresh]).unwrap();
-        assert_eq!(again, MergeReport { applied: 0, rejected: 0 }, "a second copy is not new");
+        assert_eq!(again, MergeReport { applied: 0, rejected: 0, rebuilt: false }, "a second copy is not new");
     }
 }

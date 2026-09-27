@@ -2245,6 +2245,26 @@ pub(crate) fn channel_backfill_allowed_from(
     allowed
 }
 
+/// E4: backfill never brings in a post whose author (master) was not a member when
+/// it was written, going by the membership record. A legacy-anchored server has no
+/// record to prove it by yet and is not judged.
+pub(crate) fn backfill_author_allowed(
+    state: Option<&crate::crdt::server_state::ServerState>,
+    author: &str,
+    ts_ms: i64,
+) -> bool {
+    let Some(state) = state else { return false };
+    if state.anchor() == crate::crdt::server_state::Anchor::Legacy {
+        return true;
+    }
+    let master = super::resolver::resolve(author);
+    let allowed = state.was_member_at(&master, ts_ms.max(0) as u64);
+    if !allowed {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED backfilled post in {} by {master}: not a member when it was written", state.server_id);
+    }
+    allowed
+}
+
 /// Collapse online MLS leaf credential ids (device ids, or master ids for legacy
 /// leaves) into the sorted, deduped set of distinct MASTER identities that are
 /// online; `local_peer` always counts. Coordinator elections use it so a human

@@ -136,15 +136,30 @@ into possible holes, so this file itself belongs on the security branch.
   Existing groups rebind in place. Vitalik's decisions: a Welcome from any
   member if we asked for it; re-key in place rather than re-form. D8 closed at
   the MLS layer, its `MemberAdded` half stays E7.
-- **Next:** the three remaining DESIGN sessions, each at xhigh with harness
-  tests: class E (pinned owner + signed membership record E1/E2/E4; tombstoned
-  HLC sets E3/E5/E15; author and target rules E6..E9, E11, E12), class A with
-  J8/J9 (plaintext control messages into Olm/MLS; also I4..I6, A17, J5, J7, the
-  unsigned profile fields, a signed content hash for files, the variant left by
-  HOL-SEC-022/023, and from design D: signed epoch probes (S-20) and meeting
-  host pinning with the lobby frames (S-26, S-29..S-32)), ID-1 with HOL-SEC-002
-  (also I3, I8, F3, F6, and the stolen-device leaf certificates of HOL-SEC-041).
-  The relay traffic measurement waits for phase G.
+- **Session 9 (2026-09-27): design E, CRDT state authority**
+  (`audit/design_E_crdt_authority.md`, the fold in `crdt/fold.rs`, anchors in
+  `crdt/anchor.rs`). A server's state is now a pure function of the signed ops it
+  holds, folded in HLC order with each op judged against the state before it, and
+  built from an anchor a joiner can prove: **HOL-SEC-046** (High: a joiner took its
+  state, owner included, from whoever answered; 0.12 servers get self-certifying
+  ids, older ones an owner-signed checkpoint and an `owner=` invite pin),
+  **HOL-SEC-047** (High: replay past the 1000-op window and arrival-order
+  outcomes), **HOL-SEC-048** (High: backfill of posts by never-members; a
+  membership record), **HOL-SEC-049** (Medium: `MemberAdded` past ban, private,
+  cap, owner-verify and Twitch; every member re-checks), **HOL-SEC-050** (Medium:
+  strangers and device keys authored ops), **HOL-SEC-051** (Medium: device-keyed
+  registers folded onto the owner), **HOL-SEC-052** (Low: moderation edges,
+  ownership). Vitalik's decisions: the owner is fixed; older servers keep joining
+  on trust until their owner updates; invite links pin the owner; any member admits
+  with the gates re-checked. Proposed accepted risks AR-10..AR-12 (residuals R1..R3).
+- **Next:** the two remaining DESIGN sessions, each at xhigh with harness tests:
+  class A with J8/J9 (plaintext control messages into Olm/MLS; also I4..I6, A17,
+  J5, J7, the unsigned profile fields, a signed content hash for files, the variant
+  left by HOL-SEC-022/023, signed epoch probes (S-20), meeting host pinning with the
+  lobby frames (S-26, S-29..S-32), and from design E the plaintext join frames
+  A2, A3, A5, A10), then ID-1 with HOL-SEC-002 (also I3, I8, F3, F6, the
+  stolen-device leaf certificates of HOL-SEC-041, and AR-11's author time). The
+  relay traffic measurement waits for phase G.
 
 ---
 

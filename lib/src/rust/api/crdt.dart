@@ -168,21 +168,30 @@ Future<ServerBannerData?> getServerBanner({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerBanner(serverId: serverId);
 
 /// Join a server via invite link. Connects to the server's signaling room and
-/// requests membership from existing members.
+/// requests membership from existing members. `owner_pin` is the `owner=` a link to
+/// a pre-0.12 server carries: the only owner the joiner will accept its state from.
 Future<void> joinServer({
   required String serverId,
   String? twitchProofJson,
   required bool nsfwConfirmed,
+  String? ownerPin,
 }) => RustLib.instance.api.crateApiCrdtJoinServer(
   serverId: serverId,
   twitchProofJson: twitchProofJson,
   nsfwConfirmed: nsfwConfirmed,
+  ownerPin: ownerPin,
 );
 
 /// Get the local user's role in a server.
 /// Returns "owner", "admin", "moderator", or "member".
 Future<String> getMyRole({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetMyRole(serverId: serverId);
+
+/// The owner an invite link to this server must carry (`owner=`), so a joiner can
+/// refuse a state anyone else hands it. `None` for a self-certifying id, which pins
+/// its owner by itself, and for a server we know no owner of.
+String? serverInviteOwner({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtServerInviteOwner(serverId: serverId);
 
 /// Get the local user's permissions bitmask in a server.
 Future<int> getMyPermissions({required String serverId}) =>

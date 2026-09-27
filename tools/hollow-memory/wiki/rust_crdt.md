@@ -457,9 +457,9 @@ There is no separate `store.rs` module. Op persistence and compaction are handle
 
 **Storage:** The `op_log: Vec<CrdtOp>` field is `#[serde(default, skip_serializing)]` — it is NOT in the persisted state JSON. Ops persist ONLY via the `crdt_ops` SQLCipher table (`insert_crdt_op`, INSERT OR IGNORE keyed by server_id+hlc+author) and are restored at startup via `restore_op_log()`. CRITICAL: every code path that applies RECEIVED ops must also insert them (all three sync-merge sites do); saving the state JSON alone silently loses history on restart. The HLC field is `#[serde(skip)]` and must be restored via `set_hlc()` after deserialization.
 
-**In-memory compaction:** `MAX_OP_LOG = 1000`. After every successful apply, if the op_log exceeds 1000 entries, the oldest entries are drained: `op_log.drain(..excess)`. This prevents unbounded memory growth.
+**The fold (design E, 2026-09-27; `crdt/fold.rs`).** Remote ops enter ONLY through `ServerState::ingest_remote`: signature, clock bound, dedup, then the state is a pure function of the retained ops folded in HLC order, each judged by `op_allowed` at its own point. Newer than the tail = tail apply; older = `fold_in` rebuilds from the anchor (`reset_materialized` + every retained and held op). `apply_op` is now only the tail-apply primitive for our own ops (`author_checked` judges them first) and the legacy path; `apply_payload` is the pure state change the fold replays. Anchors (`Anchor`): `Genesis` (40-hex self-certifying id, `crdt/anchor.rs`, founding op carries the `nonce`), `Checkpoint` (rebased on the owner's `ServerCheckpoint`, `checkpoint_hlc`), `Legacy` (32-hex id not yet checkpointed: arrival-order apply, capped). `owner_pin` is the anchor owner; `member_record` the membership spans (E4).
 
-**DB-level pruning:** The `crdt_ops` SQLCipher table is pruned every 30 minutes via `CrdtStore::prune_ops(1000)` (called from the rebalance_timer). Uses `ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY hlc_ms DESC)` to keep only the latest 1000 per server.
+**Retention and compaction:** anchored servers keep EVERY op since the anchor (no count cap; `load_ops_for_server(sid, None)` at startup); a checkpoint prunes what it overwrote in RAM (`prune_before_checkpoint`) and in the DB (`persist_admitted_ops`), keeping a self-certifying id's founding op. The owner authors checkpoints from the MLS batch tick (`sync_handler::author_due_checkpoints`): once per legacy server, then when a log passes 2000 ops, at most hourly. Only `Anchor::Legacy` keeps `LEGACY_OP_LOG_CAP = 1000` in RAM and the 30-minute `prune_legacy_ops`.
 
 **Transaction batching:** The CrdtStore actor wraps each drain cycle (all process_cmd calls + pending state/blob flushes) in a single SQLite transaction (`BEGIN IMMEDIATE`/`COMMIT`), coalescing N fsyncs into 1.
 
@@ -469,7 +469,7 @@ There is no separate `store.rs` module. Op persistence and compaction are handle
 
 **Insertion order:** Ops are binary-search inserted by HLC into the op_log, maintaining deterministic sorted order. This is critical for `StateVector::from_op_log()` which scans for the latest HLC per author, and for `compute_delta()` which filters by HLC comparison.
 
-**Duplicate detection:** Before applying, `apply_op()` does a linear scan of `op_log` checking `author == op.author && hlc == op.hlc`. Same author + same HLC = same op (since a single HLC can only be generated once by a given actor). Duplicates return `Ok(())` with no state change.
+**Duplicate detection:** `op_log_dedup` (author + HLC, rebuilt from the log on first use) plus the held pool. Same author + same HLC = same op. With retention, a replay of any op since the anchor is a duplicate; one older than a checkpoint folds before it and is overwritten.
 
 ---
 
