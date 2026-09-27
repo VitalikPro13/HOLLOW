@@ -49,12 +49,18 @@ into possible holes, so this file itself belongs on the security branch.
   sender half built (channel backfill only from a current member who can see the
   channel); its author half is candidate E4 (a provable membership record, High,
   built with E1; decision 2a). `hollow_push_decrypt` deleted.
+- **Session 4 (2026-09-27):** the live and push variants of HOL-SEC-004 (B3..B8)
+  confirmed and FIXED as **HOL-SEC-008**: the sync guard is now
+  `change_may_touch_row` for every change to an existing row, live DM changes take
+  their signer from the row, every live channel change must name its row's own
+  channel (which also closes the mute bypass C6), reactions must land where they
+  say, and the Olm channel arms run the same handlers as MLS. Class B is done
+  except ordering and replay (B10, B11).
 - **Next:** verify the candidate classes in the plan's priority order (MLS
   credentials D, CRDT snapshot E1/E2 with the membership record E4, channel
-  ingest C1/C2, files H, relay I1/I2),
-  and the live-path variants of HOL-SEC-004 (B3..B8); every AGENT-status row must
-  be re-read before it counts. Policy decisions for Vitalik are listed at the top
-  of `candidate_findings.md`.
+  ingest C1/C2, files H, relay I1/I2); every AGENT-status row must be re-read
+  before it counts. Policy decisions for Vitalik are listed at the top of
+  `candidate_findings.md`.
 
 ---
 

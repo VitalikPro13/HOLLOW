@@ -47,7 +47,8 @@ member re-attributed and hid a channel message, and the DM guard did not exist.
 
 ## Fix
 
-- One guard, `message_ops::synced_item_may_touch_row`, runs before any write for
+- One guard, `message_ops::change_may_touch_row` (named `synced_item_may_touch_row`
+  until HOL-SEC-008 extended it to live changes), runs before any write for
   every sync item: an existing row changes only when it sits in the channel or
   conversation the item names and its author is the item's signer. A channel
   row's author is its sender collapsed to the master, or the key its stored
@@ -64,11 +65,8 @@ member re-attributed and hid a channel message, and the DM guard did not exist.
 
 ## Variants
 
-- Same root cause on LIVE paths, still open: candidate B3 (DM edit signer never
-  compared to the row's author), B4 (push-path DM edit rewrites our own rows),
-  B5 (live DM delete takes its signer from the sender), B6 (DM reaction on any
-  id), B7 (DM `LinkPreviewSet` on any row), B8 (push path promotes any file row),
-  B9 live half. Each should call the same guard.
+- Same root cause on the LIVE and push paths (candidates B3..B8): HOL-SEC-008,
+  fixed with the same guard.
 - Ordering and replay of edits and reactions (B10, B11) are a separate class.
 - Who may SEND a channel batch at all (candidate C3) is fixed alongside: a batch
   is accepted only from a current member who can see that channel

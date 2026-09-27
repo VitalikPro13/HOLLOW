@@ -77,21 +77,22 @@ needed from Vitalik: which messages move, and the rollout rule.
 
 The signature proves who wrote the edit, card or deletion; nothing checks that
 the signer authored the ROW it lands on, or that the row is in the conversation
-or channel the item names. Class kill: every row mutation goes through one
-`authorise_row_mutation(row, signer, context)` that compares the row's author
-(device collapsed to master) and the row's context before the write.
+or channel the item names. Class kill (done, HOL-SEC-004 and HOL-SEC-008): every
+remote change to an existing row goes through `message_ops::change_may_touch_row`,
+which compares the row's author (device collapsed to master) and the row's
+context before the write. B10 and B11 (ordering and replay) remain.
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
 | B1 | Rewrite, re-attribute, card and then delete ANY channel message by id through an unsolicited `ChannelSyncBatch` (Olm and MLS) | channel:S1 | High | FIXED HOL-SEC-004 |
 | B2 | Rewrite any DM row by id through a `DmSyncBatch`; graft a card and swap the signature | dm:S-09, dm:S-15 | High | FIXED HOL-SEC-004 (sibling batch too) |
-| B3 | Live DM edit: signer never compared to the row's author | dm:S-10, dm:S-05 | High | AGENT |
-| B4 | Push-path DM edit has no `is_mine` check: a friend rewrites our own sent rows | dm:S-11, transport:S-04 | High | AGENT |
-| B5 | Live DM delete takes its signer from the sender, not the row (sync twin is right) | dm:S-12 | Medium | AGENT |
-| B6 | DM `AddReaction` attaches to any id, channel messages included, skipping mute | dm:S-13 | Low | AGENT |
-| B7 | DM `LinkPreviewSet` grafts a card onto any received row and swaps its signature | dm:S-14 | Medium | AGENT |
-| B8 | Push path promotes any `[file:..]` row by id to the attacker's caption and signature | dm:S-17, transport:S-03 | Medium | AGENT |
-| B9 | File metadata owner guard is fed the item's claimed sender, so a sync responder relabels any file card | dm:S-16, files:F1-5, channel:S14 | Medium | Sync half FIXED HOL-SEC-004 (blob bound to the signed `file_id`, owner = verified author); live half AGENT |
+| B3 | Live DM edit: signer never compared to the row's author | dm:S-10, dm:S-05 | High | FIXED HOL-SEC-008 |
+| B4 | Push-path DM edit has no `is_mine` check: a friend rewrites our own sent rows | dm:S-11, transport:S-04 | High | FIXED HOL-SEC-008 |
+| B5 | Live DM delete takes its signer from the sender, not the row (sync twin is right) | dm:S-12 | Medium | FIXED HOL-SEC-008 |
+| B6 | DM `AddReaction` attaches to any id, channel messages included, skipping mute | dm:S-13 | Low | FIXED HOL-SEC-008 (channel reactions also bound to the channel they name) |
+| B7 | DM `LinkPreviewSet` grafts a card onto any received row and swaps its signature | dm:S-14 | Medium | FIXED HOL-SEC-008 |
+| B8 | Push path promotes any `[file:..]` row by id to the attacker's caption and signature | dm:S-17, transport:S-03 | Medium | FIXED HOL-SEC-008 |
+| B9 | File metadata owner guard is fed the item's claimed sender, so a sync responder relabels any file card | dm:S-16, files:F1-5, channel:S14 | Medium | Sync half FIXED HOL-SEC-004 (blob bound to the signed `file_id`, owner = verified author); live half CONFIRMED sound (the live FileHeader guard takes the transport sender), the bytes around it are H1/H2 |
 | B10 | Edits carry no `edited_at` ordering: a replayed older plaintext edit reverts text | channel:S11 | Low | AGENT |
 | B11 | Replayed reaction add resurrects a removed reaction (`reaction_removals` ignored) | channel:S10 | Low | AGENT |
 
@@ -104,7 +105,7 @@ or channel the item names. Class kill: every row mutation goes through one
 | C3 | `ChannelSyncBatch` accepted unsolicited from anyone, any server, skipping posting gates | channel:S2 | High | Sender half FIXED (decision 2: both arms accept a batch only from a current member who can see the channel, `channel_backfill_allowed_from`, test `authz_channel_backfill_only_from_a_member_who_can_read_it`); author half = candidate E4 (with E1) |
 | C4 | `can_post_in_channel` enforced only on the sender's own client | channel:S5 | Medium | AGENT |
 | C5 | Olm and push channel paths skip mute, slow mode, media-only | channel:S6, transport:S-08 | Medium | AGENT |
-| C6 | Mute check keyed on the sender-supplied `sid`: omit it to bypass | channel:S7 | Medium | AGENT |
+| C6 | Mute check keyed on the sender-supplied `sid`: omit it to bypass | channel:S7 | Medium | FIXED HOL-SEC-008 (edits, cards, reactions and deletions must name their row's own channel) |
 | C7 | Slow mode judged on the sender's own signed `ts` | channel:S8 | Low | AGENT |
 | C8 | Unsolicited probe responses make a member leak per-author watermarks of restricted channels and suppress its real sync | channel:S9 | Medium | AGENT |
 | C9 | `PublicChannelSyncRequest` serves the text of deleted messages to guests and the relay | channel:S13 | Low | AGENT |
@@ -153,8 +154,8 @@ or channel the item names. Class kill: every row mutation goes through one
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| F1 | A foreign device list claims another identity's MASTER id (`speaks_for` treats an unbound id as free): friendship with that master moves to the attacker, and at next boot its server membership and role fold into the attacker | identity:S1 | Critical? | AGENT |
-| F2 | A foreign list "revokes" a legacy (device == master) contact or any unbound device: DMs dropped, Olm session deleted, MLS leaf removal queued | identity:S2 | High | AGENT |
+| F1 | A foreign device list claims another identity's MASTER id (`speaks_for` treats an unbound id as free): friendship with that master moves to the attacker, and at next boot its server membership and role fold into the attacker | identity:S1 | Critical? | FIXED HOL-SEC-006 |
+| F2 | A foreign list "revokes" a legacy (device == master) contact or any unbound device: DMs dropped, Olm session deleted, MLS leaf removal queued | identity:S2 | High | Legacy (device == master) half FIXED HOL-SEC-006; unbound-device half = F6 (co-signatures, ID-1) |
 | F3 | A revoked device signs a higher list and revokes the real ones (they wipe) | identity:S3 | Critical | KNOWN (AR-02, design ID-1); the comment at crypto_handler.rs:879 overclaims |
 | F4 | A revoked sibling re-enters through the sibling proof (resolver re-bound before the merge refuses it) and gets friends, servers, DM backfill | identity:S4 | High | AGENT |
 | F5 | Revoked devices resolve to themselves, so they pass the key-exchange and HOL-SEC-003 device check | dm:S-18 | High | AGENT |
@@ -166,10 +167,10 @@ or channel the item names. Class kill: every row mutation goes through one
 
 | ID | Where | Evidence | Sev | Status |
 |---|---|---|---|---|
-| G1 | Plaintext `ProfileUpdate` byte-slices free text (`display_name[..64]`) | identity:S7 | High | AGENT |
-| G2 | `&cid[..16]` on a sender string (vault manifest path) | files:V5-2 | High | AGENT |
-| G3 | `&content_id[..8]` in the recovery transfer plan | files:R-4b | Medium | AGENT |
-| G4 | `link_handler.rs:166` byte-slices the relay-stamped `target_peer` | identity:S15 | Low | AGENT |
+| G1 | Plaintext `ProfileUpdate` byte-slices free text (`display_name[..64]`) | identity:S7 | High | FIXED HOL-SEC-007 |
+| G2 | `&cid[..16]` on a sender string (vault manifest path) | files:V5-2 | High | FIXED HOL-SEC-007 |
+| G3 | `&content_id[..8]` in the recovery transfer plan | files:R-4b | Medium | FIXED HOL-SEC-007 |
+| G4 | `link_handler.rs:166` byte-slices the relay-stamped `target_peer` | identity:S15 | Low | FIXED HOL-SEC-007 |
 
 ## Class H. Files, vault, recovery, share, assets
 
@@ -191,7 +192,7 @@ or channel the item names. Class kill: every row mutation goes through one
 | H14 | Unsolicited `ShardResponse` stores or overwrites any shard | files:V6-1, V6-2 | High | AGENT |
 | H15 | `VaultManifestBroadcast` from anyone replaces any manifest, key included, and relinks any file row | files:V10-1 | High | AGENT |
 | H16 | Recovery pool accepts Hello/Welcome/ManifestSync/TransferPlan/Stop from anyone in any room: steer the plan, make us stream shards to a named peer, stop the pool | files:R-1..R-7, relay:15, transport:S-17 | High | AGENT |
-| H17 | `.stream_shard_{cid}.tmp` with an unsanitised cid: write outside files/ on Windows | files:V5-3 | High? | PLAUSIBLE |
+| H17 | `.stream_shard_{cid}.tmp` with an unsanitised cid: write outside files/ on Windows | files:V5-3 | High? | FIXED HOL-SEC-007 |
 | H18 | `PublicFileHeader` receipt not tied to the asked peer: substitute a guest's public file | files:F5-1 | Medium | AGENT |
 | H19 | Replayed share manifest zeroes a have-bitmap; huge `ShareHave` allocates ~512 MiB | files:S-2, S-3 | Low | AGENT/PLAUSIBLE |
 | H20 | `EmoteRequest` answers reveal which blobs we hold; 8 MiB replies at 20/s | files:E-1, E-2 | Low | PLAUSIBLE |
@@ -243,7 +244,7 @@ or channel the item names. Class kill: every row mutation goes through one
 | L2 | A blocked person's never-seen device passes the block check and is then bound to the blocked identity | dm:S-08 | Medium | AGENT |
 | L3 | Blocklist missing on edit, delete, react, link preview, friend accept/reject/remove, typing, status, key exchange, raw fallback, MLS twins | dm:S-19 | Medium | AGENT |
 | L4 | Legacy raw-text fallback shows an unsigned message with no block or revoked check | dm:S-04, transport:S-15 | Medium | AGENT |
-| L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | AGENT |
+| L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | Cards and reactions FIXED HOL-SEC-008 (MLS drops them); typing AGENT |
 | L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | PLAUSIBLE |
 
 ## Class M. Calls

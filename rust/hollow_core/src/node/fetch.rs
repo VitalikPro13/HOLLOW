@@ -981,8 +981,12 @@ fn persist_direct_message(
             // Row already exists: the inlined-image FileHeader for this mid won
             // the INSERT OR IGNORE and stored an unsigned "[file:<id>]" sentinel.
             // This is the real CAPTION, so promote the sentinel text AND its
-            // sig/pk, or the captioned image renders as "Unsigned".
-            if let Some(message_id) = mid {
+            // sig/pk, or the captioned image renders as "Unsigned". Only the
+            // sender's own row: the signature says nothing about anyone else's.
+            let scope = crate::node::message_ops::RowScope::Dm { convo, is_mine: false };
+            if let Some(message_id) = mid.filter(|m| {
+                crate::node::message_ops::change_may_touch_row(&store, &scope, Some(m))
+            }) {
                 let _ = store.promote_file_sentinel_to_caption(
                     message_id,
                     msg_text,
@@ -1012,11 +1016,9 @@ fn handle_link_preview_set(
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    // Only the other party's own message can gain a card here. `is_mine`
-    // true would be our own row, which this node never attaches to.
-    if store.get_dm_message_is_mine(&mid) != Some(false) {
-        return None;
-    }
+    // Only the sender's own message in its conversation with us can gain a card
+    // here; own-sibling envelopes never reach this node.
+    crate::node::message_ops::live_dm_change(&store, &mid, convo, local_master)?;
     let row = store.get_dm_message_sig_row(&mid)?;
 
     // Same gate as the live path: verify over OUR row's text and extras with
@@ -1059,13 +1061,14 @@ fn handle_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
+    // Only the sender's own message in its conversation with us; an edit that
+    // arrives before its original is left to DM-sync, matching the live handler.
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    crate::node::message_ops::live_dm_change(&store, &mid, convo, local_master)?;
     // Reject a tampered edit before it overwrites the stored row (raw text). The
     // v2 edit signature binds the ORIGINAL row's structural fields, so they are
-    // reconstructed from our stored row; an edit that arrives before the
-    // original is deferred to DM-sync, matching the live handler.
-    let row_extras = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|store| store.get_dm_message_sig_row(&mid));
+    // reconstructed from our stored row.
+    let row_extras = store.get_dm_message_sig_row(&mid);
     let lp_digest = row_extras.as_ref()
         .and_then(|r| r.link_preview.as_ref())
         .map(crate::node::crypto_handler::link_preview_digest);
@@ -1081,21 +1084,16 @@ fn handle_edit_message(
         return None;
     }
     let new_text = clip_text(new_text);
-    if let Ok(store) =
-        crate::storage::MessageStore::open(db_path, db_passphrase)
-    {
-        let applied = store
-            .edit_dm_message(&mid, &new_text, ts, sig.as_deref(), pk.as_deref())
-            .unwrap_or(false);
-        hollow_log!(
-            "[HOLLOW-FETCH] edit DM mid={mid} ts={ts} applied={applied} text_len={}",
-            new_text.len()
-        );
-        if !applied {
-            // Original not present yet: stamp edited_at if the row exists,
-            // otherwise DM-sync later carries the edited text under this mid.
-            let _ = store.set_dm_message_edited_at(&mid, ts);
-        }
+    let applied = store
+        .edit_dm_message(&mid, &new_text, ts, sig.as_deref(), pk.as_deref())
+        .unwrap_or(false);
+    hollow_log!(
+        "[HOLLOW-FETCH] edit DM mid={mid} ts={ts} applied={applied} text_len={}",
+        new_text.len()
+    );
+    if !applied {
+        // Same text as the row: still stamp edited_at so the badge shows.
+        let _ = store.set_dm_message_edited_at(&mid, ts);
     }
     Some(FetchedDm {
         from_peer: convo.to_string(),
@@ -1298,5 +1296,92 @@ fn persist_inline_image(
         if let Some(disk_str) = disk_str {
             let _ = store.mark_file_complete(&p.fid, disk_str);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::node::crypto_handler::{link_preview_digest, sign_message_versioned, SignedExtras};
+
+    fn kp(seed: u8) -> NativeKeypair {
+        NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    fn pk_b64(k: &NativeKeypair) -> String {
+        base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf())
+    }
+
+    fn card() -> LinkPreviewRef {
+        LinkPreviewRef {
+            url: "https://evil.example/".to_string(), title: "Login".to_string(),
+            description: String::new(), domain: "evil.example".to_string(),
+            site_name: String::new(), thumb_webp_b64: None, thumb_w: None, thumb_h: None, rich: None,
+        }
+    }
+
+    /// B4, B7, B8 on the push path: a friend's validly signed edit, card or caption
+    /// lands only on its own row in its conversation with us, never on another
+    /// conversation's row or on one of ours.
+    #[test]
+    fn authz_push_dm_change_touches_only_the_senders_own_rows() {
+        let _g = crate::node::resolver::test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("push.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let open = || crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let (alice, bob, mallory) = (kp(161), kp(162), kp(163));
+        let (a, b, m) = (alice.peer_id(), bob.peer_id(), mallory.peer_id());
+        {
+            let store = open();
+            store.insert(&b, "from bob", false, 1_000, None, None, Some("b1"), None, None, Some(1_000_000), None).unwrap();
+            store.insert(&b, "to bob", true, 1_100, None, None, Some("a1"), None, None, Some(1_100_000), None).unwrap();
+            store.insert(&b, "[file:f1]", false, 1_200, None, None, Some("f1"), None, Some("f1"), Some(1_200_000), None).unwrap();
+        }
+        let text = |mid: &str| open().get_dm_message_sig_row(mid).unwrap().text;
+
+        let edit = |k: &NativeKeypair, mid: &str, new: &str| {
+            let row = crate::node::message_ops::RowExtras::load_dm(&open(), mid);
+            let (sig, pk) = sign_message_versioned(
+                k, &pk_b64(k), "dm", &a, &k.peer_id(), 5_000, &row.as_signed(mid), new,
+            );
+            handle_edit_message(&k.peer_id(), &a, mid.into(), new.into(), 5_000, sig, pk, &path, &pass)
+        };
+        assert!(edit(&mallory, "b1", "send money").is_none());
+        assert!(edit(&bob, "a1", "words in our mouth").is_none());
+        assert_eq!(text("b1"), "from bob");
+        assert_eq!(text("a1"), "to bob");
+
+        let attach = |k: &NativeKeypair, mid: &str| {
+            let row = open().get_dm_message_sig_row(mid).unwrap();
+            let digest = link_preview_digest(&card());
+            let extras = SignedExtras {
+                mid: Some(mid), reply_to: row.reply_to_mid.as_deref(), file_id: row.file_id.as_deref(),
+                order_us: row.order_us, lp_digest: Some(&digest), album: row.album_id.as_deref(),
+            };
+            let ts = row.edited_at.unwrap_or(row.timestamp);
+            let (sig, pk) = sign_message_versioned(k, &pk_b64(k), "dm", &a, &k.peer_id(), ts, &extras, &row.text);
+            handle_link_preview_set(&k.peer_id(), &a, mid.into(), Some(Box::new(card())), ts, sig, pk, &path, &pass);
+        };
+        attach(&mallory, "b1");
+        assert_eq!(open().get_dm_message_sig_row("b1").unwrap().link_preview, None);
+
+        persist_direct_message(
+            &m, &m, "invoice attached", 1_300, Some("f1"), None, Some("f1"), Some(1_300_000), None,
+            None, None, None, &path, &pass,
+        );
+        assert_eq!(text("f1"), "[file:f1]");
+
+        // The row's own author still goes through on every path.
+        assert!(edit(&bob, "b1", "from bob, edited").is_some());
+        assert_eq!(text("b1"), "from bob, edited");
+        attach(&bob, "b1");
+        assert_eq!(open().get_dm_message_sig_row("b1").unwrap().link_preview, Some(card()));
+        persist_direct_message(
+            &b, &b, "the photo", 1_200, Some("f1"), None, Some("f1"), Some(1_200_000), None,
+            None, None, None, &path, &pass,
+        );
+        assert_eq!(text("f1"), "the photo");
     }
 }

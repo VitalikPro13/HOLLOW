@@ -3467,8 +3467,8 @@ pub(crate) fn ingest_synced_channel_item(
         );
         return (0, Vec::new());
     }
-    let scope = super::message_ops::SyncedRowScope::Channel { sid, cid, signer: &msg.s };
-    if !super::message_ops::synced_item_may_touch_row(store, &scope, msg.mid.as_deref()) {
+    let scope = super::message_ops::RowScope::Channel { sid, cid, signer: &msg.s };
+    if !super::message_ops::change_may_touch_row(store, &scope, msg.mid.as_deref()) {
         return (0, Vec::new());
     }
     let sig_verified = sig_check == BackfillSig::Valid;

@@ -7347,8 +7347,8 @@ async fn handle_incoming_request(
                                 );
                                 continue;
                             }
-                            let scope = message_ops::SyncedRowScope::Dm { convo: &convo_peer, is_mine };
-                            if !message_ops::synced_item_may_touch_row(&store, &scope, msg.mid.as_deref()) {
+                            let scope = message_ops::RowScope::Dm { convo: &convo_peer, is_mine };
+                            if !message_ops::change_may_touch_row(&store, &scope, msg.mid.as_deref()) {
                                 continue;
                             }
 
@@ -7598,8 +7598,8 @@ async fn handle_incoming_request(
                                 );
                                 continue;
                             }
-                            let scope = message_ops::SyncedRowScope::Dm { convo: &convo_peer, is_mine: msg.mine };
-                            if !message_ops::synced_item_may_touch_row(&store, &scope, msg.mid.as_deref()) {
+                            let scope = message_ops::RowScope::Dm { convo: &convo_peer, is_mine: msg.mine };
+                            if !message_ops::change_may_touch_row(&store, &scope, msg.mid.as_deref()) {
                                 continue;
                             }
 
@@ -7780,109 +7780,20 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-EDIT] Received edit for message {mid} from {peer_str}");
-
-                    // Moderation (LIVE ingest, channel edits only): drop edits from
-                    // muted members — mirrors the MLS twin in message_ops.rs.
-                    if message_ops::live_muted_ingest_drop(
-                        sid.as_deref().and_then(|s| server_states.get(s)), &peer_str, "edit",
-                    ) {
-                        return;
-                    }
-
-                    // Persist the edit to local DB (preserves old text).
-                    let mut edit_applied = false;
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        if sid.is_some() {
-                            let sender = store.get_channel_message_sender(&mid);
-                            if sender.as_deref() == Some(&peer_str) {
-                                // SECURITY: a LIVE edit must carry a signature that
-                                // verifies (v2 binds the row's structural fields; the
-                                // ownership check above trusts the reported sender).
-                                let ctx = format!(
-                                    "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
-                                );
-                                let row = message_ops::RowExtras::load_channel(&store, &mid);
-                                if !crypto_handler::verify_message_signature_v2(
-                                    &peer_str, sig.as_deref(), pk.as_deref(), "ch", &ctx,
-                                    ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
-                                ) {
-                                    hollow_log!("[HOLLOW-SECURITY] REJECTED channel edit of {mid} from {peer_str} — signature verification FAILED");
-                                    return;
-                                }
-                                let _ = store.edit_channel_message(
-                                    &mid, &new_text, ts,
-                                    sig.as_deref(), pk.as_deref(),
-                                );
-                                edit_applied = true;
-                            } else if sender.is_some() {
-                                hollow_log!("[HOLLOW-EDIT] Rejected: {peer_str} tried to edit message {mid} owned by {sender:?}");
-                            }
-                            // sender == None → message not synced yet; sync batch will bring the edited version.
-                        } else {
-                            // DM edit. Normally the editor must be the SENDER
-                            // (is_mine==false). Self fan-out is the one exception: a
-                            // sibling echoing OUR OWN edit carries is_mine==true.
-                            let is_mine = store.get_dm_message_is_mine(&mid);
-                            let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
-                            if is_mine == Some(false) || (is_mine == Some(true) && is_sibling) {
-                                // SECURITY: verify the edit signature. Signer and context
-                                // mirror the live-DM rule: a sibling echo of OUR edit was
-                                // signed by US, a friend's edit by them with US as recipient.
-                                let (signer, ctx): (String, String) = if is_sibling {
-                                    (
-                                        master_peer_str.to_string(),
-                                        store.get_dm_message_peer(&mid).unwrap_or_default(),
-                                    )
-                                } else {
-                                    (super::resolver::resolve(&peer_str), master_peer_str.to_string())
-                                };
-                                let row = message_ops::RowExtras::load_dm(&store, &mid);
-                                if !crypto_handler::verify_message_signature_v2(
-                                    &signer, sig.as_deref(), pk.as_deref(), "dm", &ctx,
-                                    ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
-                                ) {
-                                    hollow_log!("[HOLLOW-SECURITY] REJECTED DM edit of {mid} from {peer_str} (signer {signer}) — signature verification FAILED");
-                                    return;
-                                }
-                                let _ = store.edit_dm_message(
-                                    &mid, &new_text, ts,
-                                    sig.as_deref(), pk.as_deref(),
-                                );
-                                edit_applied = true;
-                            } else {
-                                hollow_log!("[HOLLOW-EDIT] Rejected: {peer_str} tried to edit DM {mid} (is_mine={is_mine:?})");
-                            }
-                        }
-                    }
-
-                    // Emit event so Dart updates UI — include sig/pk so the
-                    // receiver's Proof dialog verifies against the edit's
-                    // signature, not the original's.
-                    if edit_applied {
-                        if let (Some(server_id), Some(channel_id)) = (sid, cid) {
-                            let _ = event_tx.send(NetworkEvent::ChannelMessageEdited {
-                                server_id,
-                                channel_id,
-                                message_id: mid,
-                                new_text,
-                                edited_at: ts,
-                                signature: sig,
-                                public_key: pk,
-                            }).await;
-                        } else {
-                            // Convo attribution: for a sibling self-echo the sender
-                            // is US, so resolve(peer_str) would mis-key it — look up
-                            // the row's real conversation peer by mid.
-                            let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
-                            let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                peer_id: convo_peer,
-                                message_id: mid,
-                                new_text,
-                                edited_at: ts,
-                                signature: sig,
-                                public_key: pk,
-                            }).await;
-                        }
+                    if sid.is_some() {
+                        message_ops::handle_envelope_edit_message(
+                            event_tx, bundle_keypair,
+                            sid.as_deref().and_then(|s| server_states.get(s)),
+                            &super::resolver::resolve(peer_str),
+                            mid, new_text, ts, sig, pk, sid, cid,
+                            db_path, db_passphrase,
+                        ).await;
+                    } else {
+                        message_ops::handle_envelope_dm_edit(
+                            event_tx, peer_str, master_peer_str,
+                            mid, new_text, ts, sig, pk,
+                            db_path, db_passphrase,
+                        ).await;
                     }
                 }
                 Ok(MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid }) => {
@@ -7890,206 +7801,87 @@ async fn handle_incoming_request(
                     message_ops::handle_envelope_link_preview_set(
                         event_tx,
                         sid.as_deref().and_then(|s| server_states.get(s)),
-                        &peer_str, master_peer_str,
+                        peer_str, master_peer_str,
                         mid, lp, ts, sig, pk, sid, cid,
-                        &db_path, &db_passphrase,
+                        db_path, db_passphrase,
                     ).await;
                 }
                 Ok(MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-DELETE] Received delete for message {mid} from {peer_str}");
-
-                    // Hide the message in local DB (preserves text in message_deletions).
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        if sid.is_some() {
-                            // SECURITY: Verify sender owns the message before hiding.
-                            let sender = store.get_channel_message_sender(&mid);
-                            if sender.as_deref() != Some(&peer_str) {
-                                hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage from {peer_str} — not the sender of message {mid}");
-                                return;
-                            }
-                            // SECURITY: verify the delete signature ("ch-delete" over
-                            // the row's current text + structural fields) — an
-                            // unauthenticated delete is a censorship primitive.
-                            let ctx = format!(
-                                "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
-                            );
-                            let row = message_ops::RowExtras::load_channel(&store, &mid);
-                            let current_text = row.text.clone().unwrap_or_default();
-                            if !crypto_handler::verify_message_signature_v2(
-                                &peer_str, sig.as_deref(), pk.as_deref(), "ch-delete", &ctx,
-                                ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
-                            ) {
-                                hollow_log!("[HOLLOW-SECURITY] REJECTED channel delete of {mid} from {peer_str} — signature verification FAILED");
-                                return;
-                            }
-                            let _ = store.hide_channel_message(
-                                &mid, ts,
-                                sig.as_deref(), pk.as_deref(),
-                            );
-                        } else {
-                            // SECURITY: the deleter must own the DM message
-                            // (is_mine==false). Self fan-out exception: a sibling
-                            // echoing OUR OWN delete carries is_mine==true.
-                            let is_mine = store.get_dm_message_is_mine(&mid);
-                            let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
-                            let allowed = is_mine == Some(false) || (is_mine == Some(true) && is_sibling);
-                            if !allowed {
-                                // is_mine None → message not found; true & not sibling
-                                // → a peer trying to delete our message. Reject both.
-                                hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {peer_str} — not the sender of message {mid}");
-                                return;
-                            }
-                            // SECURITY: verify the delete signature ("dm-delete") —
-                            // signer/context mirror the DM edit arm above.
-                            let (signer, ctx): (String, String) = if is_sibling {
-                                (
-                                    master_peer_str.to_string(),
-                                    store.get_dm_message_peer(&mid).unwrap_or_default(),
-                                )
-                            } else {
-                                (super::resolver::resolve(&peer_str), master_peer_str.to_string())
-                            };
-                            let row = message_ops::RowExtras::load_dm(&store, &mid);
-                            let current_text = row.text.clone().unwrap_or_default();
-                            if !crypto_handler::verify_message_signature_v2(
-                                &signer, sig.as_deref(), pk.as_deref(), "dm-delete", &ctx,
-                                ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
-                            ) {
-                                hollow_log!("[HOLLOW-SECURITY] REJECTED DM delete of {mid} from {peer_str} (signer {signer}) — signature verification FAILED");
-                                return;
-                            }
-                            let _ = store.hide_dm_message(
-                                &mid, ts,
-                                sig.as_deref(), pk.as_deref(),
-                            );
-                        }
-                    }
-
-                    if let (Some(server_id), Some(channel_id)) = (sid, cid) {
-                        let _ = event_tx.send(NetworkEvent::ChannelMessageDeleted {
-                            server_id,
-                            channel_id,
-                            message_id: mid,
-                            deleted_at: ts,
-                        }).await;
+                    if sid.is_some() {
+                        message_ops::handle_envelope_delete_message(
+                            event_tx, bundle_keypair, &super::resolver::resolve(peer_str),
+                            mid, ts, sig, pk, sid, cid,
+                            db_path, db_passphrase,
+                        ).await;
                     } else {
-                        let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
-                        let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-                            peer_id: convo_peer,
-                            message_id: mid,
-                            deleted_at: ts,
-                        }).await;
+                        message_ops::handle_envelope_dm_delete(
+                            event_tx, peer_str, master_peer_str,
+                            mid, ts, sig, pk,
+                            db_path, db_passphrase,
+                        ).await;
                     }
                 }
                 Ok(MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
-                    // SECURITY: short Unicode emoji or a well-formed custom
-                    // emote token ([e:name:hash]) — nothing else.
-                    if !emotes::valid_reaction_emoji(&emoji) {
+                    hollow_log!("[HOLLOW-REACTION] Received reaction on {mid} from {peer_str}");
+                    // Reactions are signed by and attributed to the reactor's MASTER, so a
+                    // friend's reactions from any of its devices count as one person's.
+                    let reactor = super::resolver::resolve(peer_str);
+                    if sid.is_some() {
+                        message_ops::handle_envelope_add_reaction(
+                            event_tx, bundle_keypair,
+                            sid.as_deref().and_then(|s| server_states.get(s)),
+                            &reactor, mid, emoji, ts, sig, pk, sid, cid,
+                            db_path, db_passphrase,
+                        ).await;
+                    } else if !emotes::valid_reaction_emoji(&emoji) {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED AddReaction from {peer_str} — invalid emoji string ({} bytes)", emoji.len());
-                        return;
-                    }
-                    hollow_log!("[HOLLOW-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
-
-                    // Moderation (LIVE ingest, channel reactions only): drop reactions
-                    // from muted members — mirrors the MLS twin in message_ops.rs.
-                    if message_ops::live_muted_ingest_drop(
-                        sid.as_deref().and_then(|s| server_states.get(s)), &peer_str, "reaction",
+                    } else if !message_ops::reaction_sig_rejected(
+                        &reactor, "reaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref(),
                     ) {
-                        return;
-                    }
-
-                    // DM (sid==None): the reactor is keyed by the sender's MASTER id so
-                    // reactions from any of a friend's devices attribute to one person.
-                    // Channel context keeps the raw device id (untouched).
-                    let reactor_key = if sid.is_none() {
-                        super::resolver::resolve(&peer_str)
-                    } else {
-                        peer_str.to_string()
-                    };
-
-                    // SECURITY: a LIVE reaction must carry a signature that verifies; the
-                    // reactor identity below is otherwise transport-attested only. Reactions
-                    // are signed by the MASTER keypair, so verify against the resolved master
-                    // even where the stored reactor key stays the raw device id.
-                    if message_ops::reaction_sig_rejected(
-                        &super::resolver::resolve(&peer_str), "reaction", &mid, &emoji, ts,
-                        sig.as_deref(), pk.as_deref(),
-                    ) {
-                        return;
-                    }
-
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        let _ = store.add_reaction(
-                            &mid, &emoji, &reactor_key, ts,
-                            sig.as_deref(), pk.as_deref(),
-                        );
-                    }
-
-                    if let (Some(server_id), Some(channel_id)) = (sid, cid) {
-                        let _ = event_tx.send(NetworkEvent::ChannelReactionAdded {
-                            server_id,
-                            channel_id,
-                            message_id: mid,
-                            emoji,
-                            reactor: peer_str.to_string(),
-                            added_at: ts,
-                        }).await;
-                    } else {
-                        // peer_id = the DM thread key (the OTHER party). For a friend's reaction
-                        // the reactor IS the thread peer, but for a sibling self-echo the reactor
-                        // is US while the thread is the friend, so resolve it by the message's row.
-                        let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
-                        let _ = event_tx.send(NetworkEvent::DmReactionAdded {
-                            peer_id: convo_peer,
-                            message_id: mid,
-                            emoji,
-                            reactor: reactor_key,
-                            added_at: ts,
-                        }).await;
+                        let stored = crate::storage::MessageStore::open(db_path, db_passphrase)
+                            .is_ok_and(|store| {
+                                message_ops::dm_reaction_target_ok(&store, &mid, peer_str, master_peer_str)
+                                    && store.add_reaction(
+                                        &mid, &emoji, &reactor, ts, sig.as_deref(), pk.as_deref(),
+                                    ).is_ok()
+                            });
+                        if stored {
+                            // The DM thread is the OTHER party: the reactor for a friend's
+                            // reaction, the row's conversation for our own sibling's echo.
+                            let _ = event_tx.send(NetworkEvent::DmReactionAdded {
+                                peer_id: dm_event_convo(peer_str, master_peer_str, &mid, db_path, db_passphrase),
+                                message_id: mid,
+                                emoji,
+                                reactor,
+                                added_at: ts,
+                            }).await;
+                        }
                     }
                 }
                 Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-REACTION] Received remove reaction {emoji} on {mid} from {peer_str}");
-
-                    // DM (sid==None): reactor keyed by sender's MASTER id (see AddReaction).
-                    let reactor_key = if sid.is_none() {
-                        super::resolver::resolve(&peer_str)
-                    } else {
-                        peer_str.to_string()
-                    };
-
-                    // SECURITY: same rule as the add path — verify against the
-                    // resolved MASTER (reactions are master-signed).
-                    if message_ops::reaction_sig_rejected(
-                        &super::resolver::resolve(&peer_str), "unreaction", &mid, &emoji, ts,
-                        sig.as_deref(), pk.as_deref(),
+                    let reactor = super::resolver::resolve(peer_str);
+                    if sid.is_some() {
+                        message_ops::handle_envelope_remove_reaction(
+                            event_tx, bundle_keypair, &reactor,
+                            mid, emoji, ts, sig, pk, sid, cid,
+                            db_path, db_passphrase,
+                        ).await;
+                    } else if !message_ops::reaction_sig_rejected(
+                        &reactor, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref(),
                     ) {
-                        return;
-                    }
-
-                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        let _ = store.remove_reaction(
-                            &mid, &emoji, &reactor_key, ts,
-                            sig.as_deref(), pk.as_deref(),
-                        );
-                    }
-
-                    if let (Some(server_id), Some(channel_id)) = (sid, cid) {
-                        let _ = event_tx.send(NetworkEvent::ChannelReactionRemoved {
-                            server_id,
-                            channel_id,
-                            message_id: mid,
-                            emoji,
-                            reactor: peer_str.to_string(),
-                            removed_at: ts,
-                        }).await;
-                    } else {
-                        let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
+                        // Only the reactor's own reaction goes, so no row check is needed.
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                            let _ = store.remove_reaction(
+                                &mid, &emoji, &reactor, ts, sig.as_deref(), pk.as_deref(),
+                            );
+                        }
                         let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
-                            peer_id: convo_peer,
+                            peer_id: dm_event_convo(peer_str, master_peer_str, &mid, db_path, db_passphrase),
                             message_id: mid,
                             emoji,
-                            reactor: reactor_key,
+                            reactor,
                             removed_at: ts,
                         }).await;
                     }
@@ -10872,6 +10664,9 @@ async fn handle_incoming_request(
                                 ).await;
                             }
                             MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid } => {
+                                if sid.is_none() {
+                                    return; // DM cards ride Olm only.
+                                }
                                 let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_link_preview_set(
                                     event_tx, mod_state, &sender_master, &local_peer,

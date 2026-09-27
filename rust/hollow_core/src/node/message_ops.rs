@@ -1599,31 +1599,32 @@ fn preview_column(preview: Option<&LinkPreviewRef>) -> Option<String> {
     preview.and_then(|lp| serde_json::to_string(lp).ok())
 }
 
-/// The conversation a synced item names, and the principal its signature proves.
-pub(crate) enum SyncedRowScope<'a> {
-    /// `signer` = the item's verified `s`.
+/// The conversation a change names, and the principal its signature proves.
+pub(crate) enum RowScope<'a> {
+    /// `signer` = the change's verified author.
     Channel { sid: &'a str, cid: &'a str, signer: &'a str },
-    /// `convo` = the conversation master; `is_mine` = OUR direction for the item,
-    /// which already picked the signer the item verified against.
+    /// `convo` = the conversation master; `is_mine` = OUR direction for the change,
+    /// which already picked the signer it verified against.
     Dm { convo: &'a str, is_mine: bool },
 }
 
-/// Whether a verified sync item may change the row its `mid` names. The item's
-/// signature proves who wrote the ITEM, never that the row it lands on is theirs,
-/// so an existing row changes only when it sits in the item's channel or
-/// conversation and its author is the item's signer. `true` when there is no row.
+/// Whether a verified change, synced or live, may land on the row its `mid`
+/// names. A signature proves who wrote the CHANGE, never that the row it lands on
+/// is theirs, so an existing row changes only when it sits in the change's channel
+/// or conversation and its author is the change's signer. `true` when there is no
+/// row.
 ///
 /// A channel row's author is its sender collapsed to the master, or the key its
 /// stored signature names: a row wedged under an unresolvable device id still
 /// carries its author's key, which is what lets the sender repair converge it.
-pub(crate) fn synced_item_may_touch_row(
+pub(crate) fn change_may_touch_row(
     store: &crate::storage::MessageStore,
-    scope: &SyncedRowScope<'_>,
+    scope: &RowScope<'_>,
     mid: Option<&str>,
 ) -> bool {
     let Some(mid) = mid else { return true };
     let allowed = match *scope {
-        SyncedRowScope::Channel { sid, cid, signer } => {
+        RowScope::Channel { sid, cid, signer } => {
             let Some(row) = store.get_channel_message_owner(mid) else { return true };
             row.server_id == sid
                 && row.channel_id == cid
@@ -1631,16 +1632,83 @@ pub(crate) fn synced_item_may_touch_row(
                     || row.public_key.as_deref().and_then(peer_id_of_public_key).as_deref()
                         == Some(super::resolver::resolve(signer).as_str()))
         }
-        SyncedRowScope::Dm { convo, is_mine } => {
+        RowScope::Dm { convo, is_mine } => {
             let Some(row_is_mine) = store.get_dm_message_is_mine(mid) else { return true };
             let row_convo = store.get_dm_message_peer(mid).unwrap_or_default();
             row_is_mine == is_mine && super::resolver::resolve(&row_convo) == convo
         }
     };
     if !allowed {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED synced item for {mid}: the row belongs to another author or conversation");
+        hollow_log!("[HOLLOW-SECURITY] REJECTED change to {mid}: the row belongs to another author or conversation");
     }
     allowed
+}
+
+/// Who must have signed a LIVE change to an existing DM row, under which context,
+/// and the conversation the row is filed under.
+pub(crate) struct LiveDmChange {
+    pub signer: String,
+    pub ctx: String,
+    pub convo: String,
+}
+
+/// The [`LiveDmChange`] for DM row `mid` arriving from device `sender`. `None` =
+/// no such row, or not the sender's to change: a friend changes only its own
+/// messages in its conversation with us, and our own sibling only ours.
+pub(crate) fn live_dm_change(
+    store: &crate::storage::MessageStore,
+    mid: &str,
+    sender: &str,
+    local_master: &str,
+) -> Option<LiveDmChange> {
+    let convo = super::resolver::resolve(&store.get_dm_message_peer(mid)?);
+    let from_sibling = super::resolver::same_identity(sender, local_master);
+    let named = if from_sibling { convo.clone() } else { super::resolver::resolve(sender) };
+    if !change_may_touch_row(store, &RowScope::Dm { convo: &named, is_mine: from_sibling }, Some(mid)) {
+        return None;
+    }
+    Some(if from_sibling {
+        LiveDmChange { signer: local_master.to_string(), ctx: convo.clone(), convo }
+    } else {
+        LiveDmChange { signer: convo.clone(), ctx: local_master.to_string(), convo }
+    })
+}
+
+/// Whether a LIVE channel reaction may attach to `mid`: only to a row we hold in
+/// the channel it names. A reaction that outruns its row is dropped; sync carries
+/// it with the row.
+pub(crate) fn channel_reaction_target_ok(
+    store: &crate::storage::MessageStore,
+    mid: &str,
+    sid: &str,
+    cid: &str,
+) -> bool {
+    let ok = store
+        .get_channel_message_owner(mid)
+        .is_some_and(|row| row.server_id == sid && row.channel_id == cid);
+    if !ok {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED reaction on {mid}: no such row in {sid}/{cid}");
+    }
+    ok
+}
+
+/// Whether a LIVE DM reaction from `reactor` may attach to `mid`: only to a row of
+/// the reactor's conversation with us, in either direction, or to any DM row when
+/// the reactor is our own sibling.
+pub(crate) fn dm_reaction_target_ok(
+    store: &crate::storage::MessageStore,
+    mid: &str,
+    reactor: &str,
+    local_master: &str,
+) -> bool {
+    let ok = store.get_dm_message_peer(mid).is_some_and(|peer| {
+        super::resolver::same_identity(reactor, local_master)
+            || super::resolver::same_identity(&peer, reactor)
+    });
+    if !ok {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED DM reaction on {mid} from {reactor}: not a row of that conversation");
+    }
+    ok
 }
 
 fn peer_id_of_public_key(pk_b64: &str) -> Option<String> {
@@ -2656,7 +2724,8 @@ fn persist_incoming_channel_message(
     Some((is_new, reply_author))
 }
 
-/// Handle `MessageEnvelope::EditMessage` (MLS-decrypted path).
+/// Handle a LIVE channel `MessageEnvelope::EditMessage` from any transport;
+/// `peer_str` is the editor's MASTER.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_edit_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2678,17 +2747,19 @@ pub(crate) async fn handle_envelope_edit_message(
     if live_muted_ingest_drop(server_state, peer_str, "edit") {
         return;
     }
+    // The row must sit where the edit says, or the mute gate above read a server
+    // the sender picked.
+    let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) else { return };
     let mut edit_applied = false;
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
-        if sender.as_deref() == Some(peer_str) {
+        let scope = RowScope::Channel { sid: s, cid: c, signer: peer_str };
+        if sender.is_some() && change_may_touch_row(&store, &scope, Some(&mid)) {
             // SECURITY: a LIVE edit must carry a signature that verifies. The
             // row-ownership check above trusts the transport-reported sender,
             // which on plaintext PUBLIC channels is relay-controlled. The extras
             // come from OUR row, matching what the editor's signature bound.
-            let ctx = format!(
-                "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
-            );
+            let ctx = format!("{s}:{c}");
             let row = RowExtras::load_channel(&store, &mid);
             if !verify_message_signature_v2(
                 peer_str, sig.as_deref(), pk.as_deref(), "ch", &ctx,
@@ -2702,8 +2773,6 @@ pub(crate) async fn handle_envelope_edit_message(
                 sig.as_deref(), pk.as_deref(),
             );
             edit_applied = true;
-        } else if sender.is_some() {
-            hollow_log!("[HOLLOW-EDIT] MLS rejected: {peer_str} tried to edit message {mid} owned by {sender:?}");
         }
         // sender == None → message not synced yet; sync batch will bring the edited version.
     }
@@ -2727,8 +2796,9 @@ pub(crate) async fn handle_envelope_edit_message(
 /// same everywhere: the card only lands if the AUTHOR signed it.
 ///
 /// `peer_str` is the transport sender (a DEVICE id on the DM path); `sid` present
-/// = channel message, absent = DM. Applying the same card twice is a quiet no-op,
-/// so a duplicated frame or a re-broadcast costs nothing.
+/// = channel message, absent = DM. The card lands only on the sender's own row in
+/// the place the envelope names. Applying the same card twice is a quiet no-op, so
+/// a duplicated frame or a re-broadcast costs nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_link_preview_set(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2747,7 +2817,7 @@ pub(crate) async fn handle_envelope_link_preview_set(
 ) {
     // Moderation (LIVE ingest): a muted member can't author card content
     // either, mirroring the edit gate.
-    if live_muted_ingest_drop(server_state, peer_str, "link preview") {
+    if live_muted_ingest_drop(server_state, &super::resolver::resolve(peer_str), "link preview") {
         return;
     }
 
@@ -2758,41 +2828,21 @@ pub(crate) async fn handle_envelope_link_preview_set(
 
     // Who must have signed this, and under what context. Both are derived
     // from OUR row, never from fields the sender controls.
-    let (signer, ctx, convo_peer) = if is_channel {
-        let Some(sender) = store.get_channel_message_sender(&mid) else {
+    let (signer, ctx, convo_peer) = if let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) {
+        if !store.channel_message_exists(&mid) {
             // Row not synced yet — the sync batch will bring the card with it.
             return;
-        };
-        let sender_master = super::resolver::resolve(&sender);
-        if !super::resolver::same_identity(&sender_master, peer_str) {
-            hollow_log!("[HOLLOW-SECURITY] REJECTED link preview for {mid} from {peer_str} — not the author ({sender_master})");
+        }
+        let author = super::resolver::resolve(peer_str);
+        if !change_may_touch_row(&store, &RowScope::Channel { sid: s, cid: c, signer: &author }, Some(&mid)) {
             return;
         }
-        let ctx = format!(
-            "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
-        );
-        (sender_master, ctx, String::new())
+        (author, format!("{s}:{c}"), String::new())
+    } else if is_channel {
+        return;
     } else {
-        // DM. Normally the attacher is the other party; the exception is our OWN
-        // sibling echoing our attach back, legitimate because it resolves to us.
-        let is_mine = store.get_dm_message_is_mine(&mid);
-        let is_sibling = super::resolver::same_identity(peer_str, local_master);
-        if !(is_mine == Some(false) || (is_mine == Some(true) && is_sibling)) {
-            hollow_log!("[HOLLOW-LP] Rejected: {peer_str} tried to set a preview on DM {mid} (is_mine={is_mine:?})");
-            return;
-        }
-        let convo = if is_sibling {
-            store.get_dm_message_peer(&mid).unwrap_or_default()
-        } else {
-            super::resolver::resolve(peer_str)
-        };
-        // A sibling echo was signed by US with the row's conversation peer as
-        // recipient; a friend's attach was signed by them with US as recipient.
-        if is_sibling {
-            (local_master.to_string(), convo.clone(), convo)
-        } else {
-            (super::resolver::resolve(peer_str), local_master.to_string(), convo)
-        }
+        let Some(change) = live_dm_change(&store, &mid, peer_str, local_master) else { return };
+        (change.signer, change.ctx, change.convo)
     };
 
     let Some(row) = (if is_channel {
@@ -2850,7 +2900,8 @@ pub(crate) async fn handle_envelope_link_preview_set(
     }
 }
 
-/// Handle `MessageEnvelope::DeleteMessage` (MLS-decrypted path).
+/// Handle a LIVE channel `MessageEnvelope::DeleteMessage` from any transport;
+/// `sender_peer_id` is the deleter's MASTER.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_delete_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2865,19 +2916,17 @@ pub(crate) async fn handle_envelope_delete_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) else { return };
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let sender = store.get_channel_message_sender(&mid);
-        if sender.as_deref() != Some(sender_peer_id) {
-            hollow_log!("[HOLLOW-SECURITY] REJECTED MLS DeleteMessage from {sender_peer_id} — not the sender of {mid}");
+        let scope = RowScope::Channel { sid: s, cid: c, signer: sender_peer_id };
+        if !store.channel_message_exists(&mid) || !change_may_touch_row(&store, &scope, Some(&mid)) {
             return;
         }
         // SECURITY: a LIVE delete must carry a signature that verifies. On
         // plaintext PUBLIC channels the transport-reported sender is
         // relay-controlled, and an unauthenticated delete is a censorship
         // primitive. A receiver whose text lags rejects and converges via sync.
-        let ctx = format!(
-            "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
-        );
+        let ctx = format!("{s}:{c}");
         let row = RowExtras::load_channel(&store, &mid);
         let current_text = row.text.clone().unwrap_or_default();
         if !verify_message_signature_v2(
@@ -2902,7 +2951,88 @@ pub(crate) async fn handle_envelope_delete_message(
     }
 }
 
-/// Handle `MessageEnvelope::AddReaction` (MLS-decrypted path).
+/// Handle a LIVE DM `MessageEnvelope::EditMessage` (Olm; MLS carries no DMs).
+/// `sender` is the transport DEVICE, a friend's or our own sibling's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_envelope_dm_edit(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender: &str,
+    local_master: &str,
+    mid: String,
+    new_text: String,
+    ts: i64,
+    sig: Option<String>,
+    pk: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Some(change) = live_dm_change(&store, &mid, sender, local_master) else {
+        hollow_log!("[HOLLOW-EDIT] Rejected: {sender} may not edit DM {mid}");
+        return;
+    };
+    let row = RowExtras::load_dm(&store, &mid);
+    if !verify_message_signature_v2(
+        &change.signer, sig.as_deref(), pk.as_deref(), "dm", &change.ctx,
+        ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED DM edit of {mid} from {sender} (signer {}) — signature verification FAILED", change.signer);
+        return;
+    }
+    let _ = store.edit_dm_message(&mid, &new_text, ts, sig.as_deref(), pk.as_deref());
+    // Carries sig/pk so the receiver's Proof dialog verifies the edit's signature,
+    // not the original's.
+    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+        peer_id: change.convo,
+        message_id: mid,
+        new_text,
+        edited_at: ts,
+        signature: sig,
+        public_key: pk,
+    }).await;
+}
+
+/// Handle a LIVE DM `MessageEnvelope::DeleteMessage` (Olm; MLS carries no DMs).
+/// `sender` is the transport DEVICE, a friend's or our own sibling's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_envelope_dm_delete(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender: &str,
+    local_master: &str,
+    mid: String,
+    ts: i64,
+    sig: Option<String>,
+    pk: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let Some(change) = live_dm_change(&store, &mid, sender, local_master) else {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {sender}: may not delete {mid}");
+        return;
+    };
+    // SECURITY: an unauthenticated delete is a censorship primitive; "dm-delete"
+    // signs the row's CURRENT text and structural fields.
+    let row = RowExtras::load_dm(&store, &mid);
+    let current_text = row.text.clone().unwrap_or_default();
+    if !verify_message_signature_v2(
+        &change.signer, sig.as_deref(), pk.as_deref(), "dm-delete", &change.ctx,
+        ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED DM delete of {mid} from {sender} (signer {}) — signature verification FAILED", change.signer);
+        return;
+    }
+    let _ = store.hide_dm_message(&mid, ts, sig.as_deref(), pk.as_deref());
+    let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
+        peer_id: change.convo,
+        message_id: mid,
+        deleted_at: ts,
+    }).await;
+}
+
+/// Handle a LIVE channel `MessageEnvelope::AddReaction` from any transport;
+/// `peer_str` is the reactor's MASTER. A DM-shaped reaction (no `sid`) is dropped:
+/// DM reactions ride Olm only.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_add_reaction(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2925,6 +3055,7 @@ pub(crate) async fn handle_envelope_add_reaction(
         hollow_log!("[HOLLOW-SECURITY] REJECTED reaction from {peer_str} — invalid emoji string ({} bytes)", emoji.len());
         return;
     }
+    let (Some(s_id), Some(c_id)) = (sid, cid) else { return };
     // Moderation (LIVE ingest only): drop reactions from muted members,
     // mirroring the new-message ingest gate; reaction REMOVALS stay allowed.
     if live_muted_ingest_drop(server_state, peer_str, "reaction") {
@@ -2936,22 +3067,22 @@ pub(crate) async fn handle_envelope_add_reaction(
     if reaction_sig_rejected(peer_str, "reaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
     }
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let _ = store.add_reaction(
-            &mid, &emoji, peer_str, ts,
-            sig.as_deref(), pk.as_deref(),
-        );
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    if !channel_reaction_target_ok(&store, &mid, &s_id, &c_id) {
+        return;
     }
-    if let (Some(s_id), Some(c_id)) = (sid, cid) {
-        let _ = event_tx.send(NetworkEvent::ChannelReactionAdded {
-            server_id: s_id,
-            channel_id: c_id,
-            message_id: mid,
-            emoji,
-            reactor: peer_str.to_string(),
-            added_at: ts,
-        }).await;
-    }
+    let _ = store.add_reaction(
+        &mid, &emoji, peer_str, ts,
+        sig.as_deref(), pk.as_deref(),
+    );
+    let _ = event_tx.send(NetworkEvent::ChannelReactionAdded {
+        server_id: s_id,
+        channel_id: c_id,
+        message_id: mid,
+        emoji,
+        reactor: peer_str.to_string(),
+        added_at: ts,
+    }).await;
 }
 
 /// SECURITY: `true` = this SYNCED reaction may be stored. Reactions riding a sync
@@ -2998,7 +3129,8 @@ pub(crate) fn reaction_sig_rejected(
     false
 }
 
-/// Handle `MessageEnvelope::RemoveReaction` (MLS-decrypted path).
+/// Handle a LIVE channel `MessageEnvelope::RemoveReaction` from any transport;
+/// `peer_str` is the reactor's MASTER, and only its own reaction goes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_remove_reaction(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -3014,6 +3146,7 @@ pub(crate) async fn handle_envelope_remove_reaction(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    let (Some(s_id), Some(c_id)) = (sid, cid) else { return };
     // SECURITY: same rule as the add path — see `reaction_sig_rejected`.
     if reaction_sig_rejected(peer_str, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
@@ -3024,16 +3157,14 @@ pub(crate) async fn handle_envelope_remove_reaction(
             sig.as_deref(), pk.as_deref(),
         );
     }
-    if let (Some(s_id), Some(c_id)) = (sid, cid) {
-        let _ = event_tx.send(NetworkEvent::ChannelReactionRemoved {
-            server_id: s_id,
-            channel_id: c_id,
-            message_id: mid,
-            emoji,
-            reactor: peer_str.to_string(),
-            removed_at: ts,
-        }).await;
-    }
+    let _ = event_tx.send(NetworkEvent::ChannelReactionRemoved {
+        server_id: s_id,
+        channel_id: c_id,
+        message_id: mid,
+        emoji,
+        reactor: peer_str.to_string(),
+        removed_at: ts,
+    }).await;
 }
 
 #[cfg(test)]
@@ -3661,8 +3792,8 @@ mod tests {
         let (bob, mallory) = (kp(121).peer_id(), kp(122).peer_id());
         store.insert(&bob, "from bob", false, 1_000, None, None, Some("dm-b"), None, None, None, None).unwrap();
         store.insert(&bob, "to bob", true, 1_100, None, None, Some("dm-a"), None, None, None, None).unwrap();
-        let may = |convo: &str, is_mine: bool, mid: &str| synced_item_may_touch_row(
-            &store, &SyncedRowScope::Dm { convo, is_mine }, Some(mid),
+        let may = |convo: &str, is_mine: bool, mid: &str| change_may_touch_row(
+            &store, &RowScope::Dm { convo, is_mine }, Some(mid),
         );
         assert!(!may(&mallory, false, "dm-b"), "another conversation's row");
         assert!(!may(&bob, true, "dm-b"), "Bob's row claimed as ours");
@@ -3670,5 +3801,186 @@ mod tests {
         assert!(may(&bob, false, "dm-b"));
         assert!(may(&bob, true, "dm-a"));
         assert!(may(&mallory, false, "not-stored-yet"));
+    }
+    // ── Live row changes (B3..B8, the live half of HOL-SEC-004) ──────────
+    //
+    // The live handlers open the DB by path, so these run on a temp file.
+
+    fn file_db() -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("live.db").to_string_lossy().into_owned();
+        (tmp, path, "ab".repeat(32))
+    }
+
+    fn open(path: &str, pass: &str) -> crate::storage::MessageStore {
+        crate::storage::MessageStore::open(path, pass).expect("open store")
+    }
+
+    fn evil_card() -> LinkPreviewRef {
+        LinkPreviewRef {
+            url: "https://evil.example/".to_string(), title: "Login".to_string(),
+            description: String::new(), domain: "evil.example".to_string(),
+            site_name: String::new(), thumb_webp_b64: None, thumb_w: None, thumb_h: None, rich: None,
+        }
+    }
+
+    /// Sign `msg_type` over the stored row's extras as `k`, the way a sender does.
+    #[allow(clippy::too_many_arguments)]
+    fn row_sig(
+        path: &str, pass: &str, is_channel: bool, k: &NativeKeypair,
+        msg_type: &str, ctx: &str, mid: &str, ts: i64, text: &str,
+    ) -> (Option<String>, Option<String>) {
+        let store = open(path, pass);
+        let row = if is_channel { RowExtras::load_channel(&store, mid) } else { RowExtras::load_dm(&store, mid) };
+        sign_message_versioned(k, &pk_b64(k), msg_type, ctx, &k.peer_id(), ts, &row.as_signed(mid), text)
+    }
+
+    /// A card attach signed by `k` over the stored row, as `sign_attached_preview` does.
+    fn card_sig(
+        path: &str, pass: &str, is_channel: bool, k: &NativeKeypair, ctx: &str, mid: &str,
+    ) -> AttachSig {
+        let store = open(path, pass);
+        let row = if is_channel { store.get_channel_message_sig_row(mid) } else { store.get_dm_message_sig_row(mid) };
+        let msg_type = if is_channel { "ch" } else { "dm" };
+        sign_attached_preview(&row.unwrap(), Some(&evil_card()), k, &pk_b64(k), msg_type, ctx, &k.peer_id(), mid)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn live_dm_edit(path: &str, pass: &str, k: &NativeKeypair, local: &str, ctx: &str, mid: &str, text: &str) {
+        let (sig, pk) = row_sig(path, pass, false, k, "dm", ctx, mid, 5_000, text);
+        let (tx, _rx) = mpsc::channel(16);
+        handle_envelope_dm_edit(&tx, &k.peer_id(), local, mid.into(), text.into(), 5_000, sig, pk, path, pass).await;
+    }
+
+    async fn live_dm_delete(path: &str, pass: &str, k: &NativeKeypair, local: &str, ctx: &str, mid: &str) {
+        let current = open(path, pass).get_dm_message_sig_row(mid).unwrap().text;
+        let (sig, pk) = row_sig(path, pass, false, k, "dm-delete", ctx, mid, 6_000, &current);
+        let (tx, _rx) = mpsc::channel(16);
+        handle_envelope_dm_delete(&tx, &k.peer_id(), local, mid.into(), 6_000, sig, pk, path, pass).await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn live_card(
+        path: &str, pass: &str, k: &NativeKeypair, local: &str, ctx: &str, mid: &str,
+        place: Option<(&str, &str)>,
+    ) {
+        let att = card_sig(path, pass, place.is_some(), k, ctx, mid);
+        let (tx, _rx) = mpsc::channel(16);
+        handle_envelope_link_preview_set(
+            &tx, None, &k.peer_id(), local, mid.into(), Some(Box::new(evil_card())),
+            att.ts, att.sig, att.pk,
+            place.map(|p| p.0.to_string()), place.map(|p| p.1.to_string()), path, pass,
+        ).await;
+    }
+
+    /// B3, B5, B7: a live DM edit, deletion or card lands only on the sender's own
+    /// row in its conversation with us, and our sibling's only on our own row. Each
+    /// refused change is validly signed by the device that sends it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_live_dm_change_touches_only_the_senders_own_rows() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (alice, bob, mallory) = (kp(131), kp(132), kp(133));
+        let (a, b) = (alice.peer_id(), bob.peer_id());
+        {
+            let store = open(&path, &pass);
+            store.insert(&b, "from bob", false, 1_000, None, None, Some("b1"), None, None, Some(1_000_000), None).unwrap();
+            store.insert(&b, "to bob", true, 1_100, None, None, Some("a1"), None, None, Some(1_100_000), None).unwrap();
+        }
+        let row = |mid: &str| open(&path, &pass).get_dm_message_sig_row(mid).unwrap();
+
+        live_dm_edit(&path, &pass, &mallory, &a, &a, "b1", "send money").await;
+        live_dm_edit(&path, &pass, &bob, &a, &a, "a1", "words in our mouth").await;
+        live_dm_edit(&path, &pass, &alice, &a, &b, "b1", "sibling rewrites bob").await;
+        assert_eq!(row("b1").text, "from bob");
+        assert_eq!(row("a1").text, "to bob");
+
+        live_dm_delete(&path, &pass, &mallory, &a, &a, "b1").await;
+        live_dm_delete(&path, &pass, &bob, &a, &a, "a1").await;
+        assert_eq!(open(&path, &pass).get_dm_message_hidden_at("b1"), None);
+        assert_eq!(open(&path, &pass).get_dm_message_hidden_at("a1"), None);
+
+        live_card(&path, &pass, &mallory, &a, &a, "b1", None).await;
+        assert_eq!(row("b1").link_preview, None);
+
+        // The row's own author, and our sibling on our own row, still go through.
+        live_card(&path, &pass, &bob, &a, &a, "b1", None).await;
+        assert_eq!(row("b1").link_preview, Some(evil_card()));
+        live_dm_edit(&path, &pass, &bob, &a, &a, "b1", "from bob, edited").await;
+        live_dm_edit(&path, &pass, &alice, &a, &b, "a1", "to bob, edited").await;
+        assert_eq!(row("b1").text, "from bob, edited");
+        assert_eq!(row("a1").text, "to bob, edited");
+        live_dm_delete(&path, &pass, &bob, &a, &a, "b1").await;
+        assert!(open(&path, &pass).get_dm_message_hidden_at("b1").is_some());
+    }
+
+    /// B6: a DM reaction attaches only to a row of the reactor's conversation with
+    /// us (either direction), or anywhere in our DMs for our own sibling; never to a
+    /// channel message or a missing row.
+    #[test]
+    fn authz_dm_reaction_lands_only_in_the_reactors_conversation() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let (a, b, m) = (kp(141).peer_id(), kp(142).peer_id(), kp(143).peer_id());
+        store.insert(&b, "from bob", false, 1_000, None, None, Some("b1"), None, None, None, None).unwrap();
+        store.insert(&b, "to bob", true, 1_100, None, None, Some("a1"), None, None, None, None).unwrap();
+        store.insert_channel_message("srv", "chan", &b, "hi", false, 1_200, None, None, Some("c1"), None, None, None, None).unwrap();
+        assert!(!dm_reaction_target_ok(&store, "b1", &m, &a), "another conversation's row");
+        assert!(!dm_reaction_target_ok(&store, "c1", &b, &a), "a channel message");
+        assert!(!dm_reaction_target_ok(&store, "gone", &b, &a), "no row");
+        assert!(dm_reaction_target_ok(&store, "b1", &b, &a));
+        assert!(dm_reaction_target_ok(&store, "a1", &b, &a));
+        assert!(dm_reaction_target_ok(&store, "b1", &a, &a), "our sibling");
+    }
+
+    /// A live channel edit, deletion, card or reaction must name the channel its
+    /// row sits in. Naming another one passed with the author's own signature for
+    /// that context, and left the mute gate reading a server the sender picked.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_live_channel_change_must_name_the_rows_own_channel() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (alice, bob, mallory) = (kp(151), kp(152), kp(153));
+        let (a, b, m) = (alice.peer_id(), bob.peer_id(), mallory.peer_id());
+        let (sid, cid) = ("srv-a", "chan-a");
+        open(&path, &pass).insert_channel_message(
+            sid, cid, &b, "hello", false, 1_000, None, None, Some("c1"), None, None, Some(1_000_000), None,
+        ).unwrap();
+        let text = || open(&path, &pass).get_channel_message_sig_row("c1").unwrap().text;
+        let (tx, _rx) = mpsc::channel(64);
+        let named = |place: Option<(&str, &str)>| {
+            (place.map(|p| p.0.to_string()), place.map(|p| p.1.to_string()))
+        };
+
+        for place in [Some(("srv-b", "chan-b")), Some((sid, "chan-b")), None] {
+            let ctx = place.map(|(s, c)| format!("{s}:{c}")).unwrap_or_else(|| ":".to_string());
+            let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", &ctx, "c1", 5_000, "moved");
+            let (s, c) = named(place);
+            handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "moved".into(), 5_000, sig, pk, s, c, &path, &pass).await;
+        }
+        assert_eq!(text(), "hello");
+
+        let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch-delete", "srv-b:chan-b", "c1", 6_000, "hello");
+        let (s, c) = named(Some(("srv-b", "chan-b")));
+        handle_envelope_delete_message(&tx, &bob, &b, "c1".into(), 6_000, sig, pk, s, c, &path, &pass).await;
+        assert_eq!(open(&path, &pass).get_channel_message_hidden_at("c1"), None);
+
+        live_card(&path, &pass, &bob, &a, "srv-b:chan-b", "c1", Some(("srv-b", "chan-b"))).await;
+        assert_eq!(open(&path, &pass).get_channel_message_sig_row("c1").unwrap().link_preview, None);
+
+        for (place, emoji) in [(Some(("srv-b", "chan-b")), "elsewhere"), (None, "as a DM"), (Some((sid, cid)), "here")] {
+            let (sig, pk) = sign_message(&mallory, &pk_b64(&mallory), &format!("reaction:c1:{emoji}:7000"));
+            let (s, c) = named(place);
+            handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), emoji.into(), 7_000, sig, pk, s, c, &path, &pass).await;
+        }
+        let reactions = open(&path, &pass).load_reactions_for_messages(&["c1".to_string()]).unwrap();
+        assert_eq!(reactions.get("c1"), Some(&vec![("here".to_string(), m.clone(), 7_000)]));
+
+        let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", &format!("{sid}:{cid}"), "c1", 5_000, "hello again");
+        let (s, c) = named(Some((sid, cid)));
+        handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "hello again".into(), 5_000, sig, pk, s, c, &path, &pass).await;
+        assert_eq!(text(), "hello again");
     }
 }
