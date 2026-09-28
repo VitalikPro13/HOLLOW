@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::crdt::server_state::ServerState;
 use crate::crypto::MlsManager;
 use super::crypto_handler::{
-    peer_is_reachable, persist_crypto_state, send_encrypted_text_to_peer, send_mls_broadcast,
+    persist_crypto_state, send_encrypted_text_to_peer, send_mls_broadcast,
     send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer,
 };
 use super::types::*;
@@ -408,8 +408,9 @@ pub(crate) fn share_friend_with_siblings(
     let msg = HavenMessage::FriendListSync {
         friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at }],
     };
-    let Ok(data) = serde_json::to_vec(&msg) else { return };
-    super::sync_handler::fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, data);
+    super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
+    );
 }
 
 /// True when `master` is an accepted friend on disk. A queued accept for anyone else
@@ -986,9 +987,9 @@ pub(crate) fn handle_send_typing_indicator(
             // Route into the deterministic DM room (not a first-match lookup):
             // the target may be co-present in several rooms and the first match
             // could be one it has since left, silently losing the typing frame.
-            if super::crypto_handler::ws_room_for_peer(&ws_room_peers, target).is_some() {
-                super::crypto_handler::send_message_to_peer_in_room(
-                    &ws_cmd_tx, &dm_room, target, msg.clone(),
+            if super::crypto_handler::ws_room_for_peer(ws_room_peers, target).is_some() {
+                super::olm_lane::carry(
+                    ws_cmd_tx, target, Some(&dm_room), &msg, super::olm_lane::NoSession::Drop,
                 );
                 sent_to += 1;
             }
@@ -997,8 +998,8 @@ pub(crate) fn handle_send_typing_indicator(
             "[HOLLOW-TYPING] DM typing → master {recipient_master}: sent to {sent_to} device(s)"
         );
     } else {
-        // Channel typing: an MLS broadcast to the group, PLUS the plaintext copy to
-        // exactly the online member devices that hold no leaf in our group.
+        // Channel typing: an MLS broadcast to the group, PLUS an Olm copy to exactly
+        // the online member devices that hold no leaf in our group.
         //
         // COMPLEMENT rule, not `if !mls_ok`: our own encrypt succeeding says nothing
         // about whether a given member can DECRYPT, and a member with no leaf would
@@ -1016,37 +1017,48 @@ pub(crate) fn handle_send_typing_indicator(
             let leafless = super::crypto_handler::leafless_member_devices(
                 mls, &server_id, server, ws_room_peers, local_peer_str,
             );
-            if !leafless.is_empty() {
-                let data = serde_json::to_vec(&msg).unwrap_or_default();
-                hollow_log!("[HOLLOW-TYPING] Plaintext typing copy to {} leaf-less device(s)", leafless.len());
+            if let Some(json) = super::olm_lane::carried_json(&msg).filter(|_| !leafless.is_empty()) {
+                hollow_log!("[HOLLOW-TYPING] Olm typing copy to {} leaf-less device(s)", leafless.len());
                 for dev in &leafless {
-                    send_raw_to_peer(ws_cmd_tx, ws_room_peers, dev, data.clone());
+                    super::olm_lane::carry_json(ws_cmd_tx, dev, None, json.clone(), super::olm_lane::NoSession::Drop);
                 }
             }
         }
     }
 }
 
-/// Handle `NodeCommand::SetInvisible`.
-/// Broadcasts StatusUpdate to every unique connected peer across all WS rooms.
+/// Handle `NodeCommand::SetInvisible`: tell every connected device of a friend or
+/// a co-member, the people who show our presence.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_set_invisible(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
     local_peer_str: &str,
     invisible: bool,
     is_invisible: &mut bool,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     *is_invisible = invisible;
     let status = if invisible { "invisible" } else { "online" };
     hollow_log!("[HOLLOW-STATUS] Setting invisible={invisible}, broadcasting status={status}");
-    let msg = HavenMessage::StatusUpdate { status: status.to_string() };
-
-    let data = serde_json::to_vec(&msg).unwrap_or_default();
+    let Some(json) = super::olm_lane::carried_json(&HavenMessage::StatusUpdate { status: status.to_string() }) else {
+        return;
+    };
+    let friends: std::collections::HashSet<String> = super::crypto_handler::accepted_friend_entries(db_path, db_passphrase)
+        .into_iter()
+        .map(|f| super::resolver::resolve(&f.peer_id))
+        .collect();
     let mut sent_to = std::collections::HashSet::new();
     for peers in ws_room_peers.values() {
         for peer in peers {
-            if peer != local_peer_str && sent_to.insert(peer.clone()) {
-                send_raw_to_peer(ws_cmd_tx, ws_room_peers, peer, data.clone());
+            if super::resolver::same_identity(peer, local_peer_str) || !sent_to.insert(peer.clone()) {
+                continue;
+            }
+            let master = super::resolver::resolve(peer);
+            if friends.contains(&master) || server_states.values().any(|s| s.is_member(&master)) {
+                super::olm_lane::carry_json(ws_cmd_tx, peer, None, json.clone(), super::olm_lane::NoSession::Drop);
             }
         }
     }
@@ -1942,7 +1954,7 @@ pub(crate) async fn handle_envelope_profile_update(
     // drop Olm sessions and remove MLS leaves for a device revoked this way.
     let outcome = super::crypto_handler::ingest_device_list(
         event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
-        &sender_peer_id, ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
+        &sender_peer_id, ws_cmd_tx, device_list, db_path, db_passphrase,
     ).await;
     let newly_revoked = outcome.newly_revoked;
     if profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {

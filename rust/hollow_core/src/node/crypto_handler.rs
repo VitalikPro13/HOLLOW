@@ -25,7 +25,6 @@ pub(crate) fn reset_sibling_backfill_cooldown() {
 /// two detection paths and reconnect re-fires collapse into one request.
 pub(crate) fn request_sibling_dm_backfill(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sibling_peer_id: &str,
     db_path: &str,
     db_passphrase: &str,
@@ -60,9 +59,10 @@ pub(crate) fn request_sibling_dm_backfill(
         per_convo_since.len(),
         gaps.len()
     );
-    send_message_to_peer(
-        ws_cmd_tx, ws_room_peers,
-        sibling_peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps },
+    super::olm_lane::carry(
+        ws_cmd_tx, sibling_peer_id, None,
+        &HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps },
+        super::olm_lane::NoSession::Queue,
     );
 }
 
@@ -72,7 +72,6 @@ pub(crate) fn request_sibling_dm_backfill(
 /// handshake path. Returns the marker count.
 pub(crate) fn send_read_markers_to_sibling(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sibling_peer_id: &str,
     db_path: &str,
     db_passphrase: &str,
@@ -86,10 +85,45 @@ pub(crate) fn send_read_markers_to_sibling(
     if markers.is_empty() { return 0; }
     let n = markers.len();
     hollow_log!("[HOLLOW-UNREAD] Sending {n} read marker(s) to sibling {sibling_peer_id}");
-    send_message_to_peer(
-        ws_cmd_tx, ws_room_peers, sibling_peer_id, HavenMessage::ReadMarkers { markers },
+    super::olm_lane::carry(
+        ws_cmd_tx, sibling_peer_id, None,
+        &HavenMessage::ReadMarkers { markers },
+        super::olm_lane::NoSession::Queue,
     );
     n
+}
+
+/// Our accepted friends as the sibling lane carries them.
+pub(crate) fn accepted_friend_entries(db_path: &str, db_passphrase: &str) -> Vec<FriendListEntry> {
+    crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|s| s.load_friends(Some("accepted")).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(peer_id, status, direction, requested_at, _updated)| FriendListEntry {
+            peer_id, status, direction, requested_at,
+        })
+        .collect()
+}
+
+/// What a sibling that just proved itself gets, from either detection path (the
+/// inbox proof and the device-list ingest): our friends, a pull of theirs, a DM
+/// backfill request and our read markers. Every piece is idempotent on arrival.
+pub(crate) fn share_state_with_sibling(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    sibling: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    use super::olm_lane::{carry, NoSession};
+    let friends = accepted_friend_entries(db_path, db_passphrase);
+    if !friends.is_empty() {
+        hollow_log!("[HOLLOW-MULTIDEV] Sharing {} friends with sibling {sibling}", friends.len());
+        carry(ws_cmd_tx, sibling, None, &HavenMessage::FriendListSync { friends }, NoSession::Queue);
+    }
+    carry(ws_cmd_tx, sibling, None, &HavenMessage::FriendListRequest, NoSession::Queue);
+    request_sibling_dm_backfill(ws_cmd_tx, sibling, db_path, db_passphrase);
+    send_read_markers_to_sibling(ws_cmd_tx, sibling, db_path, db_passphrase);
 }
 
 // -- Per-message Ed25519 signing helpers (v2 only since 0.8.5) --
@@ -1402,7 +1436,6 @@ pub(crate) async fn ingest_device_list(
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     sender_peer_id: &str,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     list: Option<SignedDeviceList>,
     db_path: &str,
     db_passphrase: &str,
@@ -1417,7 +1450,7 @@ pub(crate) async fn ingest_device_list(
     if list.master_peer_id == local_master_peer_id {
         let (grew, newly_revoked) = ingest_sibling_device_list(
             event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
-            sender_peer_id, ws_cmd_tx, ws_room_peers, list, db_path, db_passphrase,
+            sender_peer_id, ws_cmd_tx, list, db_path, db_passphrase,
         ).await;
         return IngestOutcome { our_devices_grew: grew, newly_revoked };
     }
@@ -1648,7 +1681,6 @@ async fn ingest_sibling_device_list(
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     sender_peer_id: &str,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     list: SignedDeviceList,
     db_path: &str,
     db_passphrase: &str,
@@ -1766,46 +1798,11 @@ async fn ingest_sibling_device_list(
         }).await;
     }
 
-    // Hand our friend list to the sibling that JUST contacted us, not to whichever
-    // ids look "new": across wipe+reimport cycles the stored list accumulates dead
-    // ids, so a reconnecting sibling can already be "known" and the fresh device
-    // never gets the friends. The receiver is idempotent.
+    // The sibling that JUST contacted us gets our state, not whichever ids look
+    // "new": across wipe+reimport cycles the stored list accumulates dead ids, so a
+    // reconnecting sibling can already be "known" and never get the friends.
     if sender_peer_id != local_device_peer_id && !is_revoked(sender_peer_id) {
-        if let Ok(friends) = store.load_friends(Some("accepted")) {
-            if !friends.is_empty() {
-                let entries: Vec<FriendListEntry> = friends
-                    .into_iter()
-                    .map(|(pid, status, direction, requested_at, _u)| FriendListEntry {
-                        peer_id: pid, status, direction, requested_at,
-                    })
-                    .collect();
-                hollow_log!(
-                    "[HOLLOW-MULTIDEV] Sharing {} friends with sibling {sender_peer_id}",
-                    entries.len()
-                );
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers,
-                    sender_peer_id, HavenMessage::FriendListSync { friends: entries.clone() },
-                );
-            }
-        }
-        // Also PULL: covers the case where WE are the fresh device and the sibling's
-        // push did not reach us. Idempotent and cheap.
-        hollow_log!("[HOLLOW-MULTIDEV] Requesting friend list from sibling {sender_peer_id}");
-        send_message_to_peer(
-            ws_cmd_tx, ws_room_peers,
-            sender_peer_id, HavenMessage::FriendListRequest,
-        );
-
-        // Sibling detection has TWO paths, the `inbox:{master}` join-proof and this
-        // device-list ingest, so the DM backfill request must fire from both or it
-        // silently never runs. `request_sibling_dm_backfill` throttles the pair.
-        request_sibling_dm_backfill(
-            ws_cmd_tx, ws_room_peers, sender_peer_id, db_path, db_passphrase,
-        );
-        send_read_markers_to_sibling(
-            ws_cmd_tx, ws_room_peers, sender_peer_id, db_path, db_passphrase,
-        );
+        share_state_with_sibling(ws_cmd_tx, sender_peer_id, db_path, db_passphrase);
     }
 
     (changed, newly_revoked)
@@ -2689,8 +2686,25 @@ pub(crate) fn send_mls_broadcast(
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
 ) -> Result<(), String> {
+    send_mls_broadcast_in(mls, ws_cmd_tx, server_id, None, envelope, crypto_store)
+}
+
+/// [`send_mls_broadcast`] under `channel`'s subgroup when `Some`: still one frame to
+/// the whole room, which only the subgroup's members can read.
+pub(crate) fn send_mls_broadcast_in(
+    mls: &mut MlsManager,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    channel: Option<&str>,
+    envelope: &MessageEnvelope,
+    crypto_store: &CryptoStore,
+) -> Result<(), String> {
+    let group_key = match channel {
+        Some(cid) => crate::crypto::subgroup_id(server_id, cid),
+        None => server_id.to_string(),
+    };
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
-    let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
+    let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
     // MLS rule: persist on encrypt. A regressed SEND ratchet re-uses generations
     // receivers already consumed, so every live message then fails with
@@ -2701,7 +2715,7 @@ pub(crate) fn send_mls_broadcast(
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
-        channel_id: None,
+        channel_id: channel.map(str::to_string),
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
@@ -3191,13 +3205,14 @@ pub(crate) async fn handle_mls_commit_frame(
             {
                 // The committer's view is ahead of ours: pull its ops so the batch
                 // tick's retry can pass. No epoch hint, we already hold its commit.
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers, frame_sender,
-                    HavenMessage::SyncRequest {
+                super::olm_lane::carry(
+                    ws_cmd_tx, frame_sender, None,
+                    &HavenMessage::SyncRequest {
                         server_id: server_id.to_string(),
                         state_vector_json: sv,
                         mls_epoch: None,
                     },
+                    super::olm_lane::NoSession::Queue,
                 );
             }
             CommitApplyOutcome::Held
@@ -5218,11 +5233,10 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
         let (ws_cmd_tx, _ws_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
         ingest_device_list(
             &event_tx, &local_master_id, &local_device, &local_master,
-            sender_peer_id, &ws_cmd_tx, &rooms, Some(list.clone()), &db, &pass,
+            sender_peer_id, &ws_cmd_tx, Some(list.clone()), &db, &pass,
         )
         .await;
 
@@ -5252,10 +5266,9 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel::<NetworkEvent>(64);
         let (ws_cmd_tx, _ws_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         ingest_device_list(
             &event_tx, &local_master_id, &local_device, &local_master,
-            sender_peer_id, &ws_cmd_tx, &rooms, Some(list.clone()), &db, &pass,
+            sender_peer_id, &ws_cmd_tx, Some(list.clone()), &db, &pass,
         )
         .await;
         drop(event_tx);
@@ -5333,14 +5346,14 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
         let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         let ingest = |list: SignedDeviceList, sender: String| {
-            let (event_tx, ws_cmd_tx, rooms, db, pass) =
+            let (event_tx, ws_cmd_tx, _rooms, db, pass) =
                 (event_tx.clone(), ws_cmd_tx.clone(), rooms.clone(), db.clone(), pass.clone());
             let (local_master_id, local_device, local_master) =
                 (local_master_id.clone(), local_device.clone(), kp(0x01));
             async move {
                 ingest_device_list(
                     &event_tx, &local_master_id, &local_device, &local_master,
-                    &sender, &ws_cmd_tx, &rooms, Some(list), &db, &pass,
+                    &sender, &ws_cmd_tx, Some(list), &db, &pass,
                 )
                 .await
             }
@@ -5415,7 +5428,6 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
         let (ws_cmd_tx, _ws_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
         let bob = kp(0x60);
         let bob_kept = kp(0x61).peer_id();
@@ -5426,7 +5438,7 @@ mod tests {
         ] {
             ingest_device_list(
                 &event_tx, &local_master_id, &local_device, &local_master,
-                &bob_kept, &ws_cmd_tx, &rooms, Some(list), &db, &pass,
+                &bob_kept, &ws_cmd_tx, Some(list), &db, &pass,
             )
             .await;
         }
@@ -5476,11 +5488,10 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
         let (ws_cmd_tx, _ws_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for (list, sender) in [(&before, &bob_kept), (&after, &bob_kept), (&before, &bob_revoked)] {
             ingest_device_list(
                 &event_tx, &kp(0x01).peer_id(), &kp(0x02).peer_id(), &kp(0x01),
-                sender, &ws_cmd_tx, &rooms, Some(list.clone()), &db, &pass,
+                sender, &ws_cmd_tx, Some(list.clone()), &db, &pass,
             )
             .await;
         }
@@ -5546,12 +5557,12 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
         let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         let ingest = |list: SignedDeviceList, sender: String| {
-            let (event_tx, ws_cmd_tx, rooms, db, pass) =
+            let (event_tx, ws_cmd_tx, _rooms, db, pass) =
                 (event_tx.clone(), ws_cmd_tx.clone(), rooms.clone(), db.clone(), pass.clone());
             async move {
                 ingest_device_list(
                     &event_tx, &kp(0x01).peer_id(), &kp(0x02).peer_id(), &kp(0x01),
-                    &sender, &ws_cmd_tx, &rooms, Some(list), &db, &pass,
+                    &sender, &ws_cmd_tx, Some(list), &db, &pass,
                 )
                 .await
             }
@@ -5662,11 +5673,10 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
         let (ws_cmd_tx, _ws_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
         ingest_device_list(
             &event_tx, &local_master_id, local_device, &local_master_kp,
-            sender_peer_id, &ws_cmd_tx, &rooms, Some(incoming.clone()), &db, &pass,
+            sender_peer_id, &ws_cmd_tx, Some(incoming.clone()), &db, &pass,
         )
         .await;
 
@@ -6069,8 +6079,9 @@ mod tests {
         );
     }
 
-    /// E13: no client sends a CRDT op or an op-log sync over Olm, so the Olm dispatch
-    /// ignores all three envelopes instead of running a second, weaker ingest.
+    /// E13: over Olm a CRDT op arrives only as a carried `CrdtOpBroadcast`, which
+    /// runs the one ingest every op takes; the group envelopes are ignored there
+    /// instead of running a second, weaker ingest.
     #[test]
     fn authz_olm_carries_no_crdt_ingest() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs");
@@ -6078,7 +6089,7 @@ mod tests {
         let end = swarm.find("Received MLS-only envelope via Olm").expect("the Olm ignore arm");
         let start = swarm[..end].rfind("=> {").expect("an arm before the ignore arm");
         let ignored = &swarm[swarm[..start].rfind("}\n").expect("the arm before it")..end];
-        for kind in ["CrdtOp", "SyncReq", "SyncResp"] {
+        for kind in ["CrdtOp", "ChannelHint", "Typing"] {
             let pattern = format!("Ok(MessageEnvelope::{kind} {{");
             assert_eq!(swarm.matches(&pattern).count(), 1, "swarm.rs: an Olm {kind} arm is back");
             assert!(ignored.contains(&format!("{pattern} .. }})")), "swarm.rs: Olm {kind} is not ignored");
@@ -6112,8 +6123,12 @@ mod tests {
             let body = between(&swarm, &arm, "message_ops::handle_envelope_");
             assert!(body.contains("public_frame_accepted("), "swarm.rs: {kind} skips the public check");
         }
+        for arm in ["HavenMessage::ChannelNotificationHint { server_id", "MessageEnvelope::ChannelHint { sid"] {
+            assert!(between(&swarm, arm, ").await;").contains("message_ops::deliver_channel_hint("), "swarm.rs: {arm} skips the shared hint gate");
+        }
+        let ops = read("message_ops.rs");
+        assert!(between(&ops, "pub(crate) async fn deliver_channel_hint(", "NetworkEvent::ChannelNotificationHint {").contains("channel_signal_accepted("), "message_ops.rs: the hint skips the signal gate");
         for (arm, until) in [
-            ("HavenMessage::ChannelNotificationHint {", "NetworkEvent::ChannelNotificationHint {"),
             ("HavenMessage::TypingIndicator {", "NetworkEvent::TypingStarted {"),
             ("MessageEnvelope::Typing { sid, cid } => {", "handle_envelope_typing("),
         ] {
@@ -6197,10 +6212,10 @@ mod tests {
         assert!(!fits(&post("srv", "general"), "srv", Some("staff")), "a subgroup carries only its channel");
         assert!(fits(&post("srv", "general"), "srv", None));
 
-        let delete_server = MessageEnvelope::ServerDelete { sid: "srv".into() };
-        assert!(!fits(&delete_server, "conf:meeting", None), "a conference group naming a real server");
-        assert!(fits(&delete_server, "srv", None));
-        assert!(!fits(&delete_server, "srv", Some("staff")), "server-wide traffic in a subgroup");
+        let op = MessageEnvelope::CrdtOp { sid: "srv".into(), op_json: "{}".into() };
+        assert!(!fits(&op, "conf:meeting", None), "a conference group naming a real server");
+        assert!(fits(&op, "srv", None));
+        assert!(!fits(&op, "srv", Some("staff")), "server-wide traffic in a subgroup");
 
         let join = |sid: &str| MessageEnvelope::VoiceChannelJoin { sid: sid.into(), cid: "main".into() };
         assert!(!fits(&join("conf:meeting"), "srv", None), "a meeting joined through a server group");

@@ -1190,6 +1190,14 @@ pub(crate) enum NodeCommand {
     DebugSnapshot {
         reply: tokio::sync::oneshot::Sender<DebugSnapshotReply>,
     },
+
+    /// TEST-ONLY: carry any Olm-lane message to one device through this node's own
+    /// session, as a member with a modified client could. Absent in release builds.
+    #[cfg(test)]
+    TestCarry {
+        device: String,
+        msg: Box<HavenMessage>,
+    },
 }
 
 impl NodeCommand {
@@ -1350,6 +1358,8 @@ impl NodeCommand {
             Self::ShareList => "ShareList",
             #[cfg(test)]
             Self::DebugSnapshot { .. } => "DebugSnapshot",
+            #[cfg(test)]
+            Self::TestCarry { .. } => "TestCarry",
         }
     }
 }
@@ -1370,6 +1380,9 @@ pub(crate) struct DebugSnapshotReply {
     /// own view leads this one, so "the node has noticed a peer leave" has a signal
     /// to poll instead of a sleep.
     pub room_peers: Vec<String>,
+    /// Every envelope this node aimed at a device over the Olm lane, oldest first, as
+    /// (device, envelope JSON), whether or not a session let it go out.
+    pub carried: Vec<(String, String)>,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1909,11 +1922,9 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "friend_remove")]
     FriendRemove,
 
-    /// A master-signed destruction order, carried in the clear because it proves
-    /// itself. Two lanes ride this one variant: a SIBLING device of our own master
-    /// (the complement to the Olm [`MessageEnvelope::DestroyIdentity`], so a
-    /// sibling with no live Olm session still hears it) and a FRIEND being told
-    /// their contact is gone. The receiver branches on whose master signed it.
+    /// A master-signed destruction order told to a FRIEND, whose contact is gone.
+    /// Our own devices get [`MessageEnvelope::DestroyIdentityOrder`] or the relay's
+    /// kill list instead. The receiver branches on whose master signed it.
     #[serde(rename = "identity_destroyed")]
     IdentityDestroyed {
         #[serde(default)]
@@ -3150,23 +3161,28 @@ pub(crate) enum MessageEnvelope {
 
     // -- Phase 6: MLS-only server messages (replaces plaintext HavenMessage variants) --
 
-    /// CRDT operation broadcast (replaces HavenMessage::CrdtOpBroadcast for MLS path).
+    /// A CRDT op over the server's MLS group; its Olm twin is a carried
+    /// `HavenMessage::CrdtOpBroadcast`.
     #[serde(rename = "crdt_op")]
     CrdtOp {
         sid: String,
         op_json: String,
     },
 
-    /// Server deletion broadcast (replaces HavenMessage::ServerDeleteBroadcast for MLS path).
-    #[serde(rename = "srv_delete")]
-    ServerDelete {
+    /// A channel's new-post hint over the server group, or over the channel's own
+    /// subgroup when it is restricted; its Olm twin is a carried
+    /// `HavenMessage::ChannelNotificationHint`.
+    #[serde(rename = "ch_hint")]
+    ChannelHint {
         sid: String,
-    },
-
-    /// Member kick notification (replaces HavenMessage::MemberKickBroadcast for MLS path).
-    #[serde(rename = "member_kick")]
-    MemberKick {
-        sid: String,
+        cid: String,
+        mid: String,
+        #[serde(default)]
+        has_everyone: bool,
+        #[serde(default)]
+        mentioned_names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to_sender: Option<String>,
     },
 
     /// Typing indicator (replaces HavenMessage::TypingIndicator for server MLS path).
@@ -3231,44 +3247,12 @@ pub(crate) enum MessageEnvelope {
         profile_pk: Option<String>,
     },
 
-    /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).
-    #[serde(rename = "sync_req")]
-    SyncReq {
-        sid: String,
-        state_vector_json: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
-    /// CRDT sync response (replaces HavenMessage::SyncResponse for MLS path).
-    #[serde(rename = "sync_resp")]
-    SyncResp {
-        sid: String,
-        ops_json: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
-    /// Channel message sync request (replaces HavenMessage::ChannelSyncRequest for MLS path).
-    #[serde(rename = "ch_sync_req")]
-    ChannelSyncReq {
-        sid: String,
-        cid: String,
-        since_timestamp: i64,
-        #[serde(default)]
-        sender_timestamps: HashMap<String, i64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        gap: Option<GapDigest>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-    },
-
     /// Lightweight encrypted ping sent after creating an inbound session.
     /// Causes the remote peer's outbound session to ratchet (upgrade from
     /// PreKey type 0 to Normal type 1) when they decrypt this message.
-    /// The Olm lane for a master-signed destruction order to our OWN siblings.
-    /// Verified exactly like the plaintext twin; the two are idempotent against
-    /// each other through the `destroy_applied_at_ms` stamp.
+    /// A master-signed destruction order to our OWN siblings, verified exactly like
+    /// one from the relay's kill list; the two are idempotent against each other
+    /// through the `destroy_applied_at_ms` stamp.
     #[serde(rename = "destroy_identity")]
     DestroyIdentityOrder {
         #[serde(default)]
@@ -3297,6 +3281,18 @@ pub(crate) enum MessageEnvelope {
     #[serde(rename = "call_sig")]
     CallSignal {
         signal: Box<HavenMessage>,
+    },
+
+    /// A message the relay must never read (claim C-24), carried inside the Olm
+    /// ciphertext to one device. Only a [`Lane::Carried`] message may ride here; the
+    /// receiver dispatches it as if it had arrived on its own, from the device whose
+    /// ratchet decrypted it. Boxed for the same stack reason as [`Self::CallSignal`].
+    #[serde(rename = "carried")]
+    Carried {
+        msg: Box<HavenMessage>,
+        /// When the sender wrote it, Unix ms. A queue may hold it until a session
+        /// exists, so the receiver judges it by this time, never a later one.
+        at_ms: i64,
     },
 
     // -- Voice channel signaling --
@@ -3846,6 +3842,143 @@ impl HavenMessage {
             | Self::ShareChunkResponse { .. } => true,
         }
     }
+
+    /// The wire `type` tag, for logs.
+    pub(crate) fn wire_kind(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "?".into())
+    }
+
+    /// Which lane may carry this message. A `Relay` message rides a sealed but
+    /// plaintext frame the relay can read; what claim C-24 keeps from the relay
+    /// travels inside one device's Olm session instead, and a plaintext copy is
+    /// dropped before any handler sees it. Exhaustive on purpose: a new variant
+    /// must pick one.
+    pub(crate) fn lane(&self) -> Lane {
+        match self {
+            Self::FriendListSync { .. }
+            | Self::TypingIndicator { .. }
+            | Self::StatusUpdate { .. }
+            | Self::ChannelNotificationHint { .. }
+            | Self::VoiceChannelJoin { .. }
+            | Self::VoiceChannelLeave { .. }
+            | Self::VoiceChannelAudioState { .. }
+            | Self::VoiceChannelScreenState { .. }
+            | Self::VoiceChannelCameraState { .. }
+            | Self::VoiceChannelRecordingState { .. }
+            | Self::CrdtOpBroadcast { .. }
+            | Self::SyncRequest { .. }
+            | Self::ChannelSyncRequest { .. }
+            | Self::MemberKickBroadcast { .. }
+            | Self::FriendListRequest
+            | Self::SiblingStateSyncRequest
+            | Self::ReadMarkers { .. }
+            | Self::PersonalEmoteSync { .. }
+            | Self::SiblingServerAnnounce { .. }
+            | Self::DmSiblingSyncRequest { .. }
+            | Self::IdentityDestroyed { .. } => Lane::Carried,
+            Self::CallInvite { .. }
+            | Self::CallAccept { .. }
+            | Self::CallReject { .. }
+            | Self::CallEnd { .. }
+            | Self::CallBusy { .. }
+            | Self::CallMediaRestart { .. }
+            | Self::CallSdpOffer { .. }
+            | Self::CallSdpAnswer { .. }
+            | Self::CallIceCandidate { .. }
+            | Self::CallVideoState { .. }
+            | Self::CallAudioState { .. }
+            | Self::CallScreenState { .. }
+            | Self::CallScreenOffer { .. }
+            | Self::CallScreenAnswer { .. }
+            | Self::CallScreenIce { .. }
+            | Self::CallScreenWatch { .. }
+            | Self::CallRecordingState { .. } => Lane::CallSignal,
+            Self::Encrypted { .. }
+            | Self::SyncResponse { .. }
+            | Self::ServerStateSnapshot { .. }
+            | Self::ServerJoinRequest { .. }
+            | Self::ServerJoinRejected { .. }
+            | Self::ServerJoinResolved { .. }
+            | Self::MlsChannelMessage { .. }
+            | Self::MlsWelcome { .. }
+            | Self::MlsCommit { .. }
+            | Self::MlsCommitCatchup { .. }
+            | Self::FriendRequest { .. }
+            | Self::FriendAccept { .. }
+            | Self::FriendReject { .. }
+            | Self::FriendRemove
+            | Self::PublicChannelMessage { .. }
+            | Self::PublicChannelEdit { .. }
+            | Self::PublicLinkPreviewSet { .. }
+            | Self::PublicChannelDelete { .. }
+            | Self::PublicChannelAddReaction { .. }
+            | Self::PublicChannelRemoveReaction { .. }
+            | Self::PublicChannelSyncResponse { .. }
+            | Self::ShareManifestResponse { .. }
+            | Self::KeyRequest { .. }
+            | Self::KeyBundle { .. }
+            | Self::MlsKeyPackage { .. }
+            | Self::DmSyncRequest { .. }
+            | Self::MlsKeyPackageRequest { .. }
+            | Self::MlsEpochProbe { .. }
+            | Self::ConferenceJoinRequest { .. }
+            | Self::ConferenceJoinDenied { .. }
+            | Self::ConferenceLobbyInfo { .. }
+            | Self::ConferenceChat { .. }
+            | Self::ConferenceEnded { .. }
+            | Self::ConferenceKicked { .. }
+            | Self::ProfileUpdate { .. }
+            | Self::SiblingProveRequest { .. }
+            | Self::SiblingProveResponse { .. }
+            | Self::LinkSnapshotRequest { .. }
+            | Self::LinkSnapshotKey { .. }
+            | Self::LinkDeclined
+            | Self::LinkSnapshotAck { .. }
+            | Self::PublicChannelListRequest { .. }
+            | Self::PublicChannelListResponse { .. }
+            | Self::PublicChannelSyncRequest { .. }
+            | Self::PublicChannelConfigChanged { .. }
+            | Self::AutoDownloadPref { .. }
+            | Self::FileRequest { .. }
+            | Self::FileUnavailable { .. }
+            | Self::PublicFileHeader { .. }
+            | Self::RtcOffer { .. }
+            | Self::RtcAnswer { .. }
+            | Self::RtcIceCandidate { .. }
+            | Self::RtcShareOffer { .. }
+            | Self::RtcShareAnswer { .. }
+            | Self::RtcShareIceCandidate { .. }
+            | Self::PeerExchange { .. }
+            | Self::ProfileRequest
+            | Self::EmoteRequest { .. }
+            | Self::EmoteAssets { .. }
+            | Self::ProfileRequestFor { .. }
+            | Self::ProfileRelay { .. }
+            | Self::RecoveryHello { .. }
+            | Self::RecoveryWelcome { .. }
+            | Self::RecoveryTransferPlan { .. }
+            | Self::RecoveryShardReceived { .. }
+            | Self::RecoveryStop
+            | Self::ShareManifestRequest { .. }
+            | Self::ShareHave { .. }
+            | Self::ShareChunkRequest { .. }
+            | Self::ShareChunkResponse { .. } => Lane::Relay,
+        }
+    }
+}
+
+/// Where a [`HavenMessage`] may travel; see [`HavenMessage::lane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// A sealed plaintext frame.
+    Relay,
+    /// Only inside [`MessageEnvelope::Carried`].
+    Carried,
+    /// Only inside [`MessageEnvelope::CallSignal`], whose arm whitelists it again.
+    CallSignal,
 }
 
 impl MessageEnvelope {
@@ -3857,9 +3990,6 @@ impl MessageEnvelope {
             | Self::ShardRequest { target, .. }
             | Self::ShardResponse { target, .. }
             | Self::ShardMigrate { target, .. }
-            | Self::SyncReq { target, .. }
-            | Self::SyncResp { target, .. }
-            | Self::ChannelSyncReq { target, .. }
             | Self::VoiceChannelSdpOffer { target, .. }
             | Self::VoiceChannelSdpAnswer { target, .. }
             | Self::VoiceChannelIce { target, .. }
@@ -3892,6 +4022,7 @@ impl MessageEnvelope {
             | Self::SessionAck
             | Self::DestroyIdentityOrder { .. }
             | Self::CallSignal { .. }
+            | Self::Carried { .. }
             | Self::FwdStreamRegister { .. }
             | Self::FwdStreamAuth { .. }
             | Self::FwdStreamUnregister { .. }
@@ -3917,11 +4048,7 @@ impl MessageEnvelope {
                 Some(sid) => Server { sid, cid: cid.as_deref() },
                 None => Direct,
             },
-            Self::CrdtOp { sid, .. }
-            | Self::ServerDelete { sid }
-            | Self::MemberKick { sid }
-            | Self::SyncReq { sid, .. }
-            | Self::SyncResp { sid, .. } => Server { sid, cid: None },
+            Self::CrdtOp { sid, .. } => Server { sid, cid: None },
             Self::ChannelSyncBatch { sid, cid, .. }
             | Self::ShardStoreAck { sid, cid, .. }
             | Self::ShardDelete { sid, cid }
@@ -3930,7 +4057,7 @@ impl MessageEnvelope {
             | Self::VaultManifestBroadcast { sid, cid, .. }
             | Self::ShardMigrate { sid, cid, .. }
             | Self::Typing { sid, cid }
-            | Self::ChannelSyncReq { sid, cid, .. }
+            | Self::ChannelHint { sid, cid, .. }
             | Self::VoiceChannelJoin { sid, cid }
             | Self::VoiceChannelLeave { sid, cid }
             | Self::VoiceChannelSdpOffer { sid, cid, .. }
@@ -3958,6 +4085,7 @@ impl MessageEnvelope {
     /// delivers it late. Exhaustive on purpose, like [`Self::place`].
     pub(crate) fn live_only(&self) -> bool {
         match self {
+            Self::Carried { msg, .. } => msg.live_only(),
             Self::DirectMessage { .. }
             | Self::ChannelMessage { .. }
             | Self::ChannelSyncBatch { .. }
@@ -3977,15 +4105,11 @@ impl MessageEnvelope {
             | Self::VaultManifestBroadcast { .. }
             | Self::ShardMigrate { .. }
             | Self::CrdtOp { .. }
-            | Self::ServerDelete { .. }
-            | Self::MemberKick { .. }
             | Self::ProfileUpdate { .. }
-            | Self::SyncResp { .. }
             | Self::DestroyIdentityOrder { .. }
             | Self::SessionAck => false,
             Self::Typing { .. }
-            | Self::SyncReq { .. }
-            | Self::ChannelSyncReq { .. }
+            | Self::ChannelHint { .. }
             | Self::CallSignal { .. }
             | Self::VoiceChannelJoin { .. }
             | Self::VoiceChannelLeave { .. }
@@ -4032,6 +4156,7 @@ impl MessageEnvelope {
                 | Self::AddReaction { .. }
                 | Self::RemoveReaction { .. }
                 | Self::FileHeader { .. }
+                | Self::ChannelHint { .. }
         )
     }
 }

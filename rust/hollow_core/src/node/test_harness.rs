@@ -88,6 +88,8 @@ struct RelayInner {
     /// list: one entry per target, overwritten only by a NEWER deposit, handed over
     /// on that device's next auth and deleted only by its own ack.
     kill_list: HashMap<String, KillEntry>,
+    /// Everything the relay can read while a test has the tap on (claim C-24).
+    tap: Option<Wiretap>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
     /// relay handles and every frame the relay DELIVERS to a socket is tallied
     /// here — the ground truth for "what does one server operation cost the
@@ -118,6 +120,84 @@ pub(crate) struct RelayMeter {
     pub broadcast_deliveries: u64,
     /// Deliveries attributable to targeted SendDirect fan-out (commit/welcome).
     pub direct_deliveries: u64,
+}
+
+/// What a relay reads: every payload a device hands it, seal stripped, and every
+/// room name a device joins.
+#[derive(Default, Clone)]
+pub(crate) struct Wiretap {
+    pub frames: Vec<TapFrame>,
+    pub rooms: HashSet<String>,
+}
+
+/// One payload as the relay read it, seal stripped.
+#[derive(Clone)]
+pub(crate) struct TapFrame {
+    pub from: String,
+    pub room: String,
+    /// The device a direct frame names; `None` for a room or topic broadcast.
+    pub to: Option<String>,
+    pub body: Vec<u8>,
+}
+
+impl TapFrame {
+    /// The wire `type` of a JSON body, `binary` for anything else.
+    pub(crate) fn kind(&self) -> String {
+        serde_json::from_slice::<serde_json::Value>(&self.body)
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "binary".into())
+    }
+}
+
+impl Wiretap {
+    fn record(&mut self, from: &str, cmd: &WsCommand) {
+        let (room, to, data) = match cmd {
+            WsCommand::JoinRoom { room_code } | WsCommand::JoinInbox { room_code, .. } => {
+                self.rooms.insert(room_code.clone());
+                return;
+            }
+            WsCommand::SendToRoom { room_code, data } | WsCommand::SendToRoomTopic { room_code, data, .. } => {
+                (room_code, None, data)
+            }
+            WsCommand::SendDirect { room_code, target_peer, data }
+            | WsCommand::SendDirectImage { room_code, target_peer, data }
+            | WsCommand::SendBinaryDirect { room_code, target_peer, data }
+            | WsCommand::SendChannelDirect { room_code, target_peer, data, .. } => (room_code, Some(target_peer), data),
+            _ => return,
+        };
+        self.frames.push(TapFrame {
+            from: from.to_string(),
+            room: room.clone(),
+            to: to.cloned(),
+            body: super::frame_auth::unchecked_body(data).to_vec(),
+        });
+    }
+
+    /// The wire kind of every plaintext frame whose message may ride only inside Olm.
+    pub(crate) fn lane_leaks(&self) -> Vec<String> {
+        self.frames
+            .iter()
+            .filter_map(|f| {
+                let msg: super::types::HavenMessage = serde_json::from_slice(&f.body).ok()?;
+                (msg.lane() != super::types::Lane::Relay)
+                    .then(|| format!("{} from {} in {}", msg.wire_kind(), f.from, f.room))
+            })
+            .collect()
+    }
+
+    /// Every frame or room name in which `needle` is readable, as "kind from sender in room".
+    pub(crate) fn readable(&self, needle: &str) -> Vec<String> {
+        let n = needle.as_bytes();
+        let mut hits: Vec<String> = self
+            .frames
+            .iter()
+            .filter(|f| f.body.windows(n.len()).any(|w| w == n))
+            .map(|f| format!("{} from {} in {}", f.kind(), f.from, f.room))
+            .collect();
+        hits.extend(self.rooms.iter().filter(|r| r.contains(needle)).map(|r| format!("room name {r}")));
+        hits
+    }
 }
 
 #[derive(Clone)]
@@ -308,6 +388,15 @@ impl MockRelay {
         }
     }
 
+    /// Tell `target` that `peer` joined `room`, with no join behind it: an event that
+    /// queues in order behind every frame already delivered.
+    pub(crate) fn inject_presence(&self, target: &str, room: &str, peer: &str) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get(target) {
+            let _ = conn.event_tx.send(WsEvent::PeerJoined { room: room.to_string(), peer_id: peer.to_string() });
+        }
+    }
+
     /// [`Self::inject_raw_direct`] delivered as a room broadcast.
     #[allow(dead_code)]
     pub(crate) fn inject_raw(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
@@ -493,6 +582,16 @@ impl MockRelay {
         }
     }
 
+    /// Start reading everything, as a relay can (see [`Wiretap`]).
+    pub(crate) fn start_wiretap(&self) {
+        self.inner.lock().unwrap().tap = Some(Wiretap::default());
+    }
+
+    /// What the tap has read so far.
+    pub(crate) fn wiretap(&self) -> Wiretap {
+        self.inner.lock().unwrap().tap.clone().unwrap_or_default()
+    }
+
     /// Keep a copy of every data frame this device sends.
     pub(crate) fn set_recording(&self, peer_id: &str, on: bool) {
         let mut inner = self.inner.lock().unwrap();
@@ -552,6 +651,9 @@ impl MockRelay {
         // Drop everything from an offline node (mirrors a dead socket).
         if !inner.conns.get(from).map(|c| c.online).unwrap_or(false) {
             return;
+        }
+        if let Some(tap) = inner.tap.as_mut() {
+            tap.record(from, &cmd);
         }
         match cmd {
             WsCommand::JoinRoom { room_code } => {
@@ -1414,6 +1516,22 @@ impl TestNode {
             .ok()
     }
 
+    /// Every message this node aimed at `device` over the Olm lane, whether or not a
+    /// session let it go out: what it sent a device that cannot read it yet.
+    pub(crate) async fn carried_to(&self, device: &str) -> Vec<super::types::HavenMessage> {
+        self.debug_snapshot()
+            .await
+            .map(|s| s.carried)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(to, _)| to == device)
+            .filter_map(|(_, json)| match serde_json::from_str::<super::types::MessageEnvelope>(&json) {
+                Ok(super::types::MessageEnvelope::Carried { msg, .. }) => Some(*msg),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether the LOOP still believes `device` shares a room with us. The relay
     /// drops a peer before the node hears about it, so this is what a test waits on
     /// before asserting how a send was routed.
@@ -2059,6 +2177,34 @@ fn crdt_broadcast_frame(server_id: &str, op: &crate::crdt::operations::CrdtOp) -
         op_json: serde_json::to_string(op).expect("serialize op"),
     })
     .expect("serialize frame")
+}
+
+/// Have `from` carry `msg` to `to` inside its own Olm session: what a member with a
+/// modified client can send, and the only way an Olm-lane message reaches anyone.
+async fn carry_as(from: &TestNode, to: &TestNode, msg: super::types::HavenMessage) {
+    from.cmd_tx
+        .send(NodeCommand::TestCarry { device: to.device_id.clone(), msg: Box::new(msg) })
+        .await
+        .unwrap();
+}
+
+/// Have `from` send `msg` to `to` the way its lane allows: inside `from`'s own Olm
+/// session, or sealed into `room` for a relay-lane message. What a peer with a
+/// modified client can send, so a test reaches the gates past the transport.
+async fn send_as(relay: &MockRelay, room: &str, from: &TestNode, to: &TestNode, msg: super::types::HavenMessage) {
+    if msg.lane() == super::types::Lane::Relay {
+        relay.inject(room, &from.device_id, &to.device_id, serde_json::to_vec(&msg).unwrap());
+    } else {
+        carry_as(from, to, msg).await;
+    }
+}
+
+/// The op broadcast a member hands on.
+fn crdt_broadcast(server_id: &str, op: &crate::crdt::operations::CrdtOp) -> super::types::HavenMessage {
+    super::types::HavenMessage::CrdtOpBroadcast {
+        server_id: server_id.to_string(),
+        op_json: serde_json::to_string(op).expect("serialize op"),
+    }
 }
 
 /// The exact bytes a peer would put on the wire to answer a sync request with
@@ -12566,7 +12712,9 @@ async fn personal_emote_sync_from_non_sibling_is_dropped() {
     expect_dm_pair_ready(&relay, &b, &x, 15).await;
     drain_events(&mut b);
 
-    let frame = serde_json::to_vec(&super::types::HavenMessage::PersonalEmoteSync {
+    // A friend, through its own genuine Olm session: the transport is sound, so the
+    // same-identity gate is what has to hold.
+    carry_as(&x, &b, super::types::HavenMessage::PersonalEmoteSync {
         emotes: vec![super::types::PersonalEmoteEntry {
             name: "planted".to_string(),
             hash: "b".repeat(64),
@@ -12575,9 +12723,7 @@ async fn personal_emote_sync_from_non_sibling_is_dropped() {
             added_at: 9_999_999_999_999,
         }],
     })
-    .expect("serialize");
-    let dm_room = super::types::dm_room_code(&b_master, &x_master);
-    relay.inject_direct(&dm_room, &x.device_id, &b.device_id, frame);
+    .await;
 
     let leaked = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
         matches!(ev, NetworkEvent::PersonalEmotesUpdated)
@@ -20487,24 +20633,36 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
         "C joins live"
     );
 
-    let payloads = sock.direct_payloads(6000).await;
-    let ops: Vec<crate::crdt::operations::CrdtOp> = payloads
-        .iter()
-        .filter_map(|f| serde_json::from_slice::<super::types::HavenMessage>(f).ok())
-        .filter_map(|m| match m {
-            super::types::HavenMessage::CrdtOpBroadcast { server_id: sid, op_json }
-                if sid == server_id =>
-            {
-                serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok()
-            }
-            _ => None,
-        })
-        .collect();
+    // A raw socket holds no Olm session and reads nothing, so "aimed at the deaf
+    // member" shows in what each sender carried towards it.
+    let twins = async || -> Vec<crate::crdt::operations::CrdtOp> {
+        let mut out = o.carried_to(&b_device).await;
+        out.extend(c.carried_to(&b_device).await);
+        out.into_iter()
+            .filter_map(|m| match m {
+                super::types::HavenMessage::CrdtOpBroadcast { server_id: sid, op_json }
+                    if sid == server_id =>
+                {
+                    serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok()
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let aimed = |ops: &[crate::crdt::operations::CrdtOp]| {
+        ops.iter().any(|op| matches!(&op.payload,
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == c_master))
+            && ops.iter().any(|op| matches!(&op.payload,
+                crate::crdt::operations::CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes }
+                    if *peer_id == c_master && *pledge_bytes > 0))
+    };
+    let _ = wait_until(10, async || aimed(&twins().await)).await;
+    let ops = twins().await;
 
     assert!(
         ops.iter().any(|op| matches!(&op.payload,
             crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == c_master)),
-        "the owner's MemberAdded must ride the plaintext twin to a member that cannot \
+        "the owner's MemberAdded must ride the Olm twin to a member that cannot \
          read a room broadcast. The twin is UNCONDITIONAL for exactly this reason: our \
          own encrypt succeeding says nothing about whether this member can decrypt. \
          Got {ops:?}"
@@ -20806,16 +20964,23 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
         .filter_map(|f| serde_json::from_slice::<super::types::HavenMessage>(f).ok())
         .collect();
 
-    let typing = decoded
+    // The socket holds no Olm session, so the Olm copy shows in what O aimed at it.
+    let typing = o
+        .carried_to(&b_device)
+        .await
         .iter()
         .filter(|m| matches!(m, super::types::HavenMessage::TypingIndicator { server_id: sid, channel_id: cid }
             if *sid == server_id && *cid == general))
         .count();
     assert_eq!(
         typing, 1,
-        "the leaf-less member must be sent the plaintext typing indicator exactly \
-         once: the MLS copy is undecryptable for it, and the complement copy is \
-         aimed at precisely the devices with no leaf"
+        "the leaf-less member must be sent the Olm typing copy exactly once: the \
+         MLS copy is undecryptable for it, and the complement copy is aimed at \
+         precisely the devices with no leaf"
+    );
+    assert!(
+        !decoded.iter().any(|m| matches!(m, super::types::HavenMessage::TypingIndicator { .. })),
+        "the typing indicator never rides in the clear"
     );
 
     let profiles = decoded
@@ -21393,6 +21558,10 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         watermarks, 0,
         "a stranger's unsolicited probe response must not make a member send it the restricted channel's per-author watermarks"
     );
+    assert!(
+        !o.carried_to(&x_device).await.iter().any(|m| matches!(m, super::types::HavenMessage::ChannelSyncRequest { .. })),
+        "nor aim one at it over Olm"
+    );
 
     let meta = c.file_meta(&fid).expect("the Admin still holds the header");
     assert_eq!(meta.file_name, "payroll.txt", "the header names the file");
@@ -21439,7 +21608,8 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // nobody applies (1.5 s).
     // 2026-09-27: the design A frame tests added one spawn stagger and one absence
     // proof, a KeyRequest the relay must never see (2.7 s).
-    const BUDGET_MS: u64 = 643_400;
+    // 2026-09-28: the C-24 sibling-lane tests added three spawn staggers (4.5 s).
+    const BUDGET_MS: u64 = 647_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -22507,34 +22677,34 @@ async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
     // op that could not have won would prove nothing.
     const AHEAD: u64 = 60_000;
 
-    let attacks: Vec<(&str, Vec<u8>)> = vec![
+    let attacks: Vec<(&str, super::types::HavenMessage)> = vec![
         (
             "unsigned author-spoof over CrdtOpBroadcast",
-            crdt_broadcast_frame(
+            crdt_broadcast(
                 &server_id,
                 &forge_crdt_op(&server_id, &o_master, promote(), AHEAD, None),
             ),
         ),
         (
             "author-spoof signed with the attacker's own key",
-            crdt_broadcast_frame(
+            crdt_broadcast(
                 &server_id,
                 &forge_crdt_op(&server_id, &o_master, promote(), AHEAD, Some(&m.master_kp)),
             ),
         ),
         (
             "the same forged op smuggled inside a SyncResponse batch",
-            sync_response_frame(
+            serde_json::from_slice(&sync_response_frame(
                 &server_id,
                 &[
                     forge_crdt_op(&server_id, &o_master, promote(), AHEAD, None),
                     forge_crdt_op(&server_id, &o_master, promote(), AHEAD + 1, Some(&m.master_kp)),
                 ],
-            ),
+            )).unwrap(),
         ),
         (
             "a second ServerCreated naming the attacker as owner",
-            crdt_broadcast_frame(
+            crdt_broadcast(
                 &server_id,
                 &forge_crdt_op(
                     &server_id,
@@ -22551,9 +22721,9 @@ async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
         ),
     ];
 
-    for (what, frame) in attacks {
+    for (what, msg) in attacks {
         for target in [&o, &x] {
-            relay.inject(&server_id, &m.device_id, &target.device_id, frame.clone());
+            send_as(&relay, &server_id, &m, target, msg.clone()).await;
         }
         // Absence proof: give both victims a bounded window to have applied
         // the op, THEN assert they did not.
@@ -22643,9 +22813,8 @@ async fn crdt_future_hlc_op_is_rejected_and_owner_can_still_rename() {
     );
     assert_eq!(poison.hlc.physical_ms, u64::MAX, "the op really is stamped at the end of time");
     assert!(poison.verify_author().is_ok(), "and its signature is genuinely valid");
-    let frame = crdt_broadcast_frame(&server_id, &poison);
     for target in [&o, &x] {
-        relay.inject(&server_id, &m.device_id, &target.device_id, frame.clone());
+        carry_as(&m, target, crdt_broadcast(&server_id, &poison)).await;
     }
     sleep_ms(1500).await;
     for (node, who) in [(&o, "O"), (&x, "X")] {
@@ -22711,12 +22880,7 @@ async fn crdt_signed_op_relayed_by_another_member_is_accepted() {
         "Relayed",
         "precondition: M has not seen this rename"
     );
-    relay.inject(
-        &server_id,
-        &x.device_id,
-        &m.device_id,
-        crdt_broadcast_frame(&server_id, &renamed),
-    );
+    carry_as(&x, &m, crdt_broadcast(&server_id, &renamed)).await;
 
     let ok = wait_until(10, async || {
         m.live_server_name(&server_id).await == "Relayed"
@@ -25008,13 +25172,13 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
     let (banned, open, closed) = (keys(187).peer_id(), keys(188).peer_id(), keys(189).peer_id());
     // One author never stamps two ops with one clock, so neither may the forger.
     let clock = std::sync::atomic::AtomicU64::new(0);
-    let admit = |who: &str| crdt_broadcast_frame(&server_id, &forge_crdt_op(
+    let admit = |who: &str| crdt_broadcast(&server_id, &forge_crdt_op(
         &server_id, &m.master_id,
         crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: who.into(), display_name: "z".into(), follow: None },
         clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed), Some(&m.master_kp),
     ));
-    let deliver = |f: Vec<u8>| for target in [&o, &x] {
-        relay.inject(&server_id, &m.device_id, &target.device_id, f.clone());
+    let deliver = async |msg: super::types::HavenMessage| for target in [&o, &x] {
+        carry_as(&m, target, msg.clone()).await;
     };
 
     o.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: banned.clone() }).await.unwrap();
@@ -25022,8 +25186,8 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
         wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_banned(&banned))).await,
         "X must see the ban"
     );
-    deliver(admit(&banned));
-    deliver(admit(&open));
+    deliver(admit(&banned)).await;
+    deliver(admit(&open)).await;
     assert!(
         wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&open))).await,
         "any member may admit into an open server"
@@ -25036,7 +25200,7 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
         wait_until(10, async || x.live_server_state(&server_id).await.is_some_and(|s| s.is_private())).await,
         "X must see the server go private"
     );
-    deliver(admit(&closed));
+    deliver(admit(&closed)).await;
     // ABSENCE: the admissions above landed within this window.
     sleep_ms(1500).await;
     for (node, who) in [(&o, "O"), (&x, "X")] {
@@ -25180,19 +25344,20 @@ fn removal() -> Vec<u8> {
     serde_json::to_vec(&super::types::HavenMessage::FriendRemove).unwrap()
 }
 
-/// Wait until `to` has handled every frame delivered to it so far: frames reach a node
-/// in order, so once a typing frame sealed by `from_tag` shows, all before it are done.
-async fn flush_frames(relay: &MockRelay, room: &str, from_tag: u8, to: &mut TestNode) {
-    let from = NativeKeypair::from_secret_bytes(&seed_bytes(from_tag));
-    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
-        server_id: String::new(),
-        channel_id: String::new(),
-    })
-    .unwrap();
+/// Wait until `to` has handled every frame delivered to it so far: relay events reach
+/// a node in order, so once a presence event queued behind them shows, all before it
+/// are done.
+async fn flush_frames(relay: &MockRelay, to: &mut TestNode) {
+    static BARRIER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = BARRIER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let barrier = format!("barrier-{n}");
     drain_events(to);
-    relay.inject_raw_direct(room, &from.peer_id(), &to.device_id, super::frame_auth::seal(&from, room, &to.device_id, &typing));
+    relay.inject_presence(&to.device_id, "barrier-room", &barrier);
     assert!(
-        wait_event(to, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::TypingStarted { .. })).await,
+        wait_event(to, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::PeerDiscovered { peer } if peer.peer_id == barrier)
+        })
+        .await,
         "the barrier frame must arrive"
     );
 }
@@ -25212,7 +25377,7 @@ async fn authz_the_relay_cannot_send_a_frame_in_a_members_name() {
     let relay_key = NativeKeypair::from_secret_bytes(&seed_bytes(183));
     let resealed = super::frame_auth::seal(&relay_key, &room, &b.device_id, &removal());
     relay.inject_raw_direct(&room, &a.device_id, &b.device_id, resealed);
-    flush_frames(&relay, &room, 181, &mut b).await;
+    flush_frames(&relay, &mut b).await;
     assert!(is_friend(&b, &a.master_id), "a removal A never sealed must not unfriend");
 
     // The same removal sealed by A itself lands, so the refusals above were the seal's.
@@ -25246,7 +25411,7 @@ async fn authz_a_sealed_frame_cannot_be_moved_to_another_room_or_device() {
     // A direct sealed for B, delivered as a room broadcast.
     let for_b = super::frame_auth::seal(&a_key, &room, &b.device_id, &removal());
     relay.inject_raw(&room, &a.device_id, &b.device_id, for_b.clone());
-    flush_frames(&relay, &room, 184, &mut b).await;
+    flush_frames(&relay, &mut b).await;
     assert!(is_friend(&b, &a.master_id), "a frame moved off its room or route must be refused");
 
     relay.inject_raw_direct(&room, &a.device_id, &b.device_id, for_b);
@@ -25267,27 +25432,24 @@ async fn authz_the_relay_cannot_echo_a_devices_own_frame_back_to_it() {
     let room = super::types::dm_room_code(&a.master_id, &b.master_id);
     let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(188));
     let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(187));
-    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
-        server_id: String::new(),
-        channel_id: String::new(),
-    })
-    .unwrap();
+    // A plaintext frame with a visible effect: a friend removal.
+    let frame = removal();
     drain_events(&mut b);
-    let typed = async |b: &mut TestNode| {
+    let removed = async |b: &mut TestNode| {
         wait_event(b, std::time::Duration::from_millis(1500), |ev| {
-            matches!(ev, NetworkEvent::TypingStarted { .. })
+            matches!(ev, NetworkEvent::FriendRemoved { .. })
         })
         .await
     };
 
     // B's own genuine seal, handed back to B: every "is this us" gate would pass it.
-    let own = super::frame_auth::seal(&b_key, &room, &b.device_id, &typing);
+    let own = super::frame_auth::seal(&b_key, &room, &b.device_id, &frame);
     relay.inject_raw_direct(&room, &b.device_id, &b.device_id, own);
-    assert!(!typed(&mut b).await, "a device's own frame handed back to it must be dropped unread");
+    assert!(!removed(&mut b).await, "a device's own frame handed back to it must be dropped unread");
 
-    let from_a = super::frame_auth::seal(&a_key, &room, &b.device_id, &typing);
+    let from_a = super::frame_auth::seal(&a_key, &room, &b.device_id, &frame);
     relay.inject_raw_direct(&room, &a.device_id, &b.device_id, from_a);
-    assert!(typed(&mut b).await, "the same frame from A is taken");
+    assert!(removed(&mut b).await, "the same frame from A is taken");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -25311,7 +25473,7 @@ async fn authz_a_removal_older_than_the_friendship_is_ignored() {
     let a_day_ago = super::frame_auth::now_ms() - 24 * 3600 * 1000;
     let old = super::frame_auth::seal_at(&a_key, &room, &b.device_id, a_day_ago, [9; 16], &removal());
     relay.inject_raw_direct(&room, &a.device_id, &b.device_id, old);
-    flush_frames(&relay, &room, 189, &mut b).await;
+    flush_frames(&relay, &mut b).await;
     assert!(is_friend(&b, &a.master_id), "a removal from before the friendship must not end it");
 
     relay.inject_direct(&room, &a.device_id, &b.device_id, removal());
@@ -25331,15 +25493,16 @@ async fn authz_a_live_frame_is_taken_once_and_only_while_fresh() {
     let (a, mut b) = friend_pair(&relay, 191, 192).await;
     let room = super::types::dm_room_code(&a.master_id, &b.master_id);
     let a_key = NativeKeypair::from_secret_bytes(&seed_bytes(191));
-    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
-        server_id: String::new(),
-        channel_id: String::new(),
+    // A plaintext live frame with a visible effect: a data-channel offer.
+    let typing = serde_json::to_vec(&super::types::HavenMessage::RtcOffer {
+        sdp: "v=0".to_string(),
+        conn_id: "live-test".to_string(),
     })
     .unwrap();
     drain_events(&mut b);
     let typed = async |b: &mut TestNode| {
         wait_event(b, std::time::Duration::from_millis(1500), |ev| {
-            matches!(ev, NetworkEvent::TypingStarted { .. })
+            matches!(ev, NetworkEvent::WebRtcSignal { conn_id, .. } if conn_id == "live-test")
         })
         .await
     };
@@ -25489,20 +25652,31 @@ async fn authz_only_a_member_is_served_the_op_log() {
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
-    let (o, m, x, server_id) = three_member_server(&relay, 197, 198, 199).await;
-    let (stranger, mut sock) = stranger_in_room(&relay, 202, &server_id).await;
+    relay.start_wiretap();
+    let (mut o, m, x, server_id) = three_member_server(&relay, 197, 198, 199).await;
+    // A friend of the owner who never joined: a working Olm session, no membership.
+    let o_master = o.master_id.clone();
+    let s = spawn_node_with_friends(&relay, 202, 202, &[&o_master]).await;
+    o.store().save_friend(&s.master_id, "accepted", "outgoing", 0).unwrap();
+    expect_dm_pair_ready(&relay, &o, &s, 20).await;
 
-    // A stranger holding the server id asks for everything the server is.
+    // It asks for everything the server is.
+    let to_o = || relay.wiretap().frames.iter().filter(|f| {
+        f.from == s.device_id && f.to.as_deref() == Some(o.device_id.as_str()) && f.kind() == "encrypted"
+    }).count();
+    let before = to_o();
     let empty = crate::crdt::sync::StateVector { server_id: server_id.clone(), entries: HashMap::new() };
-    let request = serde_json::to_vec(&super::types::HavenMessage::SyncRequest {
+    carry_as(&s, &o, super::types::HavenMessage::SyncRequest {
         server_id: server_id.clone(),
         state_vector_json: serde_json::to_string(&empty).unwrap(),
         mls_epoch: None,
     })
-    .unwrap();
-    relay.inject_direct(&server_id, &stranger, &o.device_id, request);
-    let answers = sock.direct_payloads(1500).await;
-    assert!(!mentions(&answers, "\"sync_response\""), "a non-member must not be served the op log");
+    .await;
+    assert!(wait_until(10, async || to_o() > before).await, "the request reaches the relay");
+    flush_frames(&relay, &mut o).await;
+    let served_in_clear = relay.wiretap().frames.iter().any(|f| f.from == o.device_id && f.to.as_deref() == Some(s.device_id.as_str()) && f.kind() == "sync_response");
+    let served_carried = o.carried_to(&s.device_id).await.iter().any(|m| matches!(m, super::types::HavenMessage::SyncResponse { .. }));
+    assert!(!served_in_clear && !served_carried, "a non-member must not be served the op log");
     drop((m, x));
 }
 
@@ -25599,7 +25773,7 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
         super::frame_auth::seal_at(&m_key, &server_id, &o_device, at, [nonce; 16], &body)
     };
     relay.inject_raw_direct(&server_id, &m.device_id, &o.device_id, request(sealed_while_joining, 1));
-    flush_frames(&relay, &super::types::dm_room_code(&o.master_id, &m.master_id), 207, &mut o).await;
+    flush_frames(&relay, &mut o).await;
     assert!(
         !o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m.master_id)),
         "a request sealed before the leave must not re-admit"
@@ -25622,30 +25796,48 @@ async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
+    relay.start_wiretap();
     let (o, mut m, x, server_id) = three_member_server(&relay, 209, 210, 211).await;
     let o_key = NativeKeypair::from_secret_bytes(&seed_bytes(209));
-    let kick = serde_json::to_vec(&super::types::HavenMessage::MemberKickBroadcast {
-        server_id: server_id.clone(),
-    })
-    .unwrap();
-
-    // M's current membership began a moment ago; a kick sealed an hour ago predates it.
     assert!(
         m.live_server_state(&server_id).await.is_some_and(|s| s.member_since(&m.master_id).is_some()),
         "precondition: M's record holds its membership"
     );
-    let an_hour_ago = super::frame_auth::now_ms() - 3600 * 1000;
-    let old = super::frame_auth::seal_at(&o_key, &server_id, &m.device_id, an_hour_ago, [4; 16], &kick);
-    relay.inject_raw_direct(&server_id, &o.device_id, &m.device_id, old);
-    flush_frames(&relay, &super::types::dm_room_code(&o.master_id, &m.master_id), 209, &mut m).await;
-    assert!(m.live_server_state(&server_id).await.is_some(), "a kick from before the membership must not land");
 
-    relay.inject_direct(&server_id, &o.device_id, &m.device_id, kick);
+    // The relay holds back O's kick notices to M and X, genuine Olm frames both.
+    relay.swallow_direct(&o.device_id, &m.device_id);
+    relay.swallow_direct(&o.device_id, &x.device_id);
+    let marker = relay.wiretap().frames.len();
+    for who in [&m, &x] {
+        o.cmd_tx
+            .send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: who.master_id.clone() })
+            .await
+            .unwrap();
+    }
+    let notice_to = |device: &str| {
+        relay.wiretap().frames[marker..]
+            .iter()
+            .rev()
+            .find(|f| f.from == o.device_id && f.to.as_deref() == Some(device) && f.kind() == "encrypted")
+            .map(|f| f.body.clone())
+    };
     assert!(
-        wait_until(10, async || m.live_server_state(&server_id).await.is_none()).await,
+        wait_until(10, async || notice_to(&m.device_id).is_some() && notice_to(&x.device_id).is_some()).await,
+        "O's kick notices must reach the wire"
+    );
+
+    // M's membership began a moment ago; its notice, stamped an hour ago, predates it.
+    let an_hour_ago = super::frame_auth::now_ms() - 3600 * 1000;
+    let held = super::frame_auth::seal_at(&o_key, &server_id, &m.device_id, an_hour_ago, [4; 16], &notice_to(&m.device_id).unwrap());
+    relay.inject_raw_direct(&server_id, &o.device_id, &m.device_id, held);
+    let fresh = super::frame_auth::seal(&o_key, &server_id, &x.device_id, &notice_to(&x.device_id).unwrap());
+    relay.inject_raw_direct(&server_id, &o.device_id, &x.device_id, fresh);
+    assert!(
+        wait_until(10, async || x.live_server_state(&server_id).await.is_none()).await,
         "a kick sealed now lands"
     );
-    drop(x);
+    flush_frames(&relay, &mut m).await;
+    assert!(m.live_server_state(&server_id).await.is_some(), "a kick from before the membership must not land");
 }
 
 /// A-D2: a file's id commits to its author, message and bytes, so a member holding a
@@ -25770,22 +25962,17 @@ async fn expect_on_relay(relay: &MockRelay, nodes: &[&TestNode]) {
 /// right after the rogue one: frames on one connection are handled in order.
 async fn surfaces_before_barrier(
     relay: &MockRelay,
-    room: &str,
-    barrier_tag: u8,
     node: &mut TestNode,
     rogue: impl Fn(&NetworkEvent) -> bool,
 ) -> bool {
-    let from = NativeKeypair::from_secret_bytes(&seed_bytes(barrier_tag));
-    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
-        server_id: String::new(),
-        channel_id: String::new(),
-    })
-    .unwrap();
-    relay.inject_raw_direct(room, &from.peer_id(), &node.device_id, super::frame_auth::seal(&from, room, &node.device_id, &typing));
+    static BARRIER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = BARRIER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let barrier_id = format!("meeting-barrier-{n}");
+    relay.inject_presence(&node.device_id, "barrier-room", &barrier_id);
     let mut seen = false;
     let barrier = wait_event(node, std::time::Duration::from_secs(10), |ev| {
         seen |= rogue(ev);
-        matches!(ev, NetworkEvent::TypingStarted { .. })
+        matches!(ev, NetworkEvent::PeerDiscovered { peer } if peer.peer_id == barrier_id)
     })
     .await;
     assert!(barrier, "the barrier frame must arrive");
@@ -25853,7 +26040,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
             relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, frame(&msg));
         }
     }
-    let obeyed = surfaces_before_barrier(&relay, &conf_sid, 217, &mut knocker, |ev| {
+    let obeyed = surfaces_before_barrier(&relay, &mut knocker, |ev| {
         matches!(ev, NetworkEvent::ConferenceLobbyInfo { host_name, .. } if host_name == "Rogue")
             || matches!(ev, NetworkEvent::ConferenceJoinDenied { .. })
     })
@@ -25875,7 +26062,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
         channel_id: None,
         conf_nonce: Some("lobby-n1".into()),
     }));
-    let admitted = surfaces_before_barrier(&relay, &conf_sid, 217, &mut knocker, |ev| {
+    let admitted = surfaces_before_barrier(&relay, &mut knocker, |ev| {
         matches!(ev, NetworkEvent::ConferenceAdmitted { .. })
     })
     .await;
@@ -25908,7 +26095,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
         frame(&HavenMessage::ConferenceKicked { conf_id: conf_id.clone(), host: host_proof.clone() }));
     relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id,
         frame(&HavenMessage::ConferenceEnded { conf_id: conf_id.clone(), host: host_proof }));
-    let ended = surfaces_before_barrier(&relay, &conf_sid, 217, &mut knocker, |ev| {
+    let ended = surfaces_before_barrier(&relay, &mut knocker, |ev| {
         matches!(ev, NetworkEvent::ConferenceEnded { .. } | NetworkEvent::ConferenceKicked { .. })
     })
     .await;
@@ -25997,4 +26184,419 @@ async fn authz_a_knock_proves_its_code_only_for_its_own_device() {
         .await,
         "the rogue never reaches the waiting room",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Claim C-24: what a relay reads. Each test runs a real flow under the wiretap and
+// asserts on what reached the relay in a form it can read.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_the_sibling_lane_rides_olm() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+
+    const F_MASTER: u8 = 60;
+    const F_DEV: u8 = 61;
+    const M_MASTER: u8 = 62;
+    const B_DEV: u8 = 63;
+    const C_DEV: u8 = 64;
+    let f_master = NativeKeypair::from_secret_bytes(&seed_bytes(F_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let _f = spawn_node_with_friends(&relay, F_MASTER, F_DEV, &[&m_master]).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&f_master]).await;
+    {
+        let store = b.store();
+        store.insert(&f_master, "hi", false, 4000, None, None, Some("canary-read-mid"), None, None, None, None).unwrap();
+        store.save_setting(&format!("seen:dm:{f_master}"), "canary-read-mid").unwrap();
+        store.merge_personal_emote_entry("canaryemote", "", false, "", 10).unwrap();
+    }
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+
+    let friend_arrived = wait_until(15, async || {
+        c.store().load_friends(Some("accepted")).unwrap_or_default().iter().any(|row| row.0 == f_master)
+    })
+    .await;
+    assert!(friend_arrived, "C must learn B's friend over the Olm lane");
+    let emote_arrived = wait_until(10, async || {
+        c.store().list_personal_emote_entries().unwrap_or_default().iter().any(|row| row.0 == "canaryemote")
+    })
+    .await;
+    assert!(emote_arrived, "C must learn B's personal emote row over the Olm lane");
+
+    drain_events(&mut c);
+    let server_id = create_server_and_wait(&mut b, "Sibling Lane Server").await;
+    let joined = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "C must onboard the server B announced over the Olm lane");
+
+    drain_events(&mut c);
+    c.cmd_tx
+        .send(NodeCommand::RequestStateSync { source_device_id: b.device_id.clone() })
+        .await
+        .unwrap();
+    let refreshed = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(refreshed, "the manual state sync answers over the Olm lane");
+
+    let tap = relay.wiretap();
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new(), "an Olm-only message reached the relay in the clear");
+    for canary in ["canary-read-mid", "canaryemote"] {
+        assert_eq!(tap.readable(canary), Vec::<String>::new(), "the relay read {canary}");
+    }
+}
+
+/// HOL-SEC-056. A sibling's announce for a server we already hold used to run the
+/// join flow again, and while that join was pending any member's snapshot could
+/// replace our state. Now it only refreshes the list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_a_sibling_announce_for_a_held_server_starts_no_join() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 65;
+    const B_DEV: u8 = 66;
+    const C_DEV: u8 = 67;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+    drain_events(&mut c);
+    let server_id = create_server_and_wait(&mut b, "Held Server").await;
+    let joined = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "C onboards the new server from B's announce");
+
+    relay.set_recording(&c.device_id, true);
+    drain_events(&mut c);
+    c.cmd_tx
+        .send(NodeCommand::RequestStateSync { source_device_id: b.device_id.clone() })
+        .await
+        .unwrap();
+    let refreshed = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(refreshed, "the second announce still refreshes C's list");
+    assert!(
+        frames_of_type(&relay, &c.device_id, "join_request").is_empty(),
+        "HOL-SEC-056: an announce for a server C holds started a join",
+    );
+    drop(b);
+}
+
+/// Claim C-24 on the receiving side: an Olm-only message that arrives in the clear
+/// counts for nothing, even sealed by our own sibling, so a sender that regressed to
+/// plaintext fails loudly instead of leaking quietly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_a_plaintext_copy_of_an_olm_only_message_is_dropped() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 68;
+    const B_DEV: u8 = 69;
+    const C_DEV: u8 = 70;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    let stranger = NativeKeypair::from_secret_bytes(&seed_bytes(71)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+
+    let plain = super::types::HavenMessage::FriendListSync {
+        friends: vec![super::types::FriendListEntry {
+            peer_id: stranger.clone(),
+            status: "accepted".into(),
+            direction: "outgoing".into(),
+            requested_at: 1,
+        }],
+    };
+    relay.inject_direct(
+        &format!("inbox:{m_master}"), &b.device_id, &c.device_id,
+        serde_json::to_vec(&plain).unwrap(),
+    );
+    flush_frames(&relay, &mut c).await;
+    assert_eq!(
+        c.friend_status(&stranger), None,
+        "a plaintext FriendListSync from our own sibling planted a friend",
+    );
+}
+
+/// Claim C-24 for server traffic: op broadcasts, sync requests, typing, the post
+/// hint, voice presence and state, status and the kick notice ride MLS or Olm; the
+/// relay reads none of them in the clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_server_traffic_rides_mls_or_olm() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let (mut o, mut m, mut x, server_id) = three_member_server(&relay, 72, 73, 74).await;
+    let general = general_channel_of(&server_id);
+
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice = None;
+    let made = wait_event(&mut m, std::time::Duration::from_secs(10), |ev| match ev {
+        NetworkEvent::ChannelAdded { channel_id, channel_type, .. } if channel_type == "voice" => {
+            voice = Some(channel_id.clone());
+            true
+        }
+        _ => false,
+    })
+    .await;
+    assert!(made, "M learns the new channel from the op");
+    let voice = voice.unwrap();
+
+    m.cmd_tx
+        .send(NodeCommand::SendTypingIndicator { server_id: server_id.clone(), channel_id: general.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::TypingStarted { .. })).await,
+        "O sees M typing in the channel"
+    );
+    o.cmd_tx
+        .send(NodeCommand::SendTypingIndicator { server_id: String::new(), channel_id: m.master_id.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::TypingStarted { server_id, .. } if server_id.is_empty())
+        })
+        .await,
+        "M sees O typing in their DM"
+    );
+
+    m.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "a post".to_string(),
+            message_id: "c24-post".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut x, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ChannelNotificationHint { message_id, .. } if message_id == "c24-post")
+        })
+        .await,
+        "X gets the post's hint"
+    );
+
+    m.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin { server_id: server_id.clone(), channel_id: voice.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice)
+        })
+        .await,
+        "O sees M join the voice channel"
+    );
+    m.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice.clone(),
+            peer_id: o.master_id.clone(),
+            signal_type: "audio_state".to_string(),
+            payload: serde_json::json!({ "call_id": voice, "muted": true, "deafened": false }).to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::VoiceChannelSignal { signal_type, .. } if signal_type == "audio_state")
+        })
+        .await,
+        "O sees M mute"
+    );
+
+    x.cmd_tx.send(NodeCommand::SetInvisible { invisible: true }).await.unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::PeerStatusChanged { status, .. } if status == "invisible")
+        })
+        .await,
+        "O hears X go invisible"
+    );
+
+    o.cmd_tx
+        .send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: x.master_id.clone() })
+        .await
+        .unwrap();
+    let x_sid = server_id.clone();
+    assert!(
+        wait_until(15, async || x.live_server_state(&x_sid).await.is_none()).await,
+        "X hears the kick"
+    );
+
+    assert_eq!(relay.wiretap().lane_leaks(), Vec::<String>::new(), "an Olm-only message reached the relay in the clear");
+}
+
+/// J9: a post's hint in a restricted channel rides that channel's subgroup, so the
+/// qualifying member hears it, the relay reads nothing of it, and a member who
+/// cannot see the channel cannot even decrypt it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_a_restricted_channel_hint_rides_its_subgroup() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let (mut o, mut m, mut x, server_id) = three_member_server(&relay, 75, 76, 77).await;
+    expect_mls_group(&[&o, &m, &x], &server_id, 20).await;
+
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "staff".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut staff = None;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(5), |ev| match ev {
+            NetworkEvent::ChannelAdded { channel_id, name, .. } if name == "staff" => {
+                staff = Some(channel_id.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "O creates the channel"
+    );
+    let staff = staff.unwrap();
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "admin".to_string() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || m.live_role(&server_id, &m.master_id).await == crate::crdt::operations::MemberRole::Admin).await,
+        "M is promoted"
+    );
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: staff.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    let subgroup = crate::crypto::subgroup_id(&server_id, &staff);
+    expect_mls_leaf(&o, &subgroup, &m.device_id, 25).await;
+
+    drain_events(&mut m);
+    drain_events(&mut x);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: staff.clone(),
+            text: "for staff".to_string(),
+            message_id: "staff-post".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ChannelNotificationHint { message_id, .. } if message_id == "staff-post")
+        })
+        .await,
+        "the qualifying member hears the hint through the subgroup"
+    );
+    assert!(
+        !wait_event(&mut x, std::time::Duration::from_millis(1500), |ev| {
+            matches!(ev, NetworkEvent::ChannelNotificationHint { message_id, .. } if message_id == "staff-post")
+        })
+        .await,
+        "a member who cannot see the channel hears nothing of it"
+    );
+    let tap = relay.wiretap();
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new(), "an Olm-only message reached the relay in the clear");
+    assert_eq!(tap.readable("staff-post"), Vec::<String>::new(), "the relay read the restricted post's hint");
+}
+
+/// A-D5: a DM typing dot shows only from a friend. A co-member we are not friends
+/// with holds a working Olm session with us, so the friendship is the whole gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_a_dm_typing_dot_shows_only_from_a_friend() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (o, m, mut x, _server_id) = three_member_server(&relay, 78, 79, 80).await;
+    x.store().remove_friend(&m.master_id).unwrap();
+    drain_events(&mut x);
+    let dm_typing = |to: &TestNode| super::types::HavenMessage::TypingIndicator {
+        server_id: String::new(),
+        channel_id: to.master_id.clone(),
+    };
+    let dot_from = async |x: &mut TestNode, who: &str| {
+        let who = who.to_string();
+        wait_event(x, std::time::Duration::from_secs(5), |ev| {
+            matches!(ev, NetworkEvent::TypingStarted { peer_id, server_id, .. } if *peer_id == who && server_id.is_empty())
+        })
+        .await
+    };
+
+    carry_as(&m, &x, dm_typing(&x)).await;
+    assert!(!dot_from(&mut x, &m.master_id).await, "a co-member who is not a friend must not show a DM typing dot");
+    carry_as(&o, &x, dm_typing(&x)).await;
+    assert!(dot_from(&mut x, &o.master_id).await, "a friend's dot shows");
 }

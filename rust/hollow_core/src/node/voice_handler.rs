@@ -7,9 +7,9 @@ use crate::crdt::server_state::ServerState;
 use crate::crypto::{MlsManager, OlmManager, CryptoStore};
 use crate::identity::native_identity::NativeKeypair;
 use super::crypto_handler::{
-    peer_is_reachable, send_mls_broadcast,
+    send_mls_broadcast,
     send_encrypted_message, send_encrypted_message_in_room,
-    send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
+    send_message_to_peer, send_raw_to_identity,
 };
 use super::types::*;
 
@@ -649,7 +649,7 @@ pub(crate) async fn handle_voice_channel_join(
         }
     }
 
-    // MLS broadcast + always plaintext — voice joins must arrive even with stale MLS epochs.
+    // MLS broadcast + always the Olm twin: voice joins must arrive even at stale MLS epochs.
     let envelope = MessageEnvelope::VoiceChannelJoin {
         sid: server_id.clone(),
         cid: channel_id.clone(),
@@ -685,29 +685,28 @@ pub(crate) async fn handle_voice_channel_join(
     ).await;
 }
 
-/// Fan a plaintext `HavenMessage` to every server member except ourselves
-/// (device→master fan handled inside `send_raw_to_identity`).
-fn fan_plaintext_to_members(
+/// Carry a `HavenMessage` inside Olm to every online device of every server member
+/// except ourselves.
+fn carry_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     state: &ServerState,
     local_peer_str: &str,
     msg: &HavenMessage,
+    no_session: super::olm_lane::NoSession,
 ) {
-    let data = serde_json::to_vec(msg).unwrap_or_default();
-    for member in state.members.keys() {
-        if super::resolver::same_identity(member, local_peer_str) { continue; }
-        send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
+    if let Some(json) = super::olm_lane::carried_json(msg) {
+        super::olm_lane::carry_to_identities(ws_cmd_tx, ws_room_peers, state.members.keys(), local_peer_str, &json, no_session);
     }
 }
 
 /// Announce voice-channel presence (join/leave): MLS broadcast when the server
-/// group is held, PLUS always the plaintext member fan-out, because voice presence
-/// must arrive even at stale MLS epochs.
+/// group is held, PLUS always the Olm member fan-out, because voice presence must
+/// arrive even at stale MLS epochs.
 ///
-/// The REFERENCE SHAPE for every VC signal: MLS plus an UNCONDITIONAL plaintext
-/// twin, never `if !mls_sent`. Our own encrypt succeeding measures the wrong end
-/// of the wire, since a reachable member may hold no leaf or sit at a skewed epoch.
+/// The REFERENCE SHAPE for every VC signal: MLS plus an UNCONDITIONAL Olm twin,
+/// never `if !mls_sent`. Our own encrypt succeeding measures the wrong end of the
+/// wire, since a reachable member may hold no leaf or sit at a skewed epoch.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_vc_presence(
     mls: &mut Option<MlsManager>,
@@ -725,7 +724,7 @@ fn broadcast_vc_presence(
         let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store);
     }
     if let Some(state) = server_states.get(server_id) {
-        fan_plaintext_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, plain);
+        carry_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, plain, super::olm_lane::NoSession::Queue);
     }
 }
 
@@ -990,7 +989,7 @@ pub(crate) async fn handle_voice_channel_leave(
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     hollow_log!("[HOLLOW-VC] Leave voice channel {channel_id} in server {server_id}");
-    // MLS broadcast + always plaintext — voice leaves must arrive even with stale MLS epochs.
+    // MLS broadcast + always the Olm twin: voice leaves must arrive even at stale MLS epochs.
     let envelope = MessageEnvelope::VoiceChannelLeave {
         sid: server_id.clone(),
         cid: channel_id.clone(),
@@ -1295,10 +1294,10 @@ fn origin_json_value(o: &StreamOrigin) -> serde_json::Value {
 }
 
 /// Broadcast a VC state signal (audio, screen, camera): MLS broadcast when the
-/// server group is held, PLUS always the plaintext member fan-out, the same shape
-/// as `broadcast_vc_presence`.
+/// server group is held, PLUS always the Olm member fan-out, the same shape as
+/// `broadcast_vc_presence`.
 ///
-/// Running the plaintext leg only `if !mls_sent` measures the wrong end of the
+/// Running the Olm leg only `if !mls_sent` measures the wrong end of the
 /// wire: a member with no leaf or at a skewed epoch is perfectly reachable and
 /// simply cannot read the frame, so its tile kept showing somebody unmuted who
 /// had muted minutes before. These signals are small, idempotent, last-writer-wins.
@@ -1320,19 +1319,19 @@ fn broadcast_vc_state_signal(
     if mls_ok {
         let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store);
     }
-    // UNCONDITIONAL plaintext twin, exactly like `broadcast_vc_presence`.
-    let plaintext_msg = build_vc_plaintext_state(signal_type, server_id, channel_id, payload);
-    if let Some(msg) = plaintext_msg
+    // UNCONDITIONAL Olm twin, exactly like `broadcast_vc_presence`. A state that
+    // cannot go now is stale by the time a session exists.
+    if let Some(msg) = build_vc_state_twin(signal_type, server_id, channel_id, payload)
         && let Some(state) = server_states.get(server_id)
     {
-        fan_plaintext_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg);
+        carry_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg, super::olm_lane::NoSession::Drop);
     }
 }
 
-/// Plaintext `HavenMessage` twin of a broadcast VC state signal, sent alongside the
-/// MLS copy on every broadcast, not only when our own encrypt fails: a receiver
-/// with no leaf is invisible from the sender. Non-state types yield `None`.
-fn build_vc_plaintext_state(
+/// The Olm twin of a broadcast VC state signal, sent alongside the MLS copy on
+/// every broadcast, not only when our own encrypt fails: a receiver with no leaf is
+/// invisible from the sender. Non-state types yield `None`.
+fn build_vc_state_twin(
     signal_type: &str,
     server_id: &str,
     channel_id: &str,
@@ -1511,6 +1510,8 @@ fn is_vc_participant(
 /// Handle `MessageEnvelope::VoiceChannelJoin` (MLS path).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_voice_channel_join(
+    mls: &mut MlsManager,
+    crypto_store: &CryptoStore,
     server_states: &HashMap<String, ServerState>,
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
@@ -1543,20 +1544,17 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     let vc_key = format!("{sid}:{cid}");
     // Conference participant sync: a freshly-admitted member's join is the FIRST
     // thing existing participants hear from them, and there is no CRDT or room
-    // history to learn the pre-existing roster from. Reply with our own join,
-    // DIRECT, so the new member's grid shows us. Plaintext, since their MLS just
-    // minted; their receive guard verifies us against the conf group's leaf set.
+    // history to learn the pre-existing roster from. Reply with our own join over
+    // the meeting's group, which their join just proved they read.
     if super::conference::is_conference_sid(&sid)
         && voice_channel_participants
             .get(&vc_key)
             .is_some_and(|p| p.contains(device_peer_id) || p.contains(local_peer_str))
     {
-        super::crypto_handler::send_message_to_peer_in_room(
-            ws_cmd_tx, &sid, &sender_peer_id,
-            HavenMessage::VoiceChannelJoin {
-                server_id: sid.clone(), channel_id: cid.clone(),
-            },
-        );
+        let ours = MessageEnvelope::VoiceChannelJoin { sid: sid.clone(), cid: cid.clone() };
+        if let Err(e) = send_mls_broadcast(mls, ws_cmd_tx, &sid, &ours, crypto_store) {
+            hollow_log!("[HOLLOW-VC] Meeting roster reply to {sender_peer_id} failed: {e}");
+        }
     }
     voice_channel_participants.entry(vc_key.clone()).or_default()
         .insert(sender_peer_id.clone());

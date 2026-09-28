@@ -67,7 +67,7 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-24 | A fully malicious relay learns only device peer ids, which rooms they are in, and the timing and size of traffic. It never learns content, profiles, contact lists, or which devices belong to one person. | P-01 | WP 3.1, 23.1 | Believed, but WP 23.3 only assumes an honest-but-curious relay; see note 2 |
+| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalik); being built as design A-D1, see note 2 |
 | C-25 | A malicious relay can delay or drop traffic, but cannot forge a message, a server change, a device list, a friend accept or a destroy order. | P-01 | WP 23.1 | Believed |
 | C-26 | Apple, Google and UnifiedPush distributors receive only a wake-up and a sender id, never message content. | P-11 | WP 13 | Believed |
 | C-27 | Reading a message with a link preview makes no request from my device to the linked site. | P-12 | WP 23.1 | Believed |
@@ -128,3 +128,11 @@ adds):
    homeserver, and anyone can run a Hollow relay. This audit assumes an
    actively malicious relay (P-01) everywhere. WP 23.3 gets rewritten at
    close-out.
+   Reworded 2026-09-28: the old text also promised that the relay never learns
+   contact lists or which devices belong to one person. Routing alone gives both
+   away: every device of a person joins the same rooms (its own `inbox:{master}`
+   among them) and is reached at the same instant, and two friends' devices share
+   a two-person room. Hiding that takes cover traffic or a mixnet, which would
+   cost bandwidth and battery and still fall to timing analysis on a small
+   network, so the claim now promises what the design can keep: the relay reads
+   no data, only routing. WP 3.1 follows at close-out.

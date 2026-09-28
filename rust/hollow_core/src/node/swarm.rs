@@ -134,7 +134,6 @@ async fn ensure_olm_session_and_drain(
 /// Rows only: a name the sibling cannot render pulls its bytes over the asset rail.
 fn send_personal_emotes_to_sibling(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer_id: &str,
     db_path: &str,
     db_passphrase: &str,
@@ -158,9 +157,10 @@ fn send_personal_emotes_to_sibling(
     hollow_log!(
         "[HOLLOW-MULTIDEV] Sharing {count} personal emote row(s) with sibling {peer_id}"
     );
-    send_message_to_peer(
-        ws_cmd_tx, ws_room_peers,
-        peer_id, HavenMessage::PersonalEmoteSync { emotes },
+    super::olm_lane::carry(
+        ws_cmd_tx, peer_id, None,
+        &HavenMessage::PersonalEmoteSync { emotes },
+        super::olm_lane::NoSession::Queue,
     );
     count
 }
@@ -254,52 +254,10 @@ fn on_verified_sibling(
         );
     }
 
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        if let Ok(friends) = store.load_friends(Some("accepted")) {
-            if !friends.is_empty() {
-                let entries: Vec<FriendListEntry> = friends
-                    .into_iter()
-                    .map(|(pid, status, direction, requested_at, _updated)| FriendListEntry {
-                        peer_id: pid,
-                        status,
-                        direction,
-                        requested_at,
-                    })
-                    .collect();
-                hollow_log!(
-                    "[HOLLOW-MULTIDEV] Sibling device {peer_id} verified — sharing {} friends",
-                    entries.len()
-                );
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers,
-                    peer_id, HavenMessage::FriendListSync { friends: entries },
-                );
-            }
-        }
-    }
-    send_personal_emotes_to_sibling(
-        ws_cmd_tx, ws_room_peers, peer_id, db_path, db_passphrase,
-    );
-    // Both sides send on verification, so whichever device read more while the
+    // Both sides share on verification, so whichever device read more while the
     // other was away wins per conversation (#80).
-    super::crypto_handler::send_read_markers_to_sibling(
-        ws_cmd_tx, ws_room_peers, peer_id, db_path, db_passphrase,
-    );
-    // Pull theirs too (in case WE are the empty device).
-    hollow_log!(
-        "[HOLLOW-MULTIDEV] Sibling {peer_id} verified — requesting their friend list"
-    );
-    send_message_to_peer(
-        ws_cmd_tx, ws_room_peers,
-        peer_id, HavenMessage::FriendListRequest,
-    );
-
-    // Multi-device backfill (Step 5): ask the sibling for the FULL DM history across
-    // all conversations, both directions, since our per-conversation high-water mark.
-    super::crypto_handler::request_sibling_dm_backfill(
-        ws_cmd_tx, ws_room_peers, peer_id,
-        db_path, db_passphrase,
-    );
+    super::crypto_handler::share_state_with_sibling(ws_cmd_tx, peer_id, db_path, db_passphrase);
+    send_personal_emotes_to_sibling(ws_cmd_tx, peer_id, db_path, db_passphrase);
 
     // Re-announce every server we still BELONG to (idempotent on the receiver).
     // The MEMBERSHIP filter matters as much as the tombstone: announcing a shell
@@ -307,16 +265,11 @@ fn on_verified_sibling(
     // server we left, real members reject that op, and the actor's devices fork.
     for (sid, st) in server_states.iter() {
         if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
-        let announce = serde_json::to_vec(
+        super::olm_lane::carry(
+            ws_cmd_tx, peer_id, Some(&own_inbox),
             &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner() },
-        ).unwrap_or_default();
-        if !announce.is_empty() {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: own_inbox.clone(),
-                target_peer: peer_id.to_string(),
-                data: announce,
-            });
-        }
+            super::olm_lane::NoSession::Queue,
+        );
     }
     hollow_log!(
         "[HOLLOW-CRDT] Re-announced {} server(s) to verified sibling {peer_id}",
@@ -386,7 +339,7 @@ fn issue_sibling_challenge(
 }
 
 use crate::crdt::hlc::Hlc;
-use crate::crdt::operations::{CrdtPayload, Permission};
+use crate::crdt::operations::{CrdtPayload};
 use crate::crdt::server_state::ServerState;
 use crate::crdt::sync::{self as crdt_sync, StateVector};
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
@@ -568,7 +521,9 @@ async fn run_event_loop(
     let master_keypair = bundle_keypair.clone();
     let master_peer_str = local_peer_str.clone();
     crypto_handler::bind_olm_identity(&mut olm, &device_keypair);
-    let ws_cmd_tx = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx);
+    let (ws_cmd_tx, mut carry_rx) = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx);
+    #[cfg(test)]
+    let mut carry_log: Vec<(String, String)> = Vec::new();
     let mut frame_replays = super::frame_auth::ReplayGuard::default();
 
     // Decrypt-failure cooldown per peer: prevents session thrashing when many
@@ -1270,6 +1225,19 @@ async fn run_event_loop(
             loop_stall.check(arm, name, t0);
         }
         tokio::select! {
+            Some((carry, done)) = carry_rx.recv() => {
+                if let super::ws_client::WsCommand::Carry { device, room, json, no_session } = carry {
+                    #[cfg(test)]
+                    carry_log.push((device.clone(), json.clone()));
+                    let frames = super::olm_lane::OlmLane::new(
+                        &mut olm, &crypto_store, &ws_room_peers,
+                        &mut pending_messages, &mut key_request_in_flight, &device_keypair, &device_peer_id,
+                    )
+                    .deliver(&device, room.as_deref(), &json, no_session);
+                    let _ = done.send(frames);
+                }
+            }
+
             Some(cmd) = cmd_rx.recv() => {
                 arm_started = Some(("cmd", cmd.kind(), std::time::Instant::now()));
                 match cmd {
@@ -1481,50 +1449,28 @@ async fn run_event_loop(
                         hollow_log!(
                             "[HOLLOW-SYNC] Manual state-sync request → source device {source_device_id}"
                         );
-                        let req = serde_json::to_vec(&HavenMessage::SiblingStateSyncRequest)
-                            .unwrap_or_default();
-                        if !req.is_empty() {
-                            // Target the source device directly via our own inbox room
-                            // (only our devices are in inbox:{master}). Fall back to any
-                            // room that currently lists it.
-                            let own_inbox = format!("inbox:{local_peer_str}");
-                            let room = if ws_room_peers.get(&own_inbox)
-                                .is_some_and(|p| p.contains(&source_device_id))
-                            {
-                                Some(own_inbox)
-                            } else {
-                                ws_room_peers.iter()
-                                    .find(|(_, peers)| peers.contains(&source_device_id))
-                                    .map(|(r, _)| r.clone())
-                            };
-                            if let Some(room) = room {
-                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                                    room_code: room,
-                                    target_peer: source_device_id.clone(),
-                                    data: req,
-                                });
-                            } else {
-                                hollow_log!(
-                                    "[HOLLOW-SYNC] Source device {source_device_id} not in any room — is it online?"
-                                );
-                            }
-                        }
+                        // Only our devices are in inbox:{master}; any shared room reaches it.
+                        let own_inbox = format!("inbox:{local_peer_str}");
+                        let room = ws_room_peers.get(&own_inbox)
+                            .is_some_and(|p| p.contains(&source_device_id))
+                            .then_some(own_inbox);
+                        super::olm_lane::carry(
+                            &ws_cmd_tx, &source_device_id, room.as_deref(),
+                            &HavenMessage::SiblingStateSyncRequest,
+                            super::olm_lane::NoSession::Queue,
+                        );
                     }
 
                     NodeCommand::SyncPersonalEmotes { emotes } => {
                         let count = emotes.len();
-                        let data = serde_json::to_vec(
+                        let sent = super::olm_lane::carry_to_own_siblings(
+                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id,
                             &HavenMessage::PersonalEmoteSync { emotes },
-                        ).unwrap_or_default();
-                        if !data.is_empty() {
-                            let sent = sync_handler::fan_to_own_siblings(
-                                &ws_cmd_tx, &ws_room_peers,
-                                &local_peer_str, &device_peer_id, data,
-                            );
-                            hollow_log!(
-                                "[HOLLOW-MULTIDEV] Personal emote delta ({count} row(s)) fanned to {sent} sibling device(s)"
-                            );
-                        }
+                            super::olm_lane::NoSession::Queue,
+                        );
+                        hollow_log!(
+                            "[HOLLOW-MULTIDEV] Personal emote delta ({count} row(s)) fanned to {sent} sibling device(s)"
+                        );
                     }
 
                     NodeCommand::LeaveServer { server_id } => {
@@ -2269,17 +2215,17 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SyncReadMarkers { markers } => {
-                        if let Ok(data) = serde_json::to_vec(&HavenMessage::ReadMarkers { markers }) {
-                            sync_handler::fan_to_own_siblings(
-                                &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, data,
-                            );
-                        }
+                        super::olm_lane::carry_to_own_siblings(
+                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id,
+                            &HavenMessage::ReadMarkers { markers },
+                            super::olm_lane::NoSession::Queue,
+                        );
                     }
 
                     NodeCommand::SetInvisible { invisible } => {
                         social::handle_set_invisible(
-                            &ws_cmd_tx, &ws_room_peers, &local_peer_str,
-                            invisible, &mut is_invisible,
+                            &ws_cmd_tx, &ws_room_peers, &server_states, &local_peer_str,
+                            invisible, &mut is_invisible, &db_path, &db_passphrase,
                         );
                     }
 
@@ -2971,6 +2917,7 @@ async fn run_event_loop(
                                 fwd_bridge,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                                 super::frame_auth::now_ms(),
+                                &mut None,
                             ).await;
                         }
                     }
@@ -3058,6 +3005,11 @@ async fn run_event_loop(
                     // These managers are owned by this loop and unreadable from a TestNode; this
                     // reads the SAME live state the production paths use, with no snapshot lag.
                     #[cfg(test)]
+                    NodeCommand::TestCarry { device, msg } => {
+                        super::olm_lane::carry(&ws_cmd_tx, &device, None, &msg, super::olm_lane::NoSession::Queue);
+                    }
+
+                    #[cfg(test)]
                     NodeCommand::DebugSnapshot { reply } => {
                         let mut snap = super::types::DebugSnapshotReply::default();
                         if let Some(ref mls_mgr) = mls {
@@ -3084,6 +3036,7 @@ async fn run_event_loop(
                             peers.extend(set.iter().cloned());
                         }
                         snap.room_peers = peers.into_iter().collect();
+                        snap.carried = carry_log.clone();
                         let _ = reply.send(snap);
                     }
                 }
@@ -3423,12 +3376,13 @@ async fn run_event_loop(
                                 // The room is KNOWN here, so send into it directly
                                 // rather than through `ws_room_for_peer` (first-match
                                 // is the silent one-way-loss trap).
-                                super::crypto_handler::send_message_to_peer_in_room(
-                                    &ws_cmd_tx, &room, &peer_id,
-                                    HavenMessage::VoiceChannelJoin {
+                                super::olm_lane::carry(
+                                    &ws_cmd_tx, &peer_id, Some(&room),
+                                    &HavenMessage::VoiceChannelJoin {
                                         server_id: vc_sid.to_string(),
                                         channel_id: vc_cid.to_string(),
                                     },
+                                    super::olm_lane::NoSession::Queue,
                                 );
                             }
                         }
@@ -3614,17 +3568,18 @@ async fn run_event_loop(
                                         if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) {
                                             let our_vector = StateVector::from_server_state(state);
                                             if let Ok(sv_json) = serde_json::to_string(&our_vector) {
-                                                // Always use plaintext for post-reconnection SyncReq —
+                                                // Olm, never MLS, for the post-reconnection SyncReq:
                                                 // the peer's MLS epoch may be stale, causing silent decrypt failure.
-                                                send_message_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    &peer_id, HavenMessage::SyncRequest {
+                                                super::olm_lane::carry(
+                                                    &ws_cmd_tx, &peer_id, None,
+                                                    &HavenMessage::SyncRequest {
                                                         server_id: sid.clone(),
                                                         state_vector_json: sv_json,
                                                         // Epoch hint: lets the responder detect
                                                         // us (or itself) stale on first contact.
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                     },
+                                                    super::olm_lane::NoSession::Queue,
                                                 );
                                             }
 
@@ -4164,15 +4119,16 @@ async fn run_event_loop(
                                     for (sid, state) in server_states.iter() {
                                         if state.is_member(pid_str) {
                                             if let Some(sv_json) = sv_cache.get(sid.as_str()) {
-                                                send_message_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    pid_str, HavenMessage::SyncRequest {
+                                                super::olm_lane::carry(
+                                                    &ws_cmd_tx, pid_str, None,
+                                                    &HavenMessage::SyncRequest {
                                                         server_id: sid.clone(),
                                                         state_vector_json: sv_json.clone(),
                                                         // Epoch hint: lets the responder detect
                                                         // us (or itself) stale on first contact.
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                     },
+                                                    super::olm_lane::NoSession::Queue,
                                                 );
                                             }
 
@@ -4930,59 +4886,68 @@ async fn run_event_loop(
                                         continue;
                                     }
 
-                                    #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
-                                    let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
-                                    #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
-                                    let fwd_bridge: FwdBridge = std::marker::PhantomData;
-                                    handle_incoming_request(
-                                        &mut olm, &crypto_store, &crdt_store, &event_tx,
-                                        &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
-                                        &mut server_states, &bundle_keypair,
-                                        &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
-                                        &mut pending_server_joins,
-                                                                                &mut join_request_seen,
-                                                                                &mut join_resolutions,
-                                                                                &mut awaiting_mls_after_parked_join,
-                                                                                &crdt_store,
-                                        &mut pending_sync_requests, &mut mls,
-                                        &mut mls_bootstrap_requested,
-                                        &mut mls_welcome_grace,
-                                        &mut relay_catchup_done,
-                                        &mut pending_file_streams,
-                                        &mut pending_shard_streams, &mut early_file_streams,
-                                        &mut pending_link_snapshots,
-                                        &mut decrypt_fail_cooldown,
-                                        &mut pending_mls_key_packages, &mut pending_mls_removals,
-                                        &mut mls_epoch_hint_cooldown,
-                                        &ws_cmd_tx, &ws_room_peers,
-                                        &webrtc_peers, &mut pending_webrtc_sends,
-                                        &mut channel_sync_sent,
-                                        &mut slow_mode_clock,
-                                        &mut gossip_overlays,
-                                        &mut voice_channel_participants,
-                                        &mut voice_channel_gossip_mode,
-                                        &mut conference_host,
-                                        &mut vc_signal_rate_tokens,
-                                        &mut mls_dirty,
-                                        &guest_rooms,
-                                        &subscribed_channels,
-                                        &db_path, &db_passphrase,
-                                        &local_peer_str, &from, is_invisible,
-                                        &mut link_snapshot_requested, &mut pending_sibling_challenges,
-                                        &mut pending_friend_accepts, &mut pending_friend_requests,
-                                        &mut pending_friend_removals,
-                                        &mut reject_resent,
-                                        &mut pending_asset_asks,
-                                        &mut pending_file_asks,
-                                        &pending_ws_transfers,
-                                        &mut pending_public_file_requests,
-                                        &mut requested_file_receipts,
-                                        &mut declined_file_ids,
-                                        &mut peer_auto_dl,
-                                        fwd_bridge,
-                                        msg,
-                                        frame_ts,
-                                    ).await;
+                                    // Claim C-24: what the relay must not read never counts in the clear.
+                                    if msg.lane() != Lane::Relay {
+                                        hollow_log!("[HOLLOW-SECURITY] Dropped a plaintext {} from {from}: it rides Olm only", msg.wire_kind());
+                                        continue;
+                                    }
+                                    let mut next = Some((Box::new(msg), frame_ts));
+                                    while let Some((msg, frame_ts)) = next.take() {
+                                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                                        let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
+                                        #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                                        let fwd_bridge: FwdBridge = std::marker::PhantomData;
+                                        handle_incoming_request(
+                                            &mut olm, &crypto_store, &crdt_store, &event_tx,
+                                            &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                            &mut server_states, &bundle_keypair,
+                                            &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
+                                            &mut pending_server_joins,
+                                                                                    &mut join_request_seen,
+                                                                                    &mut join_resolutions,
+                                                                                    &mut awaiting_mls_after_parked_join,
+                                                                                    &crdt_store,
+                                            &mut pending_sync_requests, &mut mls,
+                                            &mut mls_bootstrap_requested,
+                                            &mut mls_welcome_grace,
+                                            &mut relay_catchup_done,
+                                            &mut pending_file_streams,
+                                            &mut pending_shard_streams, &mut early_file_streams,
+                                            &mut pending_link_snapshots,
+                                            &mut decrypt_fail_cooldown,
+                                            &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                            &mut mls_epoch_hint_cooldown,
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &webrtc_peers, &mut pending_webrtc_sends,
+                                            &mut channel_sync_sent,
+                                            &mut slow_mode_clock,
+                                            &mut gossip_overlays,
+                                            &mut voice_channel_participants,
+                                            &mut voice_channel_gossip_mode,
+                                            &mut conference_host,
+                                            &mut vc_signal_rate_tokens,
+                                            &mut mls_dirty,
+                                            &guest_rooms,
+                                            &subscribed_channels,
+                                            &db_path, &db_passphrase,
+                                            &local_peer_str, &from, is_invisible,
+                                            &mut link_snapshot_requested, &mut pending_sibling_challenges,
+                                            &mut pending_friend_accepts, &mut pending_friend_requests,
+                                            &mut pending_friend_removals,
+                                            &mut reject_resent,
+                                            &mut pending_asset_asks,
+                                            &mut pending_file_asks,
+                                            &pending_ws_transfers,
+                                            &mut pending_public_file_requests,
+                                            &mut requested_file_receipts,
+                                            &mut declined_file_ids,
+                                            &mut peer_auto_dl,
+                                            fwd_bridge,
+                                            *msg,
+                                            frame_ts,
+                                        &mut next,
+                                        ).await;
+                                    }
                             } else {
                                 hollow_log!("[HOLLOW-WS] Failed to parse HavenMessage from {from} in {room}");
                             }
@@ -5171,9 +5136,10 @@ async fn run_event_loop(
                             for peer_id_str in &done.added {
                                 if !peer_is_reachable(&ws_room_peers, peer_id_str) { continue; }
                                 for cid in &sync_cids {
-                                    send_message_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers, peer_id_str,
-                                        sync_handler::channel_sync_request(&store, &server_id, cid, true),
+                                    super::olm_lane::carry(
+                                        &ws_cmd_tx, peer_id_str, None,
+                                        &sync_handler::channel_sync_request(&store, &server_id, cid, true),
+                                        super::olm_lane::NoSession::Queue,
                                     );
                                 }
                             }
@@ -5405,8 +5371,8 @@ async fn run_event_loop(
                             }
                             channel_sync_sent.insert(dedup_key, std::time::Instant::now());
 
-                            // Send a plaintext ChannelSyncRequest rather than an MLS ChannelProbe: an
-                            // MLS probe silently fails at a stale epoch after reconnection, so sync never
+                            // A ChannelSyncRequest over Olm rather than an MLS ChannelProbe: an MLS
+                            // probe silently fails at a stale epoch after reconnection, so sync never
                             // completes. The response handler uses MLS if available, Olm otherwise.
                             let request = match sync_store.as_ref() {
                                 Some(store) => sync_handler::channel_sync_request(store, server_id, channel_id, true),
@@ -5418,7 +5384,7 @@ async fn run_event_loop(
                                     gap: None,
                                 },
                             };
-                            send_message_to_peer(&ws_cmd_tx, &ws_room_peers, &peer_str, request);
+                            super::olm_lane::carry(&ws_cmd_tx, &peer_str, None, &request, super::olm_lane::NoSession::Queue);
                         }
                     }
 
@@ -6278,12 +6244,13 @@ async fn apply_remote_crdt_op(
                     server_id: server_id.clone(),
                     op_json: op_json.clone(),
                 };
-                let crdt_data = serde_json::to_vec(&crdt_msg).unwrap_or_default();
-                for member_peer_str in state.members.keys() {
-                    if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
-                    for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                        if dev == peer_str { continue; } // don't echo back to the sender device
-                        send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, crdt_data.clone());
+                if let Some(json) = super::olm_lane::carried_json(&crdt_msg) {
+                    for member_peer_str in state.members.keys() {
+                        if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            if dev == peer_str { continue; } // don't echo back to the sender device
+                            super::olm_lane::carry_json(ws_cmd_tx, &dev, None, json.clone(), super::olm_lane::NoSession::Queue);
+                        }
                     }
                 }
             }
@@ -6406,25 +6373,12 @@ async fn apply_remote_crdt_op(
                     let _ = event_tx.send(NetworkEvent::ServerUpdated {
                         server_id: server_id.clone(),
                     }).await;
-                    // Broadcast to room (including guests) so public channel browsers see the change.
-                    // Text only (#44) — a voice-channel announce put a ghost entry in
-                    // browsers that the next list refresh dropped.
+                    // Text only (#44): a voice-channel announce put a ghost entry in
+                    // browsers that the next list refresh dropped. The op's author tells
+                    // the room's guests; members only update their own browser.
                     if let Some(ch) = state.channels.get(channel_id)
                         .filter(|c| c.channel_type == crate::crdt::server_state::ChannelType::Text)
                     {
-                        let notify = HavenMessage::PublicChannelConfigChanged {
-                            server_id: server_id.clone(),
-                            channel_id: channel_id.clone(),
-                            is_public: *is_public,
-                            channel_name: ch.name.clone(),
-                            category: ch.category.clone(),
-                        };
-                        if let Ok(data) = serde_json::to_vec(&notify) {
-                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                                room_code: server_id.clone(),
-                                data,
-                            });
-                        }
                         // Also emit locally so in-app guest browser updates for own servers
                         let _ = event_tx.send(NetworkEvent::PublicChannelConfigChanged {
                             server_id: server_id.clone(),
@@ -6610,14 +6564,15 @@ async fn after_welcome_joined(
         if let Some(state) = server_states.get(server_id) {
             let our_vector = StateVector::from_server_state(state);
             if let Ok(sv) = serde_json::to_string(&our_vector) {
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers,
-                    sync_peer, HavenMessage::SyncRequest {
+                super::olm_lane::carry(
+                    ws_cmd_tx, sync_peer, None,
+                    &HavenMessage::SyncRequest {
                         server_id: server_id.to_string(),
                         state_vector_json: sv,
                         // Freshly Welcomed — current by construction.
                         mls_epoch: mls_mgr.epoch(server_id).ok(),
                     },
+                    super::olm_lane::NoSession::Queue,
                 );
             }
         }
@@ -6633,9 +6588,10 @@ async fn after_welcome_joined(
                 None => state.channels.keys().cloned().collect(),
             };
             for cid in &sync_cids {
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers, sync_peer,
-                    super::sync_handler::channel_sync_request(&store, server_id, cid, true),
+                super::olm_lane::carry(
+                    ws_cmd_tx, sync_peer, None,
+                    &super::sync_handler::channel_sync_request(&store, server_id, cid, true),
+                    super::olm_lane::NoSession::Queue,
                 );
             }
         }
@@ -6713,6 +6669,9 @@ async fn handle_incoming_request(
     request: HavenMessage,
     // When the sender sealed the frame: what carried signals are judged fresh by.
     frame_ts_ms: i64,
+    // A `MessageEnvelope::Carried` decrypted here and when it was written, for the
+    // caller to dispatch next.
+    carried_out: &mut Option<(Box<HavenMessage>, i64)>,
 ) {
 
     match request {
@@ -7191,6 +7150,12 @@ async fn handle_incoming_request(
             }
 
             let envelope = serde_json::from_str::<MessageEnvelope>(&text);
+            // A carried message may have waited in the sender's queue for a session, so
+            // it counts as sent when written, never later than its frame.
+            let frame_ts_ms = match &envelope {
+                Ok(MessageEnvelope::Carried { at_ms, .. }) => (*at_ms).min(frame_ts_ms),
+                _ => frame_ts_ms,
+            };
             if let Ok(env) = &envelope
                 && env.live_only()
                 && super::frame_auth::is_stale(frame_ts_ms, super::frame_auth::now_ms())
@@ -7242,9 +7207,10 @@ async fn handle_incoming_request(
                         // with updated per-sender timestamps from our DB.
                         if has_more == Some(true) {
                             hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers, peer_str,
-                                super::sync_handler::channel_sync_request(&store, &sid, &cid, false),
+                            super::olm_lane::carry(
+                                ws_cmd_tx, peer_str, None,
+                                &super::sync_handler::channel_sync_request(&store, &sid, &cid, false),
+                                super::olm_lane::NoSession::Queue,
                             );
                         }
                     }
@@ -7876,12 +7842,13 @@ async fn handle_incoming_request(
                                 .unwrap_or(None)
                                 .unwrap_or(0);
                             hollow_log!("[HOLLOW-SYNC] Requesting next sibling DM page for {convo_peer} from {peer_str} since {since}");
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                &peer_str, HavenMessage::DmSiblingSyncRequest {
+                            super::olm_lane::carry(
+                                ws_cmd_tx, peer_str, None,
+                                &HavenMessage::DmSiblingSyncRequest {
                                     per_convo_since: vec![(convo_peer.clone(), since)],
                                     gaps: HashMap::new(),
                                 },
+                                super::olm_lane::NoSession::Queue,
                             );
                         }
                     }
@@ -8612,17 +8579,22 @@ async fn handle_incoming_request(
                     ).await;
                 }
 
-                // MLS-only envelopes that should never arrive via Olm (they use plaintext
-                // HavenMessage variants instead for epoch resilience). CRDT ops and op-log
-                // sync have no Olm sender at all: ops ride MLS plus the plaintext twin.
+                // Handed back to the caller, which dispatches it as if it had arrived on
+                // its own from `peer_str`, the device whose ratchet decrypted it.
+                Ok(MessageEnvelope::Carried { msg, .. }) => {
+                    if msg.lane() == Lane::Carried {
+                        *carried_out = Some((msg, frame_ts_ms));
+                    } else {
+                        hollow_log!("[HOLLOW-SECURITY] Dropped a carried message from {peer_str} that belongs to another lane");
+                    }
+                }
+
+                // Group envelopes never ride Olm: their Olm path is the carried
+                // HavenMessage, which the caller dispatches.
                 Ok(MessageEnvelope::CrdtOp { .. })
-                | Ok(MessageEnvelope::SyncReq { .. })
-                | Ok(MessageEnvelope::SyncResp { .. })
-                | Ok(MessageEnvelope::ServerDelete { .. })
-                | Ok(MessageEnvelope::MemberKick { .. })
+                | Ok(MessageEnvelope::ChannelHint { .. })
                 | Ok(MessageEnvelope::Typing { .. })
                 | Ok(MessageEnvelope::ProfileUpdate { .. })
-                | Ok(MessageEnvelope::ChannelSyncReq { .. })
                 | Ok(MessageEnvelope::VoiceChannelJoin { .. })
                 | Ok(MessageEnvelope::VoiceChannelLeave { .. })
                 | Ok(MessageEnvelope::VoiceChannelAudioState { .. })
@@ -9148,13 +9120,15 @@ async fn handle_incoming_request(
                                                 hollow_log!("[HOLLOW-MLS] CrdtOp pledge broadcast failed: {e}");
                                             }
                                         }
-                                        let pledge_data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                                        let pledge = HavenMessage::CrdtOpBroadcast {
                                             server_id: server_id.clone(),
                                             op_json: op_json.clone(),
-                                        }).unwrap_or_default();
-                                        for member in state.members_list() {
-                                            if member.peer_id == local_peer { continue; }
-                                            send_raw_to_identity(ws_cmd_tx, ws_room_peers, &member.peer_id, pledge_data.clone());
+                                        };
+                                        if let Some(json) = super::olm_lane::carried_json(&pledge) {
+                                            super::olm_lane::carry_to_identities(
+                                                ws_cmd_tx, ws_room_peers, state.members.keys(), &local_peer, &json,
+                                                super::olm_lane::NoSession::Queue,
+                                            );
                                         }
                                     }
                                 }
@@ -9359,7 +9333,7 @@ async fn handle_incoming_request(
                     // so the resolver, the device store and every later send agree.
                     let outcome = crypto_handler::ingest_device_list(
                         event_tx, master_peer_str, device_peer_id, master_keypair,
-                        peer_str, ws_cmd_tx, ws_room_peers,
+                        peer_str, ws_cmd_tx,
                         device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
@@ -9644,8 +9618,9 @@ async fn handle_incoming_request(
                     // can DECRYPT: one with no leaf or at a skewed epoch never saw the
                     // new member appear. The op is author-signed and idempotent.
                     //
-                    // Targets come from `ws_room_peers`, not `state.members`, so the
-                    // drain-on-apply concern that bit `ServerDeleted` does not apply.
+                    // `MemberAdded` drains nobody, so reading the members after it
+                    // applied is safe (unlike `ServerDeleted`); the joiner gets its
+                    // copy in the sync answer below.
                     if let Ok(op_json) = serde_json::to_string(&op) {
                         admitted_op_json = Some(op_json.clone());
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
@@ -9655,18 +9630,16 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-MLS] CrdtOp MemberAdded broadcast failed: {e}");
                             }
                         }
-                        if let Some(room_peers) = ws_room_peers.get(&server_id) {
-                            let crdt_data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            }).unwrap_or_default();
-                            for other_str in room_peers.iter() {
-                                if other_str == local_peer_str || other_str == peer_str { continue; }
-                                send_raw_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    other_str, crdt_data.clone(),
-                                );
-                            }
+                        let added = HavenMessage::CrdtOpBroadcast {
+                            server_id: server_id.clone(),
+                            op_json: op_json.clone(),
+                        };
+                        if let Some(json) = super::olm_lane::carried_json(&added) {
+                            let others = state.members.keys().filter(|m| **m != member_master);
+                            super::olm_lane::carry_to_identities(
+                                ws_cmd_tx, ws_room_peers, others, local_peer_str, &json,
+                                super::olm_lane::NoSession::Queue,
+                            );
                         }
                     }
 
@@ -10515,21 +10488,10 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            MessageEnvelope::ServerDelete { sid } => {
-                                // Author permission check is by MASTER identity.
-                                sync_handler::handle_envelope_server_delete(
-                                    server_states, mls, bundle_keypair, event_tx,
-                                    &sender_master, sid,
-                                    crypto_store, crdt_store,
-                                ).await;
-                            }
-
-                            MessageEnvelope::MemberKick { sid } => {
-                                // Kick author permission check is by MASTER identity.
-                                sync_handler::handle_envelope_member_kick(
-                                    server_states, mls, bundle_keypair, event_tx,
-                                    &local_peer, &sender_master, sid, frame_ts_ms,
-                                    crypto_store, crdt_store,
+                            MessageEnvelope::ChannelHint { sid, cid, mid, has_everyone, mentioned_names, reply_to_sender } => {
+                                message_ops::deliver_channel_hint(
+                                    event_tx, server_states, local_peer_str, &sender_peer_id,
+                                    sid, cid, mid, has_everyone, mentioned_names, reply_to_sender,
                                 ).await;
                             }
 
@@ -10575,33 +10537,6 @@ async fn handle_incoming_request(
                                     &envelope_revoked, olm, crypto_store, Some(&*mls_mgr),
                                     local_peer_str, ws_room_peers, pending_mls_removals,
                                 );
-                            }
-
-                            MessageEnvelope::SyncReq { sid, state_vector_json, .. } => {
-                                sync_handler::handle_envelope_sync_req(
-                                    server_states, olm, crypto_store, mls_mgr,
-                                    bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
-                                    sender_peer_id, sid, state_vector_json,
-                                    crdt_store,
-                                ).await;
-                            }
-
-                            MessageEnvelope::SyncResp { sid, ops_json, .. } => {
-                                sync_handler::handle_envelope_sync_resp(
-                                    server_states, bundle_keypair, event_tx,
-                                    sid, ops_json,
-                                    crdt_store,
-                                ).await;
-                            }
-
-                            MessageEnvelope::ChannelSyncReq { sid, cid, since_timestamp, sender_timestamps, gap, .. } => {
-                                sync_handler::handle_envelope_channel_sync_req(
-                                    server_states, olm, bundle_keypair, event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                    &sender_peer_id, sid, cid, since_timestamp, sender_timestamps, gap,
-                                    crypto_store, crdt_store,
-                                    db_path, db_passphrase,
-                                ).await;
                             }
 
                             MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. } => {
@@ -10694,7 +10629,7 @@ async fn handle_incoming_request(
                             }
                             MessageEnvelope::VoiceChannelJoin { sid, cid } => {
                                 voice_handler::handle_envelope_voice_channel_join(
-                                    server_states, voice_channel_participants,
+                                    mls_mgr, crypto_store, server_states, voice_channel_participants,
                                     voice_channel_gossip_mode, gossip_overlays,
                                     ws_cmd_tx, event_tx, local_peer_str, device_peer_id,
                                     peer_str.to_string(), sid, cid,
@@ -10843,6 +10778,12 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-SECURITY] REJECTED call signal envelope via MLS from {sender_peer_id}");
                             }
 
+                            // Carried messages are Olm-direct by contract: a group
+                            // would show them to every member.
+                            MessageEnvelope::Carried { .. } => {
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED carried envelope via MLS from {sender_peer_id}");
+                            }
+
                             // The forwarder control plane is Olm-direct inside the
                             // fwd:{forwarder} room by contract, and the forwarder holds
                             // no group keys, so fwd_* over MLS is always misdirected.
@@ -10882,9 +10823,10 @@ async fn handle_incoming_request(
                                             .unwrap_or_default(),
                                     };
                                     for cid in &sync_cids {
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers, peer_str,
-                                            super::sync_handler::channel_sync_request(&store, &server_id, cid, true),
+                                        super::olm_lane::carry(
+                                            ws_cmd_tx, peer_str, None,
+                                            &super::sync_handler::channel_sync_request(&store, &server_id, cid, true),
+                                            super::olm_lane::NoSession::Queue,
                                         );
                                     }
                                     hollow_log!("[HOLLOW-MLS] Requested immediate sync from {peer_str} for {} channel(s) in {group_key}", sync_cids.len());
@@ -10904,15 +10846,16 @@ async fn handle_incoming_request(
                                 if let Some(state) = server_states.get(&server_id) {
                                     let our_vector = StateVector::from_server_state(state);
                                     if let Ok(sv) = serde_json::to_string(&our_vector) {
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            peer_str, HavenMessage::SyncRequest {
+                                        super::olm_lane::carry(
+                                            ws_cmd_tx, peer_str, None,
+                                            &HavenMessage::SyncRequest {
                                                 server_id: server_id.clone(),
                                                 state_vector_json: sv,
                                                 // A decrypt failure often IS epoch skew —
                                                 // let the responder catch us up.
                                                 mls_epoch: mls_mgr.epoch(&server_id).ok(),
                                             },
+                                            super::olm_lane::NoSession::Queue,
                                         );
                                     }
                                 }
@@ -11380,7 +11323,7 @@ async fn handle_incoming_request(
                 }
                 let outcome = crypto_handler::ingest_device_list(
                     event_tx, master_peer_str, device_peer_id, master_keypair,
-                    peer_str, ws_cmd_tx, ws_room_peers,
+                    peer_str, ws_cmd_tx,
                     device_list.clone(), db_path, db_passphrase,
                 ).await;
                 enforce_device_revocations(
@@ -11611,7 +11554,7 @@ async fn handle_incoming_request(
                     }
                     let outcome = crypto_handler::ingest_device_list(
                         event_tx, master_peer_str, device_peer_id, master_keypair,
-                        peer_str, ws_cmd_tx, ws_room_peers,
+                        peer_str, ws_cmd_tx,
                         device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
@@ -11731,7 +11674,7 @@ async fn handle_incoming_request(
                     // an accept or DM that follows must not compute a different room.
                     let outcome = crypto_handler::ingest_device_list(
                         event_tx, master_peer_str, device_peer_id, master_keypair,
-                        peer_str, ws_cmd_tx, ws_room_peers,
+                        peer_str, ws_cmd_tx,
                         device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
@@ -12054,25 +11997,17 @@ async fn handle_incoming_request(
                 );
                 return;
             }
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                if let Ok(friends) = store.load_friends(Some("accepted")) {
-                    if !friends.is_empty() {
-                        let entries: Vec<FriendListEntry> = friends
-                            .into_iter()
-                            .map(|(pid, status, direction, requested_at, _u)| FriendListEntry {
-                                peer_id: pid, status, direction, requested_at,
-                            })
-                            .collect();
-                        hollow_log!(
-                            "[HOLLOW-MULTIDEV] Replying to FriendListRequest from {peer_str} with {} friends",
-                            entries.len()
-                        );
-                        crate::node::crypto_handler::send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::FriendListSync { friends: entries },
-                        );
-                    }
-                }
+            let friends = crypto_handler::accepted_friend_entries(db_path, db_passphrase);
+            if !friends.is_empty() {
+                hollow_log!(
+                    "[HOLLOW-MULTIDEV] Replying to FriendListRequest from {peer_str} with {} friends",
+                    friends.len()
+                );
+                super::olm_lane::carry(
+                    ws_cmd_tx, peer_str, None,
+                    &HavenMessage::FriendListSync { friends },
+                    super::olm_lane::NoSession::Queue,
+                );
             }
         }
 
@@ -12106,40 +12041,28 @@ async fn handle_incoming_request(
             let mut announced = 0u32;
             for (sid, st) in server_states.iter() {
                 if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
-                let announce = serde_json::to_vec(
+                super::olm_lane::carry(
+                    ws_cmd_tx, peer_str, None,
                     &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner() },
-                ).unwrap_or_default();
-                if !announce.is_empty() {
-                    super::crypto_handler::send_raw_to_peer(ws_cmd_tx, ws_room_peers, peer_str, announce);
-                    announced += 1;
-                }
+                    super::olm_lane::NoSession::Queue,
+                );
+                announced += 1;
             }
             // 2) Re-share our friend list so the requester converges friends too.
-            let mut friends_sent = 0usize;
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                if let Ok(friends) = store.load_friends(Some("accepted")) {
-                    if !friends.is_empty() {
-                        let entries: Vec<FriendListEntry> = friends
-                            .into_iter()
-                            .map(|(pid, status, direction, requested_at, _u)| FriendListEntry {
-                                peer_id: pid, status, direction, requested_at,
-                            })
-                            .collect();
-                        friends_sent = entries.len();
-                        super::crypto_handler::send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::FriendListSync { friends: entries },
-                        );
-                    }
-                }
+            let friends = crypto_handler::accepted_friend_entries(db_path, db_passphrase);
+            let friends_sent = friends.len();
+            if !friends.is_empty() {
+                super::olm_lane::carry(
+                    ws_cmd_tx, peer_str, None,
+                    &HavenMessage::FriendListSync { friends },
+                    super::olm_lane::NoSession::Queue,
+                );
             }
             // 3) And the personal emote set, which converges the same way.
-            let emotes_sent = send_personal_emotes_to_sibling(
-                ws_cmd_tx, ws_room_peers, peer_str, db_path, db_passphrase,
-            );
+            let emotes_sent = send_personal_emotes_to_sibling(ws_cmd_tx, peer_str, db_path, db_passphrase);
             // 4) Where our reading stands, so the requester drops badges we cleared.
             let markers_sent = super::crypto_handler::send_read_markers_to_sibling(
-                ws_cmd_tx, ws_room_peers, peer_str, db_path, db_passphrase,
+                ws_cmd_tx, peer_str, db_path, db_passphrase,
             );
             hollow_log!(
                 "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend(s) + {emotes_sent} personal emote row(s) + {markers_sent} read marker(s)"
@@ -12646,30 +12569,10 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::ChannelNotificationHint { server_id, channel_id, message_id, has_everyone, mentioned_names, is_reply: _, reply_to_sender } => {
-            // The room broadcast reaches our own siblings too, and a hint for our
-            // own post counted it unread on every other device (#80).
-            if super::resolver::same_identity(peer_str, local_peer_str) {
-                return;
-            }
-            let signal_ok = server_states.get(&server_id).is_some_and(|state| {
-                message_ops::channel_signal_accepted(
-                    state, &super::resolver::resolve(peer_str), master_peer_str, &channel_id,
-                    crate::crdt::hlc::wall_clock_ms(),
-                )
-            });
-            if !signal_ok {
-                return;
-            }
-            // Reply-to-ME only — the wire's bare `is_reply` fired the
-            // mentions-only level on every reply to anyone (#42). Hints from
-            // pre-0.9.1 senders carry no author → false (never over-notify).
-            let is_reply_to_own = reply_to_sender
-                .as_deref()
-                .is_some_and(|s| super::resolver::same_identity(s, local_peer_str));
-            let _ = event_tx.send(NetworkEvent::ChannelNotificationHint {
-                server_id, channel_id, from_peer: peer_str.to_string(),
-                message_id, has_everyone, mentioned_names, is_reply_to_own,
-            }).await;
+            message_ops::deliver_channel_hint(
+                event_tx, server_states, local_peer_str, peer_str,
+                server_id, channel_id, message_id, has_everyone, mentioned_names, reply_to_sender,
+            ).await;
         }
 
         HavenMessage::TypingIndicator { server_id, channel_id } => {
@@ -12683,6 +12586,11 @@ async fn handle_incoming_request(
             // DM threads are master-keyed. The raw `peer_str` is a device id and would
             // never match, so the indicator never shows for a multi-device sender.
             let typist_master = super::resolver::resolve(peer_str);
+            // A DM dot only from a friend: a stranger in a shared room must not
+            // conjure a thread.
+            if server_id.is_empty() && !social::holds_accepted_friend(db_path, db_passphrase, &typist_master) {
+                return;
+            }
             if !server_id.is_empty()
                 && !server_states.get(&server_id).is_some_and(|state| {
                     message_ops::channel_signal_accepted(
@@ -12744,7 +12652,7 @@ async fn handle_incoming_request(
             // profile FIELDS are still refused without a valid signature, downstream.
             let ingest_outcome = super::crypto_handler::ingest_device_list(
                 event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
-                ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
+                ws_cmd_tx, device_list, db_path, db_passphrase,
             ).await;
             let our_devices_grew = ingest_outcome.our_devices_grew;
             // Step 7: enforce any device revocations learned from this list — drop

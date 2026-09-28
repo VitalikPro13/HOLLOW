@@ -169,6 +169,24 @@ structural ones are designed and built too: DM room names from a secret only the
 parties hold, the `~join` ring out of plaintext, file ids no longer readable by the
 relay, and the presence announces of A-D5.
 
+PARTLY BUILT (session 12, phases 1 and 2 of six): `HavenMessage::lane()` is one
+exhaustive list of what may ride a plaintext frame; everything else rides
+`MessageEnvelope::Carried { msg, at_ms }` inside one device's Olm session, and a
+plaintext copy is dropped before any handler. `node/olm_lane.rs::carry()` sends from
+anywhere; the sealing stage hands the carry to the event loop and waits for its
+frames, so wire order stays program order (a plaintext frame overtaking the carried
+state it depends on kept subgroups from forming). A queued carry is judged by `at_ms`,
+and nothing is re-sent after it went out (a stale announce re-onboarded a left
+server). Moved: the own-device lane and destroy fan-out; CRDT op twins, sync and
+channel sync requests, the kick notice, typing (DM from friends only), status (friends
+and co-members only), the J9 hint (MLS `ChannelHint`, the subgroup for a restricted
+channel, Olm copy to leaf-less devices) and the voice twins. Five dead MLS twins
+removed. Tests: the `c24_*` wiretap tests and authz tests that now send through a
+node's own session (`carry_as`), since a plaintext injection of a carried type passes
+vacuously. Left: C the join lane, D profiles (A28 decided: before acceptance only name
+and avatar), E DM room names from the masters' DH, F file and share traffic. The claim
+was reworded the same day: routing metadata is the relay's, data never is.
+
 ### A-D2. File content commitment (H8 remainder)
 
 No file carries a signed content hash: the message signature covers the file id only.

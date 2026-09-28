@@ -1,14 +1,14 @@
 //! Master-signed destruction orders: who may act on one, and what a friend does when
-//! it is somebody else's identity that is gone. Three lanes carry the same
-//! self-authenticating payload (the Olm sibling lane, its plaintext twin, the relay's
-//! kill list), so the verify and judge step lives here once.
+//! it is somebody else's identity that is gone. Two lanes carry the same
+//! self-authenticating payload (Olm, and the relay's kill list for a device Olm did
+//! not reach), so the verify and judge step lives here once.
 
 use tokio::sync::mpsc;
 
 use crate::storage::MessageStore;
 use super::crypto_handler::{
     build_destroy_identity, online_devices_for, revoke_self_device, send_encrypted_message,
-    send_raw_to_peer, verify_destroy_identity,
+    send_encrypted_message_in_room, verify_destroy_identity,
 };
 use super::types::*;
 
@@ -312,9 +312,9 @@ pub(crate) fn handle_publish_self_revocation(
     sent > 0
 }
 
-/// One signed order down all three lanes. The plaintext twin ALWAYS follows the Olm
-/// envelope: a sibling with no live session would otherwise hear nothing. Devices not
-/// in a room are parked on the relay's kill list.
+/// One signed order to our other devices and, when asked, our friends. A sibling
+/// the Olm lane did not reach (offline, or no session) is parked on the relay's kill
+/// list instead.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_publish_destroy_identity(
     olm: &mut crate::crypto::OlmManager,
@@ -331,38 +331,29 @@ pub(crate) async fn handle_publish_destroy_identity(
     db_passphrase: &str,
 ) -> u32 {
     let order = build_destroy_identity(master_keypair, now_ms(), targets, notify_friends);
-    let plain = serde_json::to_vec(&HavenMessage::IdentityDestroyed {
-        destroy: Box::new(order.clone()),
-    })
-    .unwrap_or_default();
     let envelope = serde_json::to_string(&MessageEnvelope::DestroyIdentityOrder {
         destroy: Box::new(order.clone()),
     })
     .unwrap_or_default();
 
-    let online: Vec<String> = online_devices_for(ws_room_peers, local_master)
-        .into_iter()
-        .filter(|d| d != local_device)
-        .collect();
-    let mut reached = 0u32;
-    for dev in &online {
-        let encrypted = send_encrypted_message(
-            olm, crypto_store, dev, &envelope, event_tx, ws_cmd_tx, ws_room_peers,
-        ).await;
-        send_raw_to_peer(ws_cmd_tx, ws_room_peers, dev, plain.clone());
-        if encrypted {
-            reached += 1;
+    let mut reached_devices: Vec<String> = Vec::new();
+    for dev in online_devices_for(ws_room_peers, local_master) {
+        if dev == local_device || !olm.has_session(&dev) {
+            continue;
+        }
+        if send_encrypted_message(olm, crypto_store, &dev, &envelope, event_tx, ws_cmd_tx, ws_room_peers).await {
+            reached_devices.push(dev);
         }
     }
 
-    let offline: Vec<String> = super::resolver::devices_for(local_master)
+    let parked: Vec<String> = super::resolver::devices_for(local_master)
         .into_iter()
-        .filter(|d| d != local_device && !online.contains(d))
+        .filter(|d| d != local_device && !reached_devices.contains(d))
         .collect();
-    if !offline.is_empty()
+    if !parked.is_empty()
         && let Some(blob) = encode_kill_blob(&order)
     {
-        for chunk in offline.chunks(16) {
+        for chunk in parked.chunks(16) {
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillDeposit {
                 targets: chunk.to_vec(),
                 issued_at_ms: order.issued_at_ms,
@@ -371,46 +362,56 @@ pub(crate) async fn handle_publish_destroy_identity(
         }
     }
     hollow_log!(
-        "[HOLLOW-DESTROY] Destruction order: {reached} sibling session(s), {} parked",
-        offline.len()
+        "[HOLLOW-DESTROY] Destruction order: {} sibling session(s), {} parked",
+        reached_devices.len(),
+        parked.len()
     );
 
     if notify_friends {
-        announce_to_friends(ws_cmd_tx, local_master, &plain, db_path, db_passphrase);
+        announce_to_friends(olm, crypto_store, event_tx, ws_cmd_tx, local_master, &order, db_path, db_passphrase).await;
     }
-    reached
+    reached_devices.len() as u32
 }
 
-/// Each known device AND the bare master: the relay buffers under an absent target,
-/// and a master-keyed buffer is replayed to whichever device next proves it owns that
-/// inbox. The issuer is seconds from being wiped, so a retry queue could never drain.
-fn announce_to_friends(
+/// Every friend device we hold a session with, inside its DM room so the relay
+/// buffers it for one that is offline. The issuer is seconds from being wiped, so a
+/// retry queue could never drain: a device we never keyed with hears nothing.
+#[allow(clippy::too_many_arguments)]
+async fn announce_to_friends(
+    olm: &mut crate::crypto::OlmManager,
+    crypto_store: &crate::crypto::CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &WsCmdTx,
     local_master: &str,
-    plain: &[u8],
+    order: &DestroyIdentity,
     db_path: &str,
     db_passphrase: &str,
 ) {
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
     let Ok(friends) = store.load_friends(Some("accepted")) else { return };
+    let Some(carried) = super::olm_lane::carried_json(&HavenMessage::IdentityDestroyed {
+        destroy: Box::new(order.clone()),
+    }) else {
+        return;
+    };
     let mut told = 0;
     for (peer_id, _status, _dir, _req, _upd) in friends {
         let master = super::resolver::resolve(&peer_id);
         let room = dm_room_code(local_master, &master);
-        let mut targets: Vec<String> = super::resolver::devices_for(&master);
-        targets.push(master.clone());
-        targets.sort();
-        targets.dedup();
-        for t in targets {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: room.clone(),
-                target_peer: t,
-                data: plain.to_vec(),
-            });
+        // The bare master is a device too for a single-device identity of old.
+        let mut devices = super::resolver::devices_for(&master);
+        devices.push(master.clone());
+        devices.sort();
+        devices.dedup();
+        for device in devices {
+            if olm.has_session(&device)
+                && send_encrypted_message_in_room(olm, crypto_store, &device, &room, &carried, event_tx, ws_cmd_tx).await
+            {
+                told += 1;
+            }
         }
-        told += 1;
     }
-    hollow_log!("[HOLLOW-DESTROY] Destruction announced to {told} friend(s)");
+    hollow_log!("[HOLLOW-DESTROY] Destruction announced to {told} friend device(s)");
 }
 
 #[cfg(test)]

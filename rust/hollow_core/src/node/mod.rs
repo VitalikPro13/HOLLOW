@@ -24,6 +24,7 @@ pub(crate) mod image_convert;
 pub(crate) mod link_handler;
 pub(crate) mod link_preview;
 pub(crate) mod message_ops;
+pub(crate) mod olm_lane;
 pub(crate) mod mls_authority;
 pub(crate) mod proxy_tunnel;
 pub(crate) mod recovery_pool;

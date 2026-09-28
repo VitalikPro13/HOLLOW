@@ -203,21 +203,47 @@ pub(crate) fn seal_command(keypair: &NativeKeypair, cmd: WsCommand) -> WsCommand
     }
 }
 
+/// A [`WsCommand::Carry`] on its way to the node, and where the node answers with
+/// the frames it became.
+pub(crate) type CarryRequest = (WsCommand, tokio::sync::oneshot::Sender<Vec<WsCommand>>);
+
 /// Put a sealing stage in front of the relay: whoever holds the returned sender can
-/// only send sealed frames, so the node hands it to everything that sends.
+/// only send sealed frames, so the node hands it to everything that sends. A
+/// [`WsCommand::Carry`] comes back out of the returned receiver for the node to put
+/// inside Olm, and nothing queued after it leaves before the frames it became: wire
+/// order stays program order, so a plaintext frame never overtakes the carried state
+/// it depends on.
 pub(crate) fn spawn_sealer(
     keypair: NativeKeypair,
     relay: UnboundedSender<WsCommand>,
-) -> UnboundedSender<WsCommand> {
+) -> (UnboundedSender<WsCommand>, tokio::sync::mpsc::UnboundedReceiver<CarryRequest>) {
+    const CARRY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (carry_tx, carry_rx) = tokio::sync::mpsc::unbounded_channel::<CarryRequest>();
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
-            if relay.send(seal_command(&keypair, cmd)).is_err() {
+            let out = match cmd {
+                WsCommand::Carry { .. } => {
+                    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                    if carry_tx.send((cmd, done_tx)).is_err() {
+                        break;
+                    }
+                    match tokio::time::timeout(CARRY_WAIT, done_rx).await {
+                        Ok(Ok(frames)) => frames,
+                        _ => {
+                            hollow_log!("[HOLLOW-SECURITY] A carried frame was not encrypted in time and was dropped");
+                            Vec::new()
+                        }
+                    }
+                }
+                cmd => vec![cmd],
+            };
+            if out.into_iter().any(|cmd| relay.send(seal_command(&keypair, cmd)).is_err()) {
                 break;
             }
         }
     });
-    tx
+    (tx, carry_rx)
 }
 
 /// The body of a sealed frame, unchecked. For code that reads frames it already

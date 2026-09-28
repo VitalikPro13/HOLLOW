@@ -7,7 +7,7 @@ use crate::crdt::server_state::ServerState;
 use super::crypto_handler::{
     link_preview_digest, sign_message, sign_message_versioned,
     verify_message_signature, verify_message_signature_v2, PkCache, SignedExtras,
-    peer_is_reachable, send_mls_broadcast, send_mls_broadcast_topic, send_encrypted_message,
+    peer_is_reachable, send_mls_broadcast_topic, send_encrypted_message,
     send_message_to_peer,
 };
 use super::types::*;
@@ -894,8 +894,35 @@ pub(crate) async fn handle_send_channel_message(
             .and_then(|s| s.get_channel_message_sender(mid))
     });
 
-    // Broadcast notification hint via SendToRoom (reaches all room members, even unsubscribed).
+    // The notification hint reaches every member, subscribed to the channel or not:
+    // over MLS to the whole room, plus an Olm copy to the devices that hold no leaf.
     {
+        let restricted = server.channel_uses_subgroup(&channel_id);
+        let group = restricted.then_some(channel_id.as_str());
+        if mls.as_ref().is_some_and(|m| m.has_group(&group.map_or_else(|| server_id.clone(), |c| crate::crypto::subgroup_id(&server_id, c)))) {
+            let envelope = MessageEnvelope::ChannelHint {
+                sid: server_id.clone(),
+                cid: channel_id.clone(),
+                mid: message_id.clone(),
+                has_everyone,
+                mentioned_names: mentioned_names.clone(),
+                reply_to_sender: reply_author.clone(),
+            };
+            if let Err(e) = super::crypto_handler::send_mls_broadcast_in(
+                mls.as_mut().unwrap(), ws_cmd_tx, &server_id, group, &envelope, crypto_store,
+            ) {
+                hollow_log!("[HOLLOW-MLS] Channel hint broadcast failed: {e}");
+            }
+        }
+        let leafless = match group {
+            Some(cid) => super::crypto_handler::leafless_member_devices_where(
+                mls, &crate::crypto::subgroup_id(&server_id, cid), server, ws_room_peers, local_peer_str,
+                |m| server.can_see_channel(m, cid),
+            ),
+            None => super::crypto_handler::leafless_member_devices(
+                mls, &server_id, server, ws_room_peers, local_peer_str,
+            ),
+        };
         let hint = HavenMessage::ChannelNotificationHint {
             server_id: server_id.clone(),
             channel_id: channel_id.clone(),
@@ -905,11 +932,10 @@ pub(crate) async fn handle_send_channel_message(
             is_reply: reply_to_mid.is_some(),
             reply_to_sender: reply_author.clone(),
         };
-        if let Ok(hint_bytes) = serde_json::to_vec(&hint) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                room_code: server_id.clone(),
-                data: hint_bytes,
-            });
+        if let Some(json) = super::olm_lane::carried_json(&hint) {
+            for dev in &leafless {
+                super::olm_lane::carry_json(ws_cmd_tx, dev, None, json.clone(), super::olm_lane::NoSession::Drop);
+            }
         }
     }
 
@@ -4270,4 +4296,44 @@ mod tests {
         assert_eq!(channel_text("synced-long").as_ref(), Some(&long));
         assert_eq!(channel_text("synced-big"), None);
     }
+}
+
+/// A channel's new-post hint, from either lane: surfaced only for a post the sender
+/// may make in a channel we may see, and never for our own identity's post.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn deliver_channel_hint(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_states: &HashMap<String, ServerState>,
+    local_peer_str: &str,
+    sender_device: &str,
+    server_id: String,
+    channel_id: String,
+    message_id: String,
+    has_everyone: bool,
+    mentioned_names: Vec<String>,
+    reply_to_sender: Option<String>,
+) {
+    // Our own siblings get the hint too, and a hint for our own post counted it
+    // unread on every other device (#80).
+    if super::resolver::same_identity(sender_device, local_peer_str) {
+        return;
+    }
+    let signal_ok = server_states.get(&server_id).is_some_and(|state| {
+        channel_signal_accepted(
+            state, &super::resolver::resolve(sender_device), local_peer_str, &channel_id,
+            crate::crdt::hlc::wall_clock_ms(),
+        )
+    });
+    if !signal_ok {
+        return;
+    }
+    // Reply-to-ME only: a bare "is a reply" fired the mentions-only level on every
+    // reply to anyone (#42).
+    let is_reply_to_own = reply_to_sender
+        .as_deref()
+        .is_some_and(|s| super::resolver::same_identity(s, local_peer_str));
+    let _ = event_tx.send(NetworkEvent::ChannelNotificationHint {
+        server_id, channel_id, from_peer: sender_device.to_string(),
+        message_id, has_everyone, mentioned_names, is_reply_to_own,
+    }).await;
 }

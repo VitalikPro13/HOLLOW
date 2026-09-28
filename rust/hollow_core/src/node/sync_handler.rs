@@ -9,8 +9,8 @@ use crate::crdt::server_state::ServerState;
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::crdt_store::CrdtStore;
 use super::crypto_handler::{
-    peer_is_reachable, send_message_to_peer, send_message_to_peer_in_room, send_mls_broadcast,
-    persist_mls_state, send_encrypted_message, send_raw_to_identity, online_devices_for,
+    send_message_to_peer, send_message_to_peer_in_room, send_mls_broadcast,
+    persist_mls_state, send_encrypted_message, online_devices_for,
     BackfillSig, PkCache,
 };
 use super::types::*;
@@ -19,17 +19,17 @@ use super::types::*;
 /// member except our own identity. Members are master-keyed and a master has no
 /// socket, so a direct `send_message_to_peer(master)` is dropped: every
 /// member-broadcast loop must go through this.
-fn broadcast_raw_to_members(
+fn carry_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     state: &ServerState,
     local_peer_str: &str,
-    data: Vec<u8>,
+    msg: &HavenMessage,
 ) {
-    for member_peer_str in state.members.keys() {
-        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-        send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
-    }
+    let Some(json) = super::olm_lane::carried_json(msg) else { return };
+    super::olm_lane::carry_to_identities(
+        ws_cmd_tx, ws_room_peers, state.members.keys(), local_peer_str, &json, super::olm_lane::NoSession::Queue,
+    );
 }
 
 /// Multi-device: fan pre-serialized bytes to our OWN online sibling devices,
@@ -62,15 +62,13 @@ pub(crate) fn fan_to_own_siblings(
     sent
 }
 
-/// Convenience: broadcast a `CrdtOpBroadcast` (plaintext fallback) to all members'
-/// devices. Used by every sync-handler CRDT op whose MLS broadcast failed or was
-/// absent.
+/// Carry a `CrdtOpBroadcast` to every member device inside Olm: the path that does
+/// not depend on anyone's MLS epoch.
 ///
 /// Tier 2 (`reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md`): when the server's gossip
 /// overlay has live data channels the op floods over the P2P mesh instead, so the
-/// sender stops paying O(members x devices) relay uploads and the relay stops
-/// seeing plaintext op JSON. Falls back to the relay fan-out whenever the mesh
-/// cannot carry it.
+/// sender stops paying O(members x devices) relay uploads. Falls back to the relay
+/// fan-out whenever the mesh cannot carry it.
 fn broadcast_crdt_op_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -84,11 +82,10 @@ fn broadcast_crdt_op_to_members(
     if super::gossip_relay::flood_crdt_op(gossip_overlays, event_tx, server_id, op_json, None) > 0 {
         return;
     }
-    let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-        server_id: server_id.to_string(),
-        op_json: op_json.to_string(),
-    }).unwrap_or_default();
-    broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, data);
+    carry_to_members(
+        ws_cmd_tx, ws_room_peers, state, local_peer_str,
+        &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json: op_json.to_string() },
+    );
 }
 
 /// Multi-device: all MLS-credential ids belonging to one identity, the master plus
@@ -130,10 +127,9 @@ fn author_op(
     Some(op)
 }
 
-/// Broadcast an authored op MLS-first, then ALWAYS also as the plaintext
-/// `CrdtOpBroadcast` twin (idempotent: op_log dedups and receivers re-validate).
-/// An MLS broadcast is confidential, but a receiver at a skewed epoch drops it
-/// silently with no recovery, permanently losing the op.
+/// Broadcast an authored op MLS-first, then ALWAYS also as the Olm-carried
+/// `CrdtOpBroadcast` twin (idempotent: op_log dedups and receivers re-validate). A
+/// receiver at a skewed epoch drops the MLS copy silently with no recovery.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_op_mls_first(
     mls: &mut Option<MlsManager>,
@@ -151,7 +147,7 @@ fn broadcast_op_mls_first(
     if mls.as_ref().is_some_and(|m| m.has_group(server_id)) {
         let envelope = MessageEnvelope::CrdtOp { sid: server_id.to_string(), op_json: op_json.clone() };
         if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, &envelope, crypto_store) {
-            hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, falling back to plaintext: {e}");
+            hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, the Olm twin still goes: {e}");
         }
     }
     broadcast_crdt_op_to_members(
@@ -159,11 +155,11 @@ fn broadcast_op_mls_first(
     );
 }
 
-/// Broadcast a plaintext-only op to all members AND fan it to our OWN online
-/// sibling devices (the master-keyed member broadcast skips our identity, so
-/// without the fan our other devices only converge on restart / next sync).
+/// Carry an op with no MLS copy to all members AND to our OWN online sibling
+/// devices (the master-keyed member broadcast skips our identity, so without the
+/// fan our other devices only converge on restart / next sync).
 #[allow(clippy::too_many_arguments)]
-fn broadcast_op_plaintext_with_fan(
+fn broadcast_op_with_fan(
     ws_cmd_tx: &WsCmdTx,
     ws_room_peers: &WsRoomPeers,
     gossip_overlays: &mut GossipOverlays,
@@ -178,11 +174,11 @@ fn broadcast_op_plaintext_with_fan(
     broadcast_crdt_op_to_members(
         ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op_json,
     );
-    let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-        server_id: server_id.to_string(),
-        op_json,
-    }).unwrap_or_default();
-    fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
+    super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
+        &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json },
+        super::olm_lane::NoSession::Queue,
+    );
 }
 
 /// Permission gate for [`author_broadcast_op`], evaluated against the acting
@@ -223,10 +219,10 @@ fn gate_allows(state: &ServerState, local_peer: &str, gate: &OpGate<'_>) -> bool
 /// How [`author_broadcast_op`] pushes the authored op out, carrying exactly
 /// the state that route needs.
 enum OpBroadcast<'a> {
-    /// MLS broadcast when the server group exists, plus the plaintext twin.
+    /// MLS broadcast when the server group exists, plus the Olm twin.
     MlsFirst { mls: &'a mut Option<MlsManager>, crypto_store: &'a CryptoStore },
-    /// Plaintext-only op (no MLS path) + own-sibling fan.
-    PlaintextWithFan { local_device_id: &'a str },
+    /// Olm only (no MLS copy) + own-sibling fan.
+    WithFan { local_device_id: &'a str },
 }
 
 /// Shared driver for locally-authored server CRDT ops: permission gate, author
@@ -271,7 +267,7 @@ async fn author_broadcast_op(
         OpBroadcast::MlsFirst { mls, crypto_store } => broadcast_op_mls_first(
             mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op, crypto_store,
         ),
-        OpBroadcast::PlaintextWithFan { local_device_id } => broadcast_op_plaintext_with_fan(
+        OpBroadcast::WithFan { local_device_id } => broadcast_op_with_fan(
             ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, local_device_id, server_id, &op,
         ),
     }
@@ -352,15 +348,15 @@ fn broadcast_removal_op(
     op: &crate::crdt::operations::CrdtOp,
 ) {
     let Ok(op_json) = serde_json::to_string(op) else { return };
-    let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-        server_id: server_id.to_string(),
-        op_json,
-    }).unwrap_or_default();
-    for member in targets {
-        if skip.is_some_and(|s| member == s) { continue; }
-        send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
-    }
-    fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
+    let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json };
+    let Some(json) = super::olm_lane::carried_json(&msg) else { return };
+    super::olm_lane::carry_to_identities(
+        ws_cmd_tx, ws_room_peers, targets.iter().filter(|m| skip != Some(m.as_str())),
+        local_peer_str, &json, super::olm_lane::NoSession::Queue,
+    );
+    super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg, super::olm_lane::NoSession::Queue,
+    );
 }
 
 /// Remove EVERY MLS leaf of `identity` from the server group (epoch rotation for
@@ -700,14 +696,13 @@ pub(crate) async fn handle_create_server(
         name,
     }).await;
 
-    // Announce the new server to our OWN online siblings so they auto-onboard: the
-    // room is brand-new, so they are not in it and have no other way to learn it
-    // exists. Offline siblings onboard on their next connect, via re-announce.
-    let announce = serde_json::to_vec(&HavenMessage::SiblingServerAnnounce {
-        server_id: server_id.clone(),
-        owner: Some(local_peer_str.to_string()),
-    }).unwrap_or_default();
-    let sent = fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, announce);
+    // Our online siblings are not in the brand-new room and have no other way to
+    // learn it exists; offline ones hear it on reconnect, via re-announce.
+    let sent = super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
+        &HavenMessage::SiblingServerAnnounce { server_id: server_id.clone(), owner: Some(local_peer_str.to_string()) },
+        super::olm_lane::NoSession::Queue,
+    );
     if sent > 0 {
         hollow_log!("[HOLLOW-CRDT] Announced new server {server_id} to {sent} online sibling device(s)");
     }
@@ -1127,7 +1122,7 @@ pub(crate) async fn handle_delete_server(
     // Fan the tombstone op to remaining members AND to our OWN siblings, which the
     // master-keyed member broadcast excludes.
     //
-    // The plaintext twin goes out UNCONDITIONALLY, alongside the MLS copy. Sending
+    // The Olm twin goes out UNCONDITIONALLY, alongside the MLS copy. Sending
     // it only `if !mls_sent` measures the WRONG end of the wire: a member can be
     // perfectly reachable and still unable to read an MLS frame, holding no leaf
     // yet or sitting at a skewed epoch, and neither is visible from here
@@ -1140,15 +1135,17 @@ pub(crate) async fn handle_delete_server(
                 hollow_log!("[HOLLOW-MLS] ServerDeleted MLS broadcast failed: {e}");
             }
         }
-        let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-            server_id: server_id.clone(), op_json,
-        }).unwrap_or_default();
-        for member in &member_targets {
-            send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
+        let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json };
+        if let Some(json) = super::olm_lane::carried_json(&msg) {
+            super::olm_lane::carry_to_identities(
+                ws_cmd_tx, ws_room_peers, member_targets.iter(), local_peer_str, &json,
+                super::olm_lane::NoSession::Queue,
+            );
         }
-        // Siblings always get the plaintext op directly (SendToRoom reaches them too,
-        // but a direct fan also covers the no-other-member-online case).
-        fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
+        // Siblings get the op directly too: it covers the no-other-member-online case.
+        super::olm_lane::carry_to_own_siblings(
+            ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg, super::olm_lane::NoSession::Queue,
+        );
     }
 
     // Tear down our LOCAL MLS group (we're leaving the server) but KEEP the CRDT
@@ -1604,9 +1601,9 @@ pub(crate) async fn handle_change_role(
             new_role: new_role.clone(),
         }).await;
 
-        // Role-change is plaintext-only (no MLS path), so the member broadcast
-        // skips our identity — the helper also fans to our OWN siblings.
-        broadcast_op_plaintext_with_fan(
+        // Role-change has no MLS copy, and the member broadcast skips our
+        // identity, so the helper also fans to our OWN siblings.
+        broadcast_op_with_fan(
             ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, local_device_id, &server_id, &op,
         );
     }
@@ -1656,18 +1653,10 @@ pub(crate) async fn handle_kick_member(
             local_peer_str, local_device_id, &server_id, &op,
         );
 
-        // Send kick notification to EVERY online device of the kicked identity
-        // via Olm (targeted) + plaintext broadcast.
-        let kicked_devices = online_devices_for(ws_room_peers, &peer_id);
-        let envelope = MessageEnvelope::MemberKick { sid: server_id.clone() };
-        let kick_json = serde_json::to_string(&envelope).unwrap_or_default();
-        let kick_bcast = serde_json::to_vec(&HavenMessage::MemberKickBroadcast {
-            server_id: server_id.clone(),
-        }).unwrap_or_default();
-        for dev in &kicked_devices {
-            send_encrypted_message(olm, crypto_store, dev, &kick_json, event_tx, ws_cmd_tx, ws_room_peers).await;
+        // Tell EVERY online device of the kicked identity.
+        if let Some(json) = super::olm_lane::carried_json(&HavenMessage::MemberKickBroadcast { server_id: server_id.clone() }) {
+            super::olm_lane::carry_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, &json, super::olm_lane::NoSession::Queue);
         }
-        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, kick_bcast);
 
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
@@ -1929,11 +1918,10 @@ pub(crate) async fn handle_ban_member(
             local_peer_str, local_device_id, &server_id, &op,
         );
 
-        // Send kick notification to every device of the banned identity.
-        let ban_bcast = serde_json::to_vec(&HavenMessage::MemberKickBroadcast {
-            server_id: server_id.clone(),
-        }).unwrap_or_default();
-        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, ban_bcast);
+        // Tell every online device of the banned identity.
+        if let Some(json) = super::olm_lane::carried_json(&HavenMessage::MemberKickBroadcast { server_id: server_id.clone() }) {
+            super::olm_lane::carry_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, &json, super::olm_lane::NoSession::Queue);
+        }
 
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
@@ -2579,14 +2567,16 @@ pub(crate) async fn handle_set_channel_public(
     }
 
     if let Some(state) = server_states.get(&server_id) {
-        // Broadcast to room (including guests) so public channel browsers see the change
+        // Tell the room's guests, who hold no server state. Only the author does, and a
+        // channel going private keeps its name and category out of the clear: a guest
+        // needs only its id to drop it.
         if let Some(ch) = state.channels.get(&channel_id) {
             let notify = HavenMessage::PublicChannelConfigChanged {
                 server_id: server_id.clone(),
                 channel_id: channel_id.clone(),
                 is_public,
-                channel_name: ch.name.clone(),
-                category: ch.category.clone(),
+                channel_name: if is_public { ch.name.clone() } else { String::new() },
+                category: if is_public { ch.category.clone() } else { None },
             };
             if let Ok(data) = serde_json::to_vec(&notify) {
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
@@ -2664,7 +2654,7 @@ pub(crate) async fn handle_set_nickname(
         CrdtPayload::NicknameChanged { peer_id: peer_id.clone(), nickname: nickname.clone() },
         &format!("Setting nickname for {peer_id} to '{nickname}'"),
         NetworkEvent::MemberJoined { server_id: server_id.clone(), peer_id: peer_id.clone() },
-        OpBroadcast::PlaintextWithFan { local_device_id },
+        OpBroadcast::WithFan { local_device_id },
         crdt_store,
     ).await
 }
@@ -2693,7 +2683,7 @@ pub(crate) async fn handle_set_twitch_username(
         CrdtPayload::TwitchUsernameChanged { peer_id: peer_id.clone(), twitch_username: twitch_username.clone() },
         &format!("Setting twitch username for {peer_id}"),
         NetworkEvent::MemberJoined { server_id: server_id.clone(), peer_id: peer_id.clone() },
-        OpBroadcast::PlaintextWithFan { local_device_id },
+        OpBroadcast::WithFan { local_device_id },
         crdt_store,
     ).await
 }
@@ -2723,9 +2713,10 @@ pub(crate) async fn handle_request_channel_sync(
     channel_sync_sent.insert(dedup_key, std::time::Instant::now());
     if let Some(state) = server_states.get(&server_id) {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let sync_data = serde_json::to_vec(&channel_sync_request(&store, &server_id, &channel_id, true))
-                .unwrap_or_default();
-            broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, sync_data);
+            carry_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str,
+                &channel_sync_request(&store, &server_id, &channel_id, true),
+            );
         }
     }
     false
@@ -2754,7 +2745,7 @@ pub(crate) async fn handle_update_channel_layout(
         CrdtPayload::ChannelLayoutUpdated { layout_json: layout_json.clone() },
         &format!("Updating channel layout, layout_json={layout_json}"),
         NetworkEvent::ServerUpdated { server_id: server_id.clone() },
-        OpBroadcast::PlaintextWithFan { local_device_id },
+        OpBroadcast::WithFan { local_device_id },
         crdt_store,
     ).await
 }
@@ -2783,7 +2774,7 @@ pub(crate) async fn handle_pin_message(
         CrdtPayload::MessagePinned { channel_id: channel_id.clone(), message_id: message_id.clone() },
         &format!("Pinning message {message_id} in channel {channel_id}"),
         NetworkEvent::MessagePinned { server_id: server_id.clone(), channel_id, message_id },
-        OpBroadcast::PlaintextWithFan { local_device_id },
+        OpBroadcast::WithFan { local_device_id },
         crdt_store,
     ).await
 }
@@ -2818,7 +2809,7 @@ pub(crate) async fn handle_unpin_message(
         unpin_payload,
         &format!("Unpinning message {message_id} in channel {channel_id}"),
         NetworkEvent::MessageUnpinned { server_id: server_id.clone(), channel_id, message_id },
-        OpBroadcast::PlaintextWithFan { local_device_id },
+        OpBroadcast::WithFan { local_device_id },
         crdt_store,
     ).await
 }
@@ -2846,7 +2837,7 @@ pub(crate) async fn handle_set_storage_pledge(
         CrdtPayload::StoragePledgeChanged { peer_id: local_peer_str.to_string(), pledge_bytes },
         &format!("Setting storage pledge to {pledge_bytes} bytes"),
         NetworkEvent::ServerUpdated { server_id: server_id.clone() },
-        OpBroadcast::PlaintextWithFan { local_device_id },
+        OpBroadcast::WithFan { local_device_id },
         crdt_store,
     ).await;
 }
@@ -3096,19 +3087,6 @@ async fn emit_crdt_apply_event(
                 if let Some(ch) = state.channels.get(channel_id)
                     .filter(|c| c.channel_type == crate::crdt::server_state::ChannelType::Text)
                 {
-                    let notify = HavenMessage::PublicChannelConfigChanged {
-                        server_id: sid.clone(),
-                        channel_id: channel_id.clone(),
-                        is_public: *is_public,
-                        channel_name: ch.name.clone(),
-                        category: ch.category.clone(),
-                    };
-                    if let Ok(data) = serde_json::to_vec(&notify) {
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                            room_code: sid.clone(),
-                            data,
-                        });
-                    }
                     let _ = event_tx.send(NetworkEvent::PublicChannelConfigChanged {
                         server_id: sid.clone(),
                         channel_id: channel_id.clone(),
@@ -3156,216 +3134,11 @@ async fn emit_crdt_apply_event(
     }
 }
 
-/// Handle `MessageEnvelope::ServerDelete` (MLS path) — owner-only.
-pub(crate) async fn handle_envelope_server_delete(
-    server_states: &mut HashMap<String, ServerState>,
-    mls: &mut Option<MlsManager>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    sender_peer_id: &str,
-    sid: String,
-    crypto_store: &CryptoStore,
-    crdt_store: &CrdtStore,
-) {
-    let sender_role = server_states.get(&sid)
-        .map(|s| s.get_role(sender_peer_id))
-        .unwrap_or(crate::crdt::operations::MemberRole::Member);
-    if sender_role != crate::crdt::operations::MemberRole::Owner {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED MLS ServerDelete from {sender_peer_id} — not owner");
-        return;
-    }
-    // Legacy one-shot MLS path (a pre-tombstone peer may still send this). Convert to
-    // a TOMBSTONE: synthesize + apply the owner's ServerDeleted op, persist, keep the
-    // shell to relay onward. (New senders route deletion through the CRDT op instead.)
-    if let Some(state) = server_states.get_mut(&sid) {
-        if !state.is_deleted() {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
-            let _ = state.apply_op(&op);
-            crdt_store.insert_op(op.clone());
-            crdt_store.save_state_snapshot(sid.clone(), state);
-            if let Some(mls_mgr_ref) = mls {
-                mls_mgr_ref.remove_group(&sid);
-                persist_mls_state(mls_mgr_ref, crypto_store);
-            }
-            let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                server_id: sid,
-            }).await;
-        }
-    }
-}
-
 /// Whether a kick sealed at `frame_ts_ms` predates our current membership: a relay
 /// holding back or replaying a kick from before we rejoined.
 pub(crate) fn kick_predates_membership(state: &ServerState, local_master: &str, frame_ts_ms: i64) -> bool {
     let sealed = frame_ts_ms.saturating_add(super::frame_auth::LIVE_SKEW_MS).max(0) as u64;
     state.member_since(local_master).is_some_and(|since| sealed < since)
-}
-
-/// Handle `MessageEnvelope::MemberKick` (MLS path) — kicker must outrank kickee.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_member_kick(
-    server_states: &mut HashMap<String, ServerState>,
-    mls: &mut Option<MlsManager>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    local_peer: &str,
-    sender_peer_id: &str,
-    sid: String,
-    frame_ts_ms: i64,
-    crypto_store: &CryptoStore,
-    crdt_store: &CrdtStore,
-) {
-    let can_kick = if let Some(state) = server_states.get(&sid) {
-        let sender_role = state.get_role(sender_peer_id);
-        let our_role = state.get_role(local_peer);
-        // Override-aware — must match the kicker's own has_permission gate.
-        let sender_perms = state.get_permissions(sender_peer_id);
-        (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) != 0
-            && sender_role.outranks(&our_role)
-            && !kick_predates_membership(state, local_peer, frame_ts_ms)
-    } else { false };
-    if !can_kick {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED MLS MemberKick from {sender_peer_id} — insufficient permissions");
-        return;
-    }
-    if server_states.remove(&sid).is_some() {
-        crdt_store.delete_server(sid.clone());
-        if let Some(mls_mgr_ref) = mls {
-            mls_mgr_ref.remove_group(&sid);
-            persist_mls_state(mls_mgr_ref, crypto_store);
-        }
-        let _ = event_tx.send(NetworkEvent::ServerDeleted {
-            server_id: sid,
-        }).await;
-    }
-}
-
-/// Handle `MessageEnvelope::SyncReq` (MLS path).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_sync_req(
-    server_states: &HashMap<String, ServerState>,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    mls_mgr: &mut MlsManager,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sender_peer_id: String,
-    sid: String,
-    state_vector_json: String,
-    _crdt_store: &CrdtStore,
-) {
-    hollow_log!("[HOLLOW-CRDT] MLS SyncReq from {sender_peer_id} for {sid}, our op_log has {} ops", server_states.get(&sid).map(|s| s.op_log.len()).unwrap_or(0));
-    if let Some(state) = server_states.get(&sid) {
-        if let Ok(their_vector) = serde_json::from_str::<crate::crdt::sync::StateVector>(&state_vector_json) {
-            let delta = crate::crdt::sync::compute_delta(&state.op_log, &their_vector);
-            hollow_log!("[HOLLOW-CRDT] Delta for {sid}: {} ops to send (their vector has {} entries)", delta.len(), their_vector.entries.len());
-            if !delta.is_empty() {
-                let ops_json = serde_json::to_string(&delta).unwrap_or_default();
-                let resp = MessageEnvelope::SyncResp {
-                    sid: sid.clone(), ops_json, target: None,
-                };
-                let resp_json = serde_json::to_string(&resp).unwrap_or_default();
-                send_encrypted_message(
-                    olm, crypto_store,
-                    &sender_peer_id, &resp_json, event_tx,
-                    ws_cmd_tx, ws_room_peers,
-                ).await;
-            }
-        }
-    }
-}
-
-/// Handle `MessageEnvelope::SyncResp` (MLS path).
-pub(crate) async fn handle_envelope_sync_resp(
-    server_states: &mut ServerStates,
-    _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &EventTx,
-    sid: String,
-    ops_json: String,
-    crdt_store: &CrdtStore,
-) {
-    let Some(state) = server_states.get_mut(&sid) else { return };
-    // Tolerant parse: an op variant from a NEWER client skips just that
-    // op, never the whole batch.
-    let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
-    if incoming_ops.is_empty() { return; }
-    // SECURITY: every op passes `admit_remote_op` inside `merge_ops`: the author's
-    // signature, the clock bound, then the permission matrix against OUR role map,
-    // never the relayer's word. That covers the destructive `ServerDeleted`
-    // tombstone along with every other payload.
-    //
-    // Persist ADMITTED ops as they merge: op_log is not serialized in the state
-    // JSON, so ops merged in RAM are lost on restart without this.
-    let Ok(report) = crate::crdt::sync::merge_ops_with(state, &incoming_ops, |op| {
-        if op.server_id == sid {
-            crdt_store.insert_op(op.clone());
-        }
-    }) else { return };
-    if report.rejected > 0 {
-        hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from an MLS SyncResp for {sid}", report.rejected);
-    }
-    let applied = report.applied;
-    if applied == 0 { return; }
-    crdt_store.save_state_snapshot(sid.clone(), state);
-    // Reconcile a deletion that happened while offline (UI hides the
-    // tombstoned server; the shell is retained to relay onward).
-    if state.is_deleted() {
-        let _ = event_tx.send(NetworkEvent::ServerDeleted {
-            server_id: sid.clone(),
-        }).await;
-    } else {
-        let _ = event_tx.send(NetworkEvent::SyncCompleted {
-            server_id: sid.clone(),
-            ops_applied: applied as u32,
-        }).await;
-    }
-}
-
-/// Handle `MessageEnvelope::ChannelSyncReq` (MLS path).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_channel_sync_req(
-    server_states: &HashMap<String, ServerState>,
-    olm: &mut OlmManager,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sender_peer_id: &str,
-    sid: String,
-    cid: String,
-    since_timestamp: i64,
-    sender_timestamps: HashMap<String, i64>,
-    gap: Option<GapDigest>,
-    crypto_store: &CryptoStore,
-    _crdt_store: &CrdtStore,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    // Visibility gate, identical to the plaintext responder in swarm.rs: this is the
-    // MLS/Olm twin of the same request and shares `build_channel_sync_batch`, so
-    // gating one leg and not the other leaves the hole open on the leg groups use.
-    let visible = match server_states.get(&sid) {
-        Some(state) => super::crypto_handler::channel_readable_by(state, sender_peer_id, &cid),
-        None => return,
-    };
-    if !visible {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncRequest from {sender_peer_id} for {cid}: not visible to that member");
-        return;
-    }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
-    let Ok((batch, count)) = build_channel_sync_batch(&store, &sid, &cid, since_timestamp, &sender_timestamps, gap.as_ref()) else { return };
-    if count == 0 { return; }
-    let batch_json = serde_json::to_string(&batch).unwrap_or_default();
-    send_encrypted_message(
-        olm, crypto_store, sender_peer_id, &batch_json, event_tx,
-        ws_cmd_tx, ws_room_peers,
-    ).await;
 }
 
 /// Handle `MessageEnvelope::ChannelSyncBatch` (MLS path).
@@ -3404,22 +3177,12 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     }
     let _ = store.commit_transaction();
     if has_more == Some(true) {
-        let sender_ts = store.get_per_sender_timestamps(&sid, &cid)
-            .unwrap_or_default();
-        let since = store.get_latest_channel_timestamp(&sid, &cid)
-            .unwrap_or(None).unwrap_or(0);
         // No digest: the first page already carried the rows behind the watermarks.
-        let req = MessageEnvelope::ChannelSyncReq {
-            sid: sid.clone(), cid: cid.clone(),
-            since_timestamp: since, sender_timestamps: sender_ts,
-            gap: None,
-            target: None,
-        };
-        let req_json = serde_json::to_string(&req).unwrap_or_default();
-        send_encrypted_message(
-            olm, crypto_store, sender_peer_id, &req_json, event_tx,
-            ws_cmd_tx, ws_room_peers,
-        ).await;
+        super::olm_lane::carry(
+            ws_cmd_tx, sender_peer_id, None,
+            &channel_sync_request(&store, &sid, &cid, false),
+            super::olm_lane::NoSession::Queue,
+        );
     }
     if has_more != Some(true) {
         let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
