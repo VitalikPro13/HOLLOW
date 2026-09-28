@@ -2778,11 +2778,11 @@ async fn run_event_loop(
                     }
 
                     // -- Conference commands (node/conference.rs) --
-                    NodeCommand::ConferenceStart { conf_id, waiting_room, access_code_hash, host_display_name, host_avatar_hash } => {
+                    NodeCommand::ConferenceStart { conf_id, nonce, waiting_room, code_key, host_display_name, host_avatar_hash } => {
                         super::conference::handle_conference_start(
                             &mut conference_host, &mut mls, &crypto_store, &ws_cmd_tx,
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
-                            conf_id, waiting_room, access_code_hash,
+                            &local_peer_str, conf_id, nonce, waiting_room, code_key,
                             host_display_name, host_avatar_hash,
                         );
                     }
@@ -2795,10 +2795,10 @@ async fn run_event_loop(
                         );
                     }
 
-                    NodeCommand::ConferenceRequestJoin { conf_id, display_name, avatar_hash, access_code } => {
+                    NodeCommand::ConferenceRequestJoin { conf_id, display_name, avatar_hash, code_key } => {
                         super::conference::handle_conference_request_join(
-                            &mut mls, &crypto_store, &ws_cmd_tx,
-                            conf_id, display_name, avatar_hash, access_code,
+                            &mut mls, &crypto_store, &ws_cmd_tx, &device_peer_id,
+                            conf_id, display_name, avatar_hash, code_key,
                         );
                     }
 
@@ -5116,6 +5116,7 @@ async fn run_event_loop(
                                 server_id: server_id.clone(),
                                 welcome: welcome_b64.clone(),
                                 channel_id: channel_id.clone(),
+                                conf_nonce: None,
                             }).unwrap_or_default();
                             for peer_id_str in &done.added {
                                 if peer_is_reachable(&ws_room_peers, peer_id_str) {
@@ -5137,6 +5138,7 @@ async fn run_event_loop(
                                             server_id: server_id.clone(),
                                             welcome: welcome_b64.clone(),
                                             channel_id: channel_id.clone(),
+                                            conf_nonce: None,
                                         },
                                     );
                                     hollow_log!("[HOLLOW-MLS] Buffered the Welcome for absent device {peer_id_str} in room {server_id} ({group_key})");
@@ -5220,7 +5222,7 @@ async fn run_event_loop(
                                 &group_key, &server_id, sender.as_ref().map(|s| s.master.as_str()), &requests,
                             );
                             super::mls_authority::judge_welcome(
-                                &server_states, &server_id, channel_id.as_deref(), asked, facts,
+                                &server_states, &server_id, channel_id.as_deref(), None, asked, facts,
                             )
                         });
                         match retried {
@@ -11104,7 +11106,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::MlsWelcome { server_id, welcome, channel_id: wl_channel_id } => {
+        HavenMessage::MlsWelcome { server_id, welcome, channel_id: wl_channel_id, conf_nonce } => {
             let group_key = match &wl_channel_id {
                 Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
                 None => server_id.clone(),
@@ -11134,7 +11136,7 @@ async fn handle_incoming_request(
                         &group_key, &server_id, welcome_sender.as_deref(), &requests,
                     );
                     super::mls_authority::judge_welcome(
-                        server_states, &server_id, wl_channel_id.as_deref(), asked, facts,
+                        server_states, &server_id, wl_channel_id.as_deref(), conf_nonce.as_deref(), asked, facts,
                     )
                 });
                 let judged = match judged {
@@ -11148,6 +11150,7 @@ async fn handle_incoming_request(
                     Ok(crate::crypto::Verdict::Refuse(reason)) => {
                         persist_mls_state(mls_mgr, crypto_store);
                         hollow_log!("[HOLLOW-SECURITY] REFUSED Welcome for {group_key} from {peer_str}: {reason}");
+                        super::conference::reknock_after_bad_welcome(mls_mgr, crypto_store, ws_cmd_tx, &server_id);
                         return;
                     }
                     Err(e) => Err(e),
@@ -11167,6 +11170,7 @@ async fn handle_incoming_request(
                         // Anyone can send a Welcome that does not process, so it clears
                         // nothing: our request stays open for the real one.
                         hollow_log!("[HOLLOW-MLS] Failed to join from Welcome for {group_key}: {e}");
+                        super::conference::reknock_after_bad_welcome(mls_mgr, crypto_store, ws_cmd_tx, &server_id);
                     }
                 }
             }
@@ -13233,21 +13237,31 @@ async fn handle_incoming_request(
         }
 
         // -- Conferences (node/conference.rs; reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
-        HavenMessage::ConferenceJoinRequest { conf_id, display_name, avatar_hash, key_package, access_hash } => {
+        HavenMessage::ConferenceJoinRequest { conf_id, display_name, avatar_hash, key_package, code_proof } => {
             // Blocklist + access-code gating live inside the handler (host-only).
             super::conference::handle_inbound_join_request(
                 conference_host, mls, crypto_store, ws_cmd_tx, event_tx,
                 peer_str, local_peer_str,
-                conf_id, display_name, avatar_hash, key_package, access_hash,
+                conf_id, display_name, avatar_hash, key_package, code_proof,
             ).await;
         }
-        HavenMessage::ConferenceJoinDenied { conf_id, reason } => {
+        // Host frames count only from the host the meeting id names; Dart is handed
+        // that host, never the frame's sender.
+        HavenMessage::ConferenceJoinDenied { conf_id, reason, host } => {
+            if super::conference::verified_host(&conf_id, peer_str, &host).is_none() {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a meeting denial for {conf_id} from {peer_str}: not its host");
+                return;
+            }
             super::conference::clear_pending_knock(&conf_id);
             let _ = event_tx.send(NetworkEvent::ConferenceJoinDenied { conf_id, reason }).await;
         }
-        HavenMessage::ConferenceLobbyInfo { conf_id, host_name, host_avatar_hash } => {
+        HavenMessage::ConferenceLobbyInfo { conf_id, host_name, host_avatar_hash, host } => {
+            let Some(host_master) = super::conference::verified_host(&conf_id, peer_str, &host) else {
+                hollow_log!("[HOLLOW-SECURITY] Dropped meeting lobby info for {conf_id} from {peer_str}: not its host");
+                return;
+            };
             let _ = event_tx.send(NetworkEvent::ConferenceLobbyInfo {
-                conf_id, host_peer_id: peer_str.to_string(), host_name, host_avatar_hash,
+                conf_id, host_peer_id: host_master, host_name, host_avatar_hash,
             }).await;
         }
         HavenMessage::ConferenceChat { conf_id, body } => {
@@ -13255,21 +13269,25 @@ async fn handle_incoming_request(
                 mls, crypto_store, event_tx, conf_id, body,
             ).await;
         }
-        HavenMessage::ConferenceEnded { conf_id } => {
-            // Anyone in the room could send this; Dart validates by_peer_id
-            // against the host it learned from LobbyInfo/meeting start.
+        HavenMessage::ConferenceEnded { conf_id, host } => {
+            let Some(host_master) = super::conference::verified_host(&conf_id, peer_str, &host) else {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a meeting end for {conf_id} from {peer_str}: not its host");
+                return;
+            };
             super::conference::clear_pending_knock(&conf_id);
             let _ = event_tx.send(NetworkEvent::ConferenceEnded {
-                conf_id, by_peer_id: peer_str.to_string(),
+                conf_id, by_peer_id: host_master,
             }).await;
         }
-        HavenMessage::ConferenceKicked { conf_id } => {
+        HavenMessage::ConferenceKicked { conf_id, host } => {
             // The MLS remove already cut us off; this is the courtesy signal.
-            // Dart validates by_peer_id against the known host before tearing
-            // down (a random member can't fake-kick us out of the UI).
+            let Some(host_master) = super::conference::verified_host(&conf_id, peer_str, &host) else {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a meeting kick for {conf_id} from {peer_str}: not its host");
+                return;
+            };
             super::conference::clear_pending_knock(&conf_id);
             let _ = event_tx.send(NetworkEvent::ConferenceKicked {
-                conf_id, by_peer_id: peer_str.to_string(),
+                conf_id, by_peer_id: host_master,
             }).await;
         }
 

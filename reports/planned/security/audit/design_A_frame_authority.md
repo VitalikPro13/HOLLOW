@@ -201,6 +201,16 @@ lobby frames only from the host the id names, and a knock proof bound to the kno
 (HMAC over its device and time under a key from the code) instead of the bearer hash.
 DECIDED: pin the host.
 
+BUILT (session 11, HOL-SEC-061): meeting id = 40 hex of SHA-256("hollow-conf1:{host
+master}:{nonce}"); host frames carry {master, nonce, the host device's MLS leaf
+certificate} and count only when the id hashes from them and the certificate binds the
+sealing device; the Welcome carries the nonce and counts only from that master's leaf;
+Dart keeps the first proven host. The knock proof is an HMAC over (meeting id, knocking
+device) keyed by Argon2id(code, meeting id); no time is needed because the knock is a
+live-only sealed frame. Found while testing: refusing a rogue Welcome spends the
+knocker's KeyPackage, so a refused or unreadable meeting Welcome re-knocks at once.
+Pre-0.12 rooms are refused (Vitalik: no migration).
+
 ### A-D4. The relay (relay-side, deploys before 0.12)
 
 - A17: auth signs only `hollow-ws-auth:{device}:{ts}`; a captured frame replays to

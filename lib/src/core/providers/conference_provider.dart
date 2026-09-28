@@ -427,6 +427,13 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       _toast('Leave your call first', HollowToastType.error);
       return;
     }
+    // A meeting made before 0.12 has an id that names no host, so Rust will not
+    // knock on it.
+    if (!_hostPinnedConfId.hasMatch(confId)) {
+      _toast('This meeting link is from before the update. Ask the host for a new one.',
+          HollowToastType.error);
+      return;
+    }
     // Knocking is pointless when the call it leads to cannot start.
     if (!await ensureTurnForCallFromRef(ref)) return;
 
@@ -556,9 +563,17 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     ]);
   }
 
+  /// Rust emits lobby info, ended and kicked only from the host the meeting id
+  /// names, and hands over that host's master, so the first one is the host.
   void onLobbyInfo(
       String confId, String hostPeerId, String hostName, String hostAvatarHash) {
     if (state.activeConfId != confId || state.isHost) return;
+    final known = state.hostPeerId;
+    if (known != null &&
+        known.isNotEmpty &&
+        !ref.read(deviceLinkProvider).sameIdentity(hostPeerId, known)) {
+      return;
+    }
     state = state.copyWith(
       hostPeerId: hostPeerId,
       hostName: hostName,
@@ -588,9 +603,9 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   Future<void> onEnded(String confId, String byPeerId) async {
     if (state.activeConfId != confId) return;
     final links = ref.read(deviceLinkProvider);
-    final expectedHost =
-        state.hostPeerId ?? (ref.read(identityProvider).peerId ?? '');
-    if (expectedHost.isNotEmpty &&
+    final expectedHost = state.hostPeerId;
+    if (expectedHost != null &&
+        expectedHost.isNotEmpty &&
         !links.sameIdentity(byPeerId, expectedHost)) {
       debugPrint(
           '[HOLLOW-CONF] Ignoring ConferenceEnded from non-host $byPeerId');
@@ -662,6 +677,9 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     HollowToast.show(ctx, message, type: type, overlayState: overlay);
   }
 }
+
+/// A meeting id that names its host (40 lowercase hex); older rooms had 32.
+final _hostPinnedConfId = RegExp(r'^[0-9a-f]{40}$');
 
 final conferenceProvider =
     NotifierProvider<ConferenceNotifier, ConferenceState>(

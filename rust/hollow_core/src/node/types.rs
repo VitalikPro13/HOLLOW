@@ -1093,9 +1093,12 @@ pub(crate) enum NodeCommand {
         active: bool,
     },
     // -- Conference commands (node/conference.rs) --
-    ConferenceStart { conf_id: String, waiting_room: bool, access_code_hash: Option<String>, host_display_name: String, host_avatar_hash: String },
+    /// `code_key` is the room's stored `conference::derive_code_key` hex, `nonce` the
+    /// founding nonce its id hashes from.
+    ConferenceStart { conf_id: String, nonce: String, waiting_room: bool, code_key: Option<String>, host_display_name: String, host_avatar_hash: String },
     ConferenceEnd { conf_id: String },
-    ConferenceRequestJoin { conf_id: String, display_name: String, avatar_hash: String, access_code: Option<String> },
+    /// `code_key` is derived from the typed code off the event loop (Argon2id).
+    ConferenceRequestJoin { conf_id: String, display_name: String, avatar_hash: String, code_key: Option<String> },
     ConferenceAdmit { conf_id: String, peer_id: String },
     ConferenceDeny { conf_id: String, peer_id: String, reason: String },
     ConferenceKick { conf_id: String, peer_id: String },
@@ -1644,6 +1647,10 @@ pub(crate) enum HavenMessage {
         welcome: String, // base64 serialized Welcome
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
+        /// A meeting host's founding nonce: with the sender leaf's master it must hash
+        /// to the meeting id (`conference::hosts_meeting`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conf_nonce: Option<String>,
     },
 
     /// Commit message (membership change) from the server owner.
@@ -1708,8 +1715,8 @@ pub(crate) enum HavenMessage {
 
     /// Joiner to the conf room: knock on the door, carrying a fresh MLS KeyPackage
     /// so admission is a single host-side commit. `avatar_hash` is a HASH (a
-    /// stranger surface is a light announce, never blobs); `access_hash` is
-    /// `derive_access_hash(conf_id, code)` or empty.
+    /// stranger surface is a light announce, never blobs); `code_proof` is
+    /// `conference::knock_proof` for the knocking device, or empty.
     #[serde(rename = "conf_join_req")]
     ConferenceJoinRequest {
         conf_id: String,
@@ -1718,7 +1725,7 @@ pub(crate) enum HavenMessage {
         avatar_hash: String,
         key_package: String,
         #[serde(default)]
-        access_hash: String,
+        code_proof: String,
     },
 
     /// Host → joiner: not getting in (wrong_code / declined / ended).
@@ -1726,6 +1733,7 @@ pub(crate) enum HavenMessage {
     ConferenceJoinDenied {
         conf_id: String,
         reason: String,
+        host: ConfHost,
     },
 
     /// Host → joiner: lobby banner ("waiting for X's meeting").
@@ -1735,6 +1743,7 @@ pub(crate) enum HavenMessage {
         host_name: String,
         #[serde(default)]
         host_avatar_hash: String,
+        host: ConfHost,
     },
 
     /// MLS-encrypted conference chat line — RAM-only on both ends, decrypted
@@ -1748,6 +1757,7 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "conf_ended")]
     ConferenceEnded {
         conf_id: String,
+        host: ConfHost,
     },
 
     /// Host → kicked member: you were removed (the MLS remove commit already
@@ -1755,6 +1765,7 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "conf_kicked")]
     ConferenceKicked {
         conf_id: String,
+        host: ConfHost,
     },
 
     // -- Profile sync --
@@ -2805,6 +2816,16 @@ pub(crate) struct ChannelMessagePayload {
     /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
+}
+
+/// What a meeting host's frame proves about its sender: the meeting id hashes from
+/// `master` and `nonce`, and `cert` (the host device's MLS leaf certificate) binds the
+/// sealing device to `master`. See `conference::verified_host`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ConfHost {
+    pub master: String,
+    pub nonce: String,
+    pub cert: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

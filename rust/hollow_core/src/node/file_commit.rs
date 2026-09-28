@@ -152,7 +152,7 @@ pub(crate) fn vault_plaintext_refused(
     let rows = store.files_with_content_id(content_id).unwrap_or_default();
     let sha256 = rows.iter().any(|r| is_committed_id(&r.file_id)).then(|| sha256_hex(plaintext));
     rows.iter()
-        .filter(|r| !r.video_thumb.as_ref().is_some_and(|v| v.cid == content_id))
+        .filter(|r| r.video_thumb.as_ref().is_none_or(|v| v.cid != content_id))
         .find_map(|r| content_refused(r, plaintext.len() as u64, sha256.as_deref().unwrap_or("")))
 }
 

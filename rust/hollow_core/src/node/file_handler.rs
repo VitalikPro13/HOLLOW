@@ -2487,7 +2487,7 @@ async fn handle_file_stream_complete(
 }
 
 /// What a person sees when delivered bytes are not the file its id commits to.
-pub(crate) const FORGED_FILE_ERROR: &str = "The file that arrived is not the one that was sent";
+pub(crate) const FORGED_FILE_ERROR: &str = "This file didn't match what the sender sent, so it wasn't saved. Try again.";
 
 /// How an assembled inbound stream ended.
 enum StreamOutcome {

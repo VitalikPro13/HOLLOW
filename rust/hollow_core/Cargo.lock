@@ -1955,6 +1955,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "hmac 0.12.1",
  "hollow_dfn",
  "image",
  "jni",

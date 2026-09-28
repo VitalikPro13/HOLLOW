@@ -1013,8 +1013,8 @@ impl MessageStore {
                 updated_at   INTEGER NOT NULL
             )")?;
 
-        // Durable "my meeting room" objects. access_code_hash is the conf-scoped sha256
-        // derivation, never the plaintext code; co_hosts is a JSON array of master ids.
+        // Durable "my meeting room" objects. access_code_hash is the conf-scoped code key,
+        // never the plaintext code; co_hosts is a JSON array of master ids.
         ddl(conn, "conferences table",
             "CREATE TABLE IF NOT EXISTS conferences (
                 conf_id          TEXT PRIMARY KEY,
@@ -1025,6 +1025,9 @@ impl MessageStore {
                 broadcast_mode   INTEGER NOT NULL DEFAULT 0,
                 created_at       INTEGER NOT NULL
             )")?;
+
+        // The founding nonce a meeting id hashes from with its host's master.
+        migrate(conn, "ALTER TABLE conferences ADD COLUMN host_nonce TEXT;");
 
         // Content-sync FTS: the FTS table reads the main table on demand and triggers
         // keep it in sync.
@@ -4202,18 +4205,19 @@ impl MessageStore {
 
     pub fn upsert_conference(&self, row: &ConferenceRow) -> Result<(), String> {
         self.conn.execute(
-            "INSERT INTO conferences (conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO conferences (conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at, host_nonce)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(conf_id) DO UPDATE SET
                 name = excluded.name,
                 waiting_room = excluded.waiting_room,
                 access_code_hash = excluded.access_code_hash,
                 co_hosts = excluded.co_hosts,
-                broadcast_mode = excluded.broadcast_mode",
+                broadcast_mode = excluded.broadcast_mode,
+                host_nonce = COALESCE(conferences.host_nonce, excluded.host_nonce)",
             rusqlite::params![
                 row.conf_id, row.name, row.waiting_room as i64,
                 row.access_code_hash, row.co_hosts, row.broadcast_mode as i64,
-                row.created_at,
+                row.created_at, row.host_nonce,
             ],
         ).map_err(|e| format!("Failed to upsert conference: {e}"))?;
         Ok(())
@@ -4221,7 +4225,7 @@ impl MessageStore {
 
     pub fn list_conferences(&self) -> Result<Vec<ConferenceRow>, String> {
         let mut stmt = self.conn.prepare(
-            "SELECT conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at
+            "SELECT conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at, host_nonce
              FROM conferences ORDER BY created_at DESC",
         ).map_err(|e| format!("Failed to prepare conference query: {e}"))?;
         let rows = stmt.query_map([], |row| {
@@ -4233,6 +4237,7 @@ impl MessageStore {
                 co_hosts: row.get(4)?,
                 broadcast_mode: row.get::<_, i64>(5)? != 0,
                 created_at: row.get(6)?,
+                host_nonce: row.get(7)?,
             })
         }).map_err(|e| format!("Failed to query conferences: {e}"))?;
         collect_rows(rows, "conference")
@@ -6187,8 +6192,11 @@ pub struct ConferenceRow {
     pub conf_id: String,
     pub name: String,
     pub waiting_room: bool,
-    /// Conf-scoped sha256 derivation of the access code (never plaintext).
+    /// `conference::derive_code_key` of the access code (never plaintext).
     pub access_code_hash: Option<String>,
+    /// The nonce the room's id hashes from with the host's master; `None` on a room
+    /// made before 0.12, which cannot be started.
+    pub host_nonce: Option<String>,
     /// JSON array of co-host master ids (phase 2 enforcement).
     pub co_hosts: String,
     pub broadcast_mode: bool,

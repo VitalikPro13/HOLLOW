@@ -49,11 +49,17 @@ fn send_command(cmd: node::NodeCommand) -> Result<(), String> {
         .map_err(|e| format!("Failed to send command: {e}"))
 }
 
+/// What a host sees when starting a room made before 0.12.
+const OLD_ROOM: &str = "This room was made before the update and can't start. Make a new room to get a new link.";
+/// What a joiner sees for a link to such a room.
+const OLD_LINK: &str = "This meeting link is from before the update. Ask the host for a new one.";
+
 /// Create or update a conference room.
 ///
-/// `conf_id: None` creates a room with a random unguessable id, which IS the link
-/// capability. `access_code` follows the profile convention: `None` keeps the current
-/// code, `Some("")` clears it, `Some(code)` sets it (stored as a conf-scoped hash).
+/// `conf_id: None` creates a room whose unguessable id hashes from our master and a
+/// fresh nonce, so the link is the capability and names its host. `access_code`
+/// follows the profile convention: `None` keeps the current code, `Some("")` clears
+/// it, `Some(code)` sets it (stored as its conf-scoped key).
 #[frb]
 pub fn conference_upsert(
     conf_id: Option<String>,
@@ -63,26 +69,31 @@ pub fn conference_upsert(
     broadcast_mode: bool,
 ) -> Result<ConferenceInfo, String> {
     let store_lock = get_store();
-    let guard = store_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let store = guard.as_ref().ok_or("Message store not open")?;
-
-    let (conf_id, existing) = match conf_id {
+    let (conf_id, existing, host_nonce) = match conf_id {
         Some(id) => {
+            let guard = store_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+            let store = guard.as_ref().ok_or("Message store not open")?;
             let existing = store.get_conference(&id)?;
-            (id, existing)
+            let nonce = existing.as_ref().and_then(|e| e.host_nonce.clone());
+            (id, existing, nonce)
         }
         None => {
-            let mut bytes = [0u8; 16];
-            getrandom::fill(&mut bytes).map_err(|e| format!("RNG error: {e}"))?;
-            (hex::encode(bytes), None)
+            let master = crate::api::network::get_local_peer_id()
+                .ok_or("Hollow is still starting; try again in a moment")?;
+            let nonce = node::conference::new_conf_nonce()?;
+            (node::conference::derive_conf_id(&master, &nonce), None, Some(nonce))
         }
     };
 
+    // Argon2 runs here, on the FFI thread and with the store unlocked.
     let access_code_hash = match access_code {
         None => existing.as_ref().and_then(|e| e.access_code_hash.clone()),
         Some(code) if code.is_empty() => None,
-        Some(code) => Some(node::conference::derive_access_hash(&conf_id, &code)),
+        Some(code) => Some(node::conference::derive_code_key(&conf_id, &code)?),
     };
+
+    let guard = store_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let store = guard.as_ref().ok_or("Message store not open")?;
 
     let row = ConferenceRow {
         conf_id: conf_id.clone(),
@@ -97,6 +108,7 @@ pub fn conference_upsert(
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0)
         }),
+        host_nonce,
     };
     store.upsert_conference(&row)?;
     Ok(row.into())
@@ -128,15 +140,20 @@ pub fn conference_start(
     host_display_name: String,
     host_avatar_hash: String,
 ) -> Result<(), String> {
-    let (waiting_room, access_code_hash) = {
+    let (waiting_room, code_key, nonce) = {
         let store_lock = get_store();
         let guard = store_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         let store = guard.as_ref().ok_or("Message store not open")?;
         let row = store.get_conference(&conf_id)?.ok_or("Unknown conference")?;
-        (row.waiting_room, row.access_code_hash)
+        (row.waiting_room, row.access_code_hash, row.host_nonce)
     };
+    let master = crate::api::network::get_local_peer_id()
+        .ok_or("Hollow is still starting; try again in a moment")?;
+    let nonce = nonce
+        .filter(|n| node::conference::hosts_meeting(&conf_id, &master, Some(n)))
+        .ok_or(OLD_ROOM)?;
     send_command(node::NodeCommand::ConferenceStart {
-        conf_id, waiting_room, access_code_hash,
+        conf_id, nonce, waiting_room, code_key,
         host_display_name, host_avatar_hash,
     })
 }
@@ -156,8 +173,15 @@ pub fn conference_request_join(
     avatar_hash: String,
     access_code: Option<String>,
 ) -> Result<(), String> {
+    if !node::conference::is_pinned_conf_id(&conf_id) {
+        return Err(OLD_LINK.to_string());
+    }
+    let code_key = access_code
+        .filter(|c| !c.is_empty())
+        .map(|c| node::conference::derive_code_key(&conf_id, &c))
+        .transpose()?;
     send_command(node::NodeCommand::ConferenceRequestJoin {
-        conf_id, display_name, avatar_hash, access_code,
+        conf_id, display_name, avatar_hash, code_key,
     })
 }
 

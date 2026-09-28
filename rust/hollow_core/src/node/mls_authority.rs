@@ -10,7 +10,8 @@ use crate::crypto::{CommitFacts, LeafIdentity, LeafView, MlsManager, Verdict, We
 pub(crate) enum GroupRules<'a> {
     /// A server group, or one of its channel subgroups, judged by our CRDT view.
     Server { state: &'a ServerState, channel: Option<&'a str> },
-    /// A meeting has no CRDT: the identity that admitted us is its only committer.
+    /// A meeting has no CRDT: its host, the master its id names, admits and commits.
+    /// `None` when nobody has proven to be the host.
     Meeting { host: Option<&'a str> },
 }
 
@@ -131,7 +132,8 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
     };
     match rules {
         GroupRules::Meeting { .. } if !asked => Verdict::Refuse("no knock of ours is pending".into()),
-        GroupRules::Meeting { .. } => Verdict::Accept,
+        GroupRules::Meeting { host: Some(host) } if sender.master == *host => Verdict::Accept,
+        GroupRules::Meeting { .. } => Verdict::Refuse("not sent by the meeting's host".into()),
         GroupRules::Server { state, .. } => {
             if let hold @ Verdict::Hold(_) = rules.membership(&sender.master, "sender") {
                 return hold;
@@ -219,15 +221,19 @@ pub(crate) fn asked_for_leaf(
 }
 
 /// [`welcome_verdict`] for a group key, with the rules its server or meeting follows.
+/// A meeting's host is the sender only when `conf_nonce` hashes it to the meeting id.
 pub(crate) fn judge_welcome(
     server_states: &std::collections::HashMap<String, ServerState>,
     server_id: &str,
     channel: Option<&str>,
+    conf_nonce: Option<&str>,
     asked: bool,
     facts: &WelcomeFacts,
 ) -> Verdict {
-    if super::conference::is_conference_sid(server_id) {
-        return welcome_verdict(facts, &GroupRules::Meeting { host: None }, asked);
+    if let Some(conf_id) = super::conference::conf_id_from_sid(server_id) {
+        let host = facts.sender.bound().map(|s| s.master.as_str())
+            .filter(|master| super::conference::hosts_meeting(conf_id, master, conf_nonce));
+        return welcome_verdict(facts, &GroupRules::Meeting { host }, asked);
     }
     match server_states.get(server_id) {
         Some(state) => welcome_verdict(facts, &GroupRules::Server { state, channel }, asked),
@@ -441,9 +447,32 @@ mod tests {
             Verdict::Hold(_)
         ), "a sender we do not know as a member");
 
-        let meeting = GroupRules::Meeting { host: None };
+        let meeting = GroupRules::Meeting { host: Some("owner") };
         assert_eq!(welcome_verdict(&good, &meeting, true), Verdict::Accept);
         assert!(matches!(welcome_verdict(&good, &meeting, false), Verdict::Refuse(_)), "no knock pending");
+        assert!(matches!(welcome_verdict(&good, &GroupRules::Meeting { host: Some("eve") }, true), Verdict::Refuse(_)),
+            "sent by someone other than the host");
+        assert!(matches!(welcome_verdict(&good, &GroupRules::Meeting { host: None }, true), Verdict::Refuse(_)),
+            "nobody proved to be the host");
+    }
+
+    /// A-D3: a meeting's Welcome counts only from the master its id hashes from, and
+    /// only with the nonce that proves it; any other bound leaf is refused.
+    #[test]
+    fn a_meeting_welcome_counts_only_from_the_host_its_id_names() {
+        let _g = super::super::resolver::test_lock();
+        let states = std::collections::HashMap::new();
+        let conf_id = super::super::conference::derive_conf_id("host", "n1");
+        let sid = super::super::conference::conf_server_id(&conf_id);
+        let knocker = leaf("k-d", "k");
+        let from = |sender: LeafView| welcome(sender.clone(), vec![sender, knocker.clone()], false);
+        let host = from(leaf("host-d", "host"));
+        assert_eq!(judge_welcome(&states, &sid, None, Some("n1"), true, &host), Verdict::Accept);
+        assert!(matches!(judge_welcome(&states, &sid, None, Some("n2"), true, &host), Verdict::Refuse(_)), "wrong nonce");
+        assert!(matches!(judge_welcome(&states, &sid, None, None, true, &host), Verdict::Refuse(_)), "no nonce");
+        let rogue = from(leaf("r-d", "rogue"));
+        assert!(matches!(judge_welcome(&states, &sid, None, Some("n1"), true, &rogue), Verdict::Refuse(_)),
+            "a member of the room is not its host");
     }
 
     #[test]

@@ -13668,14 +13668,15 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     drain_events(&mut bee);
     drain_events(&mut mallory);
 
-    let conf_id = "harnessconf1".to_string();
+    let conf_id = super::conference::derive_conf_id(&host.master_id, "harness-n1");
     let conf_sid = super::conference::conf_server_id(&conf_id);
 
     host.cmd_tx
         .send(NodeCommand::ConferenceStart {
             conf_id: conf_id.clone(),
+            nonce: "harness-n1".to_string(),
             waiting_room: true,
-            access_code_hash: None,
+            code_key: None,
             host_display_name: "Hosty".to_string(),
             host_avatar_hash: String::new(),
         })
@@ -13688,7 +13689,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
             conf_id: conf_id.clone(),
             display_name: "Bee".to_string(),
             avatar_hash: String::new(),
-            access_code: None,
+            code_key: None,
         })
         .await
         .unwrap();
@@ -13794,7 +13795,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
             conf_id: conf_id.clone(),
             display_name: "Mallory".to_string(),
             avatar_hash: String::new(),
-            access_code: None,
+            code_key: None,
         })
         .await
         .unwrap();
@@ -13819,12 +13820,13 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     .await;
     assert!(denied, "Mallory must receive the decline");
 
-    let coded_id = "harnessconf2".to_string();
+    let coded_id = super::conference::derive_conf_id(&host.master_id, "harness-n2");
     host.cmd_tx
         .send(NodeCommand::ConferenceStart {
             conf_id: coded_id.clone(),
+            nonce: "harness-n2".to_string(),
             waiting_room: true,
-            access_code_hash: Some(super::conference::derive_access_hash(&coded_id, "tiger")),
+            code_key: Some(super::conference::derive_code_key(&coded_id, "tiger").unwrap()),
             host_display_name: "Hosty".to_string(),
             host_avatar_hash: String::new(),
         })
@@ -13837,7 +13839,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
             conf_id: coded_id.clone(),
             display_name: "Mallory".to_string(),
             avatar_hash: String::new(),
-            access_code: Some("wrong".to_string()),
+            code_key: Some(super::conference::derive_code_key(&coded_id, "wrong").unwrap()),
         })
         .await
         .unwrap();
@@ -24665,6 +24667,7 @@ async fn authz_a_welcome_never_replaces_a_group_unasked() {
         server_id: server_id.clone(),
         welcome: b64(&welcome),
         channel_id: None,
+        conf_nonce: None,
     }));
     // ABSENCE: a refused Welcome leaves nothing to poll for (BUDGET_MS).
     sleep_ms(1000).await;
@@ -24719,7 +24722,7 @@ async fn authz_garbage_mls_frames_never_drop_a_group() {
 
     for msg in [
         HavenMessage::MlsCommit { server_id: server_id.clone(), commit: garbage.clone(), channel_id: None, epoch: None },
-        HavenMessage::MlsWelcome { server_id: server_id.clone(), welcome: garbage.clone(), channel_id: None },
+        HavenMessage::MlsWelcome { server_id: server_id.clone(), welcome: garbage.clone(), channel_id: None, conf_nonce: None },
     ] {
         relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&msg));
     }
@@ -25660,7 +25663,6 @@ async fn authz_a_holder_cannot_substitute_a_files_bytes() {
 
     // X is offline for the send, so it holds the card and never the bytes.
     relay.set_online(&x.device_id, false);
-    sleep_ms(2000).await;
     drain_events(&mut o);
     drain_events(&mut m);
 
@@ -25714,7 +25716,7 @@ async fn authz_a_holder_cannot_substitute_a_files_bytes() {
     })
     .await;
     assert!(x_card, "X learns the file from the relay's catch-up");
-    sleep_ms(500).await;
+    assert!(wait_until(5, async || x.file_meta(&fid).is_some()).await, "X stores the card");
     drain_events(&mut x);
 
     x.cmd_tx
@@ -25733,5 +25735,266 @@ async fn authz_a_holder_cannot_substitute_a_files_bytes() {
     assert!(
         x.file_meta(&fid).is_some_and(|f| f.completed_at.is_none()),
         "the forged bytes never complete X's card"
+    );
+}
+
+/// Start a meeting on `host` whose id names it and return the id.
+async fn start_pinned_meeting(relay: &MockRelay, host: &mut TestNode, nonce: &str, code: Option<&str>) -> String {
+    let conf_id = super::conference::derive_conf_id(&host.master_id, nonce);
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: conf_id.clone(),
+            nonce: nonce.to_string(),
+            waiting_room: true,
+            code_key: code.map(|c| super::conference::derive_code_key(&conf_id, c).unwrap()),
+            host_display_name: "Hosty".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    let room = super::conference::conf_server_id(&conf_id);
+    assert!(wait_until(10, async || relay.room_devices(&room).contains(&host.device_id)).await, "the host opens the room");
+    conf_id
+}
+
+/// Wait until every node sits in its own inbox room on the relay.
+async fn expect_on_relay(relay: &MockRelay, nodes: &[&TestNode]) {
+    let up = wait_until(10, async || {
+        nodes.iter().all(|n| relay.room_devices(&format!("inbox:{}", n.master_id)).contains(&n.device_id))
+    })
+    .await;
+    assert!(up, "every node reaches the relay");
+}
+
+/// Whether `node` surfaces an event matching `rogue` before a barrier frame sent
+/// right after the rogue one: frames on one connection are handled in order.
+async fn surfaces_before_barrier(
+    relay: &MockRelay,
+    room: &str,
+    barrier_tag: u8,
+    node: &mut TestNode,
+    rogue: impl Fn(&NetworkEvent) -> bool,
+) -> bool {
+    let from = NativeKeypair::from_secret_bytes(&seed_bytes(barrier_tag));
+    let typing = serde_json::to_vec(&super::types::HavenMessage::TypingIndicator {
+        server_id: String::new(),
+        channel_id: String::new(),
+    })
+    .unwrap();
+    relay.inject_raw_direct(room, &from.peer_id(), &node.device_id, super::frame_auth::seal(&from, room, &node.device_id, &typing));
+    let mut seen = false;
+    let barrier = wait_event(node, std::time::Duration::from_secs(10), |ev| {
+        seen |= rogue(ev);
+        matches!(ev, NetworkEvent::TypingStarted { .. })
+    })
+    .await;
+    assert!(barrier, "the barrier frame must arrive");
+    seen
+}
+
+/// A-D3 (S-29..S-32, A16): a meeting id names its host, so a room member who is not
+/// the host cannot run the lobby: its lobby info, denial and end are dropped, even
+/// replaying the host's own proof, and its Welcome is refused, so it never becomes
+/// the knocker's committer or SFrame source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 215, 215).await;
+    let mut knocker = spawn_node_on(&relay, 216, 216).await;
+    let rogue = spawn_node_on(&relay, 217, 217).await;
+    expect_on_relay(&relay, &[&host, &knocker, &rogue]).await;
+    drain_events(&mut host);
+    drain_events(&mut knocker);
+
+    relay.set_recording(&host.device_id, true);
+    relay.set_recording(&knocker.device_id, true);
+    let conf_id = start_pinned_meeting(&relay, &mut host, "lobby-n1", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    knocker.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            display_name: "Kay".to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    let host_master = host.master_id.clone();
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceLobbyInfo { conf_id: c, host_peer_id, .. }
+                if *c == conf_id && *host_peer_id == host_master)
+        })
+        .await,
+        "the knocker learns its host from the host",
+    );
+
+    // The rogue replays the host's own proof and then offers its own.
+    let lobby = frames_of_type(&relay, &host.device_id, "conf_lobby").remove(0);
+    let host_proof: super::types::ConfHost = serde_json::from_value(lobby["host"].clone()).unwrap();
+    let rogue_key = keys(217);
+    let own_proof = super::types::ConfHost {
+        master: rogue.master_id.clone(),
+        nonce: "lobby-n1".into(),
+        cert: crate::crypto::certificate_for_test(&rogue_key, &rogue_key),
+    };
+    use super::types::HavenMessage;
+    for proof in [host_proof.clone(), own_proof] {
+        for msg in [
+            HavenMessage::ConferenceLobbyInfo {
+                conf_id: conf_id.clone(), host_name: "Rogue".into(), host_avatar_hash: String::new(), host: proof.clone(),
+            },
+            HavenMessage::ConferenceJoinDenied { conf_id: conf_id.clone(), reason: "declined".into(), host: proof.clone() },
+        ] {
+            relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, frame(&msg));
+        }
+    }
+    let obeyed = surfaces_before_barrier(&relay, &conf_sid, 217, &mut knocker, |ev| {
+        matches!(ev, NetworkEvent::ConferenceLobbyInfo { host_name, .. } if host_name == "Rogue")
+            || matches!(ev, NetworkEvent::ConferenceJoinDenied { .. })
+    })
+    .await;
+    assert!(!obeyed, "a room member ran the knocker's lobby");
+
+    // The rogue builds its own group under the meeting's id around the knocker's
+    // KeyPackage, and Welcomes it with a nonce of its own.
+    let knock = frames_of_type(&relay, &knocker.device_id, "conf_join_req").remove(0);
+    let key_package = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, knock["key_package"].as_str().unwrap())
+        .unwrap();
+    let mut substitute = crate::crypto::MlsManager::new(&rogue_key, &rogue_key).unwrap();
+    substitute.create_group(&conf_sid).unwrap();
+    let (_, welcome) = substitute.add_member(&conf_sid, &key_package).unwrap();
+    drain_events(&mut host);
+    relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, frame(&HavenMessage::MlsWelcome {
+        server_id: conf_sid.clone(),
+        welcome: b64(&welcome),
+        channel_id: None,
+        conf_nonce: Some("lobby-n1".into()),
+    }));
+    let admitted = surfaces_before_barrier(&relay, &conf_sid, 217, &mut knocker, |ev| {
+        matches!(ev, NetworkEvent::ConferenceAdmitted { .. })
+    })
+    .await;
+    assert!(!admitted, "the rogue's Welcome admitted the knocker");
+
+    // Refusing it spent the KeyPackage the host holds, so the knocker knocks again.
+    let knocker_dev = knocker.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == knocker_dev)
+        })
+        .await,
+        "the knocker re-knocks with a fresh KeyPackage",
+    );
+    host.cmd_tx
+        .send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: knocker.device_id.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceAdmitted { conf_id: c } if *c == conf_id)
+        })
+        .await,
+        "the host admits the knocker",
+    );
+    let members = knocker.mls_members_checked(&conf_sid).await.unwrap_or_default();
+    assert!(members.contains(&host.device_id), "the knocker's group is the host's: {members:?}");
+
+    relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id,
+        frame(&HavenMessage::ConferenceKicked { conf_id: conf_id.clone(), host: host_proof.clone() }));
+    relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id,
+        frame(&HavenMessage::ConferenceEnded { conf_id: conf_id.clone(), host: host_proof }));
+    let ended = surfaces_before_barrier(&relay, &conf_sid, 217, &mut knocker, |ev| {
+        matches!(ev, NetworkEvent::ConferenceEnded { .. } | NetworkEvent::ConferenceKicked { .. })
+    })
+    .await;
+    assert!(!ended, "a room member kicked the knocker or ended its meeting");
+
+    host.cmd_tx.send(NodeCommand::ConferenceEnd { conf_id: conf_id.clone() }).await.unwrap();
+    let host_master = host.master_id.clone();
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceEnded { conf_id: c, by_peer_id } if *c == conf_id && *by_peer_id == host_master)
+        })
+        .await,
+        "the host ends it",
+    );
+}
+
+/// S-26 (A27): a knock proves the access code for the knocking device only, so a
+/// proof lifted from someone else's knock opens nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_knock_proves_its_code_only_for_its_own_device() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 218, 218).await;
+    let mut knocker = spawn_node_on(&relay, 219, 219).await;
+    let mut rogue = spawn_node_on(&relay, 220, 220).await;
+    expect_on_relay(&relay, &[&host, &knocker, &rogue]).await;
+    drain_events(&mut host);
+    drain_events(&mut knocker);
+    drain_events(&mut rogue);
+
+    relay.set_recording(&knocker.device_id, true);
+    relay.set_recording(&rogue.device_id, true);
+    let conf_id = start_pinned_meeting(&relay, &mut host, "code-n1", Some("tiger")).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    let knock = |node: &TestNode, code: &str| {
+        let conf_id = conf_id.clone();
+        let code_key = Some(super::conference::derive_code_key(&conf_id, code).unwrap());
+        let tx = node.cmd_tx.clone();
+        async move {
+            tx.send(NodeCommand::ConferenceRequestJoin {
+                conf_id, display_name: "K".into(), avatar_hash: String::new(), code_key,
+            })
+            .await
+            .unwrap();
+        }
+    };
+
+    knock(&knocker, "tiger").await;
+    let knocker_dev = knocker.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == knocker_dev)
+        })
+        .await,
+        "the right code reaches the waiting room",
+    );
+
+    // The rogue knocks with a wrong code, then again with the knocker's lifted proof.
+    knock(&rogue, "lion").await;
+    assert!(
+        wait_event(&mut rogue, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinDenied { reason, .. } if reason == "wrong_code")
+        })
+        .await,
+        "a wrong code is denied",
+    );
+    let lifted = frames_of_type(&relay, &knocker.device_id, "conf_join_req").remove(0);
+    let mut replay = frames_of_type(&relay, &rogue.device_id, "conf_join_req").remove(0);
+    replay["code_proof"] = lifted["code_proof"].clone();
+    relay.inject(&conf_sid, &rogue.device_id, &host.device_id, serde_json::to_vec(&replay).unwrap());
+    assert!(
+        wait_event(&mut rogue, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinDenied { reason, .. } if reason == "wrong_code")
+        })
+        .await,
+        "a proof lifted from another device's knock is denied",
+    );
+    let rogue_dev = rogue.device_id.clone();
+    assert!(
+        !wait_event(&mut host, std::time::Duration::from_millis(500), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == rogue_dev)
+        })
+        .await,
+        "the rogue never reaches the waiting room",
     );
 }

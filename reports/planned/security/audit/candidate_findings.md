@@ -81,8 +81,8 @@ needed from Vitalik: which messages move, and the rollout rule.
 | A12 | Inject an `RtcAnswer` with its own DTLS fingerprint and sit in the data channel | media:S-10 | High | FIXED HOL-SEC-053 (traced: screen-share audio was plaintext to the relay); peer half HOL-SEC-058 |
 | A13 | Forge `PeerDisconnecting` to drop a voice leg or unconnected call | dm:S-22 | Low | FIXED HOL-SEC-053 (no sender existed; variant removed) |
 | A14 | Garbage PreKey/normal frame with a spoofed `from` tears down a working Olm session | dm:S-03, transport:S-16 | Medium | FIXED HOL-SEC-053 (spoofed) + 054 (a replayed genuine frame) |
-| A15 | Swap a waiting-room knocker's KeyPackage so the host admits the relay | server_mls:S-27 | High | FIXED HOL-SEC-017/041; host pinning = decision 6 (A-D3) |
-| A16 | Conference lobby/host spoofing (`LobbyInfo`, `Ended`, `Kicked`, `JoinDenied`) | server_mls:S-29..S-32 | Medium | CONFIRMED; relay half FIXED HOL-SEC-053; host pinning = decision 6 (A-D3) |
+| A15 | Swap a waiting-room knocker's KeyPackage so the host admits the relay | server_mls:S-27 | High | FIXED HOL-SEC-017/041; host pinning FIXED HOL-SEC-061 |
+| A16 | Conference lobby/host spoofing (`LobbyInfo`, `Ended`, `Kicked`, `JoinDenied`) | server_mls:S-29..S-32 | Medium | FIXED: relay half HOL-SEC-053, member half HOL-SEC-061 (ids name the host) |
 | A17 | Auth signature has no relay binding or nonce: replay to another relay within 60 s | relay:8 | Medium | CONFIRMED (worse: an unsigned `fetch:true` replay sits invisibly beside the device); decision 6 (A-D4) |
 | A18 | A relay reply containing "license_key" stops the reconnect loop for good | relay:22 | Low | CONFIRMED (also wipes the stored key); decision 6 (A-D4) |
 
@@ -98,7 +98,7 @@ New in session 10 (design A inventories, `design_A_inventory/`), all decision 6:
 | A24 | Recovery pool authority is its token, which rides the room name the relay sees | files inventory | Medium | OPEN (token-hashed room + token proof) |
 | A25 | One ring frame under 1 MB flushes a ring; one socket fills the 65,536 registrations; retention extends retroactively | relay inventory C.4 | Medium | OPEN (A-D4) |
 | A26 | TURN URIs not checked against the relay domain | relay inventory E.9 | Low | OPEN (A-D4) |
-| A27 | Conference access hash is a replayable bearer | server_mls, relay inventories | Medium | OPEN (A-D3) |
+| A27 | Conference access hash is a replayable bearer | server_mls, relay inventories | Medium | FIXED HOL-SEC-061 (device-bound knock proof, Argon2id code key) |
 | A28 | Light profile and device list announced to every room peer; a friend request's sender gets our profile | dm inventory | Medium (C-24) | OPEN (A-D1/A-D5) |
 | A29 | DM typing has no friend check; sibling-lane stamps unbounded; unreaction and link-card replays | server_mls, dm inventories | Low | OPEN (A-D5) |
 | A30 | No file carries a signed content hash (H8 remainder) | files inventory | High | FIXED HOL-SEC-060 (self-certifying file ids; pre-0.12 files = AR-13, accepted) |

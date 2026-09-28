@@ -143,6 +143,19 @@ fn verify_bound_leaf(raw: &str, signature_key: &[u8]) -> Option<LeafIdentity> {
     Some(LeafIdentity { device: device.to_string(), master: master.to_string() })
 }
 
+/// A device certificate as `own_certificate` would give it, for tests.
+#[cfg(test)]
+pub(crate) fn certificate_for_test(device: &NativeKeypair, master: &NativeKeypair) -> String {
+    bound_credential_text(device, master)
+}
+
+/// Who a device certificate (a bound credential's text) says it is, when its
+/// master's signature holds. It proves the binding, never who sent it: pair it with
+/// a frame sealed by that device.
+pub(crate) fn certified_device(cert: &str) -> Option<LeafIdentity> {
+    classify_by_certificate(cert.as_bytes()).bound().cloned()
+}
+
 /// A leaf judged by its certificate, with the key taken from the device id it names.
 /// Only for a sender whose leaf is no longer in the current tree: every leaf that
 /// entered a tree we hold had its real key checked at that moment.
@@ -443,6 +456,14 @@ impl MlsManager {
         )
         .id()
         .to_string()
+    }
+
+    /// This device's certificate (its bound credential's text), `None` while the
+    /// credential is still a legacy unbound one.
+    pub fn own_certificate(&self) -> Option<String> {
+        let raw = self.credential_with_key.credential.serialized_content();
+        classify_leaf(raw, self.signer.public()).bound()?;
+        Some(String::from_utf8_lossy(raw).into_owned())
     }
 
     /// The signer to persist: the legacy one while a group still needs it, so a
