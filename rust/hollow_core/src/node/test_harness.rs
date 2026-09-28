@@ -2152,7 +2152,42 @@ async fn create_server_and_wait(node: &mut TestNode, name: &str) -> String {
     })
     .await;
     assert!(ok, "owner should emit ServerCreated");
-    server_id.expect("ServerCreated carried a server_id")
+    let server_id = server_id.expect("ServerCreated carried a server_id");
+    let secret = node.live_server_state(&server_id).await.and_then(|s| s.join_secret());
+    JOIN_SECRETS.lock().unwrap().insert(server_id.clone(), *secret.expect("a new server has its join key"));
+    server_id
+}
+
+/// The join secret of every server the harness created: what its members hold.
+static JOIN_SECRETS: std::sync::LazyLock<Mutex<HashMap<String, [u8; 32]>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn join_secret_of(server_id: &str) -> Option<[u8; 32]> {
+    JOIN_SECRETS.lock().unwrap().get(server_id).copied()
+}
+
+/// The `key=` an invite to `server_id` carries: what every harness join passes, as a
+/// user's click on the link would.
+fn invite_key(server_id: &str) -> Option<String> {
+    let secret = join_secret_of(server_id)?;
+    Some(super::sealed_box::key_to_text(&super::sealed_box::public_of(&secret)))
+}
+
+/// The invite key a node would put in a link it makes now.
+async fn live_join_key(node: &TestNode, server_id: &str) -> Option<String> {
+    node.live_server_state(server_id).await.and_then(|s| s.join_public_text())
+}
+
+/// A reply key for a hand-built join request.
+fn fresh_reply_key() -> String {
+    super::sealed_box::key_to_text(&super::sealed_box::public_of(&super::sealed_box::new_secret().unwrap()))
+}
+
+/// `msg` sealed to a server's join key as `device` would send it, which is what an
+/// invite holder can write and nothing else can.
+fn sealed_to_members(server_id: &str, device: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
+    let key = super::sealed_box::public_of(&join_secret_of(server_id).expect("a harness-created server"));
+    super::join_lane::seal_to_members(&key, server_id, device, msg).expect("seals")
 }
 
 /// The default `#general` channel id for a server.
@@ -2229,14 +2264,27 @@ fn crdt_broadcast(server_id: &str, op: &crate::crdt::operations::CrdtOp) -> supe
     }
 }
 
-/// The exact bytes a peer would put on the wire to answer a sync request with
-/// a batch of ops.
-fn sync_response_frame(server_id: &str, ops: &[crate::crdt::operations::CrdtOp]) -> Vec<u8> {
-    serde_json::to_vec(&super::types::HavenMessage::SyncResponse {
+/// A sync answer carrying a batch of ops.
+fn sync_response(server_id: &str, ops: &[crate::crdt::operations::CrdtOp]) -> super::types::HavenMessage {
+    super::types::HavenMessage::SyncResponse {
         server_id: server_id.to_string(),
         ops_json: serde_json::to_string(ops).expect("serialize ops"),
-    })
-    .expect("serialize frame")
+    }
+}
+
+/// `msg` sealed to the reply key of `joiner`'s pending join, as `from_device` would
+/// answer it: what a member that opened the request can write to the joiner.
+async fn sealed_to_joiner(joiner: &TestNode, server_id: &str, from_device: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
+    let reply_key = || {
+        joiner.store().load_pending_joins().ok()?.into_iter()
+            .find(|row| row.server_id == server_id)?
+            .reply_secret.as_deref()
+            .and_then(super::join_lane::ReplySecret::from_stored)
+            .map(|r| r.public_text())
+    };
+    assert!(wait_until(10, async || reply_key().is_some()).await, "the joiner's pending row holds its reply key");
+    let key = super::sealed_box::key_from_text(&reply_key().unwrap()).unwrap();
+    super::join_lane::seal_to_joiner(&key, server_id, from_device, &joiner.device_id, msg).expect("seals")
 }
 
 /// Persist a master-signed v1 `SignedDeviceList` (devices = `device_ids`) into the
@@ -2460,7 +2508,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
 
@@ -2619,7 +2667,7 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -2743,6 +2791,7 @@ async fn nsfw_server_gates_join_until_confirmed() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -2765,6 +2814,7 @@ async fn nsfw_server_gates_join_until_confirmed() {
             twitch_proof_json: None,
             nsfw_confirmed: true,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -2810,7 +2860,7 @@ async fn channel_typing_roundtrips_master_attributed() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -4870,6 +4920,7 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -5057,6 +5108,7 @@ async fn expired_answer_is_verified_locally_before_marking_our_row() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -5681,7 +5733,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
     // J joins the server (so both hold server_states with each other as members —
     // the precondition for the plaintext VC path; MLS-formed not required here).
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -5874,7 +5926,7 @@ async fn vc_self_participant_is_device_keyed_no_self_dial() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6035,7 +6087,7 @@ async fn vc_screen_origin_attribution_round_trip() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6270,7 +6322,7 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6397,7 +6449,7 @@ async fn vc_leg_restart_signal_round_trips() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6646,7 +6698,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     sleep_ms(200).await;
 
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -6705,7 +6757,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     sleep_ms(500).await; // let C re-run its connect flow
 
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -6790,7 +6842,7 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     let general = general_channel_of(&server_id);
     sleep_ms(300).await;
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -6853,7 +6905,7 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     relay.set_online(&j.device_id, true);
     sleep_ms(700).await; // let J re-run connect + re-register the sync coordinator
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     // STAYS A SLEEP, and this one was measured. Polling
@@ -6916,7 +6968,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     sleep_ms(500).await;
 
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let v_joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -6927,7 +6979,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     sleep_ms(2500).await;
 
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -7055,7 +7107,7 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     sleep_ms(500).await;
 
     a.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let a_joined = wait_event(&mut a, std::time::Duration::from_secs(8), |ev| {
@@ -7065,7 +7117,7 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     assert!(a_joined, "admin-to-be A should join the server");
     sleep_ms(1500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let m_joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -7272,7 +7324,7 @@ async fn sibling_nickname_fans_directly_with_no_relayer() {
     let server_id = create_server_and_wait(&mut b, "Solo Server").await;
     sleep_ms(500).await;
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -7333,7 +7385,7 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     let server_id = create_server_and_wait(&mut o, "Doomed Server").await;
     sleep_ms(300).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -7666,7 +7718,7 @@ async fn restricted_channel_subgroup_enforces_visibility() {
 
     for (node, who) in [(&mut a, "A"), (&mut m, "M")] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -7867,7 +7919,7 @@ async fn label_gated_channel_subgroup_and_fallback() {
     sleep_ms(500).await;
     for (node, who) in [(&mut v, "V"), (&mut m, "M")] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -8104,7 +8156,7 @@ async fn access_label_self_assign_locked() {
     let server_id = create_server_and_wait(&mut o, "Lockdown Server").await;
     sleep_ms(500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -8226,7 +8278,7 @@ async fn channel_grant_lifecycle_mls() {
     let server_id = create_server_and_wait(&mut o, "Grant Server").await;
     sleep_ms(500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -8350,7 +8402,7 @@ async fn channel_grant_expiry_sweep() {
     let server_id = create_server_and_wait(&mut o, "Expiry Server").await;
     sleep_ms(500).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
@@ -8502,7 +8554,7 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
 
     for (node, who) in [(&mut a, "A"), (&mut m, "M")] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -8733,7 +8785,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     let server_id = create_server_and_wait(&mut o, "Vis Server").await;
     sleep_ms(500).await;
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -8844,7 +8896,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
 
     let mut v2 = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
     v2.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let mut caught_up = false;
@@ -8886,7 +8938,7 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     let server_id = create_server_and_wait(&mut o, "Mod Server").await;
     sleep_ms(500).await;
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -11028,6 +11080,7 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -11241,7 +11294,7 @@ async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11380,7 +11433,7 @@ async fn channel_relay_catchup_covers_all_channels() {
     let second_cid = second_cid.expect("second channel id");
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11488,7 +11541,7 @@ async fn channel_relay_catchup_delivers_public_channel_file_caption() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11623,7 +11676,7 @@ async fn channel_relay_catchup_survives_subscribe_before_room_join() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11753,7 +11806,7 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -11869,7 +11922,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
 
     for (label, node) in [("B", &mut b), ("C", &mut c)] {
         node.cmd_tx
-            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
             .await
             .unwrap();
         let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
@@ -12608,6 +12661,7 @@ async fn scaling_benchmark_mls_fanout() {
                     twitch_proof_json: None,
                     nsfw_confirmed: false,
                     owner_pin: None,
+                    join_key: invite_key(&server_id),
                 })
                 .await
                 .unwrap();
@@ -12730,7 +12784,7 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13132,7 +13186,7 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13394,6 +13448,7 @@ async fn asset_request_not_answered_for_unrequested_hash() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -13465,7 +13520,7 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13602,7 +13657,7 @@ async fn banner_write_rejected_without_manage_server() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -13967,7 +14022,7 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -14387,7 +14442,7 @@ async fn synced_channel_deletion_hides_for_late_joiner() {
     // B joins fresh; the join-time channel sync must deliver BOTH messages,
     // one of them hidden — with the proof verifying on B.
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -14482,7 +14537,7 @@ async fn synced_channel_deletion_rejects_unproven_hidden_flags() {
     // B joins fresh and syncs the channel — both hidden flags must be DROPPED
     // (messages visible), while the rows themselves still replicate.
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -14635,6 +14690,7 @@ async fn setup_sframe_heal_pair(
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -14840,6 +14896,7 @@ async fn setup_epoch_race_trio(
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -15507,6 +15564,7 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -15791,7 +15849,7 @@ async fn album_files_over_channel_reach_live_and_backfilled_members() {
     let general = general_channel_of(&server_id);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -15836,7 +15894,7 @@ async fn album_files_over_channel_reach_live_and_backfilled_members() {
     );
     drain_events(&mut k);
     k.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut k, std::time::Duration::from_secs(10), |ev| {
@@ -16276,7 +16334,7 @@ async fn channel_member_fills_a_gap_behind_its_newest_message() {
     let server_id = create_server_and_wait(&mut a, "Gap Server").await;
     let general = general_channel_of(&server_id);
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     assert!(
@@ -16634,7 +16692,7 @@ async fn vc_screen_assign_and_route_round_trip() {
     sleep_ms(300).await;
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -16838,6 +16896,7 @@ async fn join_succeeds_while_owner_is_offline() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -16870,6 +16929,7 @@ async fn join_succeeds_while_owner_is_offline() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -16960,6 +17020,7 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -16990,6 +17051,7 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -17109,6 +17171,7 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -17138,6 +17201,7 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -18930,15 +18994,110 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
 /// Every `~join` ring frame for `server_id`, parsed, paired with the
 /// relay-stamped sender device. The relay-side truth behind a parked join.
 fn join_ring(relay: &MockRelay, server_id: &str) -> Vec<(String, super::types::HavenMessage)> {
+    let secret = join_secret_of(server_id);
     relay
         .topic_frames(server_id, super::types::JOIN_TOPIC)
         .into_iter()
         .filter_map(|(from, data)| {
-            serde_json::from_slice::<super::types::HavenMessage>(&data)
-                .ok()
-                .map(|m| (from, m))
+            let super::types::HavenMessage::JoinSealed { eph, ct } = serde_json::from_slice(&data).ok()? else {
+                return None;
+            };
+            super::join_lane::open(secret.as_ref(), None, server_id, &from, "", &eph, &ct).map(|m| (from, m))
         })
         .collect()
+}
+
+/// A join request counts only sealed to the server's join key, which only an invite
+/// carries: not with no key, not in the clear, not over an Olm session, not sealed
+/// to a key that is not the server's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_join_request_counts_only_in_the_join_box() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    // Friends, so an Olm session exists for the carried attempt.
+    let (mut o, mut j) = friend_pair(&relay, 236, 237).await;
+    let server_id = create_server_and_wait(&mut o, "Keyed Server").await;
+    let join = |join_key: Option<String>| NodeCommand::JoinServer {
+        server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key,
+    };
+    let j_master = j.master_id.clone();
+    let j_admitted = async |o: &TestNode| o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master));
+    relay.set_recording(&j.device_id, true);
+
+    j.cmd_tx.send(join(None)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(5), |ev| matches!(
+            ev, NetworkEvent::TwitchJoinRejected { server_id: sid, reason } if *sid == server_id && reason == "invite_outdated"
+        ))
+        .await,
+        "a link with no join key is refused here"
+    );
+    assert!(frames_of_type(&relay, &j.device_id, "join_sealed").is_empty(), "and nothing goes out");
+
+    let plain = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: super::types::now_ms(),
+        device_list: None,
+        parked: false,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+    };
+    relay.inject(&server_id, &j.device_id, &o.device_id, serde_json::to_vec(&plain).unwrap());
+    flush_frames(&relay, &mut o).await;
+    assert!(!j_admitted(&o).await, "a request in the clear must not count");
+    carry_as(&j, &o, plain).await;
+    carry_as(&j, &o, super::types::HavenMessage::TypingIndicator { server_id: String::new(), channel_id: o.master_id.clone() }).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::TypingStarted { peer_id, .. } if *peer_id == j_master
+        ))
+        .await,
+        "the barrier behind it on the same session arrives"
+    );
+    assert!(!j_admitted(&o).await, "a request over Olm must not count");
+
+    j.cmd_tx.send(join(Some(fresh_reply_key()))).await.unwrap();
+    assert!(
+        wait_until(10, async || !frames_of_type(&relay, &j.device_id, "join_sealed").is_empty()).await,
+        "a request sealed to some other key goes out"
+    );
+    flush_frames(&relay, &mut o).await;
+    assert!(!j_admitted(&o).await, "and no member can open it");
+
+    // A live request the relay held back: the box opens, and is judged a stale frame.
+    let held_at = super::frame_auth::now_ms() - 10 * 60_000;
+    let held = sealed_to_members(&server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: held_at,
+        device_list: None,
+        parked: false,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+    });
+    let j_key = NativeKeypair::from_secret_bytes(&seed_bytes(237));
+    relay.inject_raw_direct(
+        &server_id, &j.device_id, &o.device_id,
+        super::frame_auth::seal_at(&j_key, &server_id, &o.device_id, held_at, [7; 16], &held),
+    );
+    flush_frames(&relay, &mut o).await;
+    assert!(!j_admitted(&o).await, "a live ask from ten minutes ago must not count");
+
+    j.cmd_tx.send(join(invite_key(&server_id))).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the invite's own key admits"
+    );
+    assert!(j_admitted(&o).await);
 }
 
 /// How many parked join REQUESTS `device` has in the room's ring.
@@ -19062,6 +19221,8 @@ async fn parked_join_completes_with_zero_overlap() {
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
+    // Claim C-24 for the join lane, over a live join and a parked one end to end.
+    relay.start_wiretap();
 
     const O_MASTER: u8 = 55; // owner
     const A_MASTER: u8 = 56; // plain member: the one that comes back and admits
@@ -19087,6 +19248,7 @@ async fn parked_join_completes_with_zero_overlap() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19124,6 +19286,7 @@ async fn parked_join_completes_with_zero_overlap() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19287,6 +19450,22 @@ async fn parked_join_completes_with_zero_overlap() {
         "a parked joiner ends up a full member: it decrypts channel traffic"
     );
 
+    let tap = relay.wiretap();
+    assert!(tap.lane_leaks().is_empty(), "C-24: the relay read {:?}", tap.lane_leaks());
+    assert!(tap.readable("Cold Start").is_empty(), "the server's name crossed in the clear: {:?}", tap.readable("Cold Start"));
+    let key = invite_key(&server_id).unwrap();
+    let secret = hex::encode(join_secret_of(&server_id).unwrap());
+    assert!(tap.readable(&key).is_empty() && tap.readable(&secret).is_empty(), "the join key crossed in the clear");
+    let ring = relay.topic_frames(&server_id, super::types::JOIN_TOPIC);
+    assert!(
+        !ring.is_empty()
+            && ring.iter().all(|(_, data)| matches!(
+                serde_json::from_slice::<super::types::HavenMessage>(data),
+                Ok(super::types::HavenMessage::JoinSealed { .. })
+            )),
+        "the join ring holds sealed boxes only",
+    );
+
     drop(o);
     drop(a);
     drop(b);
@@ -19381,6 +19560,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19413,6 +19593,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19553,6 +19734,7 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19654,6 +19836,7 @@ async fn empty_server_join_parks_within_the_short_window() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19730,6 +19913,7 @@ async fn join_with_a_silent_member_present_keeps_the_long_window() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19817,6 +20001,7 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -19909,6 +20094,7 @@ async fn late_member_does_not_reserve_a_parked_join() {
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -19948,6 +20134,7 @@ async fn late_member_does_not_reserve_a_parked_join() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20034,6 +20221,7 @@ async fn parked_join_redeposit_is_interval_bounded() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20112,6 +20300,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20149,7 +20338,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     let forged_master_id = forged_master.peer_id();
 
     let now = super::types::now_ms();
-    let bad = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+    let bad = sealed_to_members(&server_id, &tampered_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -20157,15 +20346,15 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         device_list: Some(tampered),
         parked: true,
         key_package: None,
-    })
-    .unwrap();
+        reply_key: fresh_reply_key(),
+    });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &tampered_device, bad);
 
     // …and a legacy client, which carries no list at all. It is the CONTROL:
     // when this one lands we know A's catch-up has run, so the tampered frame's
     // absence from the member list is a decision, not a race.
     let legacy_device = NativeKeypair::from_secret_bytes(&seed_bytes(129)).peer_id();
-    let legacy = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+    let legacy = sealed_to_members(&server_id, &legacy_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -20173,8 +20362,8 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         device_list: None,
         parked: true,
         key_package: None,
-    })
-    .unwrap();
+        reply_key: fresh_reply_key(),
+    });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &legacy_device, legacy);
 
     relay.set_online(&a.device_id, true);
@@ -20238,6 +20427,7 @@ async fn discarded_parked_join_ignores_a_late_answer() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20266,6 +20456,7 @@ async fn discarded_parked_join_ignores_a_late_answer() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20400,6 +20591,7 @@ async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity()
             twitch_proof_json: Some(proof),
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20526,6 +20718,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20605,6 +20798,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
             twitch_proof_json: None,
             nsfw_confirmed: true,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20662,6 +20856,7 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20692,6 +20887,7 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20835,6 +21031,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -20863,7 +21060,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
     go_offline(&relay, &a, &server_id).await;
 
     let mut sock = raw_socket(&relay, &b_device);
-    let legacy = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+    let legacy = sealed_to_members(&server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -20871,8 +21068,8 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
         device_list: None,
         parked: true,
         key_package: None,
-    })
-    .unwrap();
+        reply_key: fresh_reply_key(),
+    });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
     relay.set_online(&a.device_id, true);
@@ -20927,6 +21124,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -21039,6 +21237,7 @@ async fn vc_state_signal_reaches_a_deaf_member() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -21148,6 +21347,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -21177,7 +21377,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
     go_offline(&relay, &a, &server_id).await;
 
     let mut sock = raw_socket(&relay, &b_device);
-    let legacy = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+    let legacy = sealed_to_members(&server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -21185,8 +21385,8 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
         device_list: None,
         parked: true,
         key_package: None,
-    })
-    .unwrap();
+        reply_key: fresh_reply_key(),
+    });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
     relay.set_online(&a.device_id, true);
@@ -21386,6 +21586,7 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -21590,6 +21791,7 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -22150,6 +22352,7 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
                 twitch_proof_json: Some(proof),
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -22820,6 +23023,7 @@ async fn three_member_server(
                 twitch_proof_json: None,
                 nsfw_confirmed: false,
                 owner_pin: None,
+                join_key: invite_key(&server_id),
             })
             .await
             .unwrap();
@@ -22902,13 +23106,13 @@ async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
         ),
         (
             "the same forged op smuggled inside a SyncResponse batch",
-            serde_json::from_slice(&sync_response_frame(
+            sync_response(
                 &server_id,
                 &[
                     forge_crdt_op(&server_id, &o_master, promote(), AHEAD, None),
                     forge_crdt_op(&server_id, &o_master, promote(), AHEAD + 1, Some(&m.master_kp)),
                 ],
-            )).unwrap(),
+            ),
         ),
         (
             "a second ServerCreated naming the attacker as owner",
@@ -23981,6 +24185,7 @@ async fn at_rest_channel_file_served_from_encrypted_copy_after_migration() {
             twitch_proof_json: None,
             nsfw_confirmed: false,
             owner_pin: None,
+            join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -25278,7 +25483,7 @@ async fn owner_member_and_joiner(
     let server_id = create_server_and_wait(&mut o, "Real Server").await;
     m.cmd_tx
         .send(NodeCommand::JoinServer {
-            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None,
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id),
         })
         .await
         .unwrap();
@@ -25310,7 +25515,7 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
     relay.swallow_direct(&o.device_id, &j.device_id);
     relay.swallow_direct(&m.device_id, &j.device_id);
     let join = || NodeCommand::JoinServer {
-        server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None,
+        server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id),
     };
     j.cmd_tx.send(join()).await.unwrap();
     assert!(
@@ -25322,10 +25527,10 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
     taken.members.insert(j.master_id.clone(), crate::crdt::server_state::MemberInfo {
         peer_id: j.master_id.clone(), display_name: "j".into(),
     });
-    let snapshot = frame(&super::types::HavenMessage::ServerStateSnapshot {
+    let snapshot = super::types::HavenMessage::ServerStateSnapshot {
         server_id: server_id.clone(),
         state_json: serde_json::to_string(&taken).unwrap(),
-    });
+    };
     let founding = forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::ServerCreated {
         name: "Taken".into(), owner_peer_id: m.master_id.clone(), nonce: "00".into(),
     }, 0, Some(&m.master_kp));
@@ -25333,12 +25538,14 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
         peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
     }, 1, Some(&m.master_kp));
     // The snapshot alone first (with M's admission of J), then the founding op.
+    // Sealed to J's reply key: M is a member, so it reads J's request and can answer.
     for frames in [
-        vec![snapshot, sync_response_frame(&server_id, &[admit])],
-        vec![sync_response_frame(&server_id, &[founding])],
+        vec![snapshot, sync_response(&server_id, &[admit])],
+        vec![sync_response(&server_id, &[founding])],
     ] {
         for f in frames {
-            relay.inject(&server_id, &m.device_id, &j.device_id, f);
+            let sealed = sealed_to_joiner(&j, &server_id, &m.device_id, &f).await;
+            relay.inject(&server_id, &m.device_id, &j.device_id, sealed);
         }
         // ABSENCE: nothing to poll for; the frames are handled in well under this.
         assert!(
@@ -25505,10 +25712,21 @@ async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
     .await;
     assert!(rebased, "B must rebase on the owner's checkpoint");
 
+    // It had no join key, so no invite could reach it: its owner sets one, and the
+    // member holds the same.
+    assert!(
+        wait_until(20, async || {
+            let owner_key = live_join_key(&o, &server_id).await;
+            owner_key.is_some() && owner_key == live_join_key(&b, &server_id).await
+        })
+        .await,
+        "the owner sets a join key B holds too"
+    );
     j.cmd_tx
         .send(NodeCommand::JoinServer {
             server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false,
             owner_pin: Some(ids[0].clone()),
+            join_key: live_join_key(&b, &server_id).await,
         })
         .await
         .unwrap();
@@ -25884,6 +26102,20 @@ async fn authz_only_a_member_is_served_the_op_log() {
     let served_in_clear = relay.wiretap().frames.iter().any(|f| f.from == o.device_id && f.to.as_deref() == Some(s.device_id.as_str()) && f.kind() == "sync_response");
     let served_carried = o.carried_to(&s.device_id).await.iter().any(|m| matches!(m, super::types::HavenMessage::SyncResponse { .. }));
     assert!(!served_in_clear && !served_carried, "a non-member must not be served the op log");
+
+    // A member asking the same is served, inside its Olm session and never in the clear.
+    carry_as(&m, &o, super::types::HavenMessage::SyncRequest {
+        server_id: server_id.clone(),
+        state_vector_json: serde_json::to_string(&empty).unwrap(),
+        mls_epoch: None,
+    })
+    .await;
+    assert!(
+        wait_until(10, async || o.carried_to(&m.device_id).await.iter().any(|msg| matches!(msg, super::types::HavenMessage::SyncResponse { .. }))).await,
+        "a member is served its delta over Olm"
+    );
+    let member_served_in_clear = relay.wiretap().frames.iter().any(|f| f.from == o.device_id && f.kind() == "sync_response");
+    assert!(!member_served_in_clear, "C-24: the op log crossed in the clear");
     drop((m, x));
 }
 
@@ -26187,6 +26419,76 @@ async fn meeting_participants_see_each_others_card_once_admitted() {
     assert_eq!(name_at(&bee, &host.master_id).unwrap().1, "", "the card only, no status");
 }
 
+// A meeting card is attributed by the MLS leaf that sent it: a participant cannot show
+// the others someone else's genuine card and have it stored as that person.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn a_meeting_card_claiming_another_master_is_not_stored() {
+    use base64::Engine as _;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 232, 232).await;
+    let mut bee = spawn_node_on(&relay, 233, 233).await;
+    let conf_id = super::conference::derive_conf_id(&host.master_id, "harness-borrowed-card");
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: conf_id.clone(),
+            nonce: "harness-borrowed-card".to_string(),
+            waiting_room: true,
+            code_key: None,
+            host_display_name: "Hosty".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&super::conference::conf_server_id(&conf_id)).contains(&host.device_id)).await);
+    bee.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            display_name: "Bee".to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    let bee_dev = bee.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == bee_dev)
+        })
+        .await
+    );
+    host.cmd_tx.send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: bee.device_id.clone() }).await.unwrap();
+    assert!(wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| matches!(ev, NetworkEvent::ConferenceAdmitted { .. })).await);
+
+    // X's own genuine card, signed by X, handed to Bee.
+    let x = NativeKeypair::from_secret_bytes(&seed_bytes(234));
+    let x_id = x.peer_id();
+    let payload = super::crypto_handler::card_signing_payload(&x_id, 5, "Xavier", "");
+    let pk = base64::engine::general_purpose::STANDARD.encode(x.public_key_protobuf());
+    let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&x, &pk, &payload) else { panic!("signing") };
+    let x_card = super::types::SignedCard { master: x_id.clone(), display_name: "Xavier".into(), avatar_hash: String::new(), updated_at: 5, sig, pk };
+    assert!(super::profile_card::card_holds(&x_card), "the card itself is genuine");
+
+    let line = serde_json::json!({ "card": x_card, "avatar": "" }).to_string();
+    bee.cmd_tx.send(NodeCommand::TestConferenceLine { conf_id: conf_id.clone(), line }).await.unwrap();
+    // A chat line behind it in the same group is the barrier.
+    bee.cmd_tx
+        .send(NodeCommand::ConferenceSendChat { conf_id: conf_id.clone(), text: "barrier".into(), timestamp: 1 })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceChatMessage { text, .. } if text == "barrier")
+        })
+        .await,
+        "the barrier line arrives"
+    );
+    assert!(host.store().load_profile(&x_id).unwrap().is_none(), "Bee must not be able to show X's card as X");
+}
+
 // A joiner shows its card to the members of the server it asks to join, so the one
 // deciding sees who is asking, and nothing else of its profile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -26214,7 +26516,7 @@ async fn a_joiner_shows_its_card_to_the_members_it_asks() {
     assert!(wait_until(10, async || o.server_setting(&server_id, "is_nsfw").as_deref() == Some("true")).await);
     drain_events(&mut j);
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
         .await
         .unwrap();
     assert!(
@@ -26256,7 +26558,7 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
 
     let o_device = o.device_id.clone();
     let request = |at: i64, nonce: u8| {
-        let body = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+        let body = sealed_to_members(&server_id, &m.device_id, &super::types::HavenMessage::ServerJoinRequest {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
@@ -26264,8 +26566,8 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
             device_list: None,
             parked: false,
             key_package: None,
-        })
-        .unwrap();
+            reply_key: fresh_reply_key(),
+        });
         super::frame_auth::seal_at(&m_key, &server_id, &o_device, at, [nonce; 16], &body)
     };
     relay.inject_raw_direct(&server_id, &m.device_id, &o.device_id, request(sealed_while_joining, 1));
@@ -26800,7 +27102,7 @@ async fn authz_a_sibling_announce_for_a_held_server_starts_no_join() {
     .await;
     assert!(refreshed, "the second announce still refreshes C's list");
     assert!(
-        frames_of_type(&relay, &c.device_id, "join_request").is_empty(),
+        frames_of_type(&relay, &c.device_id, "join_sealed").is_empty(),
         "HOL-SEC-056: an announce for a server C holds started a join",
     );
     drop(b);

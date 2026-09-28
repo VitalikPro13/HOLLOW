@@ -54,6 +54,11 @@ void main() {
       expect(pendingJoinReasonText('something_new:42'), 'something_new:42');
     });
 
+    test('an invite from before the join key says so', () {
+      expect(pendingJoinReasonText('invite_outdated'),
+          'This invite link is from before the update. Ask for a new one.');
+    });
+
     test('an empty reason still says something', () {
       expect(pendingJoinReasonText(''), 'The request was declined');
       expect(pendingJoinReasonText('   '), 'The request was declined');

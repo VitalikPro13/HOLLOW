@@ -202,7 +202,7 @@ void main() {
         (w) => w is HollowTextField && w.hintText == hint);
     expect(tester.getTopLeft(button('Join')).dy,
         tester.getTopLeft(button('Create')).dy);
-    expect(tester.getTopLeft(field('Invite link or server ID')).dy,
+    expect(tester.getTopLeft(field('Invite link')).dy,
         tester.getTopLeft(field('My Awesome Server')).dy);
     expect(tester.getTopLeft(find.text('Join a server')).dy,
         tester.getTopLeft(find.text('Start your own')).dy,

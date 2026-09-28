@@ -223,6 +223,54 @@ BUILT (session 13, phases E and F):
   possibly the two call tests session 12 noted, not checked). Glare should settle on one
   session.
 
+BUILT (session 15, phase C, the join lane):
+- The server join key. The owner puts an X25519 secret in the CRDT (`JoinKeySet`, Owner
+  only, 64 hex, redacted from every `Debug`); a new server gets one at creation, an older
+  one the first time its owner's node runs 0.12 (`author_missing_join_keys` on the batch
+  tick). Every member holds it and checkpoints carry it. Invite links carry the public
+  half as `key=` (43 characters of URL-safe base64, `serverInviteKey`), the website join
+  page passes it on, and a link without one is refused on the joiner's side before
+  anything is sent (`invite_outdated`). A pending join from before 0.12 becomes that tile
+  at boot. A bare server id no longer joins.
+- `node/sealed_box.rs`: an ephemeral X25519 key agrees with the recipient's (the
+  agreement must be contributory), HKDF-SHA256 salted with both public keys gives the
+  AES-256-GCM key and nonce. `node/join_lane.rs` puts every box in
+  `HavenMessage::JoinSealed { eph, ct }`, always in the server's own room. A join box
+  (`hollow-join-box1`, bound to the server and the device that sealed the frame) holds
+  only a `ServerJoinRequest` with its reply key or a members' `ServerJoinResolved`. A
+  reply box (`hollow-join-reply1`, bound to the server, the sealing device and the joiner
+  device) holds only `SyncResponse`, `ServerStateSnapshot`, `ServerJoinRejected` or
+  `ServerJoinResolved`. What a box holds is judged as a frame of its own (live-only
+  types stale after 300 s, taken once).
+- The reply key is minted once per pending-join row and persisted with it, like the
+  KeyPackage, so an answer to an older copy of the request still opens after a restart.
+- New `Lane::Join`: the request, the snapshot, the refusal and the resolution never
+  count in the clear or over Olm. `SyncResponse` became Carried, so members answer each
+  other's sync over Olm. The `~join` ring holds only boxes: the parked request and the
+  members' resolution sealed to the join key, a refusal also sealed to the joiner.
+- A sibling onboarding a server gets the join key in `SiblingServerAnnounce` and seals
+  its request like anyone, now with its signed device list.
+- A side effect worth having: the relay sees a server's id as its room name, and that
+  used to be enough to ask to join; now asking takes the invite.
+- Tests: `authz_a_join_request_counts_only_in_the_join_box` (no key, in the clear, over
+  Olm, to a wrong key, held back ten minutes, then the invite's key), a wiretap over the
+  whole of `parked_join_completes_with_zero_overlap` (no lane leak, the server's name and
+  the join key never readable, the ring all boxes), the legacy-server test now waits for
+  the owner to set a key, `authz_only_a_member_is_served_the_op_log` now also sees a
+  member served over Olm and never in the clear, unit tests in `sealed_box`,
+  `join_lane` and the CRDT matrix.
+  Tests that injected join traffic in the clear now seal it (`sealed_to_members`,
+  `sealed_to_joiner`), and `join_ring` reads the ring as a member does. Sixteen rules put
+  back one at a time, each failing its test.
+- Left open, for Vitalik: (a) the join key is never rotated, so a kicked or banned member
+  keeps it and can read later requests (who asks, the device list, the Twitch
+  credential, the KeyPackage) and forge a refusal to a joiner; rotating it breaks every
+  invite link out there, so it wants a decision (on every ban, a manual reset, or
+  accepted). (b) A server whose owner has not run 0.12 has no key, so nobody can join it
+  until the owner opens the app once, and invites made meanwhile carry no key. (c) The
+  card a joiner shows the members (phase D) still rides Olm, so it opens a session with a
+  stranger member; it could ride inside the join box.
+
 ### A-D2. File content commitment (H8 remainder)
 
 No file carries a signed content hash: the message signature covers the file id only.

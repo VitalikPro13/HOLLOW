@@ -319,7 +319,7 @@ fn on_verified_sibling(
         if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
         super::olm_lane::carry(
             ws_cmd_tx, peer_id, Some(&own_inbox),
-            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner() },
+            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text() },
             super::olm_lane::NoSession::Queue,
         );
     }
@@ -1000,6 +1000,9 @@ async fn run_event_loop(
     // Track server_ids we're trying to join (waiting for SyncResponse from existing members).
     // Value is the optional Twitch proof JSON to attach to join requests.
     let mut pending_server_joins: HashMap<String, PendingJoin> = HashMap::new();
+    // server_id -> (join key, owner pin) of the invite a join started from, for the
+    // re-ask that answers a consent or Twitch question with no link in hand.
+    let mut join_invites: HashMap<String, (String, Option<String>)> = HashMap::new();
     // "{server_id}|{joiner_device}" -> when we last saw that join request, so the
     // coordinator gate can tell a first ask from the joiner's escalation retry.
     let mut join_request_seen: HashMap<String, std::time::Instant> = HashMap::new();
@@ -1089,6 +1092,17 @@ async fn run_event_loop(
                     if row.state != "pending" {
                         continue;
                     }
+                    // A row from before the join lane names no key to seal it to: it can
+                    // never be answered, so it turns into a tile that says so.
+                    if row.join_key.is_none() {
+                        let reason = sync_handler::INVITE_OUTDATED.to_string();
+                        let _ = store.upsert_pending_join(&crate::storage::messages::PendingJoinRow {
+                            state: "rejected".to_string(),
+                            reason,
+                            ..row
+                        });
+                        continue;
+                    }
                     pending_server_joins.insert(row.server_id.clone(), PendingJoin {
                         twitch_proof_json: row.twitch_proof_json,
                         nsfw_confirmed: row.nsfw_confirmed,
@@ -1101,6 +1115,8 @@ async fn run_event_loop(
                         // re-deposit after a restart is the SAME leaf request.
                         key_package: row.key_package,
                         owner_pin: row.owner_pin,
+                        join_key: row.join_key,
+                        reply_secret: row.reply_secret.as_deref().and_then(super::join_lane::ReplySecret::from_stored),
                     });
                     restored += 1;
                 }
@@ -1391,13 +1407,34 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed, owner_pin } => {
+                    NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed, owner_pin, join_key } => {
+                        // The answer to a consent or Twitch question asks again with no link
+                        // in hand: the invite that started the join is the one it means.
+                        let remembered = join_invites.get(&server_id).cloned();
+                        let owner_pin = owner_pin.or_else(|| remembered.as_ref().and_then(|(_, pin)| pin.clone()));
+                        let join_key = join_key
+                            .filter(|k| super::sealed_box::key_from_text(k).is_some())
+                            .or_else(|| remembered.map(|(key, _)| key))
+                            .or_else(|| pending_server_joins.get(&server_id).and_then(|p| p.join_key.clone()))
+                            .or_else(|| server_states.get(&server_id).and_then(|s| s.join_public_text()));
+                        let Some(join_key) = join_key else {
+                            hollow_log!("[HOLLOW-CRDT] Join of {server_id} refused here: the invite carries no join key");
+                            let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
+                                server_id,
+                                reason: sync_handler::INVITE_OUTDATED.to_string(),
+                            }).await;
+                            continue;
+                        };
+                        if join_invites.len() >= 256 {
+                            join_invites.clear();
+                        }
+                        join_invites.insert(server_id.clone(), (join_key.clone(), owner_pin.clone()));
                         sync_handler::handle_join_server(
                             &mut pending_server_joins, &ws_cmd_tx,
                             &ws_room_peers, &cmd_tx,
-                            server_id, twitch_proof_json, nsfw_confirmed, owner_pin,
+                            server_id, twitch_proof_json, nsfw_confirmed, owner_pin, join_key,
                             &crdt_store, &master_keypair, &device_peer_id,
-                            &mls, &crypto_store, None,
+                            &mls, &crypto_store, None, None,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -2845,7 +2882,7 @@ async fn run_event_loop(
                     // -- Server join: coordinator window elapsed, ask everyone --
                     NodeCommand::RetryPendingJoin { server_id } => {
                         sync_handler::handle_retry_pending_join(
-                            &pending_server_joins, &ws_cmd_tx, &ws_room_peers, server_id,
+                            &pending_server_joins, &ws_cmd_tx, &ws_room_peers, &device_peer_id, server_id,
                         );
                     }
 
@@ -2861,13 +2898,22 @@ async fn run_event_loop(
                     // row is read on the CrdtStore actor rather than opened here.
                     NodeCommand::RequestPendingJoinAgain { server_id } => {
                         match crdt_store.load_pending_join(server_id.clone()).await {
+                            Some(row) if row.join_key.is_none() => {
+                                hollow_log!("[HOLLOW-CRDT] Request again for {server_id}: the row names no join key");
+                                let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
+                                    server_id,
+                                    state: "rejected".to_string(),
+                                    reason: sync_handler::INVITE_OUTDATED.to_string(),
+                                }).await;
+                            }
                             Some(row) => {
                                 sync_handler::handle_join_server(
                                     &mut pending_server_joins, &ws_cmd_tx,
                                     &ws_room_peers, &cmd_tx,
                                     server_id, row.twitch_proof_json, row.nsfw_confirmed, row.owner_pin,
+                                    row.join_key.unwrap_or_default(),
                                     &crdt_store, &master_keypair, &device_peer_id,
-                                    &mls, &crypto_store, row.key_package,
+                                    &mls, &crypto_store, row.key_package, row.reply_secret,
                                     &db_path, &db_passphrase,
                                 ).await;
                             }
@@ -3061,7 +3107,18 @@ async fn run_event_loop(
                     // reads the SAME live state the production paths use, with no snapshot lag.
                     #[cfg(test)]
                     NodeCommand::TestCarry { device, msg } => {
-                        super::olm_lane::carry(&ws_cmd_tx, &device, None, &msg, super::olm_lane::NoSession::Queue);
+                        // Built by hand: a modified client puts any type in its envelope.
+                        let envelope = MessageEnvelope::Carried { msg, at_ms: super::frame_auth::now_ms() };
+                        if let Ok(json) = serde_json::to_string(&envelope) {
+                            super::olm_lane::carry_json(&ws_cmd_tx, &device, None, json, super::olm_lane::NoSession::Queue);
+                        }
+                    }
+
+                    #[cfg(test)]
+                    NodeCommand::TestConferenceLine { conf_id, line } => {
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            super::conference::send_group_line(mls_mgr, &crypto_store, &ws_cmd_tx, &conf_id, &line);
+                        }
                     }
 
                     #[cfg(test)]
@@ -3724,22 +3781,8 @@ async fn run_event_loop(
 
                                 // Send join request if this room matches a pending server join.
                                 // Outside is_new guard — peer may already be synced from another room.
-                                if pending_server_joins.contains_key(&room) {
-                                    send_message_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
-                                        &peer_id, HavenMessage::ServerJoinRequest {
-                                            server_id: room.clone(),
-                                            twitch_proof_json: pending_server_joins.get(&room).and_then(|p| p.twitch_proof_json.clone()),
-                                            nsfw_confirmed: pending_server_joins.get(&room).map(|p| p.nsfw_confirmed).unwrap_or(false),
-                                            requested_at: pending_server_joins.get(&room).map(|p| p.requested_at).unwrap_or(0),
-                                            device_list: pending_server_joins.get(&room).and_then(|p| p.device_list.clone()),
-                                            parked: false,
-                                            // Live copy: the responder is right
-                                            // here, so the leaf rides the
-                                            // SyncResponse bootstrap.
-                                            key_package: None,
-                                        },
-                                    );
+                                if let Some(pending) = pending_server_joins.get(&room) {
+                                    super::join_lane::send_request(&ws_cmd_tx, &room, &device_peer_id, pending, &peer_id);
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
                                     // Who is asking, for the member deciding: our card and nothing more. The
                                     // avatar rides along, as a member is a stranger we answer no pull from.
@@ -4054,7 +4097,7 @@ async fn run_event_loop(
                             let now = super::types::now_ms();
                             if p.parked && now - p.last_deposited_at >= super::types::REDEPOSIT_INTERVAL_MS {
                                 p.last_deposited_at = now;
-                                sync_handler::deposit_parked_join(&ws_cmd_tx, &room, p);
+                                sync_handler::deposit_parked_join(&ws_cmd_tx, &room, &device_peer_id, p);
                                 crdt_store.upsert_pending_join(
                                     sync_handler::pending_join_row(&room, p, "pending", ""),
                                 );
@@ -4387,22 +4430,8 @@ async fn run_event_loop(
                                 // Send join request if this room matches a pending server join.
                                 // Outside is_new guard — peer may already be in synced_peers
                                 // from a DM room but we still need to send the join request.
-                                if pending_server_joins.contains_key(&room) {
-                                    send_message_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
-                                        pid_str, HavenMessage::ServerJoinRequest {
-                                            server_id: room.clone(),
-                                            twitch_proof_json: pending_server_joins.get(&room).and_then(|p| p.twitch_proof_json.clone()),
-                                            nsfw_confirmed: pending_server_joins.get(&room).map(|p| p.nsfw_confirmed).unwrap_or(false),
-                                            requested_at: pending_server_joins.get(&room).map(|p| p.requested_at).unwrap_or(0),
-                                            device_list: pending_server_joins.get(&room).and_then(|p| p.device_list.clone()),
-                                            parked: false,
-                                            // Live copy: the responder is right
-                                            // here, so the leaf rides the
-                                            // SyncResponse bootstrap.
-                                            key_package: None,
-                                        },
-                                    );
+                                if let Some(pending) = pending_server_joins.get(&room) {
+                                    super::join_lane::send_request(&ws_cmd_tx, &room, &device_peer_id, pending, pid_str);
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
                                     // Who is asking, for the member deciding: our card and nothing more. The
                                     // avatar rides along, as a member is a stranger we answer no pull from.
@@ -4952,11 +4981,33 @@ async fn run_event_loop(
                                         continue;
                                     }
 
-                                    // Claim C-24: what the relay must not read never counts in the clear.
-                                    if msg.lane() != Lane::Relay {
+                                    // The join lane: sealed to the server's join key or to our reply key,
+                                    // in that server's room. What it holds is judged as a frame of its own.
+                                    let msg = if let HavenMessage::JoinSealed { eph, ct } = &msg {
+                                        let join_secret = server_states.get(&room).and_then(|s| s.join_secret());
+                                        let reply_secret = pending_server_joins.get(&room).and_then(|p| p.reply_secret.as_ref());
+                                        let opened = super::join_lane::open(
+                                            join_secret.as_deref(), reply_secret, &room, &from, &device_peer_id, eph, ct,
+                                        );
+                                        let Some(inner) = opened else {
+                                            hollow_log!("[HOLLOW-SECURITY] Dropped a sealed join frame from {from} in {room}: no key of ours opens it, or it holds what that box may not carry");
+                                            continue;
+                                        };
+                                        if inner.live_only()
+                                            && (super::frame_auth::is_stale(frame_ts, now_ms)
+                                                || !frame_replays.first_sight(&from, frame_nonce, frame_ts, now_ms))
+                                        {
+                                            hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live join frame from {from} in {room}");
+                                            continue;
+                                        }
+                                        inner
+                                    } else if msg.lane() != Lane::Relay {
+                                        // Claim C-24: what the relay must not read never counts in the clear.
                                         hollow_log!("[HOLLOW-SECURITY] Dropped a plaintext {} from {from}: it rides Olm only", msg.wire_kind());
                                         continue;
-                                    }
+                                    } else {
+                                        msg
+                                    };
                                     let mut next = Some((Box::new(msg), frame_ts));
                                     while let Some((msg, frame_ts)) = next.take() {
                                         #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
@@ -5030,6 +5081,10 @@ async fn run_event_loop(
                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
                     &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store,
                 ).await;
+                sync_handler::author_missing_join_keys(
+                    &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
+                    &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store,
+                );
                 if let Some(ref mut mls_mgr) = mls {
                     // Phase 0: the Welcome grace. A commit that evicted our own leaf while we
                     // are still a member is half of a remove + re-add, and the Welcome half is
@@ -8831,12 +8886,10 @@ async fn handle_incoming_request(
                     if !delta.is_empty() {
                         if let Ok(ops_json) = serde_json::to_string(&delta) {
                             hollow_log!("[HOLLOW-CRDT] Sending {} delta ops to {peer_str}", delta.len());
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::SyncResponse {
-                                    server_id: server_id.clone(),
-                                    ops_json,
-                                },
+                            super::olm_lane::carry(
+                                ws_cmd_tx, peer_str, None,
+                                &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json },
+                                super::olm_lane::NoSession::Queue,
                             );
                         }
                     }
@@ -9264,7 +9317,7 @@ async fn handle_incoming_request(
         }
         HavenMessage::ServerJoinRequest {
             server_id, twitch_proof_json, nsfw_confirmed,
-            requested_at, device_list, parked, key_package,
+            requested_at, device_list, parked, key_package, reply_key,
         } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id} (nonce {requested_at}, parked {parked})");
 
@@ -9335,6 +9388,18 @@ async fn handle_incoming_request(
             }
 
             if let Some(state) = server_states.get_mut(&server_id) {
+                // Every answer is sealed to the reply key the request carried, and
+                // the other members' copy to the join key it was sealed to.
+                let answer = super::join_lane::Answer {
+                    server_id: &server_id,
+                    our_device: device_peer_id,
+                    join_key: state.join_secret().map(|s| super::sealed_box::public_of(&s)),
+                    joiner_device: peer_str,
+                    joiner_master: &member_master,
+                    reply_key: &reply_key,
+                    requested_at,
+                };
+
                 // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices,
                 // a sibling co-owning this server. It skips the ban, Twitch and
                 // owner-verify gates, which are for strangers, and is still added.
@@ -9421,10 +9486,7 @@ async fn handle_incoming_request(
                     if requested_at != 0 {
                         join_resolutions.insert(resolution_key, requested_at);
                     }
-                    sync_handler::send_join_rejection(
-                        ws_cmd_tx, &server_id, &peer_str, &member_master,
-                        requested_at, "banned", catchup_secs,
-                    );
+                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, "banned", catchup_secs);
                     return;
                 }
 
@@ -9463,10 +9525,7 @@ async fn handle_incoming_request(
                         if requested_at != 0 && !enriched_reason.starts_with("twitch_required:") {
                             join_resolutions.insert(resolution_key, requested_at);
                         }
-                        sync_handler::send_join_rejection(
-                            ws_cmd_tx, &server_id, &peer_str, &member_master,
-                            requested_at, &enriched_reason, catchup_secs,
-                        );
+                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &enriched_reason, catchup_secs);
                         return;
                     }
                 } } // close Twitch gate + `if !is_sibling`
@@ -9489,10 +9548,7 @@ async fn handle_incoming_request(
                                     if requested_at != 0 {
                                         join_resolutions.insert(resolution_key, requested_at);
                                     }
-                                    sync_handler::send_join_rejection(
-                                        ws_cmd_tx, &server_id, &peer_str, &member_master,
-                                        requested_at, &reason, catchup_secs,
-                                    );
+                                    sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
                                 }
                                 // Either way, non-owner does not process the join.
                                 return;
@@ -9517,10 +9573,7 @@ async fn handle_incoming_request(
                         if requested_at != 0 {
                             join_resolutions.insert(resolution_key, requested_at);
                         }
-                        sync_handler::send_join_rejection(
-                            ws_cmd_tx, &server_id, &peer_str, &member_master,
-                            requested_at, &reason, catchup_secs,
-                        );
+                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
                         return;
                     }
 
@@ -9532,10 +9585,7 @@ async fn handle_incoming_request(
                     if !is_sibling && state.is_nsfw() && !nsfw_confirmed {
                         hollow_log!("[HOLLOW-CRDT] NSFW consent required for {peer_str} joining {server_id}");
                         let reason = format!("nsfw_confirm:{}", state.name());
-                        sync_handler::send_join_rejection(
-                            ws_cmd_tx, &server_id, &peer_str, &member_master,
-                            requested_at, &reason, catchup_secs,
-                        );
+                        sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
                         return;
                     }
 
@@ -9548,10 +9598,7 @@ async fn handle_incoming_request(
                             if requested_at != 0 {
                                 join_resolutions.insert(resolution_key.clone(), requested_at);
                             }
-                            sync_handler::send_join_rejection(
-                                ws_cmd_tx, &server_id, &peer_str, &member_master,
-                                requested_at, &reason, catchup_secs,
-                            );
+                            sync_handler::send_join_rejection(ws_cmd_tx, &answer, &reason, catchup_secs);
                             return;
                         }
                     }
@@ -9709,26 +9756,20 @@ async fn handle_incoming_request(
                 // and replays. That buffered pair IS how a parked join completes.
                 let legacy = state.anchor() == crate::crdt::server_state::Anchor::Legacy;
                 if let Some(state_json) = legacy.then(|| serde_json::to_string(&state).ok()).flatten() {
-                    send_message_to_peer_in_room(
-                        ws_cmd_tx, &server_id,
-                        &peer_str, HavenMessage::ServerStateSnapshot {
-                            server_id: server_id.clone(),
-                            state_json,
-                        },
-                    );
+                    answer.reply(ws_cmd_tx, &HavenMessage::ServerStateSnapshot {
+                        server_id: server_id.clone(),
+                        state_json,
+                    });
                 }
 
                 // Send full server state to the joiner (all ops so they can reconstruct)
                 let all_ops: Vec<&crate::crdt::operations::CrdtOp> = state.op_log.iter().collect();
                 if let Ok(ops_json) = serde_json::to_string(&all_ops) {
                     hollow_log!("[HOLLOW-CRDT] Sending snapshot + {} ops to joiner {peer_str}", all_ops.len());
-                    send_message_to_peer_in_room(
-                        ws_cmd_tx, &server_id,
-                        &peer_str, HavenMessage::SyncResponse {
-                            server_id: server_id.clone(),
-                            ops_json,
-                        },
-                    );
+                    answer.reply(ws_cmd_tx, &HavenMessage::SyncResponse {
+                        server_id: server_id.clone(),
+                        ops_json,
+                    });
                 }
 
                 // Tell the ring (and so every member that is not here) that this
@@ -9737,10 +9778,7 @@ async fn handle_incoming_request(
                 if requested_at != 0 {
                     join_resolutions.insert(resolution_key, requested_at);
                     if catchup_secs > 0 {
-                        sync_handler::publish_join_resolution(
-                            ws_cmd_tx, &server_id, &member_master, requested_at,
-                            true, "", admitted_op_json,
-                        );
+                        sync_handler::publish_join_resolution(ws_cmd_tx, &answer, true, "", admitted_op_json);
                     }
                 }
 
@@ -10121,7 +10159,7 @@ async fn handle_incoming_request(
             );
         }
 
-        HavenMessage::SiblingServerAnnounce { server_id, owner } => {
+        HavenMessage::SiblingServerAnnounce { server_id, owner, join_key } => {
             // Multi-device: one of OUR OWN devices created a server and is telling us
             // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
             // a stranger can't pull us into a server this way.
@@ -10147,29 +10185,29 @@ async fn handle_incoming_request(
                 }
                 return;
             }
+            // Sealed to the join key like anyone's request, so it needs one: a server
+            // whose owner has not set it yet is announced again on the next reconnect.
+            if join_key.is_none() {
+                hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced {server_id} with no join key yet; waiting for the next announce");
+                return;
+            }
             hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; running join flow");
             // Lightweight inline join (mirrors handle_join_server): join the rooms and
             // send a ServerJoinRequest to the announcer, which same-identity fast-paths
             // us. The receiver's gates are `!is_sibling`, so no proof and NSFW pre-confirmed.
-            pending_server_joins.insert(server_id.clone(), PendingJoin {
+            // Our signed device list attributes us to our master with any member.
+            let pending = PendingJoin {
                 twitch_proof_json: None,
                 nsfw_confirmed: true,
                 owner_pin: owner,
+                device_list: crypto_handler::build_local_device_list(master_keypair, device_peer_id, db_path, db_passphrase),
+                join_key,
+                reply_secret: super::join_lane::ReplySecret::new(),
                 ..Default::default()
-            });
+            };
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
-            send_message_to_peer(
-                ws_cmd_tx, ws_room_peers,
-                &peer_str, HavenMessage::ServerJoinRequest {
-                    server_id: server_id.clone(),
-                    twitch_proof_json: None,
-                    nsfw_confirmed: true,
-                    requested_at: 0,
-                    device_list: None,
-                    parked: false,
-                    key_package: None,
-                },
-            );
+            super::join_lane::send_request(ws_cmd_tx, &server_id, device_peer_id, &pending, peer_str);
+            pending_server_joins.insert(server_id, pending);
         }
 
         // -- MLS message handlers --
@@ -11970,7 +12008,7 @@ async fn handle_incoming_request(
                 if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
                 super::olm_lane::carry(
                     ws_cmd_tx, peer_str, None,
-                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner() },
+                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text() },
                     super::olm_lane::NoSession::Queue,
                 );
                 announced += 1;

@@ -50,11 +50,18 @@ class _AddServerDialogState extends ConsumerState<_AddServerDialog> {
   Future<void> _join() async {
     final input = _invite.text.trim();
     if (input.isEmpty || _busy) return;
-    // Accepts a hollow:// link, a web /join# link or a raw server id.
+    // A hollow:// link or a web /join# link. A bare server id cannot join: the
+    // request is sealed to the join key only the whole link carries.
     final invite = inviteFromInput(input, HollowLinkType.serverInvite);
     if (!isServerIdShape(invite.id)) {
       setState(() => _joinError =
-          "That isn't an invite link or server ID. Check what you pasted.");
+          "That isn't an invite link. Check what you pasted.");
+      return;
+    }
+    if (invite.key == null) {
+      setState(() => _joinError =
+          "That isn't a full invite link. Paste the whole link, or ask for a "
+          'new one.');
       return;
     }
     setState(() {
@@ -68,14 +75,16 @@ class _AddServerDialogState extends ConsumerState<_AddServerDialog> {
           type: HollowLinkType.serverInvite,
           id: invite.id,
           relay: invite.relay,
-          owner: invite.owner)) {
+          owner: invite.owner,
+          key: invite.key)) {
         if (mounted) setState(() => _joining = false);
         return;
       }
       await crdt_api.joinServer(
           serverId: invite.id.toLowerCase(),
           nsfwConfirmed: false,
-          ownerPin: invite.owner);
+          ownerPin: invite.owner,
+          joinKey: invite.key);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -137,7 +146,7 @@ class _AddServerDialogState extends ConsumerState<_AddServerDialog> {
     // never both, so neither outranks the other and both are outline.
     const joinHeader = HollowSectionHeader(
       'Join a server',
-      subtitle: 'Paste an invite link or server ID.',
+      subtitle: 'Paste an invite link.',
     );
     final joinForm = Column(
       mainAxisSize: MainAxisSize.min,
@@ -145,7 +154,7 @@ class _AddServerDialogState extends ConsumerState<_AddServerDialog> {
       children: [
         HollowTextField(
           controller: _invite,
-          hintText: 'Invite link or server ID',
+          hintText: 'Invite link',
           autofocus: !isCompact,
           style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
           errorText: _joinError,

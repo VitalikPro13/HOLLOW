@@ -88,6 +88,7 @@ class _Api implements RustLibApi {
     String? twitchProofJson,
     required bool nsfwConfirmed,
     String? ownerPin,
+    String? joinKey,
   }) async {
     if (joinServerError != null) throw joinServerError!;
     joined.add(serverId);
@@ -315,7 +316,7 @@ void main() {
       expect(find.byWidgetPredicate((w) =>
               w is HollowButton && w.variant == HollowButtonVariant.filled),
           findsNothing);
-      expect(find.text('Invite link or server ID'), findsOneWidget);
+      expect(find.text('Invite link'), findsOneWidget);
       expect(find.text('My Awesome Server'), findsOneWidget);
     });
 
@@ -356,14 +357,31 @@ void main() {
       await _pump(tester, size: const Size(1440, 900));
       showCreateServerDialog(_ctx);
       await tester.pumpAndSettle();
-      await tester.enterText(
-          find.byType(TextField).first, '0123456789abcdef0123456789abcdef');
+      await tester.enterText(find.byType(TextField).first,
+          'https://hollow.anonlisten.com/join#server=0123456789abcdef0123456789abcdef&key=Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9');
       await tester.pump();
       await tester.tap(find.text('Join'));
       await tester.pumpAndSettle();
       expect(find.text('Add a server'), findsOneWidget);
       expect(find.text('Hollow is still starting up. Try again in a moment.'),
           findsOneWidget);
+    });
+
+    testWidgets('a bare server id is refused: the join key rides the link',
+        (tester) async {
+      await _pump(tester, size: const Size(1440, 900));
+      showCreateServerDialog(_ctx);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+          find.byType(TextField).first, '0123456789abcdef0123456789abcdef');
+      await tester.pump();
+      await tester.tap(find.text('Join'));
+      await tester.pumpAndSettle();
+      expect(
+          find.text("That isn't a full invite link. Paste the whole link, "
+              'or ask for a new one.'),
+          findsOneWidget);
+      expect(api.joined, isEmpty);
     });
 
     testWidgets('text that is no invite is refused on its field, never joined',
@@ -377,8 +395,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Add a server'), findsOneWidget);
       expect(
-          find.text(
-              "That isn't an invite link or server ID. Check what you pasted."),
+          find.text("That isn't an invite link. Check what you pasted."),
           findsOneWidget);
       expect(api.joined, isEmpty);
     });

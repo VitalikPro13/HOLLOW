@@ -61,5 +61,9 @@ String pendingJoinReasonText(String reason) {
 
   if (reason.startsWith('twitch_failed:')) return 'Twitch verification failed';
 
+  if (reason == 'invite_outdated') {
+    return 'This invite link is from before the update. Ask for a new one.';
+  }
+
   return reason.trim().isEmpty ? 'The request was declined' : reason;
 }

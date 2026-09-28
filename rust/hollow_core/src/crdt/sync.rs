@@ -102,6 +102,7 @@ pub fn payload_name(payload: &super::operations::CrdtPayload) -> &'static str {
         P::ServerCheckpoint { .. } => "ServerCheckpoint",
         P::ServerRenamed { .. } => "ServerRenamed",
         P::ServerSettingChanged { .. } => "ServerSettingChanged",
+        P::JoinKeySet { .. } => "JoinKeySet",
         P::ServerDeleted { .. } => "ServerDeleted",
         P::ChannelAdded { .. } => "ChannelAdded",
         P::ChannelRemoved { .. } => "ChannelRemoved",

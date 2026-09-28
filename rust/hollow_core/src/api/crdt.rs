@@ -662,6 +662,7 @@ pub fn join_server(
     twitch_proof_json: Option<String>,
     nsfw_confirmed: bool,
     owner_pin: Option<String>,
+    join_key: Option<String>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -671,7 +672,7 @@ pub fn join_server(
     rt.block_on(
         state
             .cmd_tx
-            .send(node::NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed, owner_pin }),
+            .send(node::NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed, owner_pin, join_key }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
@@ -717,6 +718,25 @@ pub fn server_invite_owner(server_id: String) -> Option<String> {
         .into_iter()
         .find(|row| row.server_id == server_id)
         .and_then(|row| row.owner_pin)
+}
+
+/// The join key an invite link to this server must carry (`key=`): the public half
+/// of the key every request to join is sealed to. `None` until the owner has set one.
+#[frb(sync)]
+pub fn server_invite_key(server_id: String) -> Option<String> {
+    let store_guard = super::storage::get_store().lock().ok()?;
+    let store = store_guard.as_ref()?;
+    if let Some(json) = store.load_server_state(&server_id).ok().flatten() {
+        return serde_json::from_str::<crate::crdt::server_state::ServerState>(&json)
+            .ok()
+            .and_then(|state| state.join_public_text());
+    }
+    store
+        .load_pending_joins()
+        .ok()?
+        .into_iter()
+        .find(|row| row.server_id == server_id)
+        .and_then(|row| row.join_key)
 }
 
 /// Get the local user's permissions bitmask in a server.

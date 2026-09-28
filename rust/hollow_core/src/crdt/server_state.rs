@@ -278,6 +278,9 @@ pub struct ServerState {
     /// backfill judges a post's author against. Carried by checkpoints.
     #[serde(default)]
     pub member_record: HashMap<String, Vec<MemberSpan>>,
+    /// The Owner's join secret (`JoinKeySet`), 64 hex. Carried by checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_secret: Option<AdminLwwReg<super::operations::JoinSecret>>,
     /// The owner this replica is anchored to: the founder of a self-certifying id,
     /// the pin an invite carried, or the owner of the first checkpoint or snapshot we
     /// accepted. The owner never changes, so neither does this once set.
@@ -320,7 +323,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, owner_pin, checkpoint_hlc,
+            member_record, join_secret, owner_pin, checkpoint_hlc,
             op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
         } = self;
         ServerState {
@@ -345,6 +348,7 @@ impl ServerState {
             stickers: stickers.clone(),
             deleted: *deleted,
             member_record: member_record.clone(),
+            join_secret: join_secret.clone(),
             owner_pin: owner_pin.clone(),
             checkpoint_hlc: checkpoint_hlc.clone(),
             op_log: Vec::new(),
@@ -380,6 +384,7 @@ impl ServerState {
             stickers: HashMap::new(),
             deleted: false,
             member_record: HashMap::new(),
+            join_secret: None,
             owner_pin: None,
             checkpoint_hlc: None,
             op_log: Vec::new(),
@@ -725,7 +730,7 @@ impl ServerState {
 
         let ServerState {
             name, roles, nicknames, twitch_usernames, storage_pledges, settings,
-            role_permissions, banned_members, muted_members, channel_grants,
+            role_permissions, banned_members, muted_members, channel_grants, join_secret,
             // No timestamp of their own — these converge through the ops that
             // write them, never through an LWW register.
             server_id: _, channels: _, members: _, pinned_messages: _,
@@ -736,6 +741,9 @@ impl ServerState {
         } = self;
 
         if name.clamp_hlc(max_ms) {
+            clamped += 1;
+        }
+        if join_secret.as_mut().is_some_and(|reg| reg.clamp_hlc(max_ms)) {
             clamped += 1;
         }
         clamped += clamp_map(roles, max_ms);
@@ -853,6 +861,14 @@ impl ServerState {
                     });
                 let remote = AdminLwwReg::new(value.clone(), op.hlc.clone(), priority);
                 entry.merge(&remote);
+            }
+
+            CrdtPayload::JoinKeySet { secret } => {
+                let remote = AdminLwwReg::new(secret.clone(), op.hlc.clone(), MemberRole::Owner.priority());
+                match self.join_secret.as_mut() {
+                    Some(reg) => reg.merge(&remote),
+                    None => self.join_secret = Some(remote),
+                }
             }
 
             CrdtPayload::ServerDeleted { .. } => {
@@ -1254,7 +1270,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record,
+            member_record, join_secret,
             owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
             held: _, signer: _,
         } = base;
@@ -1278,6 +1294,7 @@ impl ServerState {
         self.stickers = stickers;
         self.deleted = deleted;
         self.member_record = member_record;
+        self.join_secret = join_secret;
         self.owner_pin = Some(owner.to_string());
         self.checkpoint_hlc = Some(covers.clone());
         // The owner is trusted with the values, never with timestamps that would
@@ -1294,7 +1311,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, checkpoint_hlc,
+            member_record, join_secret, checkpoint_hlc,
             owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
         } = fresh;
         self.name = name;
@@ -1317,6 +1334,7 @@ impl ServerState {
         self.stickers = stickers;
         self.deleted = deleted;
         self.member_record = member_record;
+        self.join_secret = join_secret;
         self.checkpoint_hlc = checkpoint_hlc;
     }
 
@@ -1441,6 +1459,17 @@ impl ServerState {
     /// at 0, deliberately BELOW plain members, so do not route this via `get_role`, which
     /// defaults unknowns to `Member`. Ban and mute registers keep it: lifting one needs
     /// at least the rank that set it.
+    /// The join secret the Owner set, if any.
+    pub fn join_secret(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        join_secret_shape(&self.join_secret.as_ref()?.read().0)
+    }
+
+    /// The public half of the join secret, as invite links carry it.
+    pub fn join_public_text(&self) -> Option<String> {
+        let secret = self.join_secret()?;
+        Some(crate::node::sealed_box::key_to_text(&crate::node::sealed_box::public_of(&secret)))
+    }
+
     fn author_priority(&self, author: &str) -> u8 {
         let key = super::resolve_identity(author);
         self.roles
@@ -1620,6 +1649,7 @@ impl ServerState {
                 self.role_change_allowed(&role, perms, peer_id, new_role)
             }
             CrdtPayload::ServerRenamed { .. } => has(Permission::MANAGE_SERVER),
+            CrdtPayload::JoinKeySet { secret } => role == MemberRole::Owner && join_secret_shape(&secret.0).is_some(),
             CrdtPayload::ServerSettingChanged { key, value } => {
                 self.setting_allowed_for(&role, perms, key, value)
             }
@@ -2014,6 +2044,15 @@ fn epoch_ms_now() -> u64 {
         .as_millis() as u64
 }
 
+/// A join secret's bytes, when it has the one shape `JoinKeySet` may carry.
+fn join_secret_shape(secret: &str) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    if secret.len() != 64 {
+        return None;
+    }
+    let bytes = zeroize::Zeroizing::new(hex::decode(secret).ok()?);
+    Some(zeroize::Zeroizing::new(bytes.as_slice().try_into().ok()?))
+}
+
 /// Truncate a peer ID to a short display name.
 fn short_name(peer_id: &str) -> String {
     if peer_id.len() > 12 {
@@ -2027,6 +2066,7 @@ fn short_name(peer_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::crdt::testkeys::{keys, owned_state};
+    use crate::crdt::operations::JoinSecret;
 
     /// A state with a signer installed, so `create_op` works. The owner id stays the
     /// caller's readable string: these tests drive `op_allowed` and `apply_op`, neither
@@ -2097,6 +2137,11 @@ mod tests {
             // Server rename/settings: Owner or Admin only.
             ("admin", CrdtPayload::ServerRenamed { new_name: "X".into() }, true),
             ("moder", CrdtPayload::ServerSettingChanged { key: "k".into(), value: "v".into() }, false),
+            // The join key: the Owner only, and only a well-formed secret.
+            ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("ab".repeat(32)) }, true),
+            ("admin", CrdtPayload::JoinKeySet { secret: JoinSecret("ab".repeat(32)) }, false),
+            ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("ab".repeat(31)) }, false),
+            ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("zz".repeat(32)) }, false),
             // MemberRemoved: voluntary self-leave always; kicks need KICK_MEMBERS + outrank.
             ("alice", CrdtPayload::MemberRemoved { peer_id: "alice".into() }, true),
             ("alice", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, false),
@@ -2232,6 +2277,26 @@ mod tests {
         });
         assert!(!skeleton.op_allowed(&other), "a pinned joiner takes only the pinned owner");
         assert!(skeleton.op_allowed(&founding));
+    }
+
+    #[test]
+    fn the_join_key_lands_converges_and_rides_a_checkpoint() {
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
+        assert!(s.join_public_text().is_none(), "a server starts with no join key");
+        let first = s.create_op(CrdtPayload::JoinKeySet { secret: JoinSecret("01".repeat(32)) });
+        let second = s.create_op(CrdtPayload::JoinKeySet { secret: JoinSecret("02".repeat(32)) });
+        let mut replica = s.clone();
+        let _ = s.apply_op(&first);
+        let _ = s.apply_op(&second);
+        let _ = replica.apply_op(&second);
+        let _ = replica.apply_op(&first);
+        assert_eq!(s.join_secret().map(|k| *k), Some([2u8; 32]));
+        assert_eq!(s.join_public_text(), replica.join_public_text(), "the later key wins in any order");
+        assert!(!format!("{s:?}").contains(&"02".repeat(32)), "the secret never prints");
+
+        let mut rebuilt = ServerState::skeleton("s1".into());
+        rebuilt.rebase_on(s.lean_snapshot(), "owner", &second.hlc);
+        assert_eq!(rebuilt.join_public_text(), s.join_public_text(), "a checkpoint carries the join key");
     }
 
     #[test]

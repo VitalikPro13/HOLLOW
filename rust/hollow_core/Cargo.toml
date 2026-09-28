@@ -77,6 +77,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 argon2 = "0.5"
 # Meeting knock proofs (node/conference.rs); already in the tree through openmls.
 hmac = "0.12"
+# Join-lane sealed boxes (node/sealed_box.rs); both already in the tree through openmls.
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+hkdf = "0.12"
 # Pure-Rust Opus (libopus transpiled via c2rust) — decodes screen-share audio
 # packets on mobile. Pure Rust = no cmake/NDK, rides the existing cross-compile.
 unsafe-libopus = "0.2"

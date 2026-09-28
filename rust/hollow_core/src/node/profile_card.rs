@@ -105,3 +105,53 @@ pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, db_path: &str
         .and_then(|st| st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar).ok())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aes_gcm::aead::{Aead, Payload};
+
+    fn keypair(seed: u8) -> NativeKeypair {
+        NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    fn genuine_card(owner: &NativeKeypair, name: &str) -> SignedCard {
+        let master = owner.peer_id();
+        let payload = crate::node::crypto_handler::card_signing_payload(&master, 7, name, "");
+        let pk = base64::engine::general_purpose::STANDARD.encode(owner.public_key_protobuf());
+        let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(owner, &pk, &payload) else {
+            panic!("signing never fails");
+        };
+        SignedCard { master, display_name: name.into(), avatar_hash: String::new(), updated_at: 7, sig, pk }
+    }
+
+    /// `card` sealed under the `sealer`/`target` pair secret, whoever the card names.
+    fn seal_as(card: &SignedCard, sealer: &str, target: &str, ts: i64) -> SealedCard {
+        let ct = seal_cipher(sealer, target)
+            .expect("sealer registered")
+            .encrypt(aes_gcm::Nonce::from_slice(&[9u8; 12]), Payload {
+                msg: &serde_json::to_vec(card).unwrap(),
+                aad: &seal_aad(sealer, target, ts),
+            })
+            .unwrap();
+        let engine = base64::engine::general_purpose::STANDARD;
+        SealedCard { nonce: engine.encode([9u8; 12]), ct: engine.encode(ct) }
+    }
+
+    #[test]
+    fn a_sealed_card_naming_another_master_is_refused() {
+        let (a, b, c) = (keypair(41), keypair(42), keypair(43));
+        for k in [&a, &b, &c] {
+            crate::node::dm_room::register(k);
+        }
+        let (a_id, b_id, c_id) = (a.peer_id(), b.peer_id(), c.peer_id());
+
+        let own = seal_as(&genuine_card(&c, "Cee"), &c_id, &b_id, 100);
+        assert!(open_from(&own, &b_id, &c_id, 100).is_some(), "the requester's own card opens");
+
+        // C holds A's genuine signed card and seals it inside its own request to B.
+        let borrowed = seal_as(&genuine_card(&a, "Ay"), &c_id, &b_id, 100);
+        assert!(open_from(&borrowed, &b_id, &c_id, 100).is_none(), "C cannot show B someone else's card");
+        assert!(open_from(&borrowed, &b_id, &a_id, 100).is_none(), "nor can it pass for a request from A");
+    }
+}

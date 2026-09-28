@@ -74,6 +74,7 @@ import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/album_notification_gate.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/models/pending_join_info.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -1740,6 +1741,12 @@ class EventStreamNotifier extends Notifier<bool> {
                   '${serverName.isEmpty ? 'This server' : '“$serverName”'} has '
                   'reached its member limit${max.isEmpty ? '' : ' ($max members)'}.',
             );
+          }
+        } else if (reason == 'invite_outdated') {
+          final msg = pendingJoinReasonText(reason);
+          final handled = handleTwitchJoinResult(success: false, error: msg);
+          if (!handled) {
+            HollowToast.show(ctx, msg, type: HollowToastType.error);
           }
         } else if (reason.startsWith('nsfw_confirm:')) {
           // Format: "nsfw_confirm:{server_name}". A consent gate, not a rejection.

@@ -270,7 +270,9 @@ Future<List<MediaListItem>> listMediaForContext({
 Future<List<StoredFileInfo>> getIncompleteFiles() =>
     RustLib.instance.api.crateApiStorageGetIncompleteFiles();
 
-/// Mark a file as complete with its disk path (used for share-backed files).
+/// Mark a file as complete with its disk path (used for share-backed files). A
+/// committed file's bytes must be the ones its id commits to; the hash runs with the
+/// store unlocked, since a share download can be gigabytes.
 Future<void> markFileComplete({
   required String fileId,
   required String diskPath,

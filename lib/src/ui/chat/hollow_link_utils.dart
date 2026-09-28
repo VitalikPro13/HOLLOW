@@ -7,26 +7,33 @@ const String hollowWebJoinBase = 'https://hollow.anonlisten.com/join';
 
 /// Canonical shareable server invite. Hollow renders it as a Join card, a
 /// browser bounces it to hollow://, and anyone without Hollow gets a download
-/// page. [owner] pins the owner of a server founded before 0.12 (a newer id
-/// proves its owner by itself), so the joiner refuses a state anyone else hands
-/// it; pass `serverInviteOwner(serverId:)`.
+/// page. [key] is the server's join key (`serverInviteKey(serverId:)`): a
+/// request to join is sealed to it, so a link without one cannot join. [owner]
+/// pins the owner of a server founded before 0.12 (a newer id proves its owner
+/// by itself); pass `serverInviteOwner(serverId:)`.
 String webServerInviteLink(String serverId,
-        {required String relay, String? owner}) =>
-    '$hollowWebJoinBase#server=$serverId${_ownerParam(owner)}${_relayParam(relay, '&')}';
+        {required String relay, String? owner, String? key}) =>
+    '$hollowWebJoinBase#server=$serverId${_keyParam(key)}${_ownerParam(owner)}${_relayParam(relay, '&')}';
 
-/// The invite link to a server we hold, pinning its owner when its id cannot.
+/// The invite link to a server we hold, with its join key, pinning its owner
+/// when its id cannot.
 String serverInviteLinkFor(String serverId, {required String relay}) {
   String? owner;
+  String? key;
   try {
     owner = crdt_api.serverInviteOwner(serverId: serverId);
+    key = crdt_api.serverInviteKey(serverId: serverId);
   } catch (_) {
-    // No Rust library (a widget test): the link just goes out unpinned.
+    // No Rust library (a widget test): the link goes out without them.
   }
-  return webServerInviteLink(serverId, relay: relay, owner: owner);
+  return webServerInviteLink(serverId, relay: relay, owner: owner, key: key);
 }
 
 String _ownerParam(String? owner) =>
     owner != null && _peerIdRegex.hasMatch(owner) ? '&owner=$owner' : '';
+
+String _keyParam(String? key) =>
+    key != null && _joinKeyRegex.hasMatch(key) ? '&key=$key' : '';
 
 /// Canonical shareable conference invite, on the same fragment rule: the conf
 /// id never reaches any server log.
@@ -50,6 +57,9 @@ final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 
 /// A master peer id: base58, so no 0, O, I or l.
 final _peerIdRegex = RegExp(r'^[1-9A-HJ-NP-Za-km-z]{20,128}$');
+
+/// A server's join key: 32 bytes as unpadded URL-safe base64.
+final _joinKeyRegex = RegExp(r'^[A-Za-z0-9_-]{43}$');
 
 /// A Hollow Shop support code. Longer floor than an invite id, because these
 /// are typed out of a receipt email and a two-character code is a typo.
@@ -151,12 +161,17 @@ class HollowLink {
   /// The owner a server invite pins, for a server founded before 0.12.
   final String? owner;
 
+  /// The join key a server invite carries; null on a link made before 0.12,
+  /// which cannot join.
+  final String? key;
+
   const HollowLink({
     required this.type,
     required this.fullUrl,
     required this.id,
     this.relay,
     this.owner,
+    this.key,
   });
 }
 
@@ -178,6 +193,11 @@ HollowLink? classifyHollowLink(String url) {
     return raw != null && _peerIdRegex.hasMatch(raw) ? raw : null;
   }
 
+  String? keyOf(Map<String, String> params) {
+    final raw = params['key'];
+    return raw != null && _joinKeyRegex.hasMatch(raw) ? raw : null;
+  }
+
   if (uri.scheme == 'hollow') {
     final params = uri.queryParameters;
     final relay = relayOf(params);
@@ -192,13 +212,15 @@ HollowLink? classifyHollowLink(String url) {
       final roomCode = params['room'];
       if (serverId != null && serverId.isNotEmpty) {
         final owner = ownerOf(params);
+        final key = keyOf(params);
         return HollowLink(
           type: HollowLinkType.serverInvite,
           fullUrl:
-              'hollow://join?server=$serverId${_ownerParam(owner)}${_relayParam(relay, '&')}',
+              'hollow://join?server=$serverId${_keyParam(key)}${_ownerParam(owner)}${_relayParam(relay, '&')}',
           id: serverId,
           relay: relay,
           owner: owner,
+          key: key,
         );
       } else if (roomCode != null && roomCode.isNotEmpty) {
         return HollowLink(
@@ -259,13 +281,15 @@ HollowLink? classifyHollowLink(String url) {
     final roomCode = params['room'];
     if (serverId != null && _inviteIdRegex.hasMatch(serverId)) {
       final owner = ownerOf(params);
+      final key = keyOf(params);
       return HollowLink(
         type: HollowLinkType.serverInvite,
         fullUrl:
-            'hollow://join?server=$serverId${_ownerParam(owner)}${_relayParam(relay, '&')}',
+            'hollow://join?server=$serverId${_keyParam(key)}${_ownerParam(owner)}${_relayParam(relay, '&')}',
         id: serverId,
         relay: relay,
         owner: owner,
+        key: key,
       );
     }
     if (roomCode != null && _inviteIdRegex.hasMatch(roomCode)) {
@@ -300,16 +324,16 @@ HollowLink? classifyHollowLink(String url) {
 String inviteIdFromInput(String input, HollowLinkType type) =>
     inviteFromInput(input, type).id;
 
-/// [inviteIdFromInput] plus the relay and owner pin the link named, for the join
-/// paths that must offer a relay switch before they can reach the invite at all.
-({String id, String? relay, String? owner}) inviteFromInput(
+/// [inviteIdFromInput] plus the relay, owner pin and join key the link named, for
+/// the join paths that must offer a relay switch before they can reach the invite.
+({String id, String? relay, String? owner, String? key}) inviteFromInput(
     String input, HollowLinkType type) {
   final trimmed = input.trim();
   final link = classifyHollowLink(trimmed);
   if (link != null && link.type == type) {
-    return (id: link.id, relay: link.relay, owner: link.owner);
+    return (id: link.id, relay: link.relay, owner: link.owner, key: link.key);
   }
-  return (id: trimmed, relay: null, owner: null);
+  return (id: trimmed, relay: null, owner: null, key: null);
 }
 
 /// Whether [id] has the shape of a server id: 40 hex characters for a server

@@ -175,11 +175,13 @@ Future<void> joinServer({
   String? twitchProofJson,
   required bool nsfwConfirmed,
   String? ownerPin,
+  String? joinKey,
 }) => RustLib.instance.api.crateApiCrdtJoinServer(
   serverId: serverId,
   twitchProofJson: twitchProofJson,
   nsfwConfirmed: nsfwConfirmed,
   ownerPin: ownerPin,
+  joinKey: joinKey,
 );
 
 /// Get the local user's role in a server.
@@ -192,6 +194,11 @@ Future<String> getMyRole({required String serverId}) =>
 /// its owner by itself, and for a server we know no owner of.
 String? serverInviteOwner({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtServerInviteOwner(serverId: serverId);
+
+/// The join key an invite link to this server must carry (`key=`): the public half
+/// of the key every request to join is sealed to. `None` until the owner has set one.
+String? serverInviteKey({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtServerInviteKey(serverId: serverId);
 
 /// Get the local user's permissions bitmask in a server.
 Future<int> getMyPermissions({required String serverId}) =>

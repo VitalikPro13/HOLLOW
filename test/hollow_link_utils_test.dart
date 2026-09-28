@@ -344,6 +344,27 @@ void main() {
           reason: 'the canonical form keeps the pin');
     });
 
+    test('an invite carries its join key through every form', () {
+      const key = 'Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9';
+      final web = webServerInviteLink('abc123', relay: 'r.example.com', key: key);
+      expect(web, contains('key=$key'));
+      final parsed = inviteFromInput(web, HollowLinkType.serverInvite);
+      expect(parsed.key, key);
+      final link = classifyHollowLink(web)!;
+      expect(link.key, key);
+      expect(classifyHollowLink(link.fullUrl)!.key, key,
+          reason: 'the canonical form keeps the key, or a relay switch loses it');
+    });
+
+    test('a key that is not a join key is dropped, and a bare id has none', () {
+      final parsed = inviteFromInput(
+          'hollow://join?server=abc123&key=short', HollowLinkType.serverInvite);
+      expect(parsed.key, isNull);
+      expect(inviteFromInput('abc123', HollowLinkType.serverInvite).key, isNull);
+      expect(webServerInviteLink('abc', relay: 'r.example.com', key: 'no'),
+          isNot(contains('key=')));
+    });
+
     test('an owner that is not a peer id is dropped', () {
       final parsed = inviteFromInput(
           'hollow://join?server=abc123&owner=%3Cscript%3E',

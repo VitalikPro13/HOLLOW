@@ -631,7 +631,7 @@ pub(crate) async fn handle_conference_kick(
 
 /// One line of the meeting's group channel: MLS-encrypted under the conf group and
 /// broadcast. Never persisted anywhere, never rides topic rings.
-fn send_group_line(
+pub(crate) fn send_group_line(
     mls_mgr: &mut MlsManager,
     crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,

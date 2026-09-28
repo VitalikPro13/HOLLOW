@@ -129,6 +129,18 @@ impl CrdtOp {
     }
 }
 
+/// A server's join secret as the CRDT carries it: 64 hex on the wire, never in a
+/// log line.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct JoinSecret(pub String);
+
+impl std::fmt::Debug for JoinSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JoinSecret(..)")
+    }
+}
+
 /// The payload of a CRDT operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CrdtPayload {
@@ -159,6 +171,12 @@ pub enum CrdtPayload {
     ServerSettingChanged {
         key: String,
         value: String,
+    },
+    /// The server's X25519 join secret, 64 hex, set by the Owner only. Members hold
+    /// it and invite links carry its public half, so what a joiner and the members
+    /// say before the joiner is in stays sealed from the relay (claim C-24).
+    JoinKeySet {
+        secret: JoinSecret,
     },
     /// Server deletion tombstone, owner-authored only (validated at ingest). Marks the
     /// state `deleted` and drains membership, but survives in the op_log so reconnecting

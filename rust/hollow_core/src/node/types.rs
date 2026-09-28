@@ -752,6 +752,12 @@ pub(crate) struct PendingJoin {
     /// The owner the invite pinned (`owner=` on a link to a pre-0.12 server): the only
     /// owner a snapshot, founding op or checkpoint may name while this join completes.
     pub(crate) owner_pin: Option<String>,
+    /// The server's join key from the invite (public half, text form): every copy
+    /// of the request is sealed to it.
+    pub(crate) join_key: Option<String>,
+    /// Our reply key for this row, minted once like the KeyPackage: an answer to an
+    /// older copy of the request still opens.
+    pub(crate) reply_secret: Option<super::join_lane::ReplySecret>,
 }
 
 /// How often a still-parked join re-deposits its copy into the `~join` ring.
@@ -805,7 +811,14 @@ pub(crate) enum NodeCommand {
     RenameChannel { server_id: String, channel_id: String, new_name: String },
     UpdateServerSetting { server_id: String, key: String, value: String },
     DeleteServer { server_id: String },
-    JoinServer { server_id: String, twitch_proof_json: Option<String>, nsfw_confirmed: bool, owner_pin: Option<String> },
+    JoinServer {
+        server_id: String,
+        twitch_proof_json: Option<String>,
+        nsfw_confirmed: bool,
+        owner_pin: Option<String>,
+        /// The invite's `key=`: the server's join key, public half.
+        join_key: Option<String>,
+    },
     RequestChannelSync { server_id: String, channel_id: String },
     ChangeRole { server_id: String, peer_id: String, new_role: String },
     KickMember { server_id: String, peer_id: String },
@@ -1177,6 +1190,13 @@ pub(crate) enum NodeCommand {
         device: String,
         msg: Box<HavenMessage>,
     },
+    /// TEST-ONLY: a raw plaintext line into a meeting's MLS group, as a participant
+    /// with a modified client could send it. Absent in release builds.
+    #[cfg(test)]
+    TestConferenceLine {
+        conf_id: String,
+        line: String,
+    },
 }
 
 impl NodeCommand {
@@ -1339,6 +1359,8 @@ impl NodeCommand {
             Self::DebugSnapshot { .. } => "DebugSnapshot",
             #[cfg(test)]
             Self::TestCarry { .. } => "TestCarry",
+            #[cfg(test)]
+            Self::TestConferenceLine { .. } => "TestConferenceLine",
         }
     }
 }
@@ -1500,6 +1522,10 @@ pub(crate) enum HavenMessage {
         /// widening what the ring exposes. Absent = a client from before rung 2.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_package: Option<String>,
+        /// The joiner's reply key for this row (X25519, public half): every answer to
+        /// the request is sealed to it, so only the joiner reads them.
+        #[serde(default)]
+        reply_key: String,
     },
 
     #[serde(rename = "join_rejected")]
@@ -1543,6 +1569,14 @@ pub(crate) enum HavenMessage {
         /// The `MemberAdded` CrdtOp JSON when admitted, else None.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         op_json: Option<String>,
+    },
+
+    /// A join-lane message sealed to the server's join key or to a joiner's reply key
+    /// (`node/join_lane.rs`), always in the server's own room.
+    #[serde(rename = "join_sealed")]
+    JoinSealed {
+        eph: String,
+        ct: String,
     },
 
     /// Sent to the kicked member so they remove themselves from the server.
@@ -1609,6 +1643,10 @@ pub(crate) enum HavenMessage {
         /// join so no member's snapshot can name another.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
+        /// The server's join key, public half: our join request is sealed to it like
+        /// anyone's. `None` until the owner has set one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        join_key: Option<String>,
     },
 
     // -- MLS group encryption messages --
@@ -3765,6 +3803,7 @@ impl HavenMessage {
             | Self::ServerJoinRequest { parked: true, .. }
             | Self::ServerJoinRejected { .. }
             | Self::ServerJoinResolved { .. }
+            | Self::JoinSealed { .. }
             | Self::MemberKickBroadcast { .. }
             | Self::MlsChannelMessage { .. }
             | Self::MlsWelcome { .. }
@@ -3920,7 +3959,12 @@ impl HavenMessage {
             | Self::ProfileRequestFor { .. }
             | Self::ProfileRelay { .. }
             | Self::ProfileCard { .. }
-            | Self::IdentityDestroyed { .. } => Lane::Carried,
+            | Self::IdentityDestroyed { .. }
+            | Self::SyncResponse { .. } => Lane::Carried,
+            Self::ServerJoinRequest { .. }
+            | Self::ServerStateSnapshot { .. }
+            | Self::ServerJoinRejected { .. }
+            | Self::ServerJoinResolved { .. } => Lane::Join,
             Self::ShareManifestRequest { .. }
             | Self::ShareManifestResponse { .. }
             | Self::ShareHave { .. }
@@ -3944,11 +3988,7 @@ impl HavenMessage {
             | Self::CallScreenWatch { .. }
             | Self::CallRecordingState { .. } => Lane::CallSignal,
             Self::Encrypted { .. }
-            | Self::SyncResponse { .. }
-            | Self::ServerStateSnapshot { .. }
-            | Self::ServerJoinRequest { .. }
-            | Self::ServerJoinRejected { .. }
-            | Self::ServerJoinResolved { .. }
+            | Self::JoinSealed { .. }
             | Self::MlsChannelMessage { .. }
             | Self::MlsWelcome { .. }
             | Self::MlsCommit { .. }
@@ -4014,6 +4054,9 @@ pub(crate) enum Lane {
     CallSignal,
     /// Only inside [`HavenMessage::ShareSealed`], under the share's link key.
     Share,
+    /// Only inside [`HavenMessage::JoinSealed`], under a server's join key or a
+    /// joiner's reply key.
+    Join,
 }
 
 impl MessageEnvelope {

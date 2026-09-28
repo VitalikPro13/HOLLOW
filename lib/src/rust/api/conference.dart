@@ -11,9 +11,10 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Create or update a conference room.
 ///
-/// `conf_id: None` creates a room with a random unguessable id, which IS the link
-/// capability. `access_code` follows the profile convention: `None` keeps the current
-/// code, `Some("")` clears it, `Some(code)` sets it (stored as a conf-scoped hash).
+/// `conf_id: None` creates a room whose unguessable id hashes from our master and a
+/// fresh nonce, so the link is the capability and names its host. `access_code`
+/// follows the profile convention: `None` keeps the current code, `Some("")` clears
+/// it, `Some(code)` sets it (stored as its conf-scoped key).
 Future<ConferenceInfo> conferenceUpsert({
   String? confId,
   required String name,

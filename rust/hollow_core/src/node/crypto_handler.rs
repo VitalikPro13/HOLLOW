@@ -5043,7 +5043,7 @@ mod tests {
         match serde_json::from_str::<HavenMessage>(old_wire).unwrap() {
             HavenMessage::ServerJoinRequest {
                 server_id, twitch_proof_json, nsfw_confirmed,
-                requested_at, device_list, parked, key_package,
+                requested_at, device_list, parked, key_package, reply_key,
             } => {
                 assert_eq!(server_id, "abc");
                 assert!(twitch_proof_json.is_none());
@@ -5052,6 +5052,7 @@ mod tests {
                 assert!(device_list.is_none(), "old wire carries no device list");
                 assert!(!parked, "old wire is always a live request");
                 assert!(key_package.is_none(), "old wire carries no KeyPackage");
+                assert!(reply_key.is_empty(), "old wire carries no reply key, so no join box admits it");
             }
             other => panic!("expected ServerJoinRequest, got {other:?}"),
         }
@@ -5067,9 +5068,10 @@ mod tests {
                 device_list: None,
                 parked: true,
                 key_package: None,
+                reply_key: "rk".to_string(),
             })
             .unwrap(),
-            r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":7,"parked":true}"#,
+            r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":7,"parked":true,"reply_key":"rk"}"#,
         );
 
         // The PARKED copy carries the joiner's KeyPackage, which is what lets the
@@ -5083,11 +5085,12 @@ mod tests {
             device_list: None,
             parked: true,
             key_package: Some("a2V5cGFja2FnZQ".to_string()),
+            reply_key: "rk".to_string(),
         })
         .unwrap();
         assert_eq!(
             with_kp,
-            r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":9,"parked":true,"key_package":"a2V5cGFja2FnZQ"}"#,
+            r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":9,"parked":true,"key_package":"a2V5cGFja2FnZQ","reply_key":"rk"}"#,
         );
         match serde_json::from_str::<HavenMessage>(&with_kp).unwrap() {
             HavenMessage::ServerJoinRequest { key_package: Some(kp), parked, .. } => {
@@ -5110,6 +5113,7 @@ mod tests {
             device_list: Some(list.clone()),
             parked: true,
             key_package: None,
+            reply_key: "rk".to_string(),
         })
         .unwrap();
         match serde_json::from_str::<HavenMessage>(&wire).unwrap() {

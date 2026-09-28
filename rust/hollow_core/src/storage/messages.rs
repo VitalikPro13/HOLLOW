@@ -1155,6 +1155,9 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN key_package TEXT;");
         // The owner an invite pinned (a link to a pre-0.12 server carries `owner=`).
         migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN owner_pin TEXT;");
+        // The invite's join key and our reply key for the row (join lane, claim C-24).
+        migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN join_key TEXT;");
+        migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN reply_secret TEXT;");
 
         // Art imported from a `.hollowpack`, keyed by the art's HASH because that is its
         // identity everywhere else. The bytes live in `emote_blobs` under the ordinary
@@ -4100,8 +4103,9 @@ impl MessageStore {
             .execute(
                 "INSERT INTO pending_server_joins
                     (server_id, requested_at, nsfw_confirmed, twitch_proof_json,
-                     state, reason, last_deposited_at, created_at, key_package, owner_pin)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     state, reason, last_deposited_at, created_at, key_package, owner_pin,
+                     join_key, reply_secret)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(server_id) DO UPDATE SET
                     requested_at      = excluded.requested_at,
                     nsfw_confirmed    = excluded.nsfw_confirmed,
@@ -4110,7 +4114,9 @@ impl MessageStore {
                     reason            = excluded.reason,
                     last_deposited_at = excluded.last_deposited_at,
                     key_package       = excluded.key_package,
-                    owner_pin         = excluded.owner_pin",
+                    owner_pin         = excluded.owner_pin,
+                    join_key          = excluded.join_key,
+                    reply_secret      = excluded.reply_secret",
                 params![
                     row.server_id,
                     row.requested_at,
@@ -4122,6 +4128,8 @@ impl MessageStore {
                     row.created_at,
                     row.key_package,
                     row.owner_pin,
+                    row.join_key,
+                    row.reply_secret,
                 ],
             )
             .map_err(|e| format!("Failed to upsert pending join: {e}"))?;
@@ -4142,7 +4150,8 @@ impl MessageStore {
             .conn
             .prepare(
                 "SELECT server_id, requested_at, nsfw_confirmed, twitch_proof_json,
-                        state, reason, last_deposited_at, created_at, key_package, owner_pin
+                        state, reason, last_deposited_at, created_at, key_package, owner_pin,
+                        join_key, reply_secret
                  FROM pending_server_joins ORDER BY requested_at DESC",
             )
             .map_err(|e| format!("Failed to prepare pending join query: {e}"))?;
@@ -4159,6 +4168,8 @@ impl MessageStore {
                     created_at: row.get(7)?,
                     key_package: row.get(8)?,
                     owner_pin: row.get(9)?,
+                    join_key: row.get(10)?,
+                    reply_secret: row.get(11)?,
                 })
             })
             .map_err(|e| format!("Failed to query pending joins: {e}"))?;
@@ -6246,6 +6257,11 @@ pub struct PendingJoinRow {
     pub key_package: Option<String>,
     /// The owner the invite pinned; `None` for a link without one.
     pub owner_pin: Option<String>,
+    /// The server's join key from the invite; `None` on a row from before 0.12,
+    /// which can never be sent.
+    pub join_key: Option<String>,
+    /// Our reply key's secret half, hex: answers to the parked copy are sealed to it.
+    pub reply_secret: Option<String>,
 }
 
 /// Persisted conference room (host-local; reports/shipped/voice-and-media/CONFERENCES_PLAN.md).
