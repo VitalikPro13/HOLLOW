@@ -325,6 +325,7 @@ pub(crate) fn handle_conference_end(
     conf_id: &str,
 ) {
     clear_conf_voice_state(voice_channel_participants, voice_channel_gossip_mode, conf_id);
+    clear_card_audience(conf_id);
     let sid = conf_server_id(conf_id);
     let Some(ended) = conference_host.remove(conf_id) else {
         hollow_log!("[HOLLOW-CONF] End for {conf_id} we aren't hosting — ignoring");
@@ -403,6 +404,7 @@ pub(crate) fn handle_conference_leave(
     conf_id: &str,
 ) {
     clear_pending_knock(conf_id);
+    clear_card_audience(conf_id);
     clear_conf_voice_state(voice_channel_participants, voice_channel_gossip_mode, conf_id);
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: conf_server_id(conf_id) });
     hollow_log!("[HOLLOW-CONF] Left conference {conf_id}");
@@ -625,26 +627,23 @@ pub(crate) async fn handle_conference_kick(
     hollow_log!("[HOLLOW-CONF] Kicked {peer_id} from conference {conf_id}");
 }
 
-// ── Chat (RAM-only, MLS application messages) ────────────────────────
+// ── Chat and cards (RAM-only, MLS application messages) ──────────────
 
-/// Send a chat line: MLS-encrypt `{text, ts}` under the conf group and
+/// One line of the meeting's group channel: MLS-encrypted under the conf group and
 /// broadcast. Never persisted anywhere, never rides topic rings.
-pub(crate) fn handle_conference_send_chat(
-    mls: &mut Option<MlsManager>,
+fn send_group_line(
+    mls_mgr: &mut MlsManager,
     crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     conf_id: &str,
-    text: String,
-    timestamp: i64,
-) {
+    plaintext: &str,
+) -> bool {
     let sid = conf_server_id(conf_id);
-    let Some(mls_mgr) = mls.as_mut() else { return; };
-    let plaintext = serde_json::json!({ "text": text, "ts": timestamp }).to_string();
     let ciphertext = match mls_mgr.encrypt(&sid, plaintext.as_bytes()) {
         Ok(c) => c,
         Err(e) => {
-            hollow_log!("[HOLLOW-CONF] Chat encrypt failed for {conf_id}: {e}");
-            return;
+            hollow_log!("[HOLLOW-CONF] Group line encrypt failed for {conf_id}: {e}");
+            return false;
         }
     };
     // MLS rule: persist on encrypt (send ratchet must never be debounced).
@@ -654,16 +653,86 @@ pub(crate) fn handle_conference_send_chat(
         body: base64::engine::general_purpose::STANDARD.encode(ciphertext),
     }).unwrap_or_default();
     let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid, data });
+    true
 }
 
-/// Inbound chat line: decrypt under the conf group (decrypt success IS the
-/// membership proof) and emit — no store, no unread machinery.
+/// Send a chat line.
+pub(crate) fn handle_conference_send_chat(
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    conf_id: &str,
+    text: String,
+    timestamp: i64,
+) {
+    let Some(mls_mgr) = mls.as_mut() else { return; };
+    let plaintext = serde_json::json!({ "text": text, "ts": timestamp }).to_string();
+    send_group_line(mls_mgr, crypto_store, ws_cmd_tx, conf_id, &plaintext);
+}
+
+/// Per (our master, meeting), the devices in the group when we last sent our card:
+/// anyone else who shows theirs has not seen ours yet.
+type CardAudience = HashMap<(String, String), HashSet<String>>;
+static CARD_AUDIENCE: Mutex<Option<CardAudience>> = Mutex::new(None);
+
+/// Forget whom a meeting has shown our card to.
+pub(crate) fn clear_card_audience(conf_id: &str) {
+    if let Ok(mut guard) = CARD_AUDIENCE.lock()
+        && let Some(map) = guard.as_mut()
+    {
+        map.retain(|(_, conf), _| conf != conf_id);
+    }
+}
+
+fn card_seen_by(local_master: &str, conf_id: &str, device: &str) -> bool {
+    CARD_AUDIENCE
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            guard.as_ref().and_then(|map| {
+                map.get(&(local_master.to_string(), conf_id.to_string())).map(|set| set.contains(device))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Our card, with its avatar, to everyone admitted to the meeting (A28): the others
+/// are strangers as often as friends, and none of them can pull anything from us.
+pub(crate) fn broadcast_card(
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    conf_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Some(card) = super::profile_card::own_card(master_keypair, db_path, db_passphrase) else { return; };
+    let avatar = super::profile_card::own_avatar(&card.master, db_path, db_passphrase)
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+        .unwrap_or_default();
+    let members: HashSet<String> = mls_mgr.group_members(&conf_server_id(conf_id)).into_iter().collect();
+    let line = serde_json::json!({ "card": &card, "avatar": avatar }).to_string();
+    if send_group_line(mls_mgr, crypto_store, ws_cmd_tx, conf_id, &line)
+        && let Ok(mut guard) = CARD_AUDIENCE.lock()
+    {
+        guard.get_or_insert_with(HashMap::new).insert((card.master.clone(), conf_id.to_string()), members);
+    }
+}
+
+/// Inbound group line: decrypt under the conf group (decrypt success IS the
+/// membership proof), then a chat line is emitted and a card stored.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_inbound_chat(
     mls: &mut Option<MlsManager>,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
     conf_id: String,
     body_b64: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let sid = conf_server_id(&conf_id);
     let Some(mls_mgr) = mls.as_mut() else { return; };
@@ -672,18 +741,38 @@ pub(crate) async fn handle_inbound_chat(
         Ok(b) => b,
         Err(_) => return,
     };
-    // Chat is attributed by the sending leaf, which proves its device, so one room
-    // member cannot put words in another's mouth. Dart collapses the device for display.
+    // Attributed by the sending leaf, which proves its device and certifies its master,
+    // so one participant cannot speak or show a card for another.
     let (plaintext, sender) = match mls_mgr.decrypt(&sid, &ciphertext) {
         Ok(p) => p,
         Err(e) => {
-            hollow_log!("[HOLLOW-CONF] Chat decrypt failed for {conf_id}: {e}");
+            hollow_log!("[HOLLOW-CONF] Group line decrypt failed for {conf_id}: {e}");
             return;
         }
     };
     // Receive ratchet advanced — same persist rule as every MLS decrypt site.
     persist_mls_state(mls_mgr, crypto_store);
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&plaintext) else { return; };
+
+    if let Some(card) = parsed.get("card").and_then(|c| serde_json::from_value::<super::types::SignedCard>(c.clone()).ok()) {
+        if card.master != sender.master || !super::profile_card::card_holds(&card) {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a meeting card from {} in {conf_id}: not its own, or not signed by it", sender.device);
+            return;
+        }
+        let avatar = parsed
+            .get("avatar")
+            .and_then(|a| a.as_str())
+            .and_then(|a| base64::engine::general_purpose::STANDARD.decode(a).ok())
+            .filter(|b| b.len() <= super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES);
+        if super::profile_card::store_card(&card, avatar.as_deref(), db_path, db_passphrase) {
+            let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master.clone() }).await;
+        }
+        if !card_seen_by(&master_keypair.peer_id(), &conf_id, &sender.device) {
+            broadcast_card(mls_mgr, crypto_store, ws_cmd_tx, master_keypair, &conf_id, db_path, db_passphrase);
+        }
+        return;
+    }
+
     let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let timestamp = parsed.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
     if text.is_empty() || !super::crypto_handler::message_body_fits(&text) { return; }

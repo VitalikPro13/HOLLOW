@@ -128,42 +128,35 @@ pub(crate) struct CarriedBundle {
     pub device_pk_b64: String,
 }
 
-/// The sender's own master-signed profile, carried inside a `FriendRequest` so
-/// the incoming card renders with a real name: a stranger has never sent us a
-/// `ProfileUpdate`, so without this the card falls back to a raw peer id.
-///
-/// LIGHT like every profile announce: the avatar HASH only, never the bytes.
-///
-/// SECURITY: `profile_sig` is REQUIRED on ingest and made by `source_peer_id`'s
-/// MASTER key; an absent or invalid signature drops the PROFILE, never the
-/// request. Only the subject's own signature may assert the subject's name and
-/// avatar, which is why this is verified exactly like a relayed profile.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub(crate) struct CarriedProfile {
-    /// The subject's MASTER peer_id. Bound to the request sender's resolved master
-    /// on ingest and dropped on a mismatch: nobody may assert a third party's profile.
+/// A profile CARD: the name and avatar a person shows to someone it is not close to
+/// (A28), signed by its MASTER apart from the rest of the profile
+/// (`crypto_handler::card_signing_payload`), so it verifies without it.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct SignedCard {
     #[serde(default)]
-    pub source_peer_id: String,
+    pub master: String,
     #[serde(default)]
     pub display_name: String,
+    /// Hex SHA-256 of the avatar still; empty = no avatar.
     #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub about_me: String,
+    pub avatar_hash: String,
     #[serde(default)]
     pub updated_at: i64,
     #[serde(default)]
-    pub twitch_username: String,
-    /// Hex SHA-256 of the avatar blob; empty = no avatar. Never the bytes.
+    pub sig: String,
     #[serde(default)]
-    pub avatar_hash: String,
-    /// Subject's signature over `profile_signing_payload`. REQUIRED: an unsigned
-    /// carried profile is dropped and the request kept.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_sig: Option<String>,
-    /// Subject MASTER public key (base64 protobuf) paired with `profile_sig`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_pk: Option<String>,
+    pub pk: String,
+}
+
+/// A [`SignedCard`] sealed to one friend-request target under a key only the two
+/// identities can derive (`profile_card::seal_for`): the relay that carries the
+/// request never reads the name.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SealedCard {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub ct: String,
 }
 
 /// One conversation's read pointer as siblings exchange it. `key` is the
@@ -1772,7 +1765,8 @@ pub(crate) enum HavenMessage {
 
     // -- Profile sync --
 
-    /// Broadcast profile update to connected peers. Plaintext (not sensitive).
+    /// Our profile, to a device of our own, a friend's or a co-member's; nobody else
+    /// gets more than the card.
     #[serde(rename = "profile_update")]
     ProfileUpdate {
         display_name: String,
@@ -1870,11 +1864,10 @@ pub(crate) enum HavenMessage {
         /// ingested a ProfileUpdate first (a stranger, by definition, has not).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_list: Option<SignedDeviceList>,
-        /// The sender's own master-signed profile, so the receiver can fill the incoming
-        /// card for a stranger it holds no profile for; verified and stored exactly like
-        /// a `ProfileRelay`. Absent from older clients: the card falls back to the id.
+        /// The sender's name and avatar, sealed to the target (A28): a stranger's
+        /// incoming request shows who is asking, and the relay carrying it cannot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        carried_profile: Option<CarriedProfile>,
+        sealed_card: Option<SealedCard>,
     },
 
     #[serde(rename = "friend_accept")]
@@ -2568,6 +2561,20 @@ pub(crate) enum HavenMessage {
         /// check the bytes against it and drop just the avatar on a mismatch.
         #[serde(default)]
         avatar_hash: String,
+        /// The rest of what the owner signed, so the relayed copy verifies whole. Blobs
+        /// ride by hash; a receiver pulls them from the owner.
+        #[serde(default)]
+        banner_hash: String,
+        #[serde(default)]
+        showcase_board: String,
+        #[serde(default)]
+        showcase_assets_hash: String,
+        #[serde(default)]
+        avatar_frame: String,
+        #[serde(default)]
+        avatar_anim: String,
+        #[serde(default)]
+        banner_anim: String,
         /// The SUBJECT's own signature, forwarded verbatim by the relayer.
         ///
         /// This frame is the reason profiles are signed at all: `source_peer_id`
@@ -2578,6 +2585,27 @@ pub(crate) enum HavenMessage {
         profile_sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_pk: Option<String>,
+    },
+
+    /// Our name and avatar for someone we are not close to (A28): a pending friend
+    /// request either way, or the members of a server we asked to join. The avatar
+    /// bytes ride only when asked for; the device list teaches our device to master.
+    #[serde(rename = "profile_card")]
+    ProfileCard {
+        card: SignedCard,
+        #[serde(default)]
+        avatar_b64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_list: Option<SignedDeviceList>,
+    },
+
+    /// Our own device list, to one of OUR revoked devices only. Nothing else reaches
+    /// a revoked device (every session to it is gone, no profile goes to it), and this
+    /// list is what makes it wipe itself. Master-signed, so the relay reading it
+    /// cannot forge one; which devices are one person is routing it already sees.
+    #[serde(rename = "device_list_tombstone")]
+    DeviceListTombstone {
+        device_list: SignedDeviceList,
     },
 
     // -- Voice channel coordination (plaintext for MLS epoch resilience) --
@@ -3754,6 +3782,8 @@ impl HavenMessage {
             | Self::PublicChannelAddReaction { .. }
             | Self::PublicChannelRemoveReaction { .. }
             | Self::PublicChannelSyncResponse { .. }
+            | Self::ProfileCard { .. }
+            | Self::DeviceListTombstone { .. }
             | Self::ShareManifestResponse { .. } => false,
             Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
@@ -3885,6 +3915,11 @@ impl HavenMessage {
             | Self::PublicFileHeader { .. }
             | Self::EmoteRequest { .. }
             | Self::EmoteAssets { .. }
+            | Self::ProfileUpdate { .. }
+            | Self::ProfileRequest
+            | Self::ProfileRequestFor { .. }
+            | Self::ProfileRelay { .. }
+            | Self::ProfileCard { .. }
             | Self::IdentityDestroyed { .. } => Lane::Carried,
             Self::ShareManifestRequest { .. }
             | Self::ShareManifestResponse { .. }
@@ -3940,7 +3975,6 @@ impl HavenMessage {
             | Self::ConferenceChat { .. }
             | Self::ConferenceEnded { .. }
             | Self::ConferenceKicked { .. }
-            | Self::ProfileUpdate { .. }
             | Self::SiblingProveRequest { .. }
             | Self::SiblingProveResponse { .. }
             | Self::LinkSnapshotRequest { .. }
@@ -3958,9 +3992,7 @@ impl HavenMessage {
             | Self::RtcShareAnswer { .. }
             | Self::RtcShareIceCandidate { .. }
             | Self::PeerExchange { .. }
-            | Self::ProfileRequest
-            | Self::ProfileRequestFor { .. }
-            | Self::ProfileRelay { .. }
+            | Self::DeviceListTombstone { .. }
             | Self::RecoveryHello { .. }
             | Self::RecoveryWelcome { .. }
             | Self::RecoveryTransferPlan { .. }

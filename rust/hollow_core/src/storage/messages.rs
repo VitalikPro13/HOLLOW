@@ -59,6 +59,7 @@ fn mid_hash(mid: &str) -> u64 {
 }
 
 /// A user profile stored locally (ours or a peer's).
+#[derive(Default)]
 pub(crate) struct StoredProfile {
     pub peer_id: String,
     pub display_name: String,
@@ -88,9 +89,9 @@ pub(crate) struct StoredProfile {
     /// `support_creds_own` for us. Not covered by the profile signature: each entry
     /// binds the master peer id itself.
     pub support_creds: String,
-    /// The SUBJECT's own signature over the relayable subset of this profile,
-    /// persisted so we can forward it in a `ProfileRelay`. A relayed profile with no
-    /// owner signature is refused, so one stored without it simply never gets relayed.
+    /// The SUBJECT's own signature over every field of this profile, persisted so we
+    /// can forward it in a `ProfileRelay`. A relayed profile with no owner signature is
+    /// refused, so one stored without it (a card, say) simply never gets relayed.
     pub profile_sig: Option<String>,
     /// Owner MASTER public key (base64 protobuf) paired with `profile_sig`.
     pub profile_pk: Option<String>,
@@ -98,15 +99,21 @@ pub(crate) struct StoredProfile {
     /// `avatar_bytes`: announces are LIGHT, so our cached blob can lag the owner's and
     /// re-hashing a stale blob would produce a hash the signature does not cover.
     pub profile_avatar_hash: Option<String>,
+    /// The banner and showcase-asset hashes the signature covers, for the same reason.
+    pub profile_banner_hash: Option<String>,
+    pub profile_assets_hash: Option<String>,
 }
 
-/// The subject's proof for a profile, moved as one unit because the three parts are
-/// only meaningful together. `None` at `save_profile` leaves the stored proof alone.
+/// The subject's proof for a profile, moved as one unit because its parts are only
+/// meaningful together: the blob hashes are the ones the signature covers, which the
+/// stored blobs can lag. `None` at `save_profile` leaves the stored proof alone.
 #[derive(Clone, Copy)]
 pub(crate) struct ProfileProof<'a> {
     pub sig: &'a str,
     pub pk: &'a str,
     pub avatar_hash: &'a str,
+    pub banner_hash: &'a str,
+    pub assets_hash: &'a str,
 }
 
 /// A stored chat message.
@@ -416,6 +423,8 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> 
         avatar_anim: row.get::<_, String>(14).unwrap_or_default(),
         banner_anim: row.get::<_, String>(15).unwrap_or_default(),
         support_creds: row.get::<_, String>(16).unwrap_or_default(),
+        profile_banner_hash: row.get(17).unwrap_or(None),
+        profile_assets_hash: row.get(18).unwrap_or(None),
     })
 }
 
@@ -437,6 +446,8 @@ fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPro
         profile_sig: None,
         profile_pk: None,
         profile_avatar_hash: None,
+        profile_banner_hash: None,
+        profile_assets_hash: None,
         avatar_frame: row.get::<_, String>(7).unwrap_or_default(),
         // Hashes, not bytes: a list needs to know an animated variant exists at all.
         avatar_anim: row.get::<_, String>(8).unwrap_or_default(),
@@ -893,6 +904,9 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_sig TEXT;");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_pk TEXT;");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_avatar_hash TEXT;");
+        // -- 0.12: the signature covers every field, blobs by these hashes too.
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_banner_hash TEXT;");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_assets_hash TEXT;");
         // -- issue #54: avatar frame ID. "" = none, "b:<hue>" = built-in,
         // 64-hex = an asset-rail blob hash. Never the bytes.
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN avatar_frame TEXT NOT NULL DEFAULT '';");
@@ -2957,6 +2971,8 @@ impl MessageStore {
         let profile_sig = proof.map(|p| p.sig);
         let profile_pk = proof.map(|p| p.pk);
         let profile_avatar_hash = proof.map(|p| p.avatar_hash);
+        let profile_banner_hash = proof.map(|p| p.banner_hash);
+        let profile_assets_hash = proof.map(|p| p.assets_hash);
         // Normalize an empty avatar/banner to an explicit NULL, since COALESCE cannot.
         let avatar_val: Option<&[u8]> = avatar.and_then(|b| if b.is_empty() { None } else { Some(b) });
         let banner_val: Option<&[u8]> = banner.and_then(|b| if b.is_empty() { None } else { Some(b) });
@@ -2967,8 +2983,8 @@ impl MessageStore {
 
         let written = self.conn
             .execute(
-                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13, COALESCE(?14, ''), COALESCE(?15, ''), COALESCE(?16, ''), COALESCE(?17, ''))
+                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13, COALESCE(?14, ''), COALESCE(?15, ''), COALESCE(?16, ''), COALESCE(?17, ''), ?18, ?19)
                  ON CONFLICT(peer_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     status = excluded.status,
@@ -2982,6 +2998,8 @@ impl MessageStore {
                     profile_sig = COALESCE(excluded.profile_sig, user_profiles.profile_sig),
                     profile_pk = COALESCE(excluded.profile_pk, user_profiles.profile_pk),
                     profile_avatar_hash = COALESCE(excluded.profile_avatar_hash, user_profiles.profile_avatar_hash),
+                    profile_banner_hash = COALESCE(excluded.profile_banner_hash, user_profiles.profile_banner_hash),
+                    profile_assets_hash = COALESCE(excluded.profile_assets_hash, user_profiles.profile_assets_hash),
                     avatar_frame = COALESCE(?14, user_profiles.avatar_frame),
                     avatar_anim = COALESCE(?15, user_profiles.avatar_anim),
                     banner_anim = COALESCE(?16, user_profiles.banner_anim),
@@ -2989,7 +3007,7 @@ impl MessageStore {
                  WHERE excluded.updated_at >= user_profiles.updated_at
                     OR (excluded.updated_at < user_profiles.updated_at
                         AND ABS(excluded.updated_at - user_profiles.updated_at) < 86400000)",
-                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds],
+                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
         // The freshness WHERE refused a stale profile: its clears must not land either.
@@ -3019,13 +3037,56 @@ impl MessageStore {
         Ok(true)
     }
 
+    /// Store a profile CARD (A28): only the name and avatar of someone we are not close
+    /// to. An empty `avatar_hash` clears the avatar and bytes set it; with neither the
+    /// stored still stays until pulled. Nothing older than the row is written, and a
+    /// row a card replaces loses its owner proof, which no longer matches its name, so
+    /// it is never relayed. Returns whether it wrote.
+    pub fn save_profile_card(
+        &self,
+        peer_id: &str,
+        display_name: &str,
+        updated_at: i64,
+        avatar_hash: &str,
+        avatar: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        let avatar = avatar.filter(|b| !b.is_empty());
+        let written = self.conn
+            .execute(
+                "INSERT INTO user_profiles (peer_id, display_name, updated_at, avatar)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(peer_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    updated_at = excluded.updated_at,
+                    avatar = CASE WHEN ?5 = '' THEN NULL ELSE COALESCE(excluded.avatar, user_profiles.avatar) END,
+                    profile_sig = NULL, profile_pk = NULL, profile_avatar_hash = NULL,
+                    profile_banner_hash = NULL, profile_assets_hash = NULL
+                 WHERE excluded.updated_at > user_profiles.updated_at",
+                params![peer_id, display_name, updated_at, avatar, avatar_hash],
+            )
+            .map_err(|e| format!("Failed to save profile card: {e}"))?;
+        if written > 0 {
+            return Ok(true);
+        }
+        // The same card again, now with the bytes it was pulled for.
+        let Some(bytes) = avatar else {
+            return Ok(false);
+        };
+        let set = self.conn
+            .execute(
+                "UPDATE user_profiles SET avatar = ?2 WHERE peer_id = ?1 AND updated_at = ?3",
+                params![peer_id, bytes, updated_at],
+            )
+            .map_err(|e| format!("Failed to save profile card avatar: {e}"))?;
+        Ok(set > 0)
+    }
 
     /// Load a profile for a specific peer.
     pub fn load_profile(&self, peer_id: &str) -> Result<Option<StoredProfile>, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
@@ -3044,7 +3105,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;

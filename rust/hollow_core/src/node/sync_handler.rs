@@ -1688,6 +1688,7 @@ pub(crate) async fn handle_revoke_device(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     master_peer_str: &str,
     local_peer_str: &str,
@@ -1713,7 +1714,7 @@ pub(crate) async fn handle_revoke_device(
     // shared rooms as a side effect of the MLS leaf removal, so the message still
     // routes; skipping it left a revoked device running as the master forever.
     super::social::send_own_profile_to_peer(
-        ws_cmd_tx, ws_room_peers,
+        ws_cmd_tx, ws_room_peers, server_states,
         local_peer_str, master_keypair, device_peer_id, &target_device,
         is_invisible, db_path, db_passphrase,
     );
@@ -1727,7 +1728,7 @@ pub(crate) async fn handle_revoke_device(
             continue;
         }
         super::social::send_own_profile_to_peer(
-            ws_cmd_tx, ws_room_peers,
+            ws_cmd_tx, ws_room_peers, server_states,
             local_peer_str, master_keypair, device_peer_id, &pid,
             is_invisible, db_path, db_passphrase,
         );
@@ -1749,6 +1750,7 @@ pub(crate) async fn handle_reset_device_lists(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     master_peer_str: &str,
     local_peer_str: &str,
@@ -1775,7 +1777,7 @@ pub(crate) async fn handle_reset_device_lists(
     // MLS-leaf removal drops it from our shared rooms.
     for target in &revoked {
         super::social::send_own_profile_to_peer(
-            ws_cmd_tx, ws_room_peers,
+            ws_cmd_tx, ws_room_peers, server_states,
             local_peer_str, master_keypair, device_peer_id, target,
             is_invisible, db_path, db_passphrase,
         );
@@ -1788,7 +1790,7 @@ pub(crate) async fn handle_reset_device_lists(
             continue;
         }
         super::social::send_own_profile_to_peer(
-            ws_cmd_tx, ws_room_peers,
+            ws_cmd_tx, ws_room_peers, server_states,
             local_peer_str, master_keypair, device_peer_id, &pid,
             is_invisible, db_path, db_passphrase,
         );

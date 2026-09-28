@@ -70,23 +70,40 @@ pub(crate) fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     room
 }
 
+/// A secret only the two MASTER identities can compute, one per `domain`. `None`
+/// when `local_master` is not an identity this process holds the key of.
+pub(crate) fn pair_key(local_master: &str, other_master: &str, domain: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
+    let pair = if local_master <= other_master {
+        (local_master.to_string(), other_master.to_string())
+    } else {
+        (other_master.to_string(), local_master.to_string())
+    };
+    let masters = LOCAL_MASTERS.read().unwrap_or_else(|p| p.into_inner());
+    agreement(masters.get(local_master)?, other_master, &pair, domain)
+}
+
 /// `hex(HMAC-SHA256(X25519(ours, theirs), domain | lo | hi))[..16 bytes]`, or `None`
 /// for an id that carries no usable key.
 fn derive(our_scalar: &[u8; 32], their_id: &str, pair: &(String, String)) -> Option<String> {
+    agreement(our_scalar, their_id, pair, ROOM_DOMAIN).map(|key| hex::encode(&key[..16]))
+}
+
+/// `HMAC-SHA256(X25519(ours, theirs), domain | lo | hi)`.
+fn agreement(our_scalar: &[u8; 32], their_id: &str, pair: &(String, String), domain: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
     let their_pk = crate::crypto::safety_number::pubkey_from_peer_id(their_id)?;
     let their_point = ed25519_dalek::VerifyingKey::from_bytes(&their_pk).ok()?.to_montgomery();
     let shared = Zeroizing::new(their_point.mul_clamped(*our_scalar).to_bytes());
-    // A small-order key agrees on zero with everyone: that name would be public.
+    // A small-order key agrees on zero with everyone: that secret would be public.
     if shared.iter().fold(0u8, |acc, b| acc | b) == 0 {
         return None;
     }
     let mut mac = Hmac::<Sha256>::new_from_slice(shared.as_slice()).ok()?;
-    mac.update(ROOM_DOMAIN);
+    mac.update(domain);
     for id in [&pair.0, &pair.1] {
         mac.update(&[0]);
         mac.update(id.as_bytes());
     }
-    Some(hex::encode(&mac.finalize().into_bytes()[..16]))
+    Some(Zeroizing::new(mac.finalize().into_bytes().into()))
 }
 
 /// A room name keyed by this process's own random secret: stable for the pair within
@@ -170,6 +187,19 @@ mod tests {
         let room = dm_room_code(&a.peer_id(), &b.peer_id());
         assert_eq!(room, dm_room_code(&b.peer_id(), &a.peer_id()));
         assert_eq!(Some(room), from_side(&b, &a.peer_id()), "the unregistered side agrees");
+    }
+
+    #[test]
+    fn a_pair_key_agrees_across_the_pair_and_differs_by_domain() {
+        let (a, b, c) = (keypair(12), keypair(13), keypair(14));
+        register(&a);
+        register(&b);
+        let ab = pair_key(&a.peer_id(), &b.peer_id(), b"test-domain").expect("a holds its key");
+        let ba = pair_key(&b.peer_id(), &a.peer_id(), b"test-domain").expect("b holds its key");
+        assert_eq!(*ab, *ba);
+        assert_ne!(*ab, *pair_key(&a.peer_id(), &b.peer_id(), b"other-domain").unwrap());
+        assert_ne!(*ab, *pair_key(&a.peer_id(), &c.peer_id(), b"test-domain").unwrap());
+        assert!(pair_key(&c.peer_id(), &a.peer_id(), b"test-domain").is_none(), "no key, no secret");
     }
 
     #[test]

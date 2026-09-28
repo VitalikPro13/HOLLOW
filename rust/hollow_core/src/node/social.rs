@@ -7,7 +7,7 @@ use crate::crdt::server_state::ServerState;
 use crate::crypto::MlsManager;
 use super::crypto_handler::{
     persist_crypto_state, send_encrypted_text_to_peer, send_mls_broadcast,
-    send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer,
+    send_message_to_peer, send_message_to_peer_in_room,
 };
 use super::types::*;
 
@@ -131,145 +131,16 @@ pub(crate) fn build_friend_request(
         }
     };
 
-    // Carry our own signed profile so a stranger's incoming card renders our name
-    // instead of a raw peer id. LIGHT (the hash only, never bytes) and signed on
-    // the fly if the stored row predates signing. Absent when we have no profile.
-    let carried_profile = build_own_carried_profile(
-        master_keypair, &master_keypair.peer_id(), db_path, db_passphrase,
-    );
+    // Our name and avatar sealed to the target, so its incoming card shows who is
+    // asking while the relay carrying the request cannot read it (A28).
+    let sealed_card = super::profile_card::own_card(master_keypair, db_path, db_passphrase)
+        .and_then(|card| super::profile_card::seal_for(&card, target_master, requested_at));
 
     HavenMessage::FriendRequest {
         requested_at,
         carried_bundle: Some(bundle),
         device_list,
-        carried_profile,
-    }
-}
-
-/// Build OUR OWN signed profile to carry inside a friend request. `None` when we
-/// hold no profile row yet, or it is blank, or it cannot be signed; the
-/// receiver's card then falls back to the peer id.
-///
-/// LIGHT by contract: the avatar HASH rides inside the proof, never the bytes.
-/// A row written before signing existed is signed fresh here rather than shipped
-/// unsigned, because a receiver REQUIRES the signature.
-pub(crate) fn build_own_carried_profile(
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
-    local_master: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> Option<CarriedProfile> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let p = store.load_profile(local_master).ok().flatten()?;
-    // Nothing worth carrying — an all-blank profile would only overwrite nothing
-    // and burn wire bytes; leave the card on its peer-id fallback.
-    if p.display_name.is_empty()
-        && p.status.is_empty()
-        && p.about_me.is_empty()
-        && p.twitch_username.is_empty()
-    {
-        return None;
-    }
-    let (sig, pk, avatar_hash) = own_profile_proof(master_keypair, local_master, Some(&p));
-    // A profile we cannot sign cannot be ingested by the receiver — omit it.
-    let (profile_sig, profile_pk) = (sig?, pk?);
-    Some(CarriedProfile {
-        source_peer_id: local_master.to_string(),
-        display_name: p.display_name,
-        status: p.status,
-        about_me: p.about_me,
-        updated_at: p.updated_at,
-        twitch_username: p.twitch_username,
-        avatar_hash,
-        profile_sig: Some(profile_sig),
-        profile_pk: Some(profile_pk),
-    })
-}
-
-/// Verify and persist a `CarriedProfile` that rode in on a friend request from
-/// `sender_master`. Returns the MASTER the profile was stored under, or `None`.
-///
-/// Same trust rule as a `ProfileRelay` ingest: the subject's own signature is
-/// REQUIRED, checked over the fields EXACTLY as received (before any clamp), and
-/// over-long fields are DROPPED rather than truncated. It additionally binds the
-/// profile to the request sender, who may carry only ITS OWN identity's profile.
-/// Any failure drops JUST the profile; `if sig.is_some()` would be the bypass.
-pub(crate) fn store_carried_profile(
-    profile: &CarriedProfile,
-    sender_master: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> Option<String> {
-    // Bind to the sender: resolve both sides so a device-id source still matches
-    // its master. A mismatch means the sender is asserting someone else — drop it.
-    let source_master = super::resolver::resolve(&profile.source_peer_id);
-    if source_master != sender_master {
-        hollow_log!(
-            "[HOLLOW-FRIENDS] Ignoring carried profile from {sender_master} — it asserts a different identity ({source_master})"
-        );
-        return None;
-    }
-    if profile_text_oversized(
-        &profile.display_name, &profile.status, &profile.about_me, &profile.twitch_username,
-    ) {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED carried profile for {source_master} — field exceeds its limit");
-        return None;
-    }
-    // REQUIRED signature over the signed subset. `verify_profile_signature` is
-    // false for BOTH an absent and an invalid signature — either drops the
-    // profile (never the request).
-    if !super::crypto_handler::verify_profile_signature(
-        &source_master,
-        profile.updated_at,
-        &profile.display_name,
-        &profile.status,
-        &profile.about_me,
-        &profile.twitch_username,
-        &profile.avatar_hash,
-        profile.profile_sig.as_deref(),
-        profile.profile_pk.as_deref(),
-    ) {
-        hollow_log!(
-            "[HOLLOW-SECURITY] REJECTED carried profile for {source_master} — {}",
-            if profile.profile_sig.is_none() { "NO owner signature" } else { "owner signature INVALID" }
-        );
-        return None;
-    }
-    let (Some(sig), Some(pk)) =
-        (profile.profile_sig.as_deref(), profile.profile_pk.as_deref())
-    else {
-        return None;
-    };
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    // LIGHT: no avatar/banner bytes ride — the signed avatar HASH lands via the
-    // proof and the still is pulled on demand (asset rail / ProfileRequest).
-    // `save_profile` enforces the `updated_at` monotonicity itself, so a stale
-    // carried copy can never roll a fresher stored profile backwards.
-    match store.save_profile(
-        &source_master,
-        &profile.display_name,
-        &profile.status,
-        &profile.about_me,
-        profile.updated_at,
-        None,
-        None,
-        &profile.twitch_username,
-        None,
-        None,
-        Some(crate::storage::ProfileProof { sig, pk, avatar_hash: &profile.avatar_hash }),
-        None,
-        None,
-        None,
-        None,
-    ) {
-        Ok(_) => {
-            hollow_log!("[HOLLOW-FRIENDS] Stored carried profile for {source_master} from friend request");
-            Some(source_master)
-        }
-        Err(e) => {
-            hollow_log!("[HOLLOW-FRIENDS] Failed to store carried profile for {source_master}: {e}");
-            None
-        }
+        sealed_card,
     }
 }
 
@@ -611,6 +482,7 @@ pub(crate) async fn handle_accept_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -716,7 +588,7 @@ pub(crate) async fn handle_accept_friend_request(
                         // session with a device id it cannot attribute, so its own
                         // reply targets nobody.
                         send_own_profile_to_peer_in_room(
-                            ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair,
+                            ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair,
                             device_peer_id, &device, &dm_room, is_invisible,
                             db_path, db_passphrase,
                         );
@@ -784,7 +656,7 @@ pub(crate) async fn handle_accept_friend_request(
     // their side pushed our list, so this is the path that delivers it.
     for t in &friend_device_targets(&ws_room_peers, &peer_id_str, &master) {
         send_own_profile_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
+            &ws_cmd_tx, &ws_room_peers, server_states,
             local_peer_str, master_keypair, device_peer_id, t,
             is_invisible,
             db_path, db_passphrase,
@@ -1152,27 +1024,24 @@ pub(crate) async fn handle_update_profile(
         stored
     };
 
-    // Sign the relayable subset. This has to happen AFTER the save and reload: the
-    // avatar arg may be None = "unchanged", so only the STORED blob's hash
-    // describes what receivers check against. Re-persisted onto our own row so
-    // `handle_profile_request_for` can forward it; receivers refuse an unsigned relay.
-    let master_pub_b64 = base64::engine::general_purpose::STANDARD
-        .encode(master_keypair.public_key_protobuf());
+    // Every field signed, AFTER the save and reload: an unchanged blob arrives as
+    // None, so only the STORED blobs' hashes describe what receivers check against.
     let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(
-        master_keypair, &master_pub_b64, local_peer_str, now,
-        &display_name, &status, &about_me, &twitch_username, &avatar_hash,
+        master_keypair, local_peer_str, now,
+        &super::crypto_handler::ProfileFields {
+            display_name: &display_name,
+            status: &status,
+            about_me: &about_me,
+            twitch_username: &twitch_username,
+            avatar_hash: &avatar_hash,
+            banner_hash: &banner_hash,
+            showcase_board: &stored_showcase,
+            showcase_assets_hash: &stored_assets_hash,
+            avatar_frame: &stored_frame,
+            avatar_anim: &stored_avatar_anim,
+            banner_anim: &stored_banner_anim,
+        },
     );
-    if let (Ok(db), Some(sig), Some(pk)) = (
-        crate::storage::MessageStore::open(db_path, db_passphrase),
-        profile_sig.as_deref(), profile_pk.as_deref(),
-    ) {
-        let _ = db.save_profile(
-            local_peer_str, &display_name, &status, &about_me, now,
-            None, None, &twitch_username, None, None,
-            Some(crate::storage::ProfileProof { sig, pk, avatar_hash: &avatar_hash }),
-            None, None, None, None,
-        );
-    }
 
     // Build our master-signed device list so friends learn (tamper-proof) which
     // device peer_ids resolve to us (multi-device, Phase 6).
@@ -1180,15 +1049,13 @@ pub(crate) async fn handle_update_profile(
         master_keypair, device_peer_id, db_path, db_passphrase,
     );
 
-    // The credentials field carries its OWN master signature, over the field
-    // we are actually about to send and the timestamp we are sending it with.
-    // Without it a relay rewrites the field to `""` in flight and every
-    // receiver reads the holder's explicit clear (see `verify_support_creds_sig`).
+    // The credentials field carries its OWN master signature, over the field we are
+    // about to send and the timestamp we send it with (see `verify_support_creds_sig`).
     let support_creds_sig = super::crypto_handler::sign_support_creds(
         master_keypair, local_peer_str, now, Some(&stored_support_creds),
     );
 
-    // Broadcast profile via MLS to each server room, plus plaintext to remaining peers.
+    // Over MLS to each server we share, then over Olm to everyone MLS did not reach.
     let envelope = MessageEnvelope::ProfileUpdate {
         display_name: display_name.clone(),
         status: status.clone(),
@@ -1233,7 +1100,7 @@ pub(crate) async fn handle_update_profile(
             }
         }
     }
-    // Plaintext fallback for peers not reached via MLS (DM peers, pre-MLS servers).
+    let card_list = device_list.clone();
     let msg = HavenMessage::ProfileUpdate {
         display_name: display_name.clone(),
         status: status.clone(),
@@ -1257,28 +1124,35 @@ pub(crate) async fn handle_update_profile(
         profile_sig,
         profile_pk,
     };
-    hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
-    {
-        let all_ws_peers: std::collections::HashSet<String> = ws_room_peers
-            .values()
-            .flat_map(|peers| peers.iter().cloned())
-            .collect();
-        let data = serde_json::to_vec(&msg).unwrap_or_default();
-        for peer in &all_ws_peers {
-            if peer == &local_peer_str { continue; }
-            // `mls_reached` holds MASTER member keys; `peer` is a room DEVICE id —
-            // collapse before the skip check, or a multi-device member always also
-            // gets (and the relay always sees) the redundant plaintext copy.
-            if mls_reached.contains(peer)
-                || mls_reached.contains(&super::resolver::resolve(peer)) { continue; }
-            send_raw_to_peer(
-                &ws_cmd_tx, &ws_room_peers,
-                peer, data.clone(),
-            );
+    // The whole update to our own devices, friends and co-members, the card to either
+    // side of a pending friend request, nothing to anyone else.
+    let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
+    let room_peers: std::collections::HashSet<String> =
+        ws_room_peers.values().flat_map(|peers| peers.iter().cloned()).collect();
+    let mut carried = 0usize;
+    for peer in &room_peers {
+        // `mls_reached` holds MASTER member keys and `peer` is a room DEVICE id.
+        if peer == local_peer_str
+            || peer == device_peer_id
+            || mls_reached.contains(peer)
+            || mls_reached.contains(&super::resolver::resolve(peer))
+            || send_tombstone_if_revoked(ws_cmd_tx, ws_room_peers, local_peer_str, peer, db_path, db_passphrase)
+        {
+            continue;
         }
-        hollow_log!("[HOLLOW-PROFILE] Plaintext broadcast to {} peers (MLS reached {})",
-            all_ws_peers.len().saturating_sub(mls_reached.len()), mls_reached.len());
+        let out = match profile_audience(server_states, local_peer_str, peer, db_path, db_passphrase) {
+            Audience::Full => Some(msg.clone()),
+            Audience::Card => card.clone().map(|card| HavenMessage::ProfileCard {
+                card, avatar_b64: String::new(), device_list: card_list.clone(),
+            }),
+            Audience::None => None,
+        };
+        if let Some(out) = out {
+            super::olm_lane::carry(ws_cmd_tx, peer, None, &out, super::olm_lane::NoSession::Queue);
+            carried += 1;
+        }
     }
+    hollow_log!("[HOLLOW-PROFILE] Profile update carried to {carried} peer(s), MLS reached {}", mls_reached.len());
 
     let _ = event_tx.send(NetworkEvent::ProfileUpdated {
         peer_id: local_peer_str.to_string(),
@@ -1415,16 +1289,11 @@ pub(crate) fn save_incoming_profile(
     let banner_bytes = gated_profile_image(
         &master, "banner", super::image_convert::PROFILE_BANNER_RECV_MAX_BYTES, banner_bytes,
     );
-    // The avatar is the one blob the signature covers, by hash. Bytes that do not
-    // hash to it are someone else's picture (the relay can rewrite a plaintext
-    // full profile in flight), so they are dropped and the stored still kept (N1).
-    let avatar_bytes = avatar_bytes.filter(|b| {
-        let matches = b.is_empty() || profile_blob_hash(Some(b)) == proof.avatar_hash;
-        if !matches {
-            hollow_log!("[HOLLOW-SECURITY] DROPPED avatar for {master}: the bytes do not match the signed hash");
-        }
-        matches
-    });
+    // Every blob is signed by hash. Bytes that do not hash to it are not the
+    // owner's, so they are dropped and what we stored is kept (N1).
+    let avatar_bytes = signed_blob(&master, "avatar", avatar_bytes, proof.avatar_hash);
+    let banner_bytes = signed_blob(&master, "banner", banner_bytes, proof.banner_hash);
+    let showcase_assets = signed_blob(&master, "showcase assets", showcase_assets, proof.assets_hash);
     match db.save_profile(
         &master, display_name, status, about_me, updated_at,
         avatar_bytes, banner_bytes, twitch_username, showcase_board,
@@ -1439,6 +1308,17 @@ pub(crate) fn save_incoming_profile(
             (master, false)
         }
     }
+}
+
+/// `bytes` when they are the blob the owner signed by `signed_hash` (or a clear).
+fn signed_blob<'a>(master: &str, what: &str, bytes: Option<&'a [u8]>, signed_hash: &str) -> Option<&'a [u8]> {
+    bytes.filter(|b| {
+        let matches = b.is_empty() || profile_blob_hash(Some(b)) == signed_hash;
+        if !matches {
+            hollow_log!("[HOLLOW-SECURITY] DROPPED {what} for {master}: the bytes do not match the signed hash");
+        }
+        matches
+    })
 }
 
 /// Masters we have already complained about once, so a stripped field on a
@@ -1563,78 +1443,34 @@ pub(crate) fn valid_avatar_frame_id(id: &str) -> bool {
     crate::crdt::valid_emote_hash(id)
 }
 
-/// Verify the owner proof on a profile arriving via `ProfileUpdate` (MLS or
-/// plaintext). `None` = the PROFILE FIELDS must not be stored.
+/// Verify the owner proof on a profile arriving via `ProfileUpdate` (MLS or Olm).
+/// `None` = the PROFILE FIELDS must not be stored.
 ///
-/// REQUIRED, not tolerated. The tempting argument is that the sender IS the
-/// subject here, so an absent signature cannot spoof anyone; that covers a
-/// malicious PEER and misses a malicious RELAY, because the plaintext
-/// `HavenMessage::ProfileUpdate` fallback passes through the relay as an
-/// unencrypted JSON body it can rewrite in flight.
+/// REQUIRED, not tolerated, over every field a receiver stores (N1): a stored proof
+/// is what makes the profile relayable, so it may never cover less than the row.
 ///
-/// **This gates the profile fields ONLY.** The caller ingests the sender's
-/// signed DEVICE LIST first and independently: that list stands on its own two
-/// gates, and it must run first because this verifies against
-/// `resolve(sender_peer_id)`. A node with no profile row signs nothing while
-/// still announcing a device list, and that announce is what collapses its
-/// devices into one online identity, so gating it here would break presence.
-/// The signer is the sender's MASTER: profiles are one per identity.
-#[allow(clippy::too_many_arguments)]
+/// **This gates the profile fields ONLY.** The caller ingests the sender's signed
+/// DEVICE LIST first and independently: that list stands on its own two gates, and it
+/// must run first because this verifies against `resolve(sender_peer_id)`. A node with
+/// no profile row still announces a device list, and that announce is what collapses
+/// its devices into one online identity, so gating it here would break presence.
 pub(crate) fn verified_profile_proof(
     sender_peer_id: &str,
     updated_at: i64,
-    display_name: &str,
-    status: &str,
-    about_me: &str,
-    twitch_username: &str,
-    avatar_hash: &str,
+    fields: &super::crypto_handler::ProfileFields,
     profile_sig: Option<&str>,
     profile_pk: Option<&str>,
-) -> Option<(String, String, String)> {
+) -> Option<(String, String)> {
     let master = super::resolver::resolve(sender_peer_id);
     let (Some(sig), Some(pk)) = (profile_sig, profile_pk) else {
         hollow_log!("[HOLLOW-SECURITY] REJECTED profile fields from {sender_peer_id} (master {master}) — NO owner signature (device list, if any, still ingested)");
         return None;
     };
-    if !super::crypto_handler::verify_profile_signature(
-        &master, updated_at, display_name, status, about_me,
-        twitch_username, avatar_hash, Some(sig), Some(pk),
-    ) {
+    if !super::crypto_handler::verify_profile_signature(&master, updated_at, fields, Some(sig), Some(pk)) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED profile fields from {sender_peer_id} (master {master}) — owner signature INVALID");
         return None;
     }
-    Some((sig.to_string(), pk.to_string(), avatar_hash.to_string()))
-}
-
-/// The proof to attach to an outgoing announce of OUR OWN profile.
-///
-/// Prefers the stored one, whose `profile_avatar_hash` is the hash the
-/// signature really covers, and signs fresh when there is none. Signing fresh
-/// is what stops an upgrade silently blanking us at every peer: older rows
-/// carry no proof and receivers now REQUIRE one.
-///
-/// Returns `(sig, pk, avatar_hash)`; the hash is what must ride the wire.
-pub(crate) fn own_profile_proof(
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
-    local_master: &str,
-    stored: Option<&crate::storage::messages::StoredProfile>,
-) -> (Option<String>, Option<String>, String) {
-    let Some(p) = stored else {
-        return (None, None, String::new());
-    };
-    if let (Some(sig), Some(pk), Some(hash)) = (
-        p.profile_sig.as_ref(), p.profile_pk.as_ref(), p.profile_avatar_hash.as_ref(),
-    ) {
-        return (Some(sig.clone()), Some(pk.clone()), hash.clone());
-    }
-    let avatar_hash = profile_blob_hash(p.avatar_bytes.as_deref());
-    let pub_b64 = base64::engine::general_purpose::STANDARD
-        .encode(master_keypair.public_key_protobuf());
-    let (sig, pk) = super::crypto_handler::sign_profile(
-        master_keypair, &pub_b64, local_master, p.updated_at,
-        &p.display_name, &p.status, &p.about_me, &p.twitch_username, &avatar_hash,
-    );
-    (sig, pk, avatar_hash)
+    Some((sig.to_string(), pk.to_string()))
 }
 
 /// Hex SHA-256 of a profile blob; empty string when there is no blob.
@@ -1648,16 +1484,51 @@ pub(crate) fn profile_blob_hash(bytes: Option<&[u8]>) -> String {
     }
 }
 
-/// Send our own profile to a specific peer.
+//// How much of our profile a peer may see (A28).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Audience {
+    /// Our own devices, friends and the members of a server we share.
+    Full,
+    /// Either side of a pending friend request: the card, name and avatar only.
+    Card,
+    /// Anyone else.
+    None,
+}
+
+/// What the device `peer` may see of our profile.
+pub(crate) fn profile_audience(
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Audience {
+    if super::resolver::is_revoked(peer) {
+        return Audience::None;
+    }
+    if super::voice_handler::data_channel_peer_allowed(server_states, local_master, peer, db_path, db_passphrase) {
+        return Audience::Full;
+    }
+    let pending = !super::blocklist::is_blocked(peer)
+        && crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|st| st.get_friend_status(&super::resolver::resolve(peer)).ok().flatten())
+            .is_some_and(|status| status == "pending");
+    if pending { Audience::Card } else { Audience::None }
+}
+
+/// Send our own profile to a specific peer, as much of it as that peer may see.
 ///
 /// LIGHT by default: avatar and banner ride as EMPTY strings ("no change" under
 /// the receiver's COALESCE save) plus content hashes, and a receiver whose
 /// cached blobs do not match pulls the full profile ONCE via ProfileRequest.
 /// That keeps the many re-announce paths at about 1 KB instead of re-shipping
 /// megabytes of unchanged avatar and banner on every reconnect.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_own_profile_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -1667,7 +1538,7 @@ pub(crate) fn send_own_profile_to_peer(
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
         target_peer, is_invisible, db_path, db_passphrase, false, None, None,
     );
 }
@@ -1682,6 +1553,7 @@ pub(crate) fn send_own_profile_to_peer(
 pub(crate) fn send_own_profile_to_peer_in_room(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -1692,7 +1564,7 @@ pub(crate) fn send_own_profile_to_peer_in_room(
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
         target_peer, is_invisible, db_path, db_passphrase, false, Some(room_code), None,
     );
 }
@@ -1706,6 +1578,7 @@ pub(crate) fn send_own_profile_to_peer_in_room(
 pub(crate) fn send_own_profile_with_device_list(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -1716,16 +1589,18 @@ pub(crate) fn send_own_profile_with_device_list(
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
         target_peer, is_invisible, db_path, db_passphrase, false, None, Some(list),
     );
 }
 
 /// Full-blob variant — ONLY for answering an explicit ProfileRequest (the pull
 /// half of the light-announce protocol), so blobs still converge on demand.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_own_profile_full_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -1735,7 +1610,7 @@ pub(crate) fn send_own_profile_full_to_peer(
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
         target_peer, is_invisible, db_path, db_passphrase, true, None, None,
     );
 }
@@ -1744,6 +1619,7 @@ pub(crate) fn send_own_profile_full_to_peer(
 fn send_own_profile_inner(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -1758,85 +1634,164 @@ fn send_own_profile_inner(
     // Some = publish THIS list verbatim instead of rebuilding ours.
     override_device_list: Option<SignedDeviceList>,
 ) {
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        // CRITICAL (presence collapse): ALWAYS attach and send the device list, even
-        // when we have no profile row yet. The list is what teaches a friend
-        // `our-device -> our-master`, which collapses our devices to ONE online
-        // identity on their side; gating the whole ProfileUpdate on `load_profile ==
-        // Some` was the bug where a friend never ingested it and the identity showed
-        // OFFLINE. A profile-less node sends empty fields with a populated list.
-        let profile = store.load_profile(local_peer_str).ok().flatten();
-        // Our proof rides along: receivers REQUIRE it to store the profile at
-        // all, and forward it when relaying us onward. Signed fresh if the row
-        // predates 0.8.5 - see `own_profile_proof`.
-        let (profile_sig, profile_pk, signed_avatar_hash) =
-            own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
-        let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame, avatar_anim, banner_anim, support_creds) =
-            match profile {
-                Some(p) => (
-                    p.display_name, p.status, p.about_me, p.updated_at,
-                    p.avatar_bytes, p.banner_bytes, p.twitch_username, p.showcase_board,
-                    p.showcase_assets, p.avatar_frame, p.avatar_anim, p.banner_anim,
-                    p.support_creds,
-                ),
-                None => (String::new(), String::new(), String::new(), 0, None, None, String::new(), String::new(), None, String::new(), String::new(), String::new(), String::new()),
-            };
-        let avatar_hash = signed_avatar_hash;
-        let banner_hash = profile_blob_hash(banner_bytes.as_deref());
-        let showcase_assets_hash = profile_blob_hash(showcase_assets.as_deref());
-        // Light sends leave the b64 fields EMPTY (= "no change" on the receiver);
-        // the hashes above let a stale receiver pull the blobs once.
-        let (avatar_b64, banner_b64, showcase_assets_b64) = if include_blobs {
-            (
-                avatar_bytes.as_ref()
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                    .unwrap_or_default(),
-                banner_bytes.as_ref()
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                    .unwrap_or_default(),
-                showcase_assets.as_ref()
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                    .unwrap_or_default(),
-            )
-        } else {
-            (String::new(), String::new(), String::new())
-        };
-        let device_list = match override_device_list {
-            Some(list) => Some(list),
-            None => super::crypto_handler::build_local_device_list(
-                master_keypair, device_peer_id, db_path, db_passphrase,
-            ),
-        };
-        // The board is small capped text, so it rides the LIGHT announce too; only
-        // blobs are hash-pulled. So do the avatar frame and the two animated-media
-        // hashes, which are IDs rather than art for exactly this reason.
-        // The field's own signature covers the STORED field and the STORED
-        // timestamp, because this frame re-announces what is on disk.
-        let support_creds_sig = super::crypto_handler::sign_support_creds(
-            master_keypair, local_peer_str, updated_at, Some(&support_creds),
-        );
-        let msg = HavenMessage::ProfileUpdate {
-            display_name, status, about_me, updated_at,
-            avatar_b64, banner_b64, is_invisible, twitch_username,
-            device_list,
-            avatar_hash, banner_hash,
-            showcase_board: Some(showcase_board),
-            showcase_assets_b64, showcase_assets_hash,
-            avatar_frame: Some(avatar_frame),
-            avatar_anim: Some(avatar_anim),
-            banner_anim: Some(banner_anim),
-            support_creds: Some(support_creds),
-            support_creds_sig,
-            profile_sig, profile_pk,
-        };
-        match room_code {
-            Some(room) => send_message_to_peer_in_room(ws_cmd_tx, room, target_peer, msg),
-            None => send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg),
+    if send_tombstone_if_revoked(ws_cmd_tx, ws_room_peers, local_peer_str, target_peer, db_path, db_passphrase) {
+        return;
+    }
+    match profile_audience(server_states, local_peer_str, target_peer, db_path, db_passphrase) {
+        Audience::Full => {
+            let msg = own_profile_update(
+                master_keypair, local_peer_str, device_peer_id, is_invisible, include_blobs,
+                override_device_list, db_path, db_passphrase,
+            );
+            if let Some(msg) = msg {
+                super::olm_lane::carry(ws_cmd_tx, target_peer, room_code, &msg, super::olm_lane::NoSession::Queue);
+            }
         }
+        Audience::Card => send_own_card(
+            ws_cmd_tx, master_keypair, device_peer_id, target_peer, room_code, include_blobs, db_path, db_passphrase,
+        ),
+        Audience::None => {}
     }
 }
 
-/// If a LIGHT ProfileUpdate advertises avatar/banner hashes that do not match
+/// Our card to one device, with the avatar bytes when it asked for them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_own_card(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    target_peer: &str,
+    room_code: Option<&str>,
+    with_avatar: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Some(card) = super::profile_card::own_card(master_keypair, db_path, db_passphrase) else {
+        return;
+    };
+    let avatar_b64 = with_avatar
+        .then(|| super::profile_card::own_avatar(&card.master, db_path, db_passphrase))
+        .flatten()
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+        .unwrap_or_default();
+    let device_list = super::crypto_handler::build_local_device_list(master_keypair, device_peer_id, db_path, db_passphrase);
+    super::olm_lane::carry(
+        ws_cmd_tx, target_peer, room_code,
+        &HavenMessage::ProfileCard { card, avatar_b64, device_list },
+        super::olm_lane::NoSession::Queue,
+    );
+}
+
+/// When `target_peer` is one of OUR revoked devices, hand it our tombstoning list in
+/// the clear and nothing else: no session reaches it any more, and that list is what
+/// makes it wipe itself. Returns whether it was one.
+fn send_tombstone_if_revoked(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_master: &str,
+    target_peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let Some(list) = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.load_device_list(local_master).ok().flatten())
+        .filter(|list| list.revoked.iter().any(|d| d == target_peer))
+    else {
+        return false;
+    };
+    send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, HavenMessage::DeviceListTombstone { device_list: list });
+    true
+}
+
+/// Our profile as stored, with every field signed now. Our own blobs are the
+/// authority, so the hashes describe exactly what we hold; `include_blobs` adds the
+/// bytes for a pull. A profile-less node still announces its device list, which is
+/// what collapses its devices into one online identity at a friend's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn own_profile_update(
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_master: &str,
+    device_peer_id: &str,
+    is_invisible: bool,
+    include_blobs: bool,
+    override_device_list: Option<SignedDeviceList>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<HavenMessage> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let p = store.load_profile(local_master).ok().flatten().unwrap_or_else(|| crate::storage::messages::StoredProfile {
+        peer_id: local_master.to_string(),
+        ..Default::default()
+    });
+    let hashes = (
+        profile_blob_hash(p.avatar_bytes.as_deref()),
+        profile_blob_hash(p.banner_bytes.as_deref()),
+        profile_blob_hash(p.showcase_assets.as_deref()),
+    );
+    let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(
+        master_keypair, local_master, p.updated_at, &own_fields(&p, &hashes),
+    );
+    let b64 = |b: &Option<Vec<u8>>| {
+        b.as_ref()
+            .filter(|_| include_blobs)
+            .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+            .unwrap_or_default()
+    };
+    let device_list = override_device_list.or_else(|| {
+        super::crypto_handler::build_local_device_list(master_keypair, device_peer_id, db_path, db_passphrase)
+    });
+    // The credentials field carries its OWN master signature, over the stored field
+    // and the stored timestamp this frame re-announces.
+    let support_creds_sig = super::crypto_handler::sign_support_creds(
+        master_keypair, local_master, p.updated_at, Some(&p.support_creds),
+    );
+    Some(HavenMessage::ProfileUpdate {
+        avatar_b64: b64(&p.avatar_bytes),
+        banner_b64: b64(&p.banner_bytes),
+        showcase_assets_b64: b64(&p.showcase_assets),
+        display_name: p.display_name,
+        status: p.status,
+        about_me: p.about_me,
+        updated_at: p.updated_at,
+        is_invisible,
+        twitch_username: p.twitch_username,
+        device_list,
+        avatar_hash: hashes.0,
+        banner_hash: hashes.1,
+        showcase_board: Some(p.showcase_board),
+        showcase_assets_hash: hashes.2,
+        avatar_frame: Some(p.avatar_frame),
+        avatar_anim: Some(p.avatar_anim),
+        banner_anim: Some(p.banner_anim),
+        support_creds: Some(p.support_creds),
+        support_creds_sig,
+        profile_sig,
+        profile_pk,
+    })
+}
+
+/// The signed fields of our own stored profile, with its blobs' hashes.
+fn own_fields<'a>(
+    p: &'a crate::storage::messages::StoredProfile,
+    hashes: &'a (String, String, String),
+) -> super::crypto_handler::ProfileFields<'a> {
+    super::crypto_handler::ProfileFields {
+        display_name: &p.display_name,
+        status: &p.status,
+        about_me: &p.about_me,
+        twitch_username: &p.twitch_username,
+        avatar_hash: &hashes.0,
+        banner_hash: &hashes.1,
+        showcase_board: &p.showcase_board,
+        showcase_assets_hash: &hashes.2,
+        avatar_frame: &p.avatar_frame,
+        avatar_anim: &p.avatar_anim,
+        banner_anim: &p.banner_anim,
+    }
+}
+
+// If a LIGHT ProfileUpdate advertises avatar/banner hashes that do not match
 /// our cached blobs for this identity, pull the full profile once via
 /// ProfileRequest.
 ///
@@ -1893,7 +1848,8 @@ pub(crate) fn maybe_request_full_profile(
         m.insert(key, std::time::Instant::now());
     }
     hollow_log!("[HOLLOW-PROFILE] Cached avatar/banner stale for {profile_master} — pulling full profile from {sender_peer_id}");
-    send_message_to_peer(ws_cmd_tx, ws_room_peers, sender_peer_id, HavenMessage::ProfileRequest);
+    let _ = ws_room_peers;
+    super::olm_lane::carry(ws_cmd_tx, sender_peer_id, None, &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
 }
 
 /// Handle `MessageEnvelope::Typing` — emit `TypingStarted` event.
@@ -1990,12 +1946,27 @@ pub(crate) async fn handle_envelope_profile_update(
     // Owner proof (0.8.5): persisted only when it VERIFIES, so we can never
     // launder an unverified signature into a ProfileRelay. See
     // `verified_profile_proof` for why absent is tolerated on this path.
+    let fields = super::crypto_handler::ProfileFields {
+        display_name: &display_name,
+        status: &status,
+        about_me: &about_me,
+        twitch_username: &twitch_username,
+        avatar_hash: &avatar_hash,
+        banner_hash: &banner_hash,
+        showcase_board: showcase_board.as_deref().unwrap_or_default(),
+        showcase_assets_hash: &showcase_assets_hash,
+        avatar_frame: avatar_frame.as_deref().unwrap_or_default(),
+        avatar_anim: avatar_anim.as_deref().unwrap_or_default(),
+        banner_anim: banner_anim.as_deref().unwrap_or_default(),
+    };
     let verified = verified_profile_proof(
-        &sender_peer_id, updated_at, &display_name, &status, &about_me,
-        &twitch_username, &avatar_hash, profile_sig.as_deref(), profile_pk.as_deref(),
+        &sender_peer_id, updated_at, &fields, profile_sig.as_deref(), profile_pk.as_deref(),
     );
-    let proof = verified.as_ref().map(|(s, p, h)| crate::storage::ProfileProof {
-        sig: s, pk: p, avatar_hash: h,
+    let proof = verified.as_ref().map(|(sig, pk)| crate::storage::ProfileProof {
+        sig, pk,
+        avatar_hash: &avatar_hash,
+        banner_hash: &banner_hash,
+        assets_hash: &showcase_assets_hash,
     });
     // Multi-device: persist under the sender's MASTER (any device updates the one
     // identity profile) + empty-profile guard. Single-device: master == sender.
@@ -2035,31 +2006,10 @@ pub(crate) async fn handle_envelope_profile_update(
     newly_revoked
 }
 
-/// Handle `ProfileRequestFor` — look up the target peer's profile in our DB
-/// and send it back as `ProfileRelay` (avatar included, no banner).
-/// Who may pull our full profile: our own devices, friends, members of a server we
-/// share, and anyone we have asked to be friends (their card shows our avatar).
-pub(crate) fn profile_request_allowed(
-    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
-    local_master: &str,
-    requester: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> bool {
-    if super::voice_handler::data_channel_peer_allowed(server_states, local_master, requester, db_path, db_passphrase) {
-        return true;
-    }
-    let master = super::resolver::resolve(requester);
-    !super::blocklist::is_blocked(requester)
-        && crate::storage::MessageStore::open(db_path, db_passphrase)
-            .ok()
-            .and_then(|st| st.get_friend_status_direction(&master).ok().flatten())
-            .is_some_and(|(status, direction)| status == "pending" && direction == "outgoing")
-}
-
+/// Handle `ProfileRequestFor`: relay the target's stored profile, with the owner's
+/// proof over every field, as a `ProfileRelay` (avatar included, no banner).
 pub(crate) fn handle_profile_request_for(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     requester_peer: &str,
     target_peer_id: &str,
     db_path: &str,
@@ -2069,11 +2019,11 @@ pub(crate) fn handle_profile_request_for(
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         if let Ok(Some(profile)) = store.load_profile(target_peer_id) {
-            // Only a SIGNED profile can be relayed (0.8.5) — the receiver
-            // refuses an unsigned one, so sending it would just burn bandwidth
-            // and mask the real reason with a silent drop on their side.
-            let (Some(sig), Some(pk), Some(avatar_hash)) = (
+            // Only a profile its owner signed whole can be relayed: the receiver
+            // refuses anything less, so sending it would only mask the reason.
+            let (Some(sig), Some(pk), Some(avatar_hash), Some(banner_hash), Some(showcase_assets_hash)) = (
                 profile.profile_sig, profile.profile_pk, profile.profile_avatar_hash,
+                profile.profile_banner_hash, profile.profile_assets_hash,
             ) else {
                 hollow_log!("[HOLLOW-PROFILE] Not relaying {target_peer_id} to {requester_peer} — no owner signature stored");
                 return;
@@ -2095,13 +2045,57 @@ pub(crate) fn handle_profile_request_for(
                 avatar_b64,
                 twitch_username: profile.twitch_username,
                 avatar_hash,
+                banner_hash,
+                showcase_board: profile.showcase_board,
+                showcase_assets_hash,
+                avatar_frame: profile.avatar_frame,
+                avatar_anim: profile.avatar_anim,
+                banner_anim: profile.banner_anim,
                 profile_sig: Some(sig),
                 profile_pk: Some(pk),
             };
-            send_message_to_peer(ws_cmd_tx, ws_room_peers, requester_peer, msg);
+            super::olm_lane::carry(ws_cmd_tx, requester_peer, None, &msg, super::olm_lane::NoSession::Drop);
             hollow_log!("[HOLLOW-PROFILE] Relayed profile for {target_peer_id} to {requester_peer}");
         } else {
             hollow_log!("[HOLLOW-PROFILE] No cached profile for {target_peer_id}, cannot relay");
+        }
+    }
+}
+
+/// A `ProfileRelay` as it arrived.
+pub(crate) struct RelayedProfile {
+    pub source_peer_id: String,
+    pub display_name: String,
+    pub status: String,
+    pub about_me: String,
+    pub updated_at: i64,
+    pub avatar_b64: String,
+    pub twitch_username: String,
+    pub avatar_hash: String,
+    pub banner_hash: String,
+    pub showcase_board: String,
+    pub showcase_assets_hash: String,
+    pub avatar_frame: String,
+    pub avatar_anim: String,
+    pub banner_anim: String,
+    pub profile_sig: Option<String>,
+    pub profile_pk: Option<String>,
+}
+
+impl RelayedProfile {
+    fn fields(&self) -> super::crypto_handler::ProfileFields<'_> {
+        super::crypto_handler::ProfileFields {
+            display_name: &self.display_name,
+            status: &self.status,
+            about_me: &self.about_me,
+            twitch_username: &self.twitch_username,
+            avatar_hash: &self.avatar_hash,
+            banner_hash: &self.banner_hash,
+            showcase_board: &self.showcase_board,
+            showcase_assets_hash: &self.showcase_assets_hash,
+            avatar_frame: &self.avatar_frame,
+            avatar_anim: &self.avatar_anim,
+            banner_anim: &self.banner_anim,
         }
     }
 }
@@ -2111,110 +2105,88 @@ pub(crate) fn handle_profile_request_for(
 pub(crate) async fn handle_profile_relay(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &mut HashMap<String, ServerState>,
-    source_peer_id: String,
-    display_name: String,
-    status: String,
-    about_me: String,
-    updated_at: i64,
-    avatar_b64: String,
-    twitch_username: String,
-    avatar_hash: String,
-    profile_sig: Option<String>,
-    profile_pk: Option<String>,
+    relayed: RelayedProfile,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // SECURITY: this frame asserts a THIRD party's profile. The sender picks
-    // `source_peer_id` AND `updated_at`, and it arrives in plaintext, so without
-    // this check any co-present peer (or the relay) could permanently overwrite
-    // anyone's display name and avatar by claiming updated_at = i64::MAX. Only
-    // the subject's own signature makes the claim credible.
-    //
-    if profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source_peer_id} — field exceeds its limit");
+    // SECURITY: this frame asserts a THIRD party's profile, with a `source_peer_id`
+    // and an `updated_at` the sender picks, so without the subject's own signature
+    // any co-member could overwrite anyone's profile for good by claiming
+    // updated_at = i64::MAX.
+    let source = relayed.source_peer_id.as_str();
+    if profile_text_oversized(&relayed.display_name, &relayed.status, &relayed.about_me, &relayed.twitch_username) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source} — field exceeds its limit");
         return;
     }
-    if !super::crypto_handler::verify_profile_signature(
-        &source_peer_id, updated_at, &display_name, &status, &about_me,
-        &twitch_username, &avatar_hash,
-        profile_sig.as_deref(), profile_pk.as_deref(),
-    ) {
-        hollow_log!(
-            "[HOLLOW-SECURITY] REJECTED relayed profile for {source_peer_id} — {} (updated_at={updated_at})",
-            if profile_sig.is_none() { "NO owner signature" } else { "owner signature INVALID" }
-        );
+    let (Some(sig), Some(pk)) = (relayed.profile_sig.as_deref(), relayed.profile_pk.as_deref()) else {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source} — NO owner signature");
+        return;
+    };
+    if !super::crypto_handler::verify_profile_signature(source, relayed.updated_at, &relayed.fields(), Some(sig), Some(pk)) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source} — owner signature INVALID (updated_at={})", relayed.updated_at);
         return;
     }
 
-    // The blob is bound by HASH, so it is checked separately from the text
-    // fields: a relayer with a stale cache loses only its avatar here (we keep
-    // the verified text and pull the real blob from the owner), while a relayer
-    // that SWAPPED the avatar is caught by the same comparison.
-    let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
+    // The blob is bound by HASH, so a relayer with a stale cache loses only its
+    // avatar here (we pull the real one from the owner) and one that swapped it is
+    // caught by the same comparison.
+    let avatar_bytes: Option<Vec<u8>> = if relayed.avatar_b64.is_empty() {
         None
     } else {
-        base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok()
+        base64::engine::general_purpose::STANDARD.decode(&relayed.avatar_b64).ok()
             .filter(|b| b.len() <= 1_000_000)
             .filter(|b| {
-                let ok = profile_blob_hash(Some(b)) == avatar_hash;
+                let ok = profile_blob_hash(Some(b)) == relayed.avatar_hash;
                 if !ok {
-                    hollow_log!("[HOLLOW-SECURITY] DROPPED relayed avatar for {source_peer_id} — bytes do not match the signed hash");
+                    hollow_log!("[HOLLOW-SECURITY] DROPPED relayed avatar for {source} — bytes do not match the signed hash");
                 }
                 ok
             })
     };
 
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        // Only save if we don't already have a newer profile.
-        let should_save = match store.load_profile_light(&source_peer_id) {
-            Ok(Some(existing)) => existing.updated_at < updated_at,
-            Ok(None) => true,
-            Err(_) => true,
-        };
-        if should_save {
-            // Relay carries no showcase board/assets — None preserves stored ones.
-            // The verified proof rides along so WE can relay it onward.
-            let proof = match (profile_sig.as_deref(), profile_pk.as_deref()) {
-                (Some(sig), Some(pk)) => Some(crate::storage::ProfileProof {
-                    sig, pk, avatar_hash: &avatar_hash,
-                }),
-                _ => None,
-            };
-            // A relay carries no frame and no animated-media hashes either —
-            // `None` preserves whatever we already stored for this identity.
-            // PROFILE-1: a relayed avatar is remote bytes from a peer that is
-            // not even the subject, so it takes the same gate. Refused
-            // preserves; the relay's text still lands.
-            let avatar_bytes = gated_profile_image(
-                &source_peer_id,
-                "relayed avatar",
-                super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES,
-                avatar_bytes.as_deref(),
-            );
-            let _ = store.save_profile(
-                &source_peer_id, &display_name, &status, &about_me, updated_at,
-                avatar_bytes, None, &twitch_username, None, None,
-                proof, None, None, None, None,
-            );
-            hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source_peer_id}");
-        } else {
-            hollow_log!("[HOLLOW-PROFILE] Skipped relayed profile for {source_peer_id} (already have newer)");
-            return;
-        }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return;
+    };
+    if store.load_profile_light(source).ok().flatten().is_some_and(|existing| existing.updated_at >= relayed.updated_at) {
+        hollow_log!("[HOLLOW-PROFILE] Skipped relayed profile for {source} (already have newer)");
+        return;
     }
+    // The verified proof rides along so WE can relay it onward. PROFILE-1: a relayed
+    // avatar is remote bytes from a peer that is not even the subject, so it takes
+    // the same gate; refused preserves, and the relay's text still lands.
+    let avatar_bytes = gated_profile_image(
+        source, "relayed avatar", super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES, avatar_bytes.as_deref(),
+    );
+    let proof = crate::storage::ProfileProof {
+        sig, pk,
+        avatar_hash: &relayed.avatar_hash,
+        banner_hash: &relayed.banner_hash,
+        assets_hash: &relayed.showcase_assets_hash,
+    };
+    let _ = store.save_profile(
+        source, &relayed.display_name, &relayed.status, &relayed.about_me, relayed.updated_at,
+        avatar_bytes, None, &relayed.twitch_username,
+        sanitize_incoming_showcase(Some(&relayed.showcase_board)), None,
+        Some(proof),
+        sanitize_incoming_frame(Some(&relayed.avatar_frame)),
+        sanitize_incoming_anim(Some(&relayed.avatar_anim)),
+        sanitize_incoming_anim(Some(&relayed.banner_anim)),
+        None,
+    );
+    hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source}");
 
     // Update display_name in server member lists (master-keyed).
-    let source_master = super::resolver::resolve(&source_peer_id);
+    let source_master = super::resolver::resolve(source);
     for (_, state) in server_states.iter_mut() {
         if let Some(member) = state.members.get_mut(&source_master) {
-            if !display_name.is_empty() {
-                member.display_name = display_name.clone();
+            if !relayed.display_name.is_empty() {
+                member.display_name = relayed.display_name.clone();
             }
         }
     }
 
     let _ = event_tx.send(NetworkEvent::ProfileUpdated {
-        peer_id: source_peer_id,
+        peer_id: relayed.source_peer_id,
     }).await;
 }
 
@@ -2224,7 +2196,6 @@ mod tests {
         gated_profile_image, profile_blob_hash, profile_text_oversized, sanitize_incoming_frame,
         save_incoming_profile, valid_avatar_frame_id, PROFILE_ABOUT_MAX_BYTES,
     };
-    use base64::Engine as _;
     use crate::identity::native_identity::NativeKeypair;
     use crate::node::support_creds::{self, testing};
 
@@ -2396,8 +2367,10 @@ mod tests {
         let master = NativeKeypair::from_secret_bytes(&[0x4e; 32]).peer_id();
         let (real, forged) = (small_png(), png_declaring(64, 64));
         let real_hash = profile_blob_hash(Some(&real));
+        let proof = crate::storage::ProfileProof {
+            sig: "s", pk: "p", avatar_hash: &real_hash, banner_hash: &real_hash, assets_hash: &real_hash,
+        };
         let save = |updated_at: i64, avatar: Option<&[u8]>| {
-            let proof = crate::storage::ProfileProof { sig: "s", pk: "p", avatar_hash: &real_hash };
             save_incoming_profile(
                 &master, "Anon", "", "", updated_at, avatar, None, "", None, None, Some(proof),
                 None, None, None, None, None, &db, &pass,
@@ -2407,6 +2380,16 @@ mod tests {
         let stored_avatar = || {
             crate::storage::MessageStore::open(&db, &pass).unwrap().load_avatar(&master).unwrap()
         };
+        let stored_banner = || {
+            crate::storage::MessageStore::open(&db, &pass).unwrap().load_profile(&master).unwrap().and_then(|p| p.banner_bytes)
+        };
+
+        // Every blob is signed by hash, the banner included (N1 since 0.12).
+        assert!(save_incoming_profile(
+            &master, "Anon", "", "", 9 * 86_400_000, None, Some(&forged), "", None, None, Some(proof),
+            None, None, None, None, None, &db, &pass,
+        ).1);
+        assert_eq!(stored_banner(), None, "a banner that misses its signed hash was stored");
 
         assert!(save(10 * 86_400_000, Some(&forged)));
         assert_eq!(stored_avatar(), None, "HOL-SEC-038: bytes that miss the signed hash were stored");
@@ -2480,15 +2463,16 @@ mod tests {
             creds: Option<&str>,
             creds_sig: Option<&str>,
         ) -> bool {
-            let pk_b64 = base64::engine::general_purpose::STANDARD
-                .encode(self.master.public_key_protobuf());
+            let fields = crate::node::crypto_handler::ProfileFields {
+                display_name: "Anon",
+                ..Default::default()
+            };
             let (sig, pk) = crate::node::crypto_handler::sign_profile(
-                &self.master, &pk_b64, &self.master_id, updated_at,
-                "Anon", "", "", "", "",
+                &self.master, &self.master_id, updated_at, &fields,
             );
             let (sig, pk) = (sig.unwrap(), pk.unwrap());
             let proof = crate::storage::ProfileProof {
-                sig: &sig, pk: &pk, avatar_hash: "",
+                sig: &sig, pk: &pk, avatar_hash: "", banner_hash: "", assets_hash: "",
             };
             let (_, saved) = save_incoming_profile(
                 &self.master_id, "Anon", "", "", updated_at,

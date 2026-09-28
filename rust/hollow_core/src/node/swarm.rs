@@ -274,7 +274,7 @@ fn on_verified_sibling(
             if pid == local_peer_str || pid == device_peer_id { continue; }
             if super::resolver::same_identity(&pid, local_peer_str) { continue; }
             social::send_own_profile_to_peer(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, ws_room_peers, server_states,
                 local_peer_str, master_keypair, device_peer_id, &pid,
                 is_invisible,
                 db_path, db_passphrase,
@@ -285,7 +285,7 @@ fn on_verified_sibling(
     // converges on the union too — covers the case where the sibling is the one with a
     // profile and we are the fresh device.
     social::send_own_profile_to_peer(
-        ws_cmd_tx, ws_room_peers,
+        ws_cmd_tx, ws_room_peers, server_states,
         local_peer_str, master_keypair, device_peer_id, peer_id,
         is_invisible,
         db_path, db_passphrase,
@@ -303,10 +303,7 @@ fn on_verified_sibling(
         hollow_log!(
             "[HOLLOW-MULTIDEV] Own profile empty — requesting it from sibling {peer_id}"
         );
-        send_message_to_peer(
-            ws_cmd_tx, ws_room_peers,
-            peer_id, HavenMessage::ProfileRequest,
-        );
+        super::olm_lane::carry(ws_cmd_tx, peer_id, None, &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
     }
 
     // Both sides share on verification, so whichever device read more while the
@@ -1437,7 +1434,7 @@ async fn run_event_loop(
 
                     NodeCommand::RevokeDevice { device_peer_id: target } => {
                         if let Some(revoked) = sync_handler::handle_revoke_device(
-                            &event_tx, &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                            &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
                             &master_peer_str, &local_peer_str, &device_peer_id,
                             is_invisible, target, &db_path, &db_passphrase,
                         ).await {
@@ -1453,7 +1450,7 @@ async fn run_event_loop(
 
                     NodeCommand::PublishSelfRevocation { reply } => {
                         let ok = destroy::handle_publish_self_revocation(
-                            &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                            &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
                             &master_peer_str, &device_peer_id, is_invisible,
                             &db_path, &db_passphrase,
                         );
@@ -1485,7 +1482,7 @@ async fn run_event_loop(
 
                     NodeCommand::ResetDeviceLists => {
                         if let Some(revoked) = sync_handler::handle_reset_device_lists(
-                            &event_tx, &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                            &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
                             &master_peer_str, &local_peer_str, &device_peer_id,
                             is_invisible, &db_path, &db_passphrase,
                         ).await {
@@ -2230,7 +2227,7 @@ async fn run_event_loop(
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &mut olm, &crypto_store,
-                            &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states,
                             &local_peer_str, &master_keypair, &device_peer_id, is_invisible,
                             peer_id_str,
                             &mut pending_friend_accepts,
@@ -3564,7 +3561,7 @@ async fn run_event_loop(
 
                                 if is_new {
                                     social::send_own_profile_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
+                                        &ws_cmd_tx, &ws_room_peers, &server_states,
                                         &local_peer_str, &master_keypair, &device_peer_id, &peer_id,
                                         is_invisible,
                                         &db_path, &db_passphrase,
@@ -3744,6 +3741,12 @@ async fn run_event_loop(
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
+                                    // Who is asking, for the member deciding: our card and nothing more. The
+                                    // avatar rides along, as a member is a stranger we answer no pull from.
+                                    social::send_own_card(
+                                        &ws_cmd_tx, &master_keypair, &device_peer_id, &peer_id, None, true,
+                                        &db_path, &db_passphrase,
+                                    );
                                 }
 
                                 // DM-room co-presence re-key, outside `is_new` because the peer was already
@@ -4084,7 +4087,7 @@ async fn run_event_loop(
                             for pid in &peers {
                                 if pid != &local_peer && pid.as_str() != device_peer_id {
                                     social::send_own_profile_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
+                                        &ws_cmd_tx, &ws_room_peers, &server_states,
                                         &local_peer_str, &master_keypair, &device_peer_id, pid,
                                         is_invisible,
                                         &db_path, &db_passphrase,
@@ -4121,7 +4124,7 @@ async fn run_event_loop(
                                 let is_new = synced_peers.insert(pid_str.clone());
                                 if is_new {
                                     social::send_own_profile_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
+                                        &ws_cmd_tx, &ws_room_peers, &server_states,
                                         &local_peer_str, &master_keypair, &device_peer_id, pid_str,
                                         is_invisible,
                                         &db_path, &db_passphrase,
@@ -4139,12 +4142,11 @@ async fn run_event_loop(
 
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                            if let Ok(None) = store.load_profile(pid_str) {
+                                            if let Ok(None) = store.load_profile(pid_str)
+                                                && social::profile_audience(&server_states, &local_peer_str, pid_str, &db_path, &db_passphrase) != social::Audience::None
+                                            {
                                                 hollow_log!("[HOLLOW-PROFILE] No profile for {pid_str} — sending ProfileRequest");
-                                                send_message_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    pid_str, HavenMessage::ProfileRequest,
-                                                );
+                                                super::olm_lane::carry(&ws_cmd_tx, pid_str, None, &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
                                             }
                                         }
                                     }
@@ -4167,11 +4169,10 @@ async fn run_event_loop(
                                                         continue;
                                                     }
                                                     hollow_log!("[HOLLOW-PROFILE] Requesting proxy profile for {member_id} from {pid_str}");
-                                                    send_message_to_peer(
-                                                        &ws_cmd_tx, &ws_room_peers,
-                                                        pid_str, HavenMessage::ProfileRequestFor {
-                                                            target_peer_id: member_id.clone(),
-                                                        },
+                                                    super::olm_lane::carry(
+                                                        &ws_cmd_tx, pid_str, None,
+                                                        &HavenMessage::ProfileRequestFor { target_peer_id: member_id.clone() },
+                                                        super::olm_lane::NoSession::Queue,
                                                     );
                                                     proxy_count += 1;
                                                 }
@@ -4403,6 +4404,12 @@ async fn run_event_loop(
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
+                                    // Who is asking, for the member deciding: our card and nothing more. The
+                                    // avatar rides along, as a member is a stranger we answer no pull from.
+                                    social::send_own_card(
+                                        &ws_cmd_tx, &master_keypair, &device_peer_id, pid_str, None, true,
+                                        &db_path, &db_passphrase,
+                                    );
                                 }
 
                                 // DM-room co-presence re-key, the RoomMembers twin of the PeerJoined heal
@@ -5255,7 +5262,7 @@ async fn run_event_loop(
                                 hollow_log!("[HOLLOW-MLS] Held Welcome for {group_key} now passes, joined");
                                 let sync_peer = sender.as_ref().map(|s| s.device.clone()).unwrap_or_default();
                                 after_welcome_joined(
-                                    mls_mgr, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                                    mls_mgr, &master_keypair, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                                     &crdt_store, &server_states, &mut mls_bootstrap_requested,
                                     &mut mls_welcome_grace, &mut awaiting_mls_after_parked_join,
                                     &mut relay_catchup_done, &db_path, &db_passphrase, &local_peer_str,
@@ -6538,6 +6545,7 @@ async fn apply_remote_crdt_op(
 #[allow(clippy::too_many_arguments)]
 async fn after_welcome_joined(
     mls_mgr: &mut MlsManager,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -6603,6 +6611,7 @@ async fn after_welcome_joined(
         let _ = event_tx.send(NetworkEvent::ConferenceAdmitted {
             conf_id: conf_id.to_string(),
         }).await;
+        super::conference::broadcast_card(mls_mgr, crypto_store, ws_cmd_tx, master_keypair, conf_id, db_path, db_passphrase);
     }
 
     // Emit the SFrame key for this group. If we joined a
@@ -9036,11 +9045,10 @@ async fn handle_incoming_request(
                                         if is_online { continue; }
                                         if let Ok(Some(_)) = store.load_profile_light(member_id) { continue; }
                                         hollow_log!("[HOLLOW-PROFILE] Post-join proxy profile request for {member_id} via {peer_str}");
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            peer_str, HavenMessage::ProfileRequestFor {
-                                                target_peer_id: member_id.clone(),
-                                            },
+                                        super::olm_lane::carry(
+                                            ws_cmd_tx, peer_str, None,
+                                            &HavenMessage::ProfileRequestFor { target_peer_id: member_id.clone() },
+                                            super::olm_lane::NoSession::Queue,
                                         );
                                         proxy_count += 1;
                                     }
@@ -11066,7 +11074,7 @@ async fn handle_incoming_request(
                 match judged {
                     Ok(()) => {
                         after_welcome_joined(
-                            mls_mgr, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+                            mls_mgr, master_keypair, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
                             crdt_store_actor, server_states, mls_bootstrap_requested,
                             mls_welcome_grace, awaiting_mls_after_parked_join, relay_catchup_done,
                             db_path, db_passphrase, local_peer_str, peer_str,
@@ -11242,7 +11250,7 @@ async fn handle_incoming_request(
 
         // -- Profile sync --
 
-        HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, carried_profile } => {
+        HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, sealed_card } => {
 
             // A friend request whose sender resolves to our own identity is one of
             // our own devices (multi-device: same master identity). Never render it
@@ -11394,17 +11402,14 @@ async fn handle_incoming_request(
             }
 
             // A stranger's request holds no profile in our DB and the sender is often
-            // gone before it can push one, so the card would render a raw peer id.
-            // When the request carries the sender's OWN master-signed profile, verify
-            // it by the same rule as a ProfileRelay and store it under their master
-            // BEFORE emitting the event. A bad signature drops JUST the profile.
-            if let Some(profile) = carried_profile.as_ref() {
-                if let Some(stored_master) = social::store_carried_profile(
-                    profile, &req_master_early, db_path, db_passphrase,
-                ) {
-                    let _ = event_tx.send(NetworkEvent::ProfileUpdated {
-                        peer_id: stored_master,
-                    }).await;
+            // gone before it can push one, so its card rides sealed in the request. It
+            // opens only as the requester's own card; anything else drops JUST the card,
+            // before the event, never the request.
+            if let Some(card) = sealed_card.as_ref().and_then(|sealed| {
+                super::profile_card::open_from(sealed, master_peer_str, &req_master_early, requested_at)
+            }) {
+                if super::profile_card::store_card(&card, None, db_path, db_passphrase) {
+                    let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master }).await;
                 }
             }
 
@@ -11451,7 +11456,7 @@ async fn handle_incoming_request(
                 }
                 social::handle_accept_friend_request(
                     olm, crypto_store,
-                    event_tx, ws_cmd_tx, ws_room_peers,
+                    event_tx, ws_cmd_tx, ws_room_peers, server_states,
                     local_peer_str, master_keypair, device_peer_id, is_invisible,
                     peer_str.to_string(),
                     pending_friend_accepts,
@@ -11494,7 +11499,7 @@ async fn handle_incoming_request(
             // inbox right after delivery and then being pinned in `synced_peers` via
             // the shared DM room, so it never fires again. Send to the SENDER device.
             social::send_own_profile_to_peer(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, ws_room_peers, server_states,
                 local_peer_str, master_keypair, device_peer_id, &peer_str,
                 is_invisible,
                 db_path, db_passphrase,
@@ -11604,7 +11609,7 @@ async fn handle_incoming_request(
             // learns our device→master mapping over the durable DM room (same reason as
             // the FriendRequest handler — the is_new gate otherwise suppresses it).
             social::send_own_profile_to_peer(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, ws_room_peers, server_states,
                 local_peer_str, master_keypair, device_peer_id, &peer_str,
                 is_invisible,
                 db_path, db_passphrase,
@@ -11838,63 +11843,12 @@ async fn handle_incoming_request(
                     // SendDirect on the same ordered connection.
                     //
                     // A freshly-imported device has no profile row: never gate on load_profile.
-                    {
-                        let profile = crate::storage::MessageStore::open(db_path, db_passphrase)
-                            .ok()
-                            .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
-                        // LIGHT announce, with the device list as the payload: blobs ride
-                        // as hashes and a stale friend pulls via ProfileRequest. Our proof
-                        // rides along, since receivers REQUIRE it to store the profile.
-                        let (profile_sig, profile_pk, signed_avatar_hash) =
-                            social::own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
-                        let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds) =
-                            match profile {
-                                Some(p) => (
-                                    p.display_name, p.status, p.about_me, p.updated_at,
-                                    signed_avatar_hash,
-                                    social::profile_blob_hash(p.banner_bytes.as_deref()),
-                                    p.twitch_username, p.showcase_board,
-                                    social::profile_blob_hash(p.showcase_assets.as_deref()),
-                                    p.avatar_frame, p.avatar_anim, p.banner_anim,
-                                    p.support_creds,
-                                ),
-                                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
-                            };
-                        let device_list = super::crypto_handler::build_local_device_list(
-                            master_keypair, device_peer_id, db_path, db_passphrase,
-                        );
-                        let dev_count = device_list.as_ref().map(|d| d.devices.len()).unwrap_or(0);
-                        // The credentials field's own master signature. Every announce
-                        // carrying the field carries this, or a pinned receiver drops it.
-                        let support_creds_sig = super::crypto_handler::sign_support_creds(
-                            master_keypair, local_peer_str, updated_at, Some(&support_creds),
-                        );
-                        let msg = HavenMessage::ProfileUpdate {
-                            display_name, status, about_me, updated_at,
-                            avatar_b64: String::new(), banner_b64: String::new(),
-                            is_invisible, twitch_username,
-                            device_list,
-                            avatar_hash, banner_hash,
-                            showcase_board: Some(showcase_board),
-                            showcase_assets_b64: String::new(),
-                            showcase_assets_hash,
-                            avatar_frame: Some(avatar_frame),
-                            avatar_anim: Some(avatar_anim),
-                            banner_anim: Some(banner_anim),
-                            support_creds: Some(support_creds),
-                            support_creds_sig,
-                            profile_sig, profile_pk,
-                        };
-                        let json = serde_json::to_string(&msg).unwrap_or_default();
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                            room_code: room,
-                            target_peer: entry.peer_id.clone(),
-                            data: json.into_bytes(),
-                        });
-                        hollow_log!(
-                            "[HOLLOW-DEVICES] Announced self ({dev_count}-device list) to backfilled friend {}",
-                            entry.peer_id
-                        );
+                    if let Some(msg) = social::own_profile_update(
+                        master_keypair, local_peer_str, device_peer_id, is_invisible, false, None,
+                        db_path, db_passphrase,
+                    ) {
+                        super::olm_lane::carry(ws_cmd_tx, &entry.peer_id, Some(&room), &msg, super::olm_lane::NoSession::Queue);
+                        hollow_log!("[HOLLOW-DEVICES] Announced self to backfilled friend {}", entry.peer_id);
                     }
                 }
             }
@@ -12651,7 +12605,7 @@ async fn handle_incoming_request(
                     // Skip our own other devices (siblings) — they already have it.
                     if super::resolver::same_identity(&pid, local_peer_str) { continue; }
                     social::send_own_profile_to_peer(
-                        ws_cmd_tx, ws_room_peers,
+                        ws_cmd_tx, ws_room_peers, server_states,
                         local_peer_str, master_keypair, device_peer_id, &pid,
                         is_invisible,
                         db_path, db_passphrase,
@@ -12699,6 +12653,12 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-SECURITY] REJECTED profile from {peer_str}: a field exceeds its limit");
                 return;
             }
+            // A full profile comes from someone we are close to, or from one we are
+            // about to be (their accept can outrun ours); a stranger's is not stored.
+            if social::profile_audience(server_states, master_peer_str, peer_str, db_path, db_passphrase) == social::Audience::None {
+                hollow_log!("[HOLLOW-SECURITY] Ignored the profile fields of {peer_str}: no relationship (device list, if any, still ingested)");
+                return;
+            }
 
             // Decode avatar/banner from base64.
             // Empty string = no change (None). "CLEAR" = clear (Some(empty)). Otherwise = base64 data.
@@ -12741,15 +12701,29 @@ async fn handle_incoming_request(
                     .filter(|b| b.len() <= 2_000_000)
             };
 
-            // Owner proof, stored only when it VERIFIES, so an unverified signature
-            // can never be laundered into a ProfileRelay by us. Absent is fine here:
-            // attribution is transport-attested, the profile just becomes non-relayable.
+            // Owner proof over every field, REQUIRED: nothing is stored without it, so
+            // an unverified signature can never be laundered into a ProfileRelay by us.
+            let fields = super::crypto_handler::ProfileFields {
+                display_name: &display_name,
+                status: &status,
+                about_me: &about_me,
+                twitch_username: &twitch_username,
+                avatar_hash: &avatar_hash,
+                banner_hash: &banner_hash,
+                showcase_board: showcase_board.as_deref().unwrap_or_default(),
+                showcase_assets_hash: &showcase_assets_hash,
+                avatar_frame: avatar_frame.as_deref().unwrap_or_default(),
+                avatar_anim: avatar_anim.as_deref().unwrap_or_default(),
+                banner_anim: banner_anim.as_deref().unwrap_or_default(),
+            };
             let verified_proof = social::verified_profile_proof(
-                peer_str, updated_at, &display_name, &status, &about_me,
-                &twitch_username, &avatar_hash, profile_sig.as_deref(), profile_pk.as_deref(),
+                peer_str, updated_at, &fields, profile_sig.as_deref(), profile_pk.as_deref(),
             );
-            let proof = verified_proof.as_ref().map(|(sig, pk, ah)| {
-                crate::storage::ProfileProof { sig, pk, avatar_hash: ah }
+            let proof = verified_proof.as_ref().map(|(sig, pk)| crate::storage::ProfileProof {
+                sig, pk,
+                avatar_hash: &avatar_hash,
+                banner_hash: &banner_hash,
+                assets_hash: &showcase_assets_hash,
             });
             let (profile_master, saved) = social::save_incoming_profile(
                 &peer_str, &display_name, &status, &about_me, updated_at,
@@ -13147,7 +13121,7 @@ async fn handle_incoming_request(
         }
         HavenMessage::ConferenceChat { conf_id, body } => {
             super::conference::handle_inbound_chat(
-                mls, crypto_store, event_tx, conf_id, body,
+                mls, crypto_store, event_tx, ws_cmd_tx, master_keypair, conf_id, body, db_path, db_passphrase,
             ).await;
         }
         HavenMessage::ConferenceEnded { conf_id, host } => {
@@ -13228,17 +13202,60 @@ async fn handle_incoming_request(
 
         // -- Profile request --
         HavenMessage::ProfileRequest => {
-            if !social::profile_request_allowed(server_states, master_peer_str, peer_str, db_path, db_passphrase) {
+            if social::profile_audience(server_states, master_peer_str, peer_str, db_path, db_passphrase) == social::Audience::None {
                 hollow_log!("[HOLLOW-SECURITY] Ignored a ProfileRequest from {peer_str}: no relationship");
                 return;
             }
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");
-            // FULL send — this is the pull half of the light-announce protocol.
+            // The pull half of the light-announce protocol: the blobs, or the card
+            // with its avatar for someone we are not close to.
             social::send_own_profile_full_to_peer(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx, ws_room_peers, server_states,
                 local_peer_str, master_keypair, device_peer_id, peer_str,
                 is_invisible,
                 db_path, db_passphrase,
+            );
+        }
+
+        HavenMessage::ProfileCard { card, avatar_b64, device_list } => {
+            // The list first: it is what binds the sending device to the card's master.
+            let outcome = crypto_handler::ingest_device_list(
+                event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
+                ws_cmd_tx, device_list, db_path, db_passphrase,
+            ).await;
+            enforce_device_revocations(
+                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                local_peer_str, ws_room_peers, pending_mls_removals,
+            );
+            // A card speaks only for its sender's own identity.
+            if card.master != super::resolver::resolve(peer_str) || !super::profile_card::card_holds(&card) {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a profile card from {peer_str}: not its own, or not signed by it");
+                return;
+            }
+            use base64::Engine;
+            let avatar = (!avatar_b64.is_empty())
+                .then(|| base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok())
+                .flatten()
+                .filter(|b| b.len() <= super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES);
+            if super::profile_card::store_card(&card, avatar.as_deref(), db_path, db_passphrase) {
+                let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master.clone() }).await;
+            }
+            // A new avatar we hold no bytes for: pull them once.
+            social::maybe_request_full_profile(
+                ws_cmd_tx, ws_room_peers, peer_str, &card.master,
+                &avatar_b64, "", &card.avatar_hash, "", "", "",
+                device_peer_id, db_path, db_passphrase,
+            );
+        }
+
+        HavenMessage::DeviceListTombstone { device_list } => {
+            let outcome = crypto_handler::ingest_device_list(
+                event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
+                ws_cmd_tx, Some(device_list), db_path, db_passphrase,
+            ).await;
+            enforce_device_revocations(
+                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                local_peer_str, ws_room_peers, pending_mls_removals,
             );
         }
 
@@ -13265,18 +13282,25 @@ async fn handle_incoming_request(
             }
             hollow_log!("[HOLLOW-PROFILE] ProfileRequestFor {target_peer_id} from {peer_str}");
             social::handle_profile_request_for(
-                ws_cmd_tx, ws_room_peers,
+                ws_cmd_tx,
                 peer_str, &target_peer_id,
                 db_path, db_passphrase,
             );
         }
 
-        HavenMessage::ProfileRelay { source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username, avatar_hash, profile_sig, profile_pk } => {
+        HavenMessage::ProfileRelay {
+            source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username,
+            avatar_hash, banner_hash, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim,
+            banner_anim, profile_sig, profile_pk,
+        } => {
             hollow_log!("[HOLLOW-PROFILE] ProfileRelay for {source_peer_id} from {peer_str}");
             social::handle_profile_relay(
                 event_tx, server_states,
-                source_peer_id, display_name, status, about_me, updated_at,
-                avatar_b64, twitch_username, avatar_hash, profile_sig, profile_pk,
+                social::RelayedProfile {
+                    source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username,
+                    avatar_hash, banner_hash, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim,
+                    banner_anim, profile_sig, profile_pk,
+                },
                 db_path, db_passphrase,
             ).await;
         }

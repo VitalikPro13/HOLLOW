@@ -27,6 +27,7 @@ pub(crate) mod link_preview;
 pub(crate) mod message_ops;
 pub(crate) mod olm_lane;
 pub(crate) mod mls_authority;
+pub(crate) mod profile_card;
 pub(crate) mod proxy_tunnel;
 pub(crate) mod recovery_pool;
 pub(crate) mod resolver;

@@ -288,6 +288,7 @@ pub(crate) fn encode_kill_blob(order: &DestroyIdentity) -> Option<String> {
 pub(crate) fn handle_publish_self_revocation(
     ws_cmd_tx: &WsCmdTx,
     ws_room_peers: &WsRoomPeers,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     local_master: &str,
     local_device: &str,
@@ -303,7 +304,7 @@ pub(crate) fn handle_publish_self_revocation(
             continue;
         }
         super::social::send_own_profile_with_device_list(
-            ws_cmd_tx, ws_room_peers, local_master, master_keypair, local_device,
+            ws_cmd_tx, ws_room_peers, server_states, local_master, master_keypair, local_device,
             &pid, signed.clone(), is_invisible, db_path, db_passphrase,
         );
         sent += 1;

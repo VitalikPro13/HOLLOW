@@ -67,16 +67,6 @@ struct RelayInner {
     /// (sender, target) pairs whose direct frames the relay holds back, in order,
     /// until the test releases them: a slow link, so two frames can cross.
     held_directs: HashMap<(String, String), Vec<BufferedMsg>>,
-    /// Devices whose outgoing `profile_update` frames get their `support_creds`
-    /// rewritten to `""` and their signature removed, IN FLIGHT. This is the attack
-    /// `support_creds_sig` exists for: the plaintext fallback is a JSON body the relay
-    /// can edit, and `Some("")` is an explicit clear on every receiver.
-    strip_support_creds: HashSet<String>,
-    /// Devices whose outgoing `profile_update` frames lose their
-    /// `support_creds_sig` and keep the field. What every client that
-    /// predates the signature sends, and the shape the pin has to tolerate
-    /// until it has seen one signed announce.
-    drop_support_creds_sig: HashSet<String>,
     /// Devices whose outgoing data frames are kept, so a test can replay one
     /// later (a captured older announce is a replay, not a forgery).
     recording: HashSet<String>,
@@ -539,32 +529,6 @@ impl MockRelay {
             .push((from.to_string(), data));
     }
 
-    /// Make a device deaf to 0x03 room broadcasts (or restore it) — the
-    /// silent-loss lever for the join-order MLS epoch race tests. The device
-    /// stays in its rooms and keeps receiving presence + direct frames.
-    #[allow(dead_code)]
-    /// Rewrite `support_creds` out of this device's profile announces in
-    /// flight, exactly as a hostile relay would.
-    pub(crate) fn set_strip_support_creds(&self, peer_id: &str, on: bool) {
-        let mut inner = self.inner.lock().unwrap();
-        if on {
-            inner.strip_support_creds.insert(peer_id.to_string());
-        } else {
-            inner.strip_support_creds.remove(peer_id);
-        }
-    }
-
-    /// Send this device's profile announces with the field and no signature,
-    /// the way a client that predates the signature does.
-    pub(crate) fn set_drop_support_creds_sig(&self, peer_id: &str, on: bool) {
-        let mut inner = self.inner.lock().unwrap();
-        if on {
-            inner.drop_support_creds_sig.insert(peer_id.to_string());
-        } else {
-            inner.drop_support_creds_sig.remove(peer_id);
-        }
-    }
-
     /// Every `check_peers` query `from` sent, oldest first.
     pub(crate) fn check_peers_queries(&self, from: &str) -> Vec<Vec<String>> {
         let inner = self.inner.lock().unwrap();
@@ -997,37 +961,12 @@ impl MockRelay {
 }
 
 impl RelayInner {
-    /// Record and, when a test has armed it, TAMPER with one outgoing frame.
-    ///
-    /// The only rewrite modelled is the `support_creds` strip, the one the field
-    /// signature defends against: every receiver honours `""` as an explicit clear.
-    fn on_the_wire(&mut self, from: &str, room: &str, route: &str, data: Vec<u8>) -> Vec<u8> {
+    /// Record one outgoing frame when a test has armed recording for its sender.
+    fn on_the_wire(&mut self, from: &str, _room: &str, _route: &str, data: Vec<u8>) -> Vec<u8> {
         if self.recording.contains(from) {
             self.recorded.push((from.to_string(), data.clone()));
         }
-        let strip = self.strip_support_creds.contains(from);
-        let unsign = self.drop_support_creds_sig.contains(from);
-        if !strip && !unsign {
-            return data;
-        }
-        // The edit keeps a valid seal only because the mock holds the sender's key; a
-        // real relay's edit breaks the seal, so this reaches the field signature beneath.
-        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(&data)) else {
-            return data;
-        };
-        let Some(obj) = value.as_object_mut() else { return data };
-        if obj.get("type").and_then(|t| t.as_str()) != Some("profile_update") {
-            return data;
-        }
-        if strip {
-            obj.insert("support_creds".to_string(), serde_json::Value::String(String::new()));
-        }
-        obj.remove("support_creds_sig");
-        let Ok(body) = serde_json::to_vec(&value) else { return data };
-        match self.keys.get(from) {
-            Some(kp) => super::frame_auth::seal(kp, room, route, &body),
-            None => body,
-        }
+        data
     }
 
     /// `data` as `from` would put it on the wire: already sealed frames (a capture)
@@ -17637,20 +17576,22 @@ async fn friend_accept_survives_mailbox_redelivery() {
     drop(b);
 }
 
-// FIX B: a friend request carries the sender's OWN signed profile, so a stranger's
-// incoming card renders a real name. LIGHT: the avatar HASH rides, never the bytes. A
-// TAMPERED signature means the request still lands but the profile is not stored,
-// because an unverified profile is never store-and-logged.
+// A friend request carries the sender's card sealed to the target (A28): a stranger's
+// incoming card renders a real name, and the relay carrying the request reads none of
+// it. Only the name and avatar ride, never the rest of the profile. A card that does
+// not hold (a forged signature, another identity's master) is dropped and the request
+// still lands.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
-async fn friend_request_carries_sender_profile() {
+async fn friend_request_carries_a_sealed_card() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
+    relay.start_wiretap();
     const A_MASTER: u8 = 111;
     const A_DEV: u8 = 112;
     const B_MASTER: u8 = 113;
@@ -17658,15 +17599,14 @@ async fn friend_request_carries_sender_profile() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // --- 1. A sets a profile, THEN requests B (absent). The request carries A's
-    //        signed profile into B's mailbox. ---
+    // --- 1. A sets a profile, THEN requests B (absent). ---
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
     let a_device = a.device_id.clone();
     a.cmd_tx
         .send(NodeCommand::UpdateProfile {
             display_name: "Alice Example".to_string(),
-            status: "around".to_string(),
-            about_me: String::new(),
+            status: "around the corner".to_string(),
+            about_me: "not for strangers".to_string(),
             avatar_bytes: None,
             banner_bytes: None,
             twitch_username: String::new(),
@@ -17675,12 +17615,10 @@ async fn friend_request_carries_sender_profile() {
             avatar_frame: None,
             avatar_anim: None,
             banner_anim: None,
-        support_creds: None,
+            support_creds: None,
         })
         .await
         .unwrap();
-    // A emits ProfileUpdated once its own row is written — a request built after
-    // this will carry it.
     assert!(
         wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
             matches!(ev, NetworkEvent::ProfileUpdated { .. })
@@ -17694,7 +17632,7 @@ async fn friend_request_carries_sender_profile() {
         .unwrap();
     assert!(
         wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
-        "request (carrying A's profile) must reach B's mailbox",
+        "the request must reach B's mailbox",
     );
 
     relay.set_online(&a_device, false);
@@ -17707,69 +17645,62 @@ async fn friend_request_carries_sender_profile() {
         .await,
         "B must see the mailbox request",
     );
-    // The carried profile is verified + stored BEFORE the request event fires, so
-    // by the time we saw it B already holds A's name keyed under A's MASTER — no
-    // ProfileRequest round trip needed.
-    let stored = b.store().load_profile(&a_master).unwrap();
-    assert_eq!(
-        stored.map(|p| p.display_name),
-        Some("Alice Example".to_string()),
-        "B must hold A's carried display name for the incoming card",
+    // The card is opened and stored BEFORE the request event fires.
+    let stored = b.store().load_profile(&a_master).unwrap().expect("B holds A's card");
+    assert_eq!(stored.display_name, "Alice Example", "the incoming card shows who is asking");
+    assert!(
+        stored.status.is_empty() && stored.about_me.is_empty(),
+        "A28: before an accept a stranger sees the name and avatar only, got {:?} / {:?}",
+        stored.status, stored.about_me,
     );
+    for secret in ["Alice Example", "around the corner", "not for strangers"] {
+        let seen = relay.wiretap().readable(secret);
+        assert!(seen.is_empty(), "the relay read {secret:?} in {seen:?}");
+    }
 
-    // --- 3. A TAMPERED carried profile from a THIRD identity C: valid device
-    //        list, but the signature covers a DIFFERENT name than the one carried.
-    //        The profile is rejected; the request still lands; nothing is stored
-    //        for C. Injected directly as a hostile peer would push it. ---
+    // --- 2. Sealed cards that do not hold, from a THIRD identity C. ---
     const C_MASTER: u8 = 115;
     const C_DEV: u8 = 116;
     let c_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER));
+    super::dm_room::register(&c_master_kp);
     let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
     let c_master = c_master_kp.peer_id();
     let c_list = super::crypto_handler::build_signed_device_list(
         &c_master_kp, 1, vec![c_dev.clone()], Vec::new(),
     );
-    // Sign over the REAL name, then carry a DIFFERENT one — a genuine tamper the
-    // signature cannot cover.
-    use base64::Engine as _;
-    let c_pub_b64 = base64::engine::general_purpose::STANDARD
-        .encode(c_master_kp.public_key_protobuf());
-    let (sig, pk) = super::crypto_handler::sign_profile(
-        &c_master_kp, &c_pub_b64, &c_master, 1_700_000_000_000,
-        "Real Name", "", "", "", "",
-    );
-    let tampered = super::types::CarriedProfile {
-        source_peer_id: c_master.clone(),
-        display_name: "Tampered Name".to_string(), // NOT what was signed
-        status: String::new(),
-        about_me: String::new(),
-        updated_at: 1_700_000_000_000,
-        twitch_username: String::new(),
-        avatar_hash: String::new(),
-        profile_sig: sig,
-        profile_pk: pk,
+    let pk = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(c_master_kp.public_key_protobuf())
     };
+    let signed = |name: &str| {
+        let payload = super::crypto_handler::card_signing_payload(&c_master, 1_700_000_000_000, name, "");
+        super::crypto_handler::sign_message(&c_master_kp, &pk, &payload).0.unwrap()
+    };
+    let forged = super::types::SignedCard {
+        master: c_master.clone(),
+        display_name: "Tampered Name".to_string(),
+        avatar_hash: String::new(),
+        updated_at: 1_700_000_000_000,
+        sig: signed("Real Name"),
+        pk: pk.clone(),
+    };
+    let inbox = format!("inbox:{b_master}");
+    let requested_at = 1_700_000_000_001;
     let frame = super::types::HavenMessage::FriendRequest {
-        requested_at: 1_700_000_000_001,
+        requested_at,
         carried_bundle: None,
         device_list: Some(c_list),
-        carried_profile: Some(tampered),
+        sealed_card: super::profile_card::seal_for(&forged, &b_master, requested_at),
     };
-    let data = serde_json::to_vec(&frame).unwrap();
-    let inbox = format!("inbox:{b_master}");
-    relay.inject_direct(&inbox, &c_dev, &b.device_id, data);
-
+    relay.inject_direct(&inbox, &c_dev, &b.device_id, serde_json::to_vec(&frame).unwrap());
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
             matches!(ev, NetworkEvent::FriendRequestReceived { peer_id } if *peer_id == c_dev)
         })
         .await,
-        "the request must still land even though its carried profile is unverifiable",
+        "the request must still land even though its card does not hold",
     );
-    assert!(
-        b.store().load_profile(&c_master).unwrap().is_none(),
-        "a tampered carried profile must NOT be stored",
-    );
+    assert!(b.store().load_profile(&c_master).unwrap().is_none(), "a card that does not hold was stored");
 
     drop(a);
     drop(b);
@@ -17882,7 +17813,7 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
         requested_at: newer_at,
         carried_bundle: None,
         device_list: Some(a_list),
-        carried_profile: None,
+        sealed_card: None,
     };
     let data = serde_json::to_vec(&frame).unwrap();
     let inbox = format!("inbox:{b_master}");
@@ -18486,7 +18417,7 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
         requested_at: original_at,
         carried_bundle: None,
         device_list: Some(a_list),
-        carried_profile: None,
+        sealed_card: None,
     })
     .unwrap();
 
@@ -18725,7 +18656,7 @@ async fn newer_request_advances_stored_requested_at() {
             requested_at: at,
             carried_bundle: None,
             device_list: Some(a_list.clone()),
-            carried_profile: None,
+            sealed_card: None,
         })
         .unwrap()
     };
@@ -21357,16 +21288,22 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
         "the typing indicator never rides in the clear"
     );
 
-    let profiles = decoded
+    let profiles = o
+        .carried_to(&b_device)
+        .await
         .iter()
         .filter(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { display_name, .. }
             if display_name == "Owner Renamed"))
         .count();
     assert_eq!(
         profiles, 1,
-        "the leaf-less member must be sent the plaintext profile update exactly \
-         once: `mls_reached` now holds only the masters that actually hold a leaf, \
-         so a leaf-less member is no longer skipped as already reached"
+        "the leaf-less member must be sent the Olm profile update exactly once: \
+         `mls_reached` holds only the masters that actually hold a leaf, so a \
+         leaf-less member is not skipped as already reached"
+    );
+    assert!(
+        !decoded.iter().any(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. })),
+        "a profile never rides in the clear"
     );
 
     // The other half of the complement rule: the member WITH a leaf reads the
@@ -22325,12 +22262,12 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
     drop(b);
 }
 
-// CRYPTO-1, over the wire. A master-signed device list rides every profile announce
-// in the clear, so anyone who has seen one holds a genuine, perfectly valid list for
-// somebody else. The receiver used to bind whichever device DELIVERED it to that
-// master, which hands the attacker the victim's DM fan-out, its Olm authorisation and
-// its CRDT role checks. The attacker here is a bare device id with a socket, so
-// nothing can re-teach the target that id afterwards and mask the result.
+// CRYPTO-1, over the wire. A master-signed device list reaches every friend and
+// co-member, and in the clear any revoked device, so a peer can hold a genuine,
+// perfectly valid list for somebody else. The receiver used to bind whichever device
+// DELIVERED it to that master, which hands the attacker the victim's DM fan-out, its
+// Olm authorisation and its CRDT role checks. The attacker here is a bare device id
+// with a socket, replaying the list through the one door a list rides in the clear.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -22351,10 +22288,6 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
     let t_master = NativeKeypair::from_secret_bytes(&seed_bytes(T_MASTER)).peer_id();
     let v_dev = NativeKeypair::from_secret_bytes(&seed_bytes(V_DEV)).peer_id();
     let a_dev = NativeKeypair::from_secret_bytes(&seed_bytes(A_DEV)).peer_id();
-
-    // Armed before V exists: the replay has to be V's REAL frame, bytes
-    // unchanged, or this proves nothing about a genuine signed list.
-    relay.set_recording(&v_dev, true);
 
     let mut v = spawn_node_with_friends(&relay, V_MASTER, V_DEV, &[&t_master]).await;
     let mut t = spawn_node_with_friends(&relay, T_MASTER, T_MASTER, &[&v_master]).await;
@@ -22390,26 +22323,9 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
         t.known_devices(&v_master),
     );
 
-    // V's own announce, captured off the wire: a real signature over real
-    // profile fields, carrying V's real master-signed device list.
-    let replay = relay
-        .recorded_frames(&v_dev)
-        .into_iter()
-        .filter(|data| {
-            serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(data))
-                .ok()
-                .and_then(|val| {
-                    let obj = val.as_object()?.clone();
-                    Some(
-                        obj.get("type")?.as_str()? == "profile_update"
-                            && obj.get("device_list").is_some_and(|d| !d.is_null())
-                            && obj.get("profile_sig").is_some_and(|s| !s.is_null()),
-                    )
-                })
-                .unwrap_or(false)
-        })
-        .next_back()
-        .expect("V announces a signed profile carrying its signed device list");
+    // V's real master-signed device list, exactly as T ingested it.
+    let genuine = t.store().load_device_list(&v_master).unwrap().expect("T holds V's signed device list");
+    let replay = serde_json::to_vec(&super::types::HavenMessage::DeviceListTombstone { device_list: genuine }).unwrap();
 
     // The resolver is process-global in this harness, so clear anything already
     // known about the attacker's id: a pass has to mean "refused", never
@@ -22519,7 +22435,7 @@ async fn friend_request_from_an_unlisted_device_does_not_bind() {
         requested_at: super::types::now_ms(),
         carried_bundle: None,
         device_list: Some(v_list),
-        carried_profile: None,
+        sealed_card: None,
     })
     .unwrap();
     relay.inject(&format!("inbox:{t_master}"), &a_dev, &t.device_id, request);
@@ -22553,12 +22469,47 @@ async fn friend_request_from_an_unlisted_device_does_not_bind() {
     drop(t);
 }
 
-// `support_creds` sits outside the profile signature, so on the plaintext fallback a
-// relay can rewrite it to `""` and every receiver reads the holder's explicit clear.
-// The field's OWN master signature closes that, and it is REQUIRED. The earlier
-// per-master pin was worse than nothing: a relay that stripped the signature from the
-// FIRST announce kept that master on the unsigned branch permanently, so the baseline
-// never existed for exactly the masters that needed it.
+/// `node`'s own profile announce as a modified client could send it: its master signs
+/// every profile field, and the test picks the credentials field and its signature.
+fn crafted_announce(
+    node: &TestNode,
+    updated_at: i64,
+    status: &str,
+    support_creds: Option<String>,
+    support_creds_sig: Option<String>,
+) -> super::types::HavenMessage {
+    let fields = super::crypto_handler::ProfileFields { display_name: "Anon", status, ..Default::default() };
+    let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(&node.master_kp, &node.master_id, updated_at, &fields);
+    super::types::HavenMessage::ProfileUpdate {
+        display_name: "Anon".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        updated_at,
+        avatar_b64: String::new(),
+        banner_b64: String::new(),
+        is_invisible: false,
+        twitch_username: String::new(),
+        device_list: None,
+        avatar_hash: String::new(),
+        banner_hash: String::new(),
+        showcase_board: Some(String::new()),
+        showcase_assets_b64: String::new(),
+        showcase_assets_hash: String::new(),
+        avatar_frame: Some(String::new()),
+        avatar_anim: Some(String::new()),
+        banner_anim: Some(String::new()),
+        support_creds,
+        support_creds_sig,
+        profile_sig,
+        profile_pk,
+    }
+}
+
+// `support_creds` sits outside the profile signature with a master signature of its
+// own, REQUIRED over the field and its timestamp. A profile rides Olm now, so no relay
+// can strip or replay it; what is left is a client that sends the field unsigned,
+// cleared without a signature, or signed but older, and each must change nothing.
+// No trust-on-first-use either: a master's first announce gets no softer rule.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -22578,19 +22529,10 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
     let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
 
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
-    // Keep every frame A sends from the start: leg 3 replays one of them.
-    relay.set_recording(&a.device_id, true);
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master, &c_master]).await;
     let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&b_master]).await;
-    assert!(
-        wait_until(20, || async {
-            b.online_identities(&relay).contains(&a_master)
-                && b.online_identities(&relay).contains(&c_master)
-                && a.online_identities(&relay).contains(&b_master)
-        })
-        .await,
-        "everybody must see everybody before the announces"
-    );
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    expect_dm_pair_ready(&relay, &c, &b, 20).await;
     drain_events(&mut a);
     drain_events(&mut b);
     drain_events(&mut c);
@@ -22612,161 +22554,66 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
         banner_anim: None,
         support_creds: creds,
     };
+    let status_at = |node: &TestNode, master: &str| {
+        node.store().load_profile(master).ok().flatten().map(|p| p.status).unwrap_or_default()
+    };
+    let marks_at = |node: &TestNode, master: &str| {
+        support_creds::parse_stored(&node.store().load_profile(master).unwrap().unwrap().support_creds)
+    };
 
-    // --- 0. A holder with nothing yet: a signed announce of the empty field.
-    //        This is the frame leg 3 replays, and it is entirely genuine. ---
-    a.cmd_tx
-        .send(profile("no marks yet", Some(String::new())))
-        .await
-        .unwrap();
-    assert!(
-        wait_until(10, || async {
-            b.store()
-                .load_profile(&a_master)
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.status == "no marks yet")
-        })
-        .await,
-        "B must see A before there is anything to strip"
-    );
-
+    // --- 1. A genuinely signed mark lands. ---
     a.cmd_tx
         .send(profile("with a mark", Some(support_creds::encode_entries(&[mark.clone()]))))
         .await
         .unwrap();
     assert!(
-        wait_until(10, || async {
-            b.store()
-                .load_profile(&a_master)
-                .ok()
-                .flatten()
-                .is_some_and(|p| !p.support_creds.is_empty())
-        })
-        .await,
-        "B must store A's mark"
+        wait_until(10, || async { status_at(&b, &a_master) == "with a mark" }).await,
+        "B must receive A's signed mark"
     );
-    let after_first = b.store().load_profile(&a_master).unwrap().unwrap();
-    let earlier_updated_at = after_first.updated_at;
+    assert_eq!(marks_at(&b, &a_master), vec![mark.clone()], "B must store A's mark");
+    let earlier_updated_at = b.store().load_profile(&a_master).unwrap().unwrap().updated_at;
 
-    // --- 1b. The field PRESENT and the signature gone: a relay writing marks
-    //         rather than deleting them. A picks up a second mark; B must not
-    //         see it, because the frame that carries it proves nothing. ---
+    // --- 2. The field present and its signature gone: a second mark proves nothing. ---
     let second = testing::mint_for(&a_master, &[hex::encode([0x5cu8; 32])]);
-    relay.set_drop_support_creds_sig(&a.device_id, true);
-    drain_events(&mut b);
-    a.cmd_tx
-        .send(profile(
-            "a second mark, unsigned",
-            Some(support_creds::encode_entries(&[mark.clone(), second.clone()])),
-        ))
-        .await
-        .unwrap();
-    // CONTROL: the rest of the profile IS signed and lands, so once the status
-    // is through, the unchanged field is a decision rather than a frame in
-    // flight.
+    carry_as(&a, &b, crafted_announce(
+        &a, super::frame_auth::now_ms(), "a second mark, unsigned",
+        Some(support_creds::encode_entries(&[mark.clone(), second])), None,
+    ))
+    .await;
+    // CONTROL: the rest of the profile IS signed and lands, so the unchanged field is
+    // a decision rather than a frame in flight.
     assert!(
-        wait_until(10, || async {
-            b.store()
-                .load_profile(&a_master)
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.status == "a second mark, unsigned")
-        })
-        .await,
+        wait_until(10, || async { status_at(&b, &a_master) == "a second mark, unsigned" }).await,
         "B must receive the unsigned update (the signed half of the profile is fine)"
     );
-    let p = b.store().load_profile(&a_master).unwrap().unwrap();
-    assert_eq!(
-        support_creds::parse_stored(&p.support_creds),
-        vec![mark.clone()],
-        "an unsigned field must not add a mark either: {}",
-        p.support_creds,
-    );
-    relay.set_drop_support_creds_sig(&a.device_id, false);
+    assert_eq!(marks_at(&b, &a_master), vec![mark.clone()], "an unsigned field must not add a mark");
 
-    relay.set_strip_support_creds(&a.device_id, true);
-    drain_events(&mut b);
-    a.cmd_tx.send(profile("stripped in flight", None)).await.unwrap();
+    // --- 3. Cleared without a signature. ---
+    carry_as(&a, &b, crafted_announce(&a, super::frame_auth::now_ms() + 1, "cleared unsigned", Some(String::new()), None)).await;
     assert!(
-        wait_until(10, || async {
-            b.store()
-                .load_profile(&a_master)
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.status == "stripped in flight")
-        })
-        .await,
-        "B must receive the tampered update (the rest of the profile is fine)"
+        wait_until(10, || async { status_at(&b, &a_master) == "cleared unsigned" }).await,
+        "B must receive the update (the rest of the profile is fine)"
     );
-    let p = b.store().load_profile(&a_master).unwrap().unwrap();
-    assert_eq!(
-        support_creds::parse_stored(&p.support_creds),
-        vec![mark.clone()],
-        "a relay that rewrote the field to \"\" must change NOTHING: {}",
-        p.support_creds,
-    );
-    relay.set_strip_support_creds(&a.device_id, false);
+    assert_eq!(marks_at(&b, &a_master), vec![mark.clone()], "an unsigned clear must change nothing");
 
-    // --- 3. A replayed OLDER announce, genuinely signed, must not clear it.
-    //        A's first profile announce carried no credentials and a perfectly
-    //        good signature over the empty field; replaying it is the cheapest
-    //        way to undo a purchase, and `updated_at` is what refuses it. ---
-    let older: Vec<Vec<u8>> = relay
-        .recorded_frames(&a.device_id)
-        .into_iter()
-        .filter(|data| {
-            serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(data))
-                .ok()
-                .and_then(|v| {
-                    let obj = v.as_object()?.clone();
-                    let is_profile =
-                        obj.get("type")?.as_str()? == "profile_update";
-                    let empty = obj.get("support_creds")?.as_str()?.is_empty();
-                    let signed = obj.contains_key("support_creds_sig");
-                    let stamp = obj.get("updated_at")?.as_i64()?;
-                    Some(is_profile && empty && signed && stamp < earlier_updated_at)
-                })
-                .unwrap_or(false)
-        })
-        .collect();
-    assert!(
-        !older.is_empty(),
-        "the test needs a genuine older signed announce with an empty field to replay",
-    );
-    let dm_room = super::types::dm_room_code(&a_master, &b_master);
-    relay.inject(&dm_room, &a.device_id, &b.device_id, older[0].clone());
-    // ABSENCE proof: there is no state change to poll for, so the window has
-    // to be real time, and then the row is read.
+    // --- 4. An OLDER announce, genuinely signed over the empty field, must not clear
+    //        it: `updated_at` is what refuses it. ---
+    let older = earlier_updated_at - 1_000;
+    let older_sig = super::crypto_handler::sign_support_creds(&a.master_kp, &a_master, older, Some(""));
+    carry_as(&a, &b, crafted_announce(&a, older, "older", Some(String::new()), older_sig)).await;
+    // ABSENCE proof: there is no state change to poll for, so the window has to be
+    // real time, and then the row is read.
     sleep_ms(1500).await;
-    let p = b.store().load_profile(&a_master).unwrap().unwrap();
-    assert_eq!(
-        support_creds::parse_stored(&p.support_creds),
-        vec![mark.clone()],
-        "a replayed OLDER signed announce must not clear the field: {}",
-        p.support_creds,
-    );
+    assert_eq!(marks_at(&b, &a_master), vec![mark.clone()], "an OLDER signed announce must not clear the field");
 
-    // --- 4. A master B has NEVER seen sign gets no softer rule. This is the leg that
-    // used to go the other way, on a per-master pin a relay could keep unset forever.
-    // There is no trust-on-first-use left to attack. ---
-    relay.set_drop_support_creds_sig(&c.device_id, true);
+    // --- 5. A master B has NEVER seen sign gets no softer rule. ---
     let c_mark = testing::mint_for(&c_master, &[hex::encode([0x5bu8; 32])]);
-    c.cmd_tx
-        .send(profile("old client", Some(support_creds::encode_entries(&[c_mark.clone()]))))
-        .await
-        .unwrap();
-    // CONTROL again: the signed half of C's profile lands, so the empty field
-    // that follows is a decision.
+    carry_as(&c, &b, crafted_announce(
+        &c, super::frame_auth::now_ms(), "old client", Some(support_creds::encode_entries(&[c_mark.clone()])), None,
+    ))
+    .await;
     assert!(
-        wait_until(10, || async {
-            b.store()
-                .load_profile(&c_master)
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.status == "old client")
-        })
-        .await,
+        wait_until(10, || async { status_at(&b, &c_master) == "old client" }).await,
         "B must receive C's update"
     );
     assert!(
@@ -22774,29 +22621,16 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
         "an unsigned field is refused from every master, first announce included",
     );
 
-    // --- 5. And the same mark, signed, lands: leg 4 failed on the signature,
-    //        not on the credential. ---
-    relay.set_drop_support_creds_sig(&c.device_id, false);
+    // --- 6. And the same mark, signed, lands: leg 5 failed on the signature. ---
     c.cmd_tx
         .send(profile("signed now", Some(support_creds::encode_entries(&[c_mark.clone()]))))
         .await
         .unwrap();
     assert!(
-        wait_until(10, || async {
-            b.store()
-                .load_profile(&c_master)
-                .ok()
-                .flatten()
-                .is_some_and(|p| !p.support_creds.is_empty())
-        })
-        .await,
+        wait_until(10, || async { status_at(&b, &c_master) == "signed now" }).await,
         "the same mark, signed this time, must apply"
     );
-    assert_eq!(
-        support_creds::parse_stored(&b.store().load_profile(&c_master).unwrap().unwrap().support_creds),
-        vec![c_mark],
-        "and it is C's own mark",
-    );
+    assert_eq!(marks_at(&b, &c_master), vec![c_mark], "and it is C's own mark");
 
     drop(a);
     drop(b);
@@ -24527,10 +24361,14 @@ async fn shutdown_and_wipe(relay: &MockRelay, node: TestNode) -> Vec<String> {
     let root = node.data_root.clone();
     relay.set_online(&device_id, false);
     let (_db_path, tmp) = node.into_storage();
-    // No signal for "an aborted task finished dropping its locals"; the restart
-    // helper pays the same 300ms (counted in BUDGET_MS).
-    sleep_ms(300).await;
-    crate::api::wipe::destroy_data_root(&root).expect("wipe");
+    // An aborted node's store threads can still hold the database for a moment,
+    // which production covers with the wipe marker at the next launch; here the
+    // same routine runs again until they have let go.
+    wait_until(5, async || {
+        crate::api::wipe::destroy_data_root(&root).expect("wipe");
+        wipe_survivors(&root).is_empty()
+    })
+    .await;
     let left = wipe_survivors(&root);
     drop(tmp);
     left
@@ -26056,7 +25894,8 @@ async fn authz_a_full_profile_goes_only_to_someone_we_know() {
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
-    let (a, b) = friend_pair(&relay, 203, 204).await;
+    relay.start_wiretap();
+    let mut b = spawn_node_with_friends(&relay, 204, 204, &[]).await;
     let still = {
         use image::{Rgba, RgbaImage};
         let mut png = Vec::new();
@@ -26068,7 +25907,7 @@ async fn authz_a_full_profile_goes_only_to_someone_we_know() {
     b.cmd_tx
         .send(NodeCommand::UpdateProfile {
             display_name: "B".to_string(),
-            status: String::new(),
+            status: "only for friends".to_string(),
             about_me: String::new(),
             avatar_bytes: Some(still),
             banner_bytes: None,
@@ -26089,20 +25928,308 @@ async fn authz_a_full_profile_goes_only_to_someone_we_know() {
         .await,
         "precondition: B has an avatar"
     );
-    let inbox = format!("inbox:{}", b.master_id);
-    let (stranger, mut sock) = stranger_in_room(&relay, 205, &inbox).await;
 
-    let request = serde_json::to_vec(&super::types::HavenMessage::ProfileRequest).unwrap();
-    relay.inject_direct(&inbox, &stranger, &b.device_id, request);
-    let answers = sock.direct_payloads(1500).await;
-    let full = answers.iter().any(|f| {
-        matches!(
-            serde_json::from_slice::<super::types::HavenMessage>(f),
-            Ok(super::types::HavenMessage::ProfileUpdate { ref avatar_b64, .. }) if !avatar_b64.is_empty()
-        )
-    });
-    assert!(!full, "a stranger must not pull a full profile");
-    drop(a);
+    // S asks B to be friends: while that is pending, each sees the other's card (A28).
+    let s = spawn_node_with_friends(&relay, 205, 205, &[]).await;
+    s.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::FriendRequestReceived { .. })).await,
+        "B must see S's request"
+    );
+    expect_olm_confirmed(&s, &b, 20).await;
+    carry_as(&s, &b, super::types::HavenMessage::ProfileRequest).await;
+    assert!(
+        wait_until(10, async || {
+            b.carried_to(&s.device_id).await.iter().any(|m| matches!(m, super::types::HavenMessage::ProfileCard { avatar_b64, .. } if !avatar_b64.is_empty()))
+        })
+        .await,
+        "a pending requester's pull is answered with the card and its avatar"
+    );
+    let full = |sent: &[super::types::HavenMessage]| sent.iter().any(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. }));
+    assert!(!full(&b.carried_to(&s.device_id).await), "a pending requester must not get the full profile");
+    assert!(
+        wait_until(10, async || s.store().load_profile(&b.master_id).ok().flatten().is_some_and(|p| p.display_name == "B")).await,
+        "S shows B's name on its outgoing card"
+    );
+    assert!(s.store().load_profile(&b.master_id).unwrap().unwrap().status.is_empty(), "and nothing else of B's");
+
+    // Declined, S is a stranger again: it gets nothing at all. B renames itself, so
+    // anything that reaches S from here on would carry the new name.
+    b.cmd_tx.send(NodeCommand::RejectFriendRequest { peer_id: s.master_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || b.friend_status(&s.master_id).as_deref() == Some("declined")).await);
+    b.cmd_tx.send(profile_named("B renamed", "only for friends")).await.unwrap();
+    assert!(wait_until(10, async || b.store().load_profile(&b.master_id).ok().flatten().is_some_and(|p| p.display_name == "B renamed")).await);
+    let (s_dev, b_dev) = (s.device_id.clone(), b.device_id.clone());
+    let s_to_b = || relay.wiretap().frames.iter().filter(|f| f.from == s_dev && f.to.as_deref() == Some(b_dev.as_str())).count();
+    let sent = s_to_b();
+    carry_as(&s, &b, super::types::HavenMessage::ProfileRequest).await;
+    assert!(wait_until(10, async || s_to_b() > sent).await, "the request reaches the relay");
+    flush_frames(&relay, &mut b).await;
+    let renamed = |m: &super::types::HavenMessage| match m {
+        super::types::HavenMessage::ProfileCard { card, .. } => card.display_name == "B renamed",
+        super::types::HavenMessage::ProfileUpdate { display_name, .. } => display_name == "B renamed",
+        _ => false,
+    };
+    // An answer would reach the carry log a hop after the request: watch for one.
+    let leaked = wait_until(1, async || b.carried_to(&s.device_id).await.iter().any(renamed)).await;
+    assert!(!leaked, "a stranger gets nothing, not even the name");
+
+    // Nor is a stranger's own full profile stored when it pushes one.
+    let sent = s_to_b();
+    carry_as(&s, &b, crafted_announce(&s, super::frame_auth::now_ms(), "pushed by a stranger", None, None)).await;
+    assert!(wait_until(10, async || s_to_b() > sent).await, "the push reaches the relay");
+    flush_frames(&relay, &mut b).await;
+    let held = b.store().load_profile(&s.master_id).unwrap().map(|p| p.status).unwrap_or_default();
+    assert_ne!(held, "pushed by a stranger", "a stranger's full profile must not be stored");
+}
+
+fn profile_named(name: &str, status: &str) -> NodeCommand {
+    NodeCommand::UpdateProfile {
+        display_name: name.to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: None,
+    }
+}
+
+// Claim C-24, profiles (phase D): a friend's profile rides Olm, so no field of it is
+// ever readable by the relay, and nothing profile-shaped rides a plaintext frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_a_profile_never_rides_in_the_clear() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let (a, b) = friend_pair(&relay, 221, 222).await;
+
+    a.cmd_tx.send(profile_named("Private Name", "a private status")).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            b.store().load_profile(&a.master_id).ok().flatten().is_some_and(|p| p.status == "a private status")
+        })
+        .await,
+        "B must receive A's profile"
+    );
+    for secret in ["Private Name", "a private status"] {
+        let seen = relay.wiretap().readable(secret);
+        assert!(seen.is_empty(), "the relay read {secret:?} in {seen:?}");
+    }
+    let leaks = relay.wiretap().lane_leaks();
+    assert!(leaks.is_empty(), "Olm-lane messages rode in the clear: {leaks:?}");
+}
+
+// A card speaks only for the identity that sends it, and a relayed profile only as its
+// owner signed every field of it (N1). C is a friend of B's with a session, the
+// strongest position short of being the subject.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_a_card_or_a_relayed_profile_speaks_only_for_its_owner() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c) = friend_pair(&relay, 223, 224).await;
+    let pk_of = |kp: &NativeKeypair| {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf())
+    };
+    let board = "{\"blocks\":[]}";
+    // `owner`'s profile as C hands it on, its signature over the ORIGINAL board.
+    let relayed = |owner: &NativeKeypair, status: &str, updated_at: i64, board_sent: &str| {
+        let fields = super::crypto_handler::ProfileFields {
+            display_name: "Xavier",
+            status,
+            showcase_board: board,
+            avatar_frame: "b:200",
+            ..Default::default()
+        };
+        let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(owner, &owner.peer_id(), updated_at, &fields);
+        super::types::HavenMessage::ProfileRelay {
+            source_peer_id: owner.peer_id(),
+            display_name: "Xavier".to_string(),
+            status: status.to_string(),
+            about_me: String::new(),
+            updated_at,
+            avatar_b64: String::new(),
+            twitch_username: String::new(),
+            avatar_hash: String::new(),
+            banner_hash: String::new(),
+            showcase_board: board_sent.to_string(),
+            showcase_assets_hash: String::new(),
+            avatar_frame: "b:200".to_string(),
+            avatar_anim: String::new(),
+            banner_anim: String::new(),
+            profile_sig,
+            profile_pk,
+        }
+    };
+    let x = NativeKeypair::from_secret_bytes(&seed_bytes(225));
+    let y = NativeKeypair::from_secret_bytes(&seed_bytes(226));
+    let (x_id, y_id) = (x.peer_id(), y.peer_id());
+    let t = super::frame_auth::now_ms();
+
+    // X's genuine card, handed on by C: it is X's, not C's, so it does not land.
+    let card_payload = super::crypto_handler::card_signing_payload(&x_id, t, "Card Xavier", "");
+    let card = super::types::SignedCard {
+        master: x_id.clone(),
+        display_name: "Card Xavier".to_string(),
+        avatar_hash: String::new(),
+        updated_at: t,
+        sig: super::crypto_handler::sign_message(&x, &pk_of(&x), &card_payload).0.unwrap(),
+        pk: pk_of(&x),
+    };
+    assert!(super::profile_card::card_holds(&card), "precondition: the card is genuine");
+    carry_as(&c, &b, super::types::HavenMessage::ProfileCard { card, avatar_b64: String::new(), device_list: None }).await;
+
+    // X's genuine profile relayed by C lands, with every signed field.
+    carry_as(&c, &b, relayed(&x, "relayed", t, board)).await;
+    assert!(
+        wait_until(10, async || b.store().load_profile(&x_id).ok().flatten().is_some_and(|p| p.status == "relayed")).await,
+        "a relayed profile its owner signed lands"
+    );
+    let stored = b.store().load_profile(&x_id).unwrap().unwrap();
+    assert_eq!(stored.display_name, "Xavier", "the handed-on card never landed");
+    assert_eq!((stored.showcase_board.as_str(), stored.avatar_frame.as_str()), (board, "b:200"), "with every signed field");
+    assert!(stored.profile_sig.is_some(), "and the proof, so it can be relayed onward");
+
+    // One field changed under the owner's signature, claimed newer: refused. Y's
+    // genuine relay behind it on the same session is the barrier.
+    carry_as(&c, &b, relayed(&x, "relayed", t + 1, "{\"blocks\":[\"swapped\"]}")).await;
+    carry_as(&c, &b, relayed(&y, "barrier", t, board)).await;
+    assert!(
+        wait_until(10, async || b.store().load_profile(&y_id).ok().flatten().is_some_and(|p| p.status == "barrier")).await,
+        "the barrier relay lands"
+    );
+    assert_eq!(b.store().load_profile(&x_id).unwrap().unwrap().showcase_board, board, "a relayed field the owner did not sign must not land");
+}
+
+// Meetings (A28): the others in a meeting are strangers as often as friends. Before the
+// host admits someone neither side learns the other's profile; once admitted, each sees
+// the other's card, the name and avatar, and nothing more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn meeting_participants_see_each_others_card_once_admitted() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 226, 226).await;
+    let mut bee = spawn_node_on(&relay, 227, 227).await;
+    host.cmd_tx.send(profile_named("Hosty Name", "host private")).await.unwrap();
+    bee.cmd_tx.send(profile_named("Bee Name", "bee private")).await.unwrap();
+    assert!(
+        wait_until(10, async || {
+            host.store().load_profile(&host.master_id).ok().flatten().is_some()
+                && bee.store().load_profile(&bee.master_id).ok().flatten().is_some()
+        })
+        .await
+    );
+
+    let conf_id = super::conference::derive_conf_id(&host.master_id, "harness-cards");
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: conf_id.clone(),
+            nonce: "harness-cards".to_string(),
+            waiting_room: true,
+            code_key: None,
+            host_display_name: "Hosty Name".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&super::conference::conf_server_id(&conf_id)).contains(&host.device_id)).await);
+    bee.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            display_name: "Bee Name".to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    let bee_dev = bee.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == bee_dev)
+        })
+        .await,
+        "the host must see Bee knock"
+    );
+    assert!(host.store().load_profile(&bee.master_id).unwrap().is_none(), "no profile before admission");
+    assert!(bee.store().load_profile(&host.master_id).unwrap().is_none(), "no profile before admission");
+
+    host.cmd_tx.send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: bee.device_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| matches!(ev, NetworkEvent::ConferenceAdmitted { .. })).await,
+        "Bee must be admitted"
+    );
+    let name_at = |node: &TestNode, master: &str| node.store().load_profile(master).ok().flatten().map(|p| (p.display_name, p.status));
+    assert!(
+        wait_until(10, async || {
+            name_at(&host, &bee.master_id).is_some_and(|(n, _)| n == "Bee Name")
+                && name_at(&bee, &host.master_id).is_some_and(|(n, _)| n == "Hosty Name")
+        })
+        .await,
+        "each must see the other's name once admitted: host {:?}, bee {:?}",
+        name_at(&host, &bee.master_id), name_at(&bee, &host.master_id),
+    );
+    assert_eq!(name_at(&host, &bee.master_id).unwrap().1, "", "the card only, no status");
+    assert_eq!(name_at(&bee, &host.master_id).unwrap().1, "", "the card only, no status");
+}
+
+// A joiner shows its card to the members of the server it asks to join, so the one
+// deciding sees who is asking, and nothing else of its profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn a_joiner_shows_its_card_to_the_members_it_asks() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 228, 228).await;
+    let mut j = spawn_node_on(&relay, 229, 229).await;
+    j.cmd_tx.send(profile_named("Joiner Name", "joiner private")).await.unwrap();
+    assert!(wait_until(10, async || j.store().load_profile(&j.master_id).ok().flatten().is_some()).await);
+
+    // An NSFW server refuses the first ask, so the card is all the owner ever gets.
+    let server_id = create_server_and_wait(&mut o, "Adult Server").await;
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "is_nsfw".to_string(),
+            value: "true".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.server_setting(&server_id, "is_nsfw").as_deref() == Some("true")).await);
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::TwitchJoinRejected { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "the first ask is refused"
+    );
+    assert!(
+        wait_until(10, async || o.store().load_profile(&j.master_id).ok().flatten().is_some_and(|p| p.display_name == "Joiner Name")).await,
+        "the owner deciding must see who is asking"
+    );
+    assert_eq!(o.store().load_profile(&j.master_id).unwrap().unwrap().status, "", "the card only, no status");
+    drop(o);
 }
 
 /// A member leaves; a join request it had sealed while joining, held back by the relay

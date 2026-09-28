@@ -324,80 +324,84 @@ pub(crate) fn verify_message_signature_v2(
     verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &payload, pk_cache)
 }
 
-// -- Signed profiles (0.8.5) --
+// -- Signed profiles (0.8.5, every field since 0.12) --
 //
 // Attribution used to come from the TRANSPORT, which `ProfileRelay` breaks: it
 // carries an attacker-chosen `source_peer_id` gated only by an `updated_at` the
 // same attacker picks, so `updated_at: i64::MAX` overwrote a victim's name and
 // avatar permanently. The owner signs, relayers forward, receivers verify.
 //
-// Bound: exactly the fields `ProfileRelay` carries, because a relayer rebuilds
-// the frame from its own DB. Blobs are bound by CONTENT HASH, so one signature
-// covers the light hashes-only announce and the blob-carrying relay alike.
+// Every field a receiver stores is signed, blobs by CONTENT HASH, so one signature
+// covers the light hashes-only announce and the blob-carrying relay alike (N1).
 
-/// Canonical payload for a profile signature.
-///
-/// Every field is length-prefixed into a SHA-256 digest rather than joined with
-/// a delimiter: the free-text fields may contain any character, so a `:`-joined
-/// payload would let one field's content impersonate the next field's boundary.
-pub(crate) fn profile_signing_payload(
-    peer_id: &str,
-    updated_at: i64,
-    display_name: &str,
-    status: &str,
-    about_me: &str,
-    twitch_username: &str,
-    avatar_hash: &str,
-) -> String {
+/// Every field of a profile its owner signs, as it rides the wire.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ProfileFields<'a> {
+    pub display_name: &'a str,
+    pub status: &'a str,
+    pub about_me: &'a str,
+    pub twitch_username: &'a str,
+    pub avatar_hash: &'a str,
+    pub banner_hash: &'a str,
+    pub showcase_board: &'a str,
+    pub showcase_assets_hash: &'a str,
+    pub avatar_frame: &'a str,
+    pub avatar_anim: &'a str,
+    pub banner_anim: &'a str,
+}
+
+/// Length-prefix every field into one digest: free text may hold any character, so
+/// a joined payload would let one field's content impersonate the next boundary.
+fn fields_digest(updated_at: i64, fields: &[&str]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(updated_at.to_le_bytes());
-    for field in [peer_id, display_name, status, about_me, twitch_username, avatar_hash] {
+    for field in fields {
         h.update((field.len() as u64).to_le_bytes());
         h.update(field.as_bytes());
     }
-    format!("hollow-profile1:{}", hex::encode(h.finalize()))
+    hex::encode(h.finalize())
 }
 
-/// Sign our own profile with the MASTER keypair — profiles are a per-identity
+/// Canonical payload for a profile signature.
+pub(crate) fn profile_signing_payload(peer_id: &str, updated_at: i64, f: &ProfileFields) -> String {
+    let digest = fields_digest(updated_at, &[
+        peer_id, f.display_name, f.status, f.about_me, f.twitch_username, f.avatar_hash,
+        f.banner_hash, f.showcase_board, f.showcase_assets_hash, f.avatar_frame,
+        f.avatar_anim, f.banner_anim,
+    ]);
+    format!("hollow-profile2:{digest}")
+}
+
+/// Sign our own profile with the MASTER keypair: profiles are a per-identity
 /// artifact and every receiver keys them on the master.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn sign_profile(
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    pub_key_b64: &str,
     peer_id: &str,
     updated_at: i64,
-    display_name: &str,
-    status: &str,
-    about_me: &str,
-    twitch_username: &str,
-    avatar_hash: &str,
+    fields: &ProfileFields,
 ) -> (Option<String>, Option<String>) {
-    let payload = profile_signing_payload(
-        peer_id, updated_at, display_name, status, about_me, twitch_username, avatar_hash,
-    );
-    sign_message(master_keypair, pub_key_b64, &payload)
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(master_keypair.public_key_protobuf());
+    sign_message(master_keypair, &pub_b64, &profile_signing_payload(peer_id, updated_at, fields))
 }
 
-/// `true` = this profile is authentic for `peer_id`. REQUIRED at every ingest
-/// path (absent is refused): a forwarder cannot assert a third party's profile,
-/// and "no signature" is the cheapest way to be a forwarder with nothing to prove.
-#[allow(clippy::too_many_arguments)]
+/// `true` = this profile is authentic for `peer_id`. REQUIRED at every ingest path
+/// (absent is refused): "no signature" is the cheapest way to be a forwarder with
+/// nothing to prove.
 pub(crate) fn verify_profile_signature(
     peer_id: &str,
     updated_at: i64,
-    display_name: &str,
-    status: &str,
-    about_me: &str,
-    twitch_username: &str,
-    avatar_hash: &str,
+    fields: &ProfileFields,
     sig_b64: Option<&str>,
     pk_b64: Option<&str>,
 ) -> bool {
-    let payload = profile_signing_payload(
-        peer_id, updated_at, display_name, status, about_me, twitch_username, avatar_hash,
-    );
-    verify_message_signature(peer_id, sig_b64, pk_b64, &payload)
+    verify_message_signature(peer_id, sig_b64, pk_b64, &profile_signing_payload(peer_id, updated_at, fields))
+}
+
+/// Canonical payload for a profile CARD: the name and avatar anyone we are not
+/// close to sees (A28), signed apart from the profile so it verifies without it.
+pub(crate) fn card_signing_payload(master: &str, updated_at: i64, display_name: &str, avatar_hash: &str) -> String {
+    format!("hollow-card1:{}", fields_digest(updated_at, &[master, display_name, avatar_hash]))
 }
 
 // -- The support-credentials field signature (2026-09-03) --
@@ -4540,106 +4544,94 @@ mod tests {
         );
     }
 
-    // ── Signed profiles (0.8.5) ───────────────────────────────────────────
+    // ── Signed profiles (every field since 0.12) ─────────────────────────
 
-    /// The hole this closes: `ProfileRelay` lets a peer assert a THIRD party's
-    /// profile in plaintext, with a `source_peer_id` and an `updated_at` the sender
-    /// picks. Only the subject's signature makes the claim credible, so it must bind
-    /// the subject, every field and the timestamp.
+    fn sample_fields<'a>(avatar: &'a str, banner: &'a str, assets: &'a str) -> ProfileFields<'a> {
+        ProfileFields {
+            display_name: "Vitalik",
+            status: "online",
+            about_me: "about",
+            twitch_username: "twitchname",
+            avatar_hash: avatar,
+            banner_hash: banner,
+            showcase_board: "{\"blocks\":[]}",
+            showcase_assets_hash: assets,
+            avatar_frame: "b:120",
+            avatar_anim: "",
+            banner_anim: "",
+        }
+    }
+
+    /// `ProfileRelay` asserts a THIRD party's profile with a `source_peer_id` and an
+    /// `updated_at` the sender picks, so the subject's signature must bind the
+    /// subject, the timestamp and every field a receiver stores (N1).
     #[test]
     fn profile_signature_binds_subject_and_every_field() {
         let victim = kp(30);
         let attacker = kp(31);
         let (victim_id, attacker_id) = (victim.peer_id(), attacker.peer_id());
-        let victim_pk = pk_b64(&victim);
-        let attacker_pk = pk_b64(&attacker);
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let fields = sample_fields(&a, &b, &c);
+        let (sig, pk) = sign_profile(&victim, &victim_id, 1_000, &fields);
+        let ok = |peer: &str, ts: i64, f: &ProfileFields| verify_profile_signature(peer, ts, f, sig.as_deref(), pk.as_deref());
+        assert!(ok(&victim_id, 1_000, &fields));
 
-        let base = || ("Vitalik", "online", "about", "twitchname", "a".repeat(64));
-        let (name, status, about, twitch, avatar_hash) = base();
-        let (sig, pk) = sign_profile(
-            &victim, &victim_pk, &victim_id, 1_000, name, status, about, twitch, &avatar_hash,
-        );
-        let ok = |peer: &str, ts: i64, n: &str, s: &str, a: &str, t: &str, ah: &str| {
-            verify_profile_signature(peer, ts, n, s, a, t, ah, sig.as_deref(), pk.as_deref())
-        };
-        assert!(ok(&victim_id, 1_000, name, status, about, twitch, &avatar_hash));
+        let other = "d".repeat(64);
+        let tampered: [ProfileFields; 11] = [
+            ProfileFields { display_name: "Admin", ..fields },
+            ProfileFields { status: "compromised", ..fields },
+            ProfileFields { about_me: "other", ..fields },
+            ProfileFields { twitch_username: "someoneelse", ..fields },
+            ProfileFields { avatar_hash: &other, ..fields },
+            ProfileFields { banner_hash: &other, ..fields },
+            ProfileFields { showcase_board: "", ..fields },
+            ProfileFields { showcase_assets_hash: &other, ..fields },
+            ProfileFields { avatar_frame: "b:121", ..fields },
+            ProfileFields { avatar_anim: &other, ..fields },
+            ProfileFields { banner_anim: &other, ..fields },
+        ];
+        for (i, f) in tampered.iter().enumerate() {
+            assert!(!ok(&victim_id, 1_000, f), "field {i} must be bound by the signature");
+        }
+        assert!(!ok(&victim_id, i64::MAX, &fields));
+        assert!(!ok(&attacker_id, 1_000, &fields), "bound to the subject");
 
-        assert!(!ok(&victim_id, 1_000, "Admin", status, about, twitch, &avatar_hash));
-        assert!(!ok(&victim_id, 1_000, name, "compromised", about, twitch, &avatar_hash));
-        assert!(!ok(&victim_id, 1_000, name, status, "other", twitch, &avatar_hash));
-        assert!(!ok(&victim_id, 1_000, name, status, about, "someoneelse", &avatar_hash));
-        assert!(!ok(&victim_id, 1_000, name, status, about, twitch, &"b".repeat(64)));
-        assert!(!ok(&victim_id, i64::MAX, name, status, about, twitch, &avatar_hash));
-        // Bound to the SUBJECT: the victim's own profile cannot be re-labelled
-        // as someone else's, and vice versa.
-        assert!(!ok(&attacker_id, 1_000, name, status, about, twitch, &avatar_hash));
-
-        // The actual attack: the attacker signs a profile that claims to be the
-        // victim's. The pk→peer_id binding inside the verify rejects it.
-        let (bad_sig, bad_pk) = sign_profile(
-            &attacker, &attacker_pk, &victim_id, i64::MAX, "Admin", status, about, twitch, &avatar_hash,
-        );
+        // The attacker signs a profile claiming to be the victim's.
+        let (bad_sig, bad_pk) = sign_profile(&attacker, &victim_id, i64::MAX, &fields);
         assert!(
-            !verify_profile_signature(
-                &victim_id, i64::MAX, "Admin", status, about, twitch, &avatar_hash,
-                bad_sig.as_deref(), bad_pk.as_deref(),
-            ),
+            !verify_profile_signature(&victim_id, i64::MAX, &fields, bad_sig.as_deref(), bad_pk.as_deref()),
             "a profile must not be attributable to someone who did not sign it",
         );
-
-        assert!(!ok_absent(&victim_id, 1_000, name, status, about, twitch, &avatar_hash));
+        assert!(!verify_profile_signature(&victim_id, 1_000, &fields, None, None));
     }
 
-    fn ok_absent(
-        peer: &str, ts: i64, n: &str, s: &str, a: &str, t: &str, ah: &str,
-    ) -> bool {
-        verify_profile_signature(peer, ts, n, s, a, t, ah, None, None)
-    }
-
-    /// A relay can rewrite the body of a PLAINTEXT `ProfileUpdate` in flight,
-    /// which is why the signature is REQUIRED on that path and not merely
-    /// "tolerated because the sender is the subject". Tampering with any field must
-    /// fail even though the transport-reported sender is still the subject.
-    #[test]
-    fn relay_tampering_with_an_own_profile_update_fails() {
-        let alice = kp(32);
-        let alice_id = alice.peer_id();
-        let alice_pk = pk_b64(&alice);
-        let hash = "c".repeat(64);
-
-        let (sig, pk) = sign_profile(
-            &alice, &alice_pk, &alice_id, 7_000, "alice", "online", "hi", "", &hash,
-        );
-        assert!(verify_profile_signature(
-            &alice_id, 7_000, "alice", "online", "hi", "", &hash,
-            sig.as_deref(), pk.as_deref(),
-        ));
-        assert!(
-            !verify_profile_signature(
-                &alice_id, 7_000, "Hollow Support", "online", "hi", "", &hash,
-                sig.as_deref(), pk.as_deref(),
-            ),
-            "a relay-rewritten display name must not verify",
-        );
-        assert!(!verify_profile_signature(
-            &alice_id, 7_000, "alice", "online", "hi", "", &"d".repeat(64),
-            sig.as_deref(), pk.as_deref(),
-        ));
-    }
-
-    /// Profile fields are free text, so the payload length-prefixes each one:
-    /// two different field splits that concatenate identically must NOT produce
-    /// the same signature (otherwise a display name could impersonate the next
-    /// field's boundary).
+    /// Profile fields are free text, so the payload length-prefixes each one: two
+    /// splits that concatenate identically must not share a payload.
     #[test]
     fn profile_payload_is_collision_resistant() {
-        let p1 = profile_signing_payload("peer", 1, "ab", "c", "", "", "");
-        let p2 = profile_signing_payload("peer", 1, "a", "bc", "", "", "");
+        let base = ProfileFields::default();
+        let p1 = profile_signing_payload("peer", 1, &ProfileFields { display_name: "ab", status: "c", ..base });
+        let p2 = profile_signing_payload("peer", 1, &ProfileFields { display_name: "a", status: "bc", ..base });
         assert_ne!(p1, p2);
+        let named = ProfileFields { display_name: "n", ..base };
+        assert_ne!(profile_signing_payload("peer", 1, &named), profile_signing_payload("peer", 2, &named));
+    }
+
+    /// A card is signed on its own, so a card signature never passes for a profile
+    /// and the reverse.
+    #[test]
+    fn card_and_profile_signatures_do_not_stand_in_for_each_other() {
+        let owner = kp(33);
+        let id = owner.peer_id();
+        let hash = "e".repeat(64);
+        let fields = ProfileFields { display_name: "owner", avatar_hash: &hash, ..ProfileFields::default() };
         assert_ne!(
-            profile_signing_payload("peer", 1, "n", "", "", "", ""),
-            profile_signing_payload("peer", 2, "n", "", "", "", ""),
+            card_signing_payload(&id, 5, "owner", &hash),
+            profile_signing_payload(&id, 5, &fields),
         );
+        let (sig, pk) = sign_message(&owner, &pk_b64(&owner), &card_signing_payload(&id, 5, "owner", &hash));
+        assert!(!verify_profile_signature(&id, 5, &fields, sig.as_deref(), pk.as_deref()));
+        assert_ne!(card_signing_payload(&id, 5, "ab", "c"), card_signing_payload(&id, 5, "a", "bc"));
     }
 
     /// The link-preview digest is length-prefixed, so a field-boundary shift
@@ -4901,18 +4893,18 @@ mod tests {
             requested_at: 1234,
             carried_bundle: None,
             device_list: None,
-            carried_profile: None,
+            sealed_card: None,
         };
         let json = serde_json::to_string(&bare).unwrap();
         assert_eq!(json, r#"{"type":"friend_request","requested_at":1234}"#);
 
         let old_wire = r#"{"type":"friend_request","requested_at":99}"#;
         match serde_json::from_str::<HavenMessage>(old_wire).unwrap() {
-            HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, carried_profile } => {
+            HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, sealed_card } => {
                 assert_eq!(requested_at, 99);
                 assert!(carried_bundle.is_none(), "no bundle means fall back to lazy key exchange");
                 assert!(device_list.is_none());
-                assert!(carried_profile.is_none(), "old wire carries no profile");
+                assert!(sealed_card.is_none(), "old wire carries no card");
             }
             other => panic!("expected FriendRequest, got {other:?}"),
         }
@@ -4951,7 +4943,7 @@ mod tests {
             requested_at: 7,
             carried_bundle: Some(bundle.clone()),
             device_list: Some(list),
-            carried_profile: None,
+            sealed_card: None,
         };
         let wire = serde_json::to_string(&full).unwrap();
         match serde_json::from_str::<HavenMessage>(&wire).unwrap() {
