@@ -898,7 +898,7 @@ fn try_decrypt_dm(
             let plaintext = olm_decrypt_payload(
                 from, message_type, identity_key.as_deref(),
                 identity_sig.as_deref(), identity_pk.as_deref(),
-                &ciphertext, olm, crypto_store,
+                &ciphertext, olm, crypto_store, local_peer_id,
             )?;
             // The app loads this session later and never sees the PreKey, so the
             // key-change notice is recorded here or not at all.
@@ -951,6 +951,7 @@ fn olm_decrypt_payload(
     ciphertext: &[u8],
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
+    local_device: &str,
 ) -> Option<Vec<u8>> {
     if message_type == 0 {
         // PreKeyMessage
@@ -967,45 +968,25 @@ fn olm_decrypt_payload(
             hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {from} in fetch: identity key not signed by that device");
             return None;
         }
-        if olm.has_session(from) {
-            match olm.try_decrypt_prekey_with_existing(from, ciphertext) {
-                Ok(pt) => Some(pt),
-                Err(e) => {
-                    hollow_log!("[HOLLOW-FETCH] PreKey from {from} undecryptable with existing session ({e}) — rebuilding inbound session");
-                    olm.remove_session(from);
-                    create_inbound_prekey_session(from, their_identity, ciphertext, olm, crypto_store)
+        match olm.open_prekey(from, their_identity, ciphertext, local_device) {
+            Ok(opened) => {
+                if opened.created || opened.switched {
+                    persist_crypto_state(olm, crypto_store, from);
                 }
+                Some(opened.plaintext)
             }
-        } else {
-            create_inbound_prekey_session(from, their_identity, ciphertext, olm, crypto_store)
+            Err(e) => {
+                hollow_log!("[HOLLOW-FETCH] PreKey from {from} undecryptable: {e}");
+                None
+            }
         }
     } else {
         match olm.decrypt(from, message_type, ciphertext) {
-            Ok(pt) => Some(pt),
+            Ok(opened) => Some(opened.plaintext),
             Err(e) => {
                 hollow_log!("[HOLLOW-FETCH] Decrypt failed for {from}: {e}");
                 None
             }
-        }
-    }
-}
-
-/// Create a fresh inbound Olm session from a PreKeyMessage and persist it.
-fn create_inbound_prekey_session(
-    from: &str,
-    their_identity: &str,
-    ciphertext: &[u8],
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-) -> Option<Vec<u8>> {
-    match olm.create_inbound_session(from, their_identity, ciphertext) {
-        Ok(pt) => {
-            persist_crypto_state(olm, crypto_store, from);
-            Some(pt)
-        }
-        Err(e) => {
-            hollow_log!("[HOLLOW-FETCH] PreKey session creation failed for {from}: {e}");
-            None
         }
     }
 }

@@ -130,6 +130,61 @@ async fn ensure_olm_session_and_drain(
     }
 }
 
+/// Our session with `peer` was just built or switched to: report it once it is
+/// confirmed, acknowledge it so the peer's outbound half confirms too, and send what
+/// waited for a session.
+#[allow(clippy::too_many_arguments)]
+async fn on_session_ready(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    crdt_store: &super::crdt_store::CrdtStore,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    master_peer_str: &str,
+    peer_str: &str,
+    had_session: bool,
+    ack: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if olm.has_confirmed_session(peer_str) {
+        let _ = event_tx
+            .send(NetworkEvent::SessionEstablished { peer_id: peer_str.to_string() })
+            .await;
+        key_request_in_flight.remove(peer_str);
+    }
+    if ack {
+        let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
+        send_encrypted_message(
+            olm, crypto_store, peer_str, &ack_json, event_tx, ws_cmd_tx, ws_room_peers,
+        ).await;
+    }
+    if let Some(queued) = pending_messages.remove(peer_str) {
+        hollow_log!("[HOLLOW-CRYPTO] Draining {} pending messages for {peer_str}", queued.len());
+        for text in queued {
+            send_encrypted_message(
+                olm, crypto_store, peer_str, &text, event_tx, ws_cmd_tx, ws_room_peers,
+            ).await;
+        }
+    }
+    // With no session, the peer's DMs in that window may never have rendered here:
+    // ask it to re-serve from our high-water mark.
+    if !had_session {
+        request_dm_resync_after_rekey(
+            peer_str, master_peer_str, ws_cmd_tx, ws_room_peers, db_path, db_passphrase,
+        );
+    }
+    sync_handler::flush_pending_sync_requests(
+        pending_sync_requests, peer_str, olm, crypto_store, bundle_keypair, event_tx,
+        ws_cmd_tx, ws_room_peers, crdt_store, db_path, db_passphrase,
+    ).await;
+}
+
 /// Push our WHOLE personal emote set (tombstones included) to a verified sibling.
 /// Rows only: a name the sibling cannot render pulls its bytes over the asset rail.
 fn send_personal_emotes_to_sibling(
@@ -3031,6 +3086,9 @@ async fn run_event_loop(
                             } else {
                                 "none"
                             };
+                            if let Some(id) = olm.session_id(&peer) {
+                                snap.olm_session_ids.insert(peer.clone(), id);
+                            }
                             snap.olm_sessions.insert(peer, status.to_string());
                         }
                         let mut peers: std::collections::HashSet<String> =
@@ -6718,12 +6776,21 @@ async fn handle_incoming_request(
             };
             if olm.has_confirmed_session(peer_str) && !cooldown_ok {
                 hollow_log!("[HOLLOW-CRYPTO] KeyRequest from {peer_str} but confirmed session + cooldown active, ignoring");
+            } else if olm.claim_prekey_resend(peer_str, OLM_KEY_REQUEST_TIMEOUT) {
+                // Our PreKey and their request crossed, or ours was lost. Answering with a
+                // bundle would start a second session to collide with the first; every
+                // message on an unanswered session carries the whole handshake instead.
+                hollow_log!("[HOLLOW-CRYPTO] KeyRequest from {peer_str} while our PreKey is in flight — re-sending on the same session");
+                let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
+                send_encrypted_message(
+                    olm, crypto_store, peer_str, &ack_json, event_tx, ws_cmd_tx, ws_room_peers,
+                ).await;
             } else {
                 if olm.has_session(peer_str) {
-                    // Drop our (now-known-stale) half before re-bundling so the new
-                    // inbound session the peer builds isn't shadowed by a dead one.
+                    // Stop encrypting on our half so the session the peer builds from the
+                    // new bundle is the one used; what it already sent still reads.
                     hollow_log!("[HOLLOW-CRYPTO] KeyRequest from {peer_str} while we hold a session — peer lost theirs, re-keying");
-                    olm.remove_session(peer_str);
+                    olm.retire_session(peer_str);
                     decrypt_fail_cooldown.insert(peer_str.to_string(), now);
                 }
                 let otk = olm.generate_one_time_key();
@@ -6786,7 +6853,9 @@ async fn handle_incoming_request(
                 &super::resolver::resolve(peer_str), peer_str, &identity_key,
             ).await;
 
-            if olm.has_session(peer_str) {
+            // An unanswered outbound session past the request window never reached the
+            // peer, and this bundle says the peer is waiting for one: it is replaced.
+            if olm.has_confirmed_session(peer_str) || olm.has_fresh_outbound(peer_str, OLM_KEY_REQUEST_TIMEOUT) {
                 hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
                 key_bundle_sent_to.remove(peer_str);
             } else if key_bundle_sent_to.remove(peer_str) && device_peer_id > peer_str {
@@ -6894,177 +6963,78 @@ async fn handle_incoming_request(
                     return;
                 }
 
-                let had_existing_session = olm.has_session(&peer_str);
-
-                if had_existing_session {
-                    // We have an inbound-derived session already. Try it first, which handles the
-                    // race where two encrypted messages arrive as PreKeys: the first creates the
-                    // session, the second should decrypt with it.
-                    match olm.try_decrypt_prekey_with_existing(&peer_str, &ciphertext) {
-                        Ok(pt) => {
-                            hollow_log!("[HOLLOW-CRYPTO] Decrypted PreKey with existing session for {peer_str}");
-                            pt
-                        }
-                        Err(e) => {
-                            // Existing session can't handle this PreKey — it's a
-                            // genuinely new session from the peer (e.g. they re-keyed).
-                            // Replace our session with the new inbound one.
-                            hollow_log!("[HOLLOW-CRYPTO] PreKey from {peer_str} undecryptable with existing session ({e}) — rebuilding inbound session");
-                            olm.remove_session(&peer_str);
-                            match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
-                                Ok(pt) => {
-                                    let _ = event_tx
-                                        .send(NetworkEvent::SessionEstablished {
-                                            peer_id: peer_str.to_string(),
-                                        })
-                                        .await;
-                                    // SECURITY: pin only AFTER the session was built. vodozemac
-                                    // has now proven this identity key belongs to the sender, so
-                                    // a forged key cannot fabricate a "they re-keyed" notice.
-                                    super::security_alerts::note_olm_identity_key(
-                                        event_tx, db_path, db_passphrase, master_peer_str,
-                                        &super::resolver::resolve(peer_str), peer_str,
-                                        their_identity,
-                                    ).await;
-                                    key_request_in_flight.remove(peer_str);
-                                    // Send encrypted SessionAck to upgrade peer's outbound ratchet.
-                                    let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
-                                    send_encrypted_message(
-                                        olm, crypto_store, &peer_str, &ack_json, event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                    ).await;
-                                    if let Some(queued) = pending_messages.remove(peer_str) {
-                                        for text in queued {
-                                            send_encrypted_message(
-                                                olm, crypto_store, &peer_str, &text, event_tx,
-                                            ws_cmd_tx, ws_room_peers,
-                                            ).await;
-                                        }
-                                    }
-                                    sync_handler::flush_pending_sync_requests(
-                                        pending_sync_requests, peer_str,
-                                        olm, crypto_store,
-                                        bundle_keypair, event_tx,
-                                        ws_cmd_tx, ws_room_peers,
-                                        crdt_store,
-                                        db_path, db_passphrase,
-                                    ).await;
-                                    pt
-                                }
-                                Err(e2) => {
-                                    // Both paths failed. ALWAYS log the drop (the re-key
-                                    // below stays cooldown-gated) — a burst of failures
-                                    // must never go dark on the receive side.
-                                    hollow_log!("[HOLLOW-CRYPTO] Inbound PreKey from {peer_str} undecryptable on BOTH paths: {e2} — dropped");
-                                    // Apply cooldown to prevent re-key flood.
-                                    let now = std::time::Instant::now();
-                                    let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
-                                        Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
-                                        None => true,
-                                    };
-                                    if should_rekey {
-                                        hollow_log!("[HOLLOW-CRYPTO] Initiating re-key with {peer_str}");
-                                        decrypt_fail_cooldown.insert(peer_str.to_string(), now);
-                                        if !key_request_is_fresh(key_request_in_flight, peer_str) {
-                                            key_request_in_flight.insert(peer_str.to_string(), now);
-                                            send_message_to_peer(
-                                                ws_cmd_tx, ws_room_peers,
-                                                peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
-                                            );
-                                        }
-                                    }
-                                    persist_crypto_state(olm, crypto_store, &peer_str);
-                                    
-                                    return;
-                                }
+                let had_session = olm.has_session(peer_str);
+                match olm.open_prekey(peer_str, their_identity, &ciphertext, device_peer_id) {
+                    Ok(opened) => {
+                        if opened.created {
+                            if !opened.switched {
+                                hollow_log!("[HOLLOW-CRYPTO] Glare with {peer_str}: keeping our session (lower device id), read theirs on its own");
+                            } else if had_session {
+                                hollow_log!("[HOLLOW-CRYPTO] PreKey from {peer_str} started a new session — encrypting on it");
                             }
-                        }
-                    }
-                } else {
-                    match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
-                        Ok(pt) => {
-                            let _ = event_tx
-                                .send(NetworkEvent::SessionEstablished {
-                                    peer_id: peer_str.to_string(),
-                                })
-                                .await;
-                            // SECURITY (Issue 1-C): see the sibling call above —
-                            // pinning after successful session creation is what makes
-                            // the pinned key trustworthy.
+                            persist_crypto_state(olm, crypto_store, peer_str);
+                            // SECURITY: pin only AFTER the session was built. vodozemac has
+                            // now proven this identity key belongs to the sender, so a
+                            // forged key cannot fabricate a "they re-keyed" notice.
                             super::security_alerts::note_olm_identity_key(
                                 event_tx, db_path, db_passphrase, master_peer_str,
                                 &super::resolver::resolve(peer_str), peer_str,
                                 their_identity,
                             ).await;
-                            key_request_in_flight.remove(peer_str);
-                            // Send encrypted SessionAck to upgrade peer's outbound ratchet.
-                            let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
-                            send_encrypted_message(
-                                olm, crypto_store, &peer_str, &ack_json, event_tx,
-                            ws_cmd_tx, ws_room_peers,
+                        }
+                        if opened.created || opened.switched {
+                            on_session_ready(
+                                olm, crypto_store, crdt_store, bundle_keypair, event_tx,
+                                ws_cmd_tx, ws_room_peers, pending_messages, pending_sync_requests,
+                                key_request_in_flight, master_peer_str, peer_str, had_session,
+                                true, db_path, db_passphrase,
                             ).await;
-                            if let Some(queued) = pending_messages.remove(peer_str) {
-                                for text in queued {
-                                    send_encrypted_message(
-                                        olm, crypto_store, &peer_str, &text, event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                    ).await;
-                                }
-                            }
-                            // Re-pull any DMs the peer sent on the now-dead ratchet: during
-                            // the desync it kept encrypting on a session we could not decrypt,
-                            // so those messages never rendered. Now that we hold a FRESH
-                            // session, ask it to re-serve from our high-water mark.
-                            request_dm_resync_after_rekey(
-                                &peer_str, &master_peer_str,
-                                &ws_cmd_tx, &ws_room_peers, db_path, db_passphrase,
-                            );
-                            sync_handler::flush_pending_sync_requests(
-                                pending_sync_requests, peer_str,
-                                olm, crypto_store,
-                                bundle_keypair, event_tx,
+                        }
+                        opened.plaintext
+                    }
+                    Err(e) => {
+                        // ALWAYS log the drop (the re-key below is throttled): a burst of
+                        // failures must never go dark on the receive side.
+                        hollow_log!("[HOLLOW-CRYPTO] Inbound PreKey from {peer_str} undecryptable: {e} — dropped");
+                        let now = std::time::Instant::now();
+                        if decrypt_fail_cooldown.get(peer_str)
+                            .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(5))
+                        {
+                            decrypt_fail_cooldown.insert(peer_str.to_string(), now);
+                        }
+                        // Nudge the peer to re-key on a 2 s throttle, shorter than the
+                        // teardown cooldown, so it resolves live instead of at a restart.
+                        let req_throttled = key_request_in_flight
+                            .get(peer_str)
+                            .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(2));
+                        if !req_throttled {
+                            key_request_in_flight.insert(peer_str.to_string(), now);
+                            send_message_to_peer(
                                 ws_cmd_tx, ws_room_peers,
-                                crdt_store,
-                                db_path, db_passphrase,
-                            ).await;
-                            pt
+                                peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
+                            );
                         }
-                        Err(e) => {
-                            let now = std::time::Instant::now();
-                            // ALWAYS log (was cooldown-gated → silent under a burst).
-                            hollow_log!("[HOLLOW-CRYPTO] PreKey session creation FAILED for {peer_str}: {e}");
-                            // Throttle the teardown bookkeeping to 5s (anti-flood) but
-                            // keep nudging the peer to re-key on a shorter 2s throttle so
-                            // a glare resolves live instead of stalling until restart.
-                            if matches!(decrypt_fail_cooldown.get(peer_str),
-                                        None) || decrypt_fail_cooldown.get(peer_str)
-                                .is_some_and(|last| now.duration_since(*last) >= Duration::from_secs(5))
-                            {
-                                decrypt_fail_cooldown.insert(peer_str.to_string(), now);
-                            }
-                            let req_throttled = key_request_in_flight
-                                .get(peer_str)
-                                .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(2));
-                            if !req_throttled {
-                                key_request_in_flight.insert(peer_str.to_string(), now);
-                                send_message_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
-                                );
-                            }
-                            persist_crypto_state(olm, crypto_store, &peer_str);
-                            return;
-                        }
+                        persist_crypto_state(olm, crypto_store, peer_str);
+                        return;
                     }
                 }
             } else {
-                // Normal encrypted message. Capture the confirmation transition: on an
-                // unconfirmed outbound session a successful decrypt proves the peer replied
-                // (decrypt() clears outbound_only), so SessionEstablished can be reported.
-                let was_unconfirmed = olm.has_unconfirmed_session(&peer_str);
-                match olm.decrypt(&peer_str, message_type, &ciphertext) {
-                    Ok(pt) => {
-                        if was_unconfirmed {
+                let was_confirmed = olm.has_confirmed_session(peer_str);
+                let had_session = olm.has_session(peer_str);
+                match olm.decrypt(peer_str, message_type, &ciphertext) {
+                    Ok(opened) => {
+                        if opened.switched {
+                            hollow_log!("[HOLLOW-CRYPTO] {peer_str} writes on a session we had retired — encrypting on it again");
+                        }
+                        if !had_session {
+                            on_session_ready(
+                                olm, crypto_store, crdt_store, bundle_keypair, event_tx,
+                                ws_cmd_tx, ws_room_peers, pending_messages, pending_sync_requests,
+                                key_request_in_flight, master_peer_str, peer_str, had_session,
+                                false, db_path, db_passphrase,
+                            ).await;
+                        } else if !was_confirmed {
+                            // A decrypted reply proves the peer holds the other half.
                             hollow_log!("[HOLLOW-CRYPTO] Session with {peer_str} confirmed via decrypted reply");
                             key_request_in_flight.remove(peer_str);
                             let _ = event_tx.send(NetworkEvent::SessionEstablished {
@@ -7073,11 +7043,11 @@ async fn handle_incoming_request(
                             // Re-pull anything missed while this session was unconfirmed
                             // / desynced (live equivalent of the restart re-sync).
                             request_dm_resync_after_rekey(
-                                peer_str, &master_peer_str,
+                                peer_str, master_peer_str,
                                 ws_cmd_tx, ws_room_peers, db_path, db_passphrase,
                             );
                         }
-                        pt
+                        opened.plaintext
                     }
                     Err(e) => {
                         let now = std::time::Instant::now();
@@ -7086,16 +7056,15 @@ async fn handle_incoming_request(
                         // session completely unlogged, which made the bug invisible.
                         hollow_log!("[HOLLOW-SWARM] Decrypt FAILED for {peer_str}: {e}");
 
-                        // Tear down the (known-dead) session at most once per 5s — this
-                        // throttle prevents session thrashing under a 1000-chunk file
-                        // transfer where many in-flight chunks fail at once.
+                        // No session we hold reads it, so ours is dead to the peer: retire it
+                        // at most once per 5s, which keeps a 1000-chunk transfer failing at
+                        // once from thrashing the session.
                         let teardown_ok = match decrypt_fail_cooldown.get(peer_str) {
                             Some(last_kill) => now.duration_since(*last_kill) >= Duration::from_secs(5),
                             None => true,
                         };
                         if teardown_ok {
-                            olm.remove_session(&peer_str);
-                            persist_crypto_state(olm, crypto_store, &peer_str);
+                            olm.retire_session(peer_str);
                             decrypt_fail_cooldown.insert(peer_str.to_string(), now);
 
                             let _ = event_tx
@@ -8558,19 +8527,11 @@ async fn handle_incoming_request(
                     ).await;
                 }
                 Ok(MessageEnvelope::SessionAck) => {
-                    // Lightweight encrypted ping the peer sends after creating an inbound
-                    // session. Decrypting it upgrades our outbound ratchet, and it is the
-                    // CONFIRMATION point for an initiator: the peer proved it can decrypt us,
-                    // so SessionEstablished is emitted here, not optimistically at creation.
-                    hollow_log!("[HOLLOW-CRYPTO] SessionAck received from {peer_str} — session confirmed bidirectional");
-                    let was_unconfirmed = olm.has_unconfirmed_session(&peer_str);
-                    olm.mark_session_bidirectional(&peer_str);
+                    // Lightweight encrypted ping the peer sends after building or switching
+                    // to a session. The decrypt that read it already confirmed ours and
+                    // reported SessionEstablished.
+                    hollow_log!("[HOLLOW-CRYPTO] SessionAck received from {peer_str}");
                     key_request_in_flight.remove(peer_str);
-                    if was_unconfirmed {
-                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
-                            peer_id: peer_str.to_string(),
-                        }).await;
-                    }
                 }
 
                 // 1:1 call signaling, the ONLY accepted path for a Call* message.

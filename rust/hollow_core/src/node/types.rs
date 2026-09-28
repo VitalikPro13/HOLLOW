@@ -1362,6 +1362,9 @@ pub(crate) struct DebugSnapshotReply {
     pub mls_epoch: std::collections::HashMap<String, u64>,
     /// peer DEVICE id -> Olm session status: "none" | "unconfirmed" | "confirmed".
     pub olm_sessions: std::collections::HashMap<String, String>,
+    /// peer DEVICE id -> the id of the Olm session we encrypt with; both sides of a
+    /// working pair report the same one.
+    pub olm_session_ids: std::collections::HashMap<String, String>,
     /// Every DEVICE id the loop currently believes is in a room with us. The relay's
     /// own view leads this one, so "the node has noticed a peer leave" has a signal
     /// to poll instead of a sleep.

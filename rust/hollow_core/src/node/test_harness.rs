@@ -64,6 +64,9 @@ struct RelayInner {
     /// (sender, target) pairs whose direct frames the relay swallows: it keeps what
     /// it read (recording still sees it) and delivers nothing.
     swallowed_directs: HashSet<(String, String)>,
+    /// (sender, target) pairs whose direct frames the relay holds back, in order,
+    /// until the test releases them: a slow link, so two frames can cross.
+    held_directs: HashMap<(String, String), Vec<BufferedMsg>>,
     /// Devices whose outgoing `profile_update` frames get their `support_creds`
     /// rewritten to `""` and their signature removed, IN FLIGHT. This is the attack
     /// `support_creds_sig` exists for: the plaintext fallback is a JSON body the relay
@@ -637,6 +640,40 @@ impl MockRelay {
         self.inner.lock().unwrap().swallowed_directs.remove(&(from.to_string(), target.to_string()));
     }
 
+    /// Hold back every direct frame from one device to another until [`Self::release_held`].
+    pub(crate) fn hold_direct(&self, from: &str, target: &str) {
+        self.inner.lock().unwrap().held_directs.entry((from.to_string(), target.to_string())).or_default();
+    }
+
+    /// The wire kind of each frame held from `from` to `target`, oldest first.
+    pub(crate) fn held_kinds(&self, from: &str, target: &str) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .held_directs
+            .get(&(from.to_string(), target.to_string()))
+            .map(|held| {
+                held.iter()
+                    .map(|m| TapFrame {
+                        from: m.from.clone(),
+                        room: m.room.clone(),
+                        to: None,
+                        body: super::frame_auth::unchecked_body(&m.data).to_vec(),
+                    }
+                    .kind())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Deliver, in order, what [`Self::hold_direct`] kept, and stop holding.
+    pub(crate) fn release_held(&self, from: &str, target: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.held_directs.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
+        for m in held {
+            inner.deliver_direct(&m.room, &m.from, target, m.data, m.direct);
+        }
+    }
+
     pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
         let mut inner = self.inner.lock().unwrap();
         if deaf {
@@ -1043,6 +1080,10 @@ impl RelayInner {
     /// live socket, 0 if buffered offline (no egress now).
     fn deliver_direct(&mut self, room: &str, from: &str, target: &str, data: Vec<u8>, direct: bool) -> u64 {
         if self.swallowed_directs.contains(&(from.to_string(), target.to_string())) {
+            return 0;
+        }
+        if let Some(held) = self.held_directs.get_mut(&(from.to_string(), target.to_string())) {
+            held.push(BufferedMsg { room: room.to_string(), from: from.to_string(), data, direct });
             return 0;
         }
         let online = self.conns.get(target).map(|c| c.online).unwrap_or(false);
@@ -1588,6 +1629,11 @@ impl TestNode {
 
     /// Olm session status with a peer DEVICE id: "none" | "unconfirmed" |
     /// "confirmed" | "absent" (no session object at all).
+    /// The id of the Olm session this node encrypts with for a device.
+    pub(crate) async fn olm_session_id(&self, device_peer_id: &str) -> Option<String> {
+        self.debug_snapshot().await.and_then(|s| s.olm_session_ids.get(device_peer_id).cloned())
+    }
+
     pub(crate) async fn olm_status(&self, device_peer_id: &str) -> String {
         self.debug_snapshot()
             .await
@@ -3676,8 +3722,8 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
                 continue;
             };
             let Ok(ct) = OlmManager::decode_base64(&body) else { continue };
-            if let Ok(pt) = relay_olm.decrypt("victim", message_type, &ct) {
-                relay_read.push_str(&String::from_utf8_lossy(&pt));
+            if let Ok(opened) = relay_olm.decrypt("victim", message_type, &ct) {
+                relay_read.push_str(&String::from_utf8_lossy(&opened.plaintext));
             }
         }
         tried = frames.len();
@@ -10281,6 +10327,228 @@ async fn startup_canonicalizes_device_keyed_friend_row() {
     );
 
     drop(local);
+}
+
+/// Every event a node has queued, drained without blocking.
+fn take_events(node: &mut TestNode) -> Vec<NetworkEvent> {
+    let mut out = Vec::new();
+    while let Ok(ev) = node.event_rx.try_recv() {
+        out.push(ev);
+    }
+    out
+}
+
+/// The re-key notice a node raises when no session it holds reads a peer's message.
+fn stale_session_errors(events: &[NetworkEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            NetworkEvent::Error { message } if message.starts_with("Stale session") => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+// Two friends' devices come online together and key each other at once, and the
+// higher one asks twice (its proactive request and the DM-room heal both fire), so
+// the lower answers with two bundles. The higher defers on the first, as the glare
+// rule says, and builds a session from the second; the lower built one from the
+// higher's bundle. Before the fix each then rebuilt from the other's PreKey, the two
+// sessions crossed, and the next ordinary message failed its MAC and forced a re-key,
+// losing whatever rode it. Both must settle on ONE session and lose nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn olm_glare_with_a_repeated_key_request_settles_on_one_session() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    // The tiebreak keeps the LOWER device's session, so the roles follow the ids.
+    let (lo_tag, hi_tag) = if id(101) < id(102) { (101, 102) } else { (102, 101) };
+    let (lo_id, hi_id) = (id(lo_tag), id(hi_tag));
+
+    // Nothing passes between the two until both have asked for a key, so the
+    // requests cross in flight the way they do when two devices come online at once.
+    relay.hold_direct(&lo_id, &hi_id);
+    relay.hold_direct(&hi_id, &lo_id);
+    let mut lo = spawn_node_with_friends(&relay, lo_tag, lo_tag, &[&hi_id]).await;
+    let mut hi = spawn_node_with_friends(&relay, hi_tag, hi_tag, &[&lo_id]).await;
+    let dm_room = super::types::dm_room_code(&lo.master_id, &hi.master_id);
+    let asked = wait_until(10, async || {
+        relay.held_kinds(&lo_id, &hi_id).iter().any(|k| k == "key_request")
+            && relay.held_kinds(&hi_id, &lo_id).iter().any(|k| k == "key_request")
+    })
+    .await;
+    assert!(asked, "both devices must ask for a key: {:?} / {:?}",
+        relay.held_kinds(&lo_id, &hi_id), relay.held_kinds(&hi_id, &lo_id));
+
+    // Both write before any session exists: these wait for one, then ride it.
+    for (from, to, mid) in [(&lo, &hi, "lo-early"), (&hi, &lo, "hi-early")] {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.master_id.clone(),
+                text: format!("{mid}-text"),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // The lower device reads the higher one's request, plus the repeat.
+    relay.release_held(&hi_id, &lo_id);
+    let again = crate::node::crypto_handler::signed_key_request(
+        &NativeKeypair::from_secret_bytes(&seed_bytes(hi_tag)), &hi_id, &lo_id,
+    );
+    relay.inject_direct(&dm_room, &hi_id, &lo_id, serde_json::to_vec(&again).unwrap());
+    let two_bundles = wait_until(10, async || {
+        relay.held_kinds(&lo_id, &hi_id).iter().filter(|k| *k == "key_bundle").count() >= 2
+    })
+    .await;
+    assert!(two_bundles, "the lower device answers each request with a bundle: {:?}",
+        relay.held_kinds(&lo_id, &hi_id));
+    relay.release_held(&lo_id, &hi_id);
+
+    expect_dm_pair_ready(&relay, &lo, &hi, 20).await;
+    let settled = wait_until(10, async || {
+        let (a, b) = (lo.olm_session_id(&hi_id).await, hi.olm_session_id(&lo_id).await);
+        a.is_some() && a == b
+    })
+    .await;
+    assert!(settled, "both devices must encrypt on ONE session: {:?} vs {:?}",
+        lo.olm_session_id(&hi_id).await, hi.olm_session_id(&lo_id).await);
+
+    // Traffic both ways on the settled session, back to back.
+    for (from, to, mid) in [(&lo, &hi, "lo-late"), (&hi, &lo, "hi-late")] {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.master_id.clone(),
+                text: format!("{mid}-text"),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+    let mut lo_events = Vec::new();
+    let mut hi_events = Vec::new();
+    let all_read = wait_until(15, async || {
+        lo_events.extend(take_events(&mut lo));
+        hi_events.extend(take_events(&mut hi));
+        let got = |events: &[NetworkEvent], mid: &str| {
+            events.iter().any(|ev| matches!(ev, NetworkEvent::MessageReceived { message_id, is_own, .. }
+                if message_id == mid && !*is_own))
+        };
+        got(&hi_events, "lo-early") && got(&hi_events, "lo-late")
+            && got(&lo_events, "hi-early") && got(&lo_events, "hi-late")
+    })
+    .await;
+    assert!(all_read, "every DM must arrive: lo read {:?}, hi read {:?}",
+        lo.dm_thread(&hi.master_id), hi.dm_thread(&lo.master_id));
+
+    // A crossed pair shows as a decrypt failure and a re-key; a settled one never does.
+    assert!(stale_session_errors(&lo_events).is_empty() && stale_session_errors(&hi_events).is_empty(),
+        "no message may fail to decrypt: lo {:?}, hi {:?}",
+        stale_session_errors(&lo_events), stale_session_errors(&hi_events));
+    assert_eq!(lo.olm_session_id(&hi_id).await, hi.olm_session_id(&lo_id).await,
+        "still one session after traffic both ways");
+}
+
+// A KeyRequest that crosses our PreKey on the wire: the lower device has just built
+// its session and its first PreKey is still in flight when the higher one asks again.
+// Answering with a fresh bundle, as before, started a second session the first then
+// collided with; the request is answered on the SAME session instead, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn olm_key_request_crossing_a_prekey_is_answered_on_the_same_session() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (lo_tag, hi_tag) = if id(103) < id(104) { (103, 104) } else { (104, 103) };
+    let (lo_id, hi_id) = (id(lo_tag), id(hi_tag));
+
+    relay.hold_direct(&lo_id, &hi_id);
+    relay.hold_direct(&hi_id, &lo_id);
+    let mut lo = spawn_node_with_friends(&relay, lo_tag, lo_tag, &[&hi_id]).await;
+    let mut hi = spawn_node_with_friends(&relay, hi_tag, hi_tag, &[&lo_id]).await;
+    let dm_room = super::types::dm_room_code(&lo.master_id, &hi.master_id);
+    let held = |from: &str, to: &str, kind: &str| relay.held_kinds(from, to).iter().filter(|k| *k == kind).count();
+    let asked = wait_until(10, async || {
+        held(&lo_id, &hi_id, "key_request") > 0 && held(&hi_id, &lo_id, "key_request") > 0
+    })
+    .await;
+    assert!(asked, "both devices must ask for a key");
+
+    // The higher device reads the lower's request and answers; the lower's side of
+    // the link stays slow from here on.
+    relay.release_held(&lo_id, &hi_id);
+    assert!(wait_until(10, async || held(&hi_id, &lo_id, "key_bundle") > 0).await);
+    relay.hold_direct(&lo_id, &hi_id);
+
+    // The lower device gets the request and the bundle: it answers the request, then
+    // builds its session from the bundle (it is the lower id) and sends a PreKey.
+    relay.release_held(&hi_id, &lo_id);
+    assert!(wait_until(10, async || held(&lo_id, &hi_id, "encrypted") > 0).await,
+        "the lower device must send a PreKey: {:?}", relay.held_kinds(&lo_id, &hi_id));
+    let bundles_before = held(&lo_id, &hi_id, "key_bundle");
+    let prekeys_before = held(&lo_id, &hi_id, "encrypted");
+
+    // The higher device asks again while that PreKey is still on the wire.
+    let again = crate::node::crypto_handler::signed_key_request(
+        &NativeKeypair::from_secret_bytes(&seed_bytes(hi_tag)), &hi_id, &lo_id,
+    );
+    relay.inject_direct(&dm_room, &hi_id, &lo_id, serde_json::to_vec(&again).unwrap());
+    let resent = wait_until(10, async || held(&lo_id, &hi_id, "encrypted") > prekeys_before).await;
+    assert!(resent, "the request must be answered on the session in flight: {:?}",
+        relay.held_kinds(&lo_id, &hi_id));
+    // The resend and a bundle are one handler's either-or, so none can follow it.
+    assert_eq!(held(&lo_id, &hi_id, "key_bundle"), bundles_before,
+        "no second bundle, which would start a competing session: {:?}", relay.held_kinds(&lo_id, &hi_id));
+
+    relay.release_held(&lo_id, &hi_id);
+    expect_dm_pair_ready(&relay, &lo, &hi, 20).await;
+    let settled = wait_until(10, async || {
+        let (a, b) = (lo.olm_session_id(&hi_id).await, hi.olm_session_id(&lo_id).await);
+        a.is_some() && a == b
+    })
+    .await;
+    assert!(settled, "both devices must encrypt on ONE session");
+
+    for (from, to, mid) in [(&lo, &hi, "lo-after"), (&hi, &lo, "hi-after")] {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.master_id.clone(),
+                text: format!("{mid}-text"),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+    let mut lo_events = Vec::new();
+    let mut hi_events = Vec::new();
+    let all_read = wait_until(15, async || {
+        lo_events.extend(take_events(&mut lo));
+        hi_events.extend(take_events(&mut hi));
+        let got = |events: &[NetworkEvent], mid: &str| {
+            events.iter().any(|ev| matches!(ev, NetworkEvent::MessageReceived { message_id, is_own, .. }
+                if message_id == mid && !*is_own))
+        };
+        got(&hi_events, "lo-after") && got(&lo_events, "hi-after")
+    })
+    .await;
+    assert!(all_read, "both DMs must arrive");
+    assert!(stale_session_errors(&lo_events).is_empty() && stale_session_errors(&hi_events).is_empty(),
+        "no message may fail to decrypt: lo {:?}, hi {:?}",
+        stale_session_errors(&lo_events), stale_session_errors(&hi_events));
 }
 
 // Two FRESH single-device people, each with device != master, become friends

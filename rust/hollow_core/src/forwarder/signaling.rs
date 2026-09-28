@@ -324,7 +324,7 @@ async fn handle_binary_frame(
             let Some(plaintext) = olm_decrypt(
                 &sender, message_type, identity_key.as_deref(),
                 identity_sig.as_deref(), identity_pk.as_deref(),
-                &ciphertext, olm, crypto_store,
+                &ciphertext, olm, crypto_store, local_peer_id,
             ) else {
                 hollow_log!(
                     "[HOLLOW-FWD] inbound {frame_len} B: Olm decrypt failed (msg_type {message_type}) — dropped"
@@ -411,9 +411,9 @@ async fn handle_key_request(
         return;
     }
     if olm.has_session(sender) {
-        // Peer lost their half: drop ours before re-bundling so the new inbound
-        // session is not shadowed by a dead one.
-        olm.remove_session(sender);
+        // Peer lost their half: the session it builds from the new bundle is the one
+        // used, and ours still reads what it already sent.
+        olm.retire_session(sender);
         rekey_cooldown.insert(sender.to_string(), now);
     }
     let otk = olm.generate_one_time_key();
@@ -438,6 +438,7 @@ fn olm_decrypt(
     ciphertext: &[u8],
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
+    local_peer_id: &str,
 ) -> Option<Vec<u8>> {
     if message_type == 0 {
         let their_identity = identity_key?;
@@ -445,43 +446,25 @@ fn olm_decrypt(
             hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {from}: identity key not signed by that device");
             return None;
         }
-        if olm.has_session(from) {
-            match olm.try_decrypt_prekey_with_existing(from, ciphertext) {
-                Ok(pt) => Some(pt),
-                Err(_) => {
-                    olm.remove_session(from);
-                    create_inbound(from, their_identity, ciphertext, olm, crypto_store)
+        match olm.open_prekey(from, their_identity, ciphertext, local_peer_id) {
+            Ok(opened) => {
+                if opened.created || opened.switched {
+                    persist_crypto_state(olm, crypto_store, from);
                 }
+                Some(opened.plaintext)
             }
-        } else {
-            create_inbound(from, their_identity, ciphertext, olm, crypto_store)
+            Err(e) => {
+                hollow_log!("[HOLLOW-FWD] PreKey undecryptable: {e}");
+                None
+            }
         }
     } else {
         match olm.decrypt(from, message_type, ciphertext) {
-            Ok(pt) => Some(pt),
+            Ok(opened) => Some(opened.plaintext),
             Err(e) => {
                 hollow_log!("[HOLLOW-FWD] Olm decrypt failed: {e}");
                 None
             }
-        }
-    }
-}
-
-fn create_inbound(
-    from: &str,
-    their_identity: &str,
-    ciphertext: &[u8],
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-) -> Option<Vec<u8>> {
-    match olm.create_inbound_session(from, their_identity, ciphertext) {
-        Ok(pt) => {
-            persist_crypto_state(olm, crypto_store, from);
-            Some(pt)
-        }
-        Err(e) => {
-            hollow_log!("[HOLLOW-FWD] PreKey session creation failed: {e}");
-            None
         }
     }
 }
