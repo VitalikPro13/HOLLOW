@@ -115,7 +115,8 @@ db_passphrase) -> Vec<FetchedDm>`.
   frame ONLY to a socket presenting that exact device id (so the fetch MUST auth as
   the device, not the master, or it joins as a different id and finds nothing). The
   DM room is `dm_room_code(local_master, resolve(sender))` — master-paired (rooms
-  are derived from masters; `dm_room_code` is pure). The DB passphrase stays
+  are derived from masters and keyed by the master key, so both callers run
+  `dm_room::register(&id.keypair)` first). The DB passphrase stays
   MASTER-derived (a device-derived one opens an empty DB). The callers
   (`start_fetch_node`, NSE `fetch_and_decrypt`) warm the resolver from the persisted
   device links + `seed_self` before calling, so `resolve(sender)`→master works; the

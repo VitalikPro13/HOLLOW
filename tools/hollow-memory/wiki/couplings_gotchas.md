@@ -858,11 +858,11 @@ let _ = state.apply_op(&op);
 
 ### DM room code is a PURE function of the two ids — never resolve inside it
 
-**Rule:** `node::types::dm_room_code(a, b)` hashes the two ids as-is (no `resolver::resolve`). Pass the MASTER for the local end (the event loop's `local_peer_str` is master) and the friend's identity id for the remote end. A per-device fan-out computes the room from the recipient's MASTER and uses the device id only as `target_peer`.
+**Rule:** `node::types::dm_room_code(a, b)` keys the two ids as-is (no `resolver::resolve`): an X25519 agreement between the two MASTER keys since 2026-09-28 (`node/dm_room.rs`), so a new process that routes DMs must call `dm_room::register(master)` before it computes a room. Pass the MASTER for the local end (the event loop's `local_peer_str` is master) and the friend's identity id for the remote end. A per-device fan-out computes the room from the recipient's MASTER and uses the device id only as `target_peer`.
 
 **Why:** Two friends MUST always derive the SAME DM room. If the room depended on each side's mutable resolver state, a divergence (one side ingested a device list the other hadn't, or a stale/polluted link) makes them compute DIFFERENT rooms → they never meet → key exchange never lands → "keying error" even for plain single-device friends. This regressed plain-friend keying when `dm_room_code` resolved both ends (committed multi-device work); reverted to pure 2026-06-15.
 
-**Where:** `rust/hollow_core/src/node/types.rs` (`dm_room_code`), `message_ops.rs` + `file_handler.rs` (per-device sends pass the master-pair room).
+**Where:** `rust/hollow_core/src/node/dm_room.rs` (re-exported from `types.rs`), `message_ops.rs` + `file_handler.rs` (per-device sends pass the master-pair room).
 
 ### DM send fan-out: only devices CURRENTLY IN A ROOM (kills ghost-fanout)
 

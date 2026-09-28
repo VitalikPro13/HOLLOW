@@ -70,6 +70,7 @@ The DIMENSION ceiling `MAX_DECODE_DIM` (4096/side) is the separate, tighter REMO
 
 Bytes NEVER ride the CRDT, message envelopes, or relay rings. Module **`node/emotes.rs`**:
 - `NodeCommand::RequestEmotes { hashes, server_id, peer_hint }` → `handle_request_emotes()`: filters already-cached/already-requested (per-connection `requested_emote_hashes` set in swarm.rs, cleared on WS Disconnected), sends `HavenMessage::EmoteRequest { hashes }` to the DM sender's devices (`send_raw_to_identity`) or ONE online server-room member — never a broadcast.
+- `EmoteRequest` and `EmoteAssets` ride the Olm lane (`olm_lane::carry`, `NoSession::Queue`) since 2026-09-28: the relay reads neither the hashes nor the bytes.
 - Inbound `EmoteRequest` → `handle_emote_request()`: answers with whatever subset is cached, as `EmoteAssets { bundle_json }` (the showcase bundle codec `api/showcase.rs:encode/decode_asset_bundle` — JSON map hash→base64, receiver-verified).
 - Inbound `EmoteAssets` → `handle_emote_assets()`: verifies sha256 == hash (via bundle codec), RIFF/WEBP magic, ≤256KB cap → `save_emote_blob` → emits `NetworkEvent::EmoteAssetsReceived { hashes }`.
 - Reactions: `valid_reaction_emoji()` (≤10-byte Unicode OR emote token) enforced at `message_ops.rs:handle_envelope_add_reaction` (choke point for MLS/Olm/public paths) + the swarm AddReaction arm.

@@ -127,6 +127,12 @@ impl NativeKeypair {
         self.signing_key.to_bytes()
     }
 
+    /// The unclamped Curve25519 scalar behind this key, for an X25519 agreement with
+    /// another identity's public key (`MontgomeryPoint::mul_clamped` clamps it).
+    pub(crate) fn x25519_scalar_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_scalar_bytes())
+    }
+
     /// Derive a libp2p-style PeerId string (`12D3KooW…`) from a protobuf-encoded
     /// public key (the 36-byte `[0x08,0x01,0x12,0x20,...pubkey]` format).
     ///

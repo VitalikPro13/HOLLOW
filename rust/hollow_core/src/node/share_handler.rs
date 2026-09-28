@@ -14,7 +14,7 @@ use crate::hollow_log;
 use crate::identity::native_identity::NativeKeypair;
 use crate::storage::messages::{MessageStore, StoredShare};
 
-use super::types::{HavenMessage, NetworkEvent, ShareEntryRef, ShareManifest};
+use super::types::{HavenMessage, Lane, NetworkEvent, ShareEntryRef, ShareManifest};
 use super::ws_client::WsCommand;
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -106,6 +106,77 @@ pub(crate) fn encrypt_chunk(key: &[u8; 32], chunk_index: u32, plaintext: &[u8]) 
 fn decrypt_chunk(key: &[u8; 32], chunk_index: u32, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
     let nonce = chunk_nonce(chunk_index);
     crate::vault::pipeline::aes_decrypt(ciphertext, key, &nonce)
+}
+
+// ── Control lane ─────────────────────────────────────────────────────────
+//
+// The swarm room is named by the root hash, so the relay, or anyone who saw the
+// room, can join it. Only the link key keeps the manifest, the have maps and the
+// requests to the link's holders (claim C-24).
+
+const CONTROL_DOMAIN: &[u8] = b"hollow-share-ctl1";
+
+fn control_cipher(link_key: &[u8; 32]) -> Option<aes_gcm::Aes256Gcm> {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(link_key).ok()?;
+    mac.update(CONTROL_DOMAIN);
+    let key = zeroize::Zeroizing::new(mac.finalize().into_bytes());
+    <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key.as_slice()).ok()
+}
+
+fn control_aad(root_hash: &str) -> Vec<u8> {
+    [CONTROL_DOMAIN, b"\0", root_hash.as_bytes()].concat()
+}
+
+/// The wire bytes of a share control message, sealed under the share's link key.
+pub(crate) fn seal_control(link_key: &[u8; 32], root_hash: &str, msg: &HavenMessage) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, Payload};
+    debug_assert_eq!(msg.lane(), Lane::Share, "only share control rides the share lane");
+    let plain = serde_json::to_vec(msg).ok()?;
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).ok()?;
+    let aad = control_aad(root_hash);
+    let ct = control_cipher(link_key)?
+        .encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &aad })
+        .ok()?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    serde_json::to_vec(&HavenMessage::ShareSealed {
+        root_hash: root_hash.to_string(),
+        nonce: engine.encode(nonce),
+        ct: engine.encode(ct),
+    })
+    .ok()
+}
+
+/// The control message sealed inside a `ShareSealed` that arrived in `room`. `None`
+/// unless we hold that share, the frame came through its room, the link key opens
+/// it and what it holds is share control for that same share.
+pub(crate) fn open_control(
+    registry: &ShareRegistry,
+    room: &str,
+    root_hash: &str,
+    nonce: &str,
+    ct: &str,
+) -> Option<HavenMessage> {
+    use aes_gcm::aead::{Aead, Payload};
+    let state = registry.get(root_hash).filter(|s| s.room_id() == room)?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let nonce: [u8; 12] = engine.decode(nonce).ok()?.try_into().ok()?;
+    let ct = engine.decode(ct).ok()?;
+    let aad = control_aad(root_hash);
+    let plain = control_cipher(&state.key)?
+        .decrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &ct, aad: &aad })
+        .ok()?;
+    let msg: HavenMessage = serde_json::from_slice(&plain).ok()?;
+    let inner_root = match &msg {
+        HavenMessage::ShareManifestRequest { root_hash }
+        | HavenMessage::ShareManifestResponse { root_hash, .. }
+        | HavenMessage::ShareHave { root_hash, .. }
+        | HavenMessage::ShareChunkRequest { root_hash, .. }
+        | HavenMessage::ShareChunkResponse { root_hash, .. } => root_hash,
+        _ => return None,
+    };
+    (inner_root == root_hash).then_some(msg)
 }
 
 // ── Misc helpers ─────────────────────────────────────────────────────────
@@ -645,9 +716,8 @@ pub async fn handle_command_share_open_link(
 
     let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: info.room_id() });
 
-    if let Ok(payload) = serde_json::to_vec(&HavenMessage::ShareManifestRequest {
-        root_hash: root_hash_hex.clone(),
-    }) {
+    let request = HavenMessage::ShareManifestRequest { root_hash: root_hash_hex.clone() };
+    if let Some(payload) = seal_control(&info.key, &root_hash_hex, &request) {
         let _ = ws_cmd_tx.send(WsCommand::SendToRoom {
             room_code: info.room_id(),
             data: payload,
@@ -995,11 +1065,8 @@ pub async fn broadcast_have(
     let bitmap_b64 = base64::engine::general_purpose::STANDARD.encode(state.have.as_bytes());
     let chunk_count = state.have.chunk_count;
     let room = state.room_id();
-    if let Ok(payload) = serde_json::to_vec(&HavenMessage::ShareHave {
-        root_hash: root_hash.to_string(),
-        bitmap_b64,
-        chunk_count,
-    }) {
+    let have = HavenMessage::ShareHave { root_hash: root_hash.to_string(), bitmap_b64, chunk_count };
+    if let Some(payload) = seal_control(&state.key, root_hash, &have) {
         let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: room, data: payload });
     }
 }
@@ -1297,7 +1364,7 @@ async fn tick_schedule_requests(
     root_hash: &str,
     now: Instant,
 ) {
-    let (room, assignments) = {
+    let (room, key, assignments) = {
         let Some(state) = registry.get(root_hash) else { return; };
         if state.peer_have.is_empty() { return; }
 
@@ -1315,12 +1382,12 @@ async fn tick_schedule_requests(
 
         let needed = collect_needed_chunks(state, webrtc_share_peers, manifest.chunk_count);
         let assignments = assign_chunks_to_peers(needed, &state.inflight);
-        (state.room_id(), assignments)
+        (state.room_id(), state.key, assignments)
     };
 
     // Mark in-flight + send the requests.
     mark_chunks_inflight(registry, root_hash, &assignments, now);
-    send_chunk_requests(ws_cmd_tx, &room, root_hash, assignments);
+    send_chunk_requests(ws_cmd_tx, &room, &key, root_hash, assignments);
 }
 
 /// Emit ShareNeedWebRtc for every known swarm peer without a SHARE data
@@ -1426,14 +1493,13 @@ fn mark_chunks_inflight(
 fn send_chunk_requests(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     room: &str,
+    link_key: &[u8; 32],
     root_hash: &str,
     assignments: HashMap<String, Vec<u32>>,
 ) {
     for (peer_id, indices) in assignments {
-        if let Ok(payload) = serde_json::to_vec(&HavenMessage::ShareChunkRequest {
-            root_hash: root_hash.to_string(),
-            indices,
-        }) {
+        let request = HavenMessage::ShareChunkRequest { root_hash: root_hash.to_string(), indices };
+        if let Some(payload) = seal_control(link_key, root_hash, &request) {
             let _ = ws_cmd_tx.send(WsCommand::SendDirect {
                 room_code: room.to_string(),
                 target_peer: peer_id,
@@ -1456,9 +1522,8 @@ pub async fn handle_envelope_share_manifest_request(
     let Ok(bytes) = serde_json::to_vec(manifest) else { return; };
     let manifest_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let room = state.room_id();
-    if let Ok(payload) = serde_json::to_vec(&HavenMessage::ShareManifestResponse {
-        root_hash, manifest_b64,
-    }) {
+    let response = HavenMessage::ShareManifestResponse { root_hash: root_hash.clone(), manifest_b64 };
+    if let Some(payload) = seal_control(&state.key, &root_hash, &response) {
         let _ = ws_cmd_tx.send(WsCommand::SendDirect {
             room_code: room,
             target_peer: sender_peer_id.to_string(),
@@ -2077,6 +2142,43 @@ mod tests {
         assert!(registry[&root].peer_have.is_empty(), "a Have before the manifest was taken");
         handle_envelope_share_manifest_response(&mut registry, &kp, &tx, root.clone(), b64).await;
         assert!(registry[&root].manifest.is_some(), "the first manifest lands");
+    }
+
+    fn sealed_parts(bytes: &[u8]) -> (String, String, String) {
+        match serde_json::from_slice::<HavenMessage>(bytes).expect("sealed frame parses") {
+            HavenMessage::ShareSealed { root_hash, nonce, ct } => (root_hash, nonce, ct),
+            other => panic!("expected share_sealed, got {}", other.wire_kind()),
+        }
+    }
+
+    /// C-24: share control opens only with the link key, only in its own room and
+    /// only as control for the share it names.
+    #[test]
+    fn share_control_opens_only_with_the_link_key() {
+        let root = hex::encode([7u8; 32]);
+        let mut state = seeding_share(None);
+        state.root_hash = [7; 32];
+        state.key = [9; 32];
+        let room = state.room_id();
+        let mut registry = new_registry();
+        registry.insert(root.clone(), state);
+        let have = HavenMessage::ShareHave { root_hash: root.clone(), bitmap_b64: "AA==".into(), chunk_count: 1 };
+
+        let sealed = seal_control(&[9; 32], &root, &have).expect("seals");
+        assert!(!String::from_utf8_lossy(&sealed).contains("bitmap_b64"), "the sealed frame names nothing inside");
+        let (r, n, c) = sealed_parts(&sealed);
+        assert!(matches!(open_control(&registry, &room, &r, &n, &c), Some(HavenMessage::ShareHave { .. })));
+
+        let (r, n, c) = sealed_parts(&seal_control(&[8; 32], &root, &have).unwrap());
+        assert!(open_control(&registry, &room, &r, &n, &c).is_none(), "another key opens nothing");
+
+        let (r, n, c) = sealed_parts(&seal_control(&[9; 32], &root, &have).unwrap());
+        assert!(open_control(&registry, "share:elsewhere", &r, &n, &c).is_none(), "only in the share's own room");
+
+        let other_root = hex::encode([6u8; 32]);
+        let aimed_elsewhere = HavenMessage::ShareHave { root_hash: other_root, bitmap_b64: "AA==".into(), chunk_count: 1 };
+        let (r, n, c) = sealed_parts(&seal_control(&[9; 32], &root, &aimed_elsewhere).unwrap());
+        assert!(open_control(&registry, &room, &r, &n, &c).is_none(), "the inner message names this share");
     }
 
     /// The Share lane's liveness set gates BOTH scheduling and serving. A peer with

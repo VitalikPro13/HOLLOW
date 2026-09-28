@@ -144,6 +144,7 @@ fn fetch_and_decrypt(
         crate::node::resolver::warm_from_store(&store);
     }
     crate::node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
+    crate::node::dm_room::register(&id.keypair);
 
     let relay = if relay_domain.is_empty() {
         "relay.anonlisten.com"

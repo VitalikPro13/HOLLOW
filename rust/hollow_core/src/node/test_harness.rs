@@ -1532,6 +1532,23 @@ impl TestNode {
             .collect()
     }
 
+    /// Every message of wire `kind` this node sent over the Olm lane, to anyone, as
+    /// the JSON a plaintext frame of it would have carried: the Olm-lane twin of
+    /// [`frames_of_type`].
+    pub(crate) async fn carried_of_type(&self, kind: &str) -> Vec<serde_json::Value> {
+        self.debug_snapshot()
+            .await
+            .map(|s| s.carried)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, json)| match serde_json::from_str::<super::types::MessageEnvelope>(&json) {
+                Ok(super::types::MessageEnvelope::Carried { msg, .. }) => serde_json::to_value(*msg).ok(),
+                _ => None,
+            })
+            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some(kind))
+            .collect()
+    }
+
     /// Whether the LOOP still believes `device` shares a room with us. The relay
     /// drops a peer before the node hears about it, so this is what a test waits on
     /// before asserting how a send was routed.
@@ -3600,9 +3617,9 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
     let forged = serde_json::to_vec(&HavenMessage::Encrypted {
         message_type: 0,
         body: OlmManager::encode_base64(&ciphertext),
-        identity_key: Some(relay_ik),
-        identity_sig,
-        identity_pk,
+        identity_key: Some(relay_ik.clone()),
+        identity_sig: identity_sig.clone(),
+        identity_pk: identity_pk.clone(),
     })
     .unwrap();
     drain_events(victim_node);
@@ -3615,12 +3632,21 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
     .await;
 
     // Whatever the victim now encrypts to the impersonated device must stay closed to
-    // the relay: a plaintext sync request in that device's name pulls the old
-    // history, and a new DM rides the same session.
-    let sync_request = serde_json::to_vec(&HavenMessage::DmSyncRequest {
-        since_timestamp: 0,
-        both_directions: true,
-        gap: None,
+    // the relay: a sync request carried in that device's name pulls the old history,
+    // and a new DM rides the same session.
+    let sync_request = MessageEnvelope::Carried {
+        msg: Box::new(HavenMessage::DmSyncRequest { since_timestamp: 0, both_directions: true, gap: None }),
+        at_ms: super::frame_auth::now_ms(),
+    };
+    let (message_type, ciphertext) = relay_olm
+        .encrypt("victim", serde_json::to_string(&sync_request).unwrap().as_bytes())
+        .expect("encrypt");
+    let sync_request = serde_json::to_vec(&HavenMessage::Encrypted {
+        message_type,
+        body: OlmManager::encode_base64(&ciphertext),
+        identity_key: Some(relay_ik),
+        identity_sig,
+        identity_pk,
     })
     .unwrap();
     relay.inject_direct(&dm_room, &impersonated, &victim, sync_request);
@@ -4643,17 +4669,15 @@ async fn file_unavailable_from_unasked_device_changes_nothing() {
     assert!(waiting, "the ask must be queued against the offline holder");
     drain_events(&mut b);
 
-    let bc_room = super::types::dm_room_code(&b_master, &c_master);
-    relay.inject_direct(
-        &bc_room,
-        &c.device_id,
-        &b.device_id,
-        serde_json::to_vec(&super::types::HavenMessage::FileUnavailable {
+    carry_as(
+        &c,
+        &b,
+        super::types::HavenMessage::FileUnavailable {
             file_id: fid.clone(),
             reason: "gone".to_string(),
-        })
-        .expect("serialize FileUnavailable"),
-    );
+        },
+    )
+    .await;
     let moved = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
         matches!(
             ev,
@@ -4759,21 +4783,20 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
     a.store().null_disk_path_all().expect("clear A's cached bytes");
     relay.set_recording(&a.device_id, true);
 
-    let ad_room = super::types::dm_room_code(&a_master, &d_master);
-    relay.inject_direct(
-        &ad_room,
-        &d.device_id,
-        &a.device_id,
-        serde_json::to_vec(&super::types::HavenMessage::FileRequest {
+    carry_as(
+        &d,
+        &a,
+        super::types::HavenMessage::FileRequest {
             file_id: fid.clone(),
             chunks: Vec::new(),
             offset: 0,
-        })
-        .expect("serialize FileRequest"),
-    );
+        },
+    )
+    .await;
     // An absence proof, polled: it fails the moment A answers the stranger.
     let leaked = wait_until(2, async || {
-        frames_of_type(&relay, &a.device_id, "file_unavail")
+        a.carried_of_type("file_unavail")
+            .await
             .iter()
             .any(|v| v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str()))
     })
@@ -4792,7 +4815,8 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
         .await
         .unwrap();
     let answered = wait_until(10, async || {
-        frames_of_type(&relay, &a.device_id, "file_unavail")
+        a.carried_of_type("file_unavail")
+            .await
             .iter()
             .any(|v| v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str()))
     })
@@ -4955,7 +4979,7 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
         "a rotation that succeeds must never show a dead-end state, got {seq:?}"
     );
 
-    let said_gone = frames_of_type(&relay, &a.device_id, "file_unavail").iter().any(|v| {
+    let said_gone = a.carried_of_type("file_unavail").await.iter().any(|v| {
         v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str())
             && v.get("reason").and_then(|r| r.as_str()) == Some("gone")
     });
@@ -11697,6 +11721,7 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
+    relay.start_wiretap();
 
     const O_MASTER: u8 = 230;
     const G_MASTER: u8 = 231; // stranger/guest — no friendship, never a member
@@ -11818,6 +11843,11 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     })
     .await;
     assert!(g_done, "guest must receive the public-channel file bytes");
+    assert_eq!(
+        relay.wiretap().lane_leaks(),
+        Vec::<String>::new(),
+        "the guest's request and the header with its key ride Olm"
+    );
     sleep_ms(300).await;
     let meta = g.file_meta(&fid).expect("guest persisted the files row");
     let disk = meta.disk_path.expect("guest's completed file has a disk path");
@@ -13105,8 +13135,7 @@ async fn asset_request_not_answered_for_unrequested_hash() {
         bundle_json: String::from_utf8(bundle).expect("bundle is JSON"),
         missing: Vec::new(),
     };
-    let frame = serde_json::to_vec(&msg).expect("serialize EmoteAssets");
-    relay.inject_direct(&server_id, &o.device_id, &j.device_id, frame);
+    carry_as(&o, &j, msg).await;
 
     let stored = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
         matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
@@ -23005,7 +23034,7 @@ async fn asset_pull_retries_when_the_holder_comes_online() {
 
     // One dead ask and one retry at the outside — the retry must not become a
     // poll that hammers the room every tick.
-    let asks = frames_of_type(&relay, &b.device_id, "emote_request");
+    let asks = b.carried_of_type("emote_request").await;
     assert!(
         asks.len() <= 2,
         "at most one dead ask plus one retry, sent {}",
@@ -23054,6 +23083,9 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
     })
     .await;
     assert!(roomed, "all three have to share the server room");
+    // Asks ride Olm: the asker holds a session with each holder, as a room peer does.
+    expect_olm_confirmed(&b, &o, 15).await;
+    expect_olm_confirmed(&b, &g, 15).await;
 
     // Candidates are walked in ascending peer-id order, so putting the blob on
     // the HIGHER id guarantees the first ask lands on an empty node.
@@ -23104,7 +23136,8 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
         "rotated pull must land the bytes byte-exact"
     );
 
-    let empty_replies = frames_of_type(&relay, &empty_id, "emote_assets");
+    let node_of = |id: &str| if id == o.device_id { &o } else { &g };
+    let empty_replies = node_of(&empty_id).carried_of_type("emote_assets").await;
     assert!(
         empty_replies.iter().any(|v| {
             v.get("missing")
@@ -23118,7 +23151,7 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
         "the member without the bytes must answer, naming the hash as missing"
     );
 
-    let holder_replies = frames_of_type(&relay, &holder_id, "emote_assets");
+    let holder_replies = node_of(&holder_id).carried_of_type("emote_assets").await;
     assert!(
         holder_replies.iter().any(|v| {
             crate::api::showcase::decode_asset_bundle(
@@ -23132,7 +23165,7 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
 
     // Exactly two asks: the empty node, then the holder. One would mean the
     // walk got lucky and proves nothing; three would mean it sprayed.
-    let asks = frames_of_type(&relay, &b.device_id, "emote_request");
+    let asks = b.carried_of_type("emote_request").await;
     assert_eq!(
         asks.len(),
         2,
@@ -23200,23 +23233,23 @@ async fn asset_pull_asks_are_bounded_per_connection() {
         .unwrap();
 
     let bounded = wait_until(20, async || {
-        frames_of_type(&relay, &b.device_id, "emote_request").len() >= 4
+        b.carried_of_type("emote_request").await.len() >= 4
     })
     .await;
     assert!(
         bounded,
         "the walk must try four holders, tried {}",
-        frames_of_type(&relay, &b.device_id, "emote_request").len()
+        b.carried_of_type("emote_request").await.len()
     );
     // Sit through several retry sweeps: a fifth ask would mean the bound is
     // not a bound. Polled rather than slept so it fails the moment a fifth
     // one goes out, and so the harness sleep budget stays where it was.
     let fifth = wait_until(4, async || {
-        frames_of_type(&relay, &b.device_id, "emote_request").len() > 4
+        b.carried_of_type("emote_request").await.len() > 4
     })
     .await;
     assert!(!fifth, "four asks and no more, however many sweeps run");
-    let settled = frames_of_type(&relay, &b.device_id, "emote_request").len();
+    let settled = b.carried_of_type("emote_request").await.len();
     assert_eq!(settled, 4, "four asks and no more, sent {settled}");
 
     relay.set_online(&b.device_id, false);
@@ -23224,13 +23257,13 @@ async fn asset_pull_asks_are_bounded_per_connection() {
     assert!(dropped, "B must actually leave the relay");
     relay.set_online(&b.device_id, true);
     let resumed = wait_until(25, async || {
-        frames_of_type(&relay, &b.device_id, "emote_request").len() > settled
+        b.carried_of_type("emote_request").await.len() > settled
     })
     .await;
     assert!(
         resumed,
         "asks must resume on a new connection, still {}",
-        frames_of_type(&relay, &b.device_id, "emote_request").len()
+        b.carried_of_type("emote_request").await.len()
     );
 
     drop(o);
@@ -23296,7 +23329,7 @@ async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
     // An absence proof, polled: it fails the moment an ask goes out, and it
     // costs the harness sleep budget nothing.
     let asked = wait_until(3, async || {
-        !frames_of_type(&relay, &b.device_id, "emote_request").is_empty()
+        !b.carried_of_type("emote_request").await.is_empty()
     })
     .await;
     assert!(!asked, "no ask can go out while the only holder is offline");
@@ -23306,15 +23339,9 @@ async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
             .expect("empty bundle is JSON"),
         missing: vec![hash.clone()],
     };
-    let dm_room = super::types::dm_room_code(&b_master, &c_master);
-    relay.inject_direct(
-        &dm_room,
-        &c.device_id,
-        &b.device_id,
-        serde_json::to_vec(&msg).expect("serialize EmoteAssets"),
-    );
+    carry_as(&c, &b, msg).await;
     let fanned = wait_until(3, async || {
-        !frames_of_type(&relay, &b.device_id, "emote_request").is_empty()
+        !b.carried_of_type("emote_request").await.is_empty()
     })
     .await;
     assert!(
@@ -23365,17 +23392,10 @@ async fn emote_request_for_unheld_hashes_answers_missing() {
     );
 
     relay.set_recording(&a.device_id, true);
-    let ask = super::types::HavenMessage::EmoteRequest { hashes: vec![hash.clone()] };
-    let dm_room = super::types::dm_room_code(&a_master, &b_master);
-    relay.inject_direct(
-        &dm_room,
-        &b.device_id,
-        &a.device_id,
-        serde_json::to_vec(&ask).expect("serialize EmoteRequest"),
-    );
+    carry_as(&b, &a, super::types::HavenMessage::EmoteRequest { hashes: vec![hash.clone()] }).await;
 
     let answered = wait_until(10, async || {
-        frames_of_type(&relay, &a.device_id, "emote_assets")
+        a.carried_of_type("emote_assets").await
             .iter()
             .any(|v| {
                 v.get("missing")
@@ -23388,7 +23408,7 @@ async fn emote_request_for_unheld_hashes_answers_missing() {
 
     // The empty bundle that reply carries has to survive the ordinary receive
     // path — an old client decodes it and moves on.
-    let reply = frames_of_type(&relay, &a.device_id, "emote_assets")
+    let reply = a.carried_of_type("emote_assets").await
         .into_iter()
         .next()
         .expect("the reply was just asserted");
@@ -23440,6 +23460,9 @@ async fn asset_pull_rotates_after_invalid_bytes() {
     })
     .await;
     assert!(roomed, "all three have to share the server room");
+    // Asks ride Olm: the asker holds a session with each holder, as a room peer does.
+    expect_olm_confirmed(&b, &o, 15).await;
+    expect_olm_confirmed(&b, &g, 15).await;
 
     // A 300 KB blob with a valid WebP container: over the emote ceiling
     // (256 KB) and well under the GIF one (2 MB). BOTH members hold it,
@@ -23483,21 +23506,22 @@ async fn asset_pull_rotates_after_invalid_bytes() {
     // THE POINT: the refusal must move the ask to the next holder. Before
     // this it deleted the ask and the count stayed at one forever.
     let rotated = wait_until(20, async || {
-        frames_of_type(&relay, &b.device_id, "emote_request").len() >= 2
+        b.carried_of_type("emote_request").await.len() >= 2
     })
     .await;
     assert!(
         rotated,
         "refused bytes must move the ask to the next holder, sent {}",
-        frames_of_type(&relay, &b.device_id, "emote_request").len()
+        b.carried_of_type("emote_request").await.len()
     );
     assert!(
         !b.store().has_emote_blob(&hash).unwrap(),
         "the over-cap blob must not be cached at either holder"
     );
 
+    let second = if second_id == o.device_id { &o } else { &g };
     let second_answered = wait_until(10, async || {
-        frames_of_type(&relay, &second_id, "emote_assets").iter().any(|v| {
+        second.carried_of_type("emote_assets").await.iter().any(|v| {
             crate::api::showcase::decode_asset_bundle(
                 v.get("bundle_json").and_then(|s| s.as_str()).unwrap_or("").as_bytes(),
             )
@@ -26599,4 +26623,230 @@ async fn authz_a_dm_typing_dot_shows_only_from_a_friend() {
     assert!(!dot_from(&mut x, &m.master_id).await, "a co-member who is not a friend must not show a DM typing dot");
     carry_as(&o, &x, dm_typing(&x)).await;
     assert!(dot_from(&mut x, &o.master_id).await, "a friend's dot shows");
+}
+
+/// C-24 and I4: a DM room is named by an agreement between the two master keys. A
+/// name hashed from the public ids let anyone who knew both find the room and watch
+/// who came online; now nobody joins that name, and the history sync rides Olm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_a_dm_room_is_named_by_the_two_master_keys() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    const A_MASTER: u8 = 81;
+    const B_MASTER: u8 = 82;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let a = spawn_node_with_friends(&relay, A_MASTER, 83, &[&b_master]).await;
+    let b = spawn_node_with_friends(&relay, B_MASTER, 84, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    a.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: b_master.clone(),
+            text: "through the keyed room".to_string(),
+            message_id: "c24-dm".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || b.dm_thread(&a_master).iter().any(|m| m.text == "through the keyed room")).await,
+        "the DM arrives through the keyed room"
+    );
+    assert!(!b.carried_of_type("dm_sync_req").await.is_empty(), "B asked A for DM history over Olm");
+
+    let public_name = {
+        use sha2::{Digest, Sha256};
+        let (lo, hi) = if a_master <= b_master { (&a_master, &b_master) } else { (&b_master, &a_master) };
+        hex::encode(&Sha256::digest(format!("dm-{lo}-{hi}").as_bytes())[..16])
+    };
+    let tap = relay.wiretap();
+    assert!(tap.rooms.contains(&super::types::dm_room_code(&a_master, &b_master)), "both ends meet in the keyed room");
+    assert!(!tap.rooms.contains(&public_name), "a device joined the room anyone could compute");
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new(), "an Olm-only message reached the relay in the clear");
+}
+
+/// C-24 for file and asset traffic: a pulled DM file, the auto-download advert and an
+/// asset pull ride Olm, so the relay reads no file name, file id or asset bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_file_and_asset_traffic_rides_olm() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    const A_MASTER: u8 = 85;
+    const B_MASTER: u8 = 86;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    // B takes nothing from A unasked, so the bytes come only through a request.
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+    let src = global_tmp.path().join("c24-canary-file.bin");
+    std::fs::write(&src, b"bytes the relay must never name").expect("write src file");
+    drain_events(&mut b);
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b_master.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "c24-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid = None;
+    let carded = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| match ev {
+        NetworkEvent::FileHeaderReceived { file_id, file_name, .. } if file_name == "c24-canary-file.bin" => {
+            fid = Some(file_id.clone());
+            true
+        }
+        _ => false,
+    })
+    .await;
+    assert!(carded, "B gets the card");
+    let fid = fid.unwrap();
+    b.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: a_master.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+        })
+        .await,
+        "the pulled file lands"
+    );
+
+    let (blob, hash) = asset_blob(91);
+    a.store().save_asset_blob(&hash, &blob, false, "gif").expect("A caches the asset");
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: None,
+            peer_hint: Some(a_master.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+        })
+        .await,
+        "the asset pull lands"
+    );
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+
+    for (node, kind) in [(&b, "file_req"), (&b, "emote_request"), (&a, "emote_assets"), (&a, "auto_dl_pref")] {
+        assert!(!node.carried_of_type(kind).await.is_empty(), "no {kind} went over the Olm lane");
+    }
+    let tap = relay.wiretap();
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new(), "an Olm-only message reached the relay in the clear");
+    for canary in ["c24-canary-file", hash.as_str()] {
+        assert_eq!(tap.readable(canary), Vec::<String>::new(), "the relay read {canary}");
+    }
+    let file_id_in_control = tap
+        .frames
+        .iter()
+        .any(|f| f.kind() != "binary" && f.body.windows(fid.len()).any(|w| w == fid.as_bytes()));
+    assert!(!file_id_in_control, "a control frame named the file id in the clear");
+}
+
+/// C-24 for Hollow Share: the swarm room is named by the root hash, so the relay (or
+/// anyone who saw the room) can join it as a peer. Share control rides sealed under
+/// the link key: a link holder gets the manifest, a peer with only the room gets no
+/// answer at all, and nothing the relay reads names the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn c24_share_control_opens_only_with_the_link_key() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let mut a = spawn_node_on(&relay, 87, 87).await;
+    let mut b = spawn_node_on(&relay, 88, 88).await;
+    let m = spawn_node_on(&relay, 89, 89).await;
+
+    let src = global_tmp.path().join("c24-share-canary.bin");
+    std::fs::write(&src, vec![7u8; 300_000]).expect("write src file");
+    a.cmd_tx.send(NodeCommand::ShareCreate { source_path: src.to_str().unwrap().to_string() }).await.unwrap();
+    let mut created = None;
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| match ev {
+            NetworkEvent::ShareCreated { root_hash, link, .. } => {
+                created = Some((root_hash.clone(), link.clone()));
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "A creates the share"
+    );
+    let (root_hash, link) = created.unwrap();
+    let room = format!("share:{root_hash}");
+
+    assert!(
+        wait_until(10, async || relay.room_devices(&room).contains(&a.device_id)).await,
+        "the seeder sits in its swarm room"
+    );
+
+    b.cmd_tx.send(NodeCommand::ShareOpenLink { link, server_id: None, context_type: None }).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ShareManifestReady { file_name, .. } if file_name == "c24-share-canary.bin")
+        })
+        .await,
+        "the link holder gets the manifest"
+    );
+
+    // M has the room name, as the relay does, but not the link.
+    m.cmd_tx.send(NodeCommand::JoinRoom { room_code: room.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || relay.room_devices(&room).contains(&m.device_id)).await,
+        "M sits in the swarm room"
+    );
+    let plain = super::types::HavenMessage::ShareManifestRequest { root_hash: root_hash.clone() };
+    relay.inject(&room, &m.device_id, &a.device_id, serde_json::to_vec(&plain).unwrap());
+    let guessed = super::share_handler::seal_control(&[0u8; 32], &root_hash, &plain).expect("seal");
+    relay.inject(&room, &m.device_id, &a.device_id, guessed);
+    let answered = wait_until(3, async || {
+        relay
+            .wiretap()
+            .frames
+            .iter()
+            .any(|f| f.from == a.device_id && f.to.as_deref() == Some(m.device_id.as_str()) && f.kind().starts_with("share_"))
+    })
+    .await;
+    assert!(!answered, "a peer without the link key got an answer");
+
+    let tap = relay.wiretap();
+    assert!(tap.frames.iter().any(|f| f.kind() == "share_sealed"), "share control rode the sealed lane");
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new(), "share control reached the relay in the clear");
+    assert_eq!(tap.readable("c24-share-canary"), Vec::<String>::new(), "the relay read the shared file's name");
+    drain_events(&mut a);
 }

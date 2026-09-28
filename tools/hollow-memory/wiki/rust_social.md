@@ -28,7 +28,7 @@ Called when the local user sends a friend request (`NodeCommand::SendFriendReque
 
 Steps:
 1. **Persist as pending outgoing:** Opens `MessageStore`, calls `store.save_friend(peer_id, "pending", "outgoing", now)`.
-2. **Register DM room:** Computes the deterministic DM room code via `dm_room_code(local_peer, peer_id)` (SHA-256 hash of sorted peer IDs with "dm-" prefix). Registers the room with signaling (`SignalingCmd::SetRoom` + `SignalingCmd::Bootstrap`) and joins the WS relay room (`WsCommand::JoinRoom`). This enables peer discovery even before the request is accepted.
+2. **Register DM room:** Computes the deterministic DM room code via `dm_room_code(local_peer, peer_id)` (keyed by the two master keys, see `rust_types.md`). Registers the room with signaling (`SignalingCmd::SetRoom` + `SignalingCmd::Bootstrap`) and joins the WS relay room (`WsCommand::JoinRoom`). This enables peer discovery even before the request is accepted.
 3. **Join target's inbox room:** Joins `"inbox:{peer_id}"` on the WS relay. Every peer auto-joins their own inbox room on startup, so this is the reliable way to reach any peer regardless of shared servers.
 4. **Send or queue (device-targeted, 2026-07-02):** Builds concrete DEVICE targets via `friend_device_targets(ws_room_peers, peer_id, master)` — the literal id, resolver-known devices, and any room peer resolving to the master, ALL gated on EXACT room membership (never identity-wide `peer_is_reachable`: a bare master admitted by an identity-wide check is a silently-dropped send). Non-empty → sends `HavenMessage::FriendRequest { requested_at: now }` to each device + leaves the target inbox. Empty → inserts into `pending_friend_requests: HashMap<String, i64>` (peer_id -> requested_at timestamp); drained when the peer appears via `PeerJoined`/`RoomMembers` in swarm.rs (the drain targets the concrete device that appeared).
 5. **Emit event:** Sends `NetworkEvent::FriendRequestReceived { peer_id }` to Dart so the UI shows the outgoing request immediately.
@@ -39,7 +39,7 @@ Steps:
 
 ### DM Room Code
 
-`types.rs:dm_room_code(peer_a, peer_b) -> String` — deterministic room name for any peer pair. Sorts the two peer IDs lexicographically, concatenates as `"dm-{sorted[0]}-{sorted[1]}"`, then SHA-256 hashes the result. Output is the hex-encoded hash. Both peers compute the same room code independently.
+`types.rs:dm_room_code(peer_a, peer_b) -> String` — deterministic room name for a pair of masters: HMAC-SHA256 over the sorted ids keyed by the X25519 agreement of the two master keys, first 16 bytes hex (`node/dm_room.rs`). Both peers compute the same room code independently; nobody without one of the two master keys can.
 
 ---
 

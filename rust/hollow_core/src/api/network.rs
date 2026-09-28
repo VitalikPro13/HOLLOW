@@ -2817,6 +2817,7 @@ pub fn start_fetch_node(
     }
     // Ensure our own device→master mapping exists even if no links row yet.
     node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
+    node::dm_room::register(&id.keypair);
 
     let license_key = get_license_key()
         .lock()

@@ -409,6 +409,7 @@ pub(crate) async fn spawn_node(
     let bundle_keypair = native_keypair.clone();
     let master_peer_id = native_keypair.peer_id();
     let device_peer_id = device_keypair.peer_id();
+    super::dm_room::register(&native_keypair);
 
     // Peer discovery rides the live WS connection (`discover_peers` plus RoomMembers
     // on join); the relay keeps its HTTP endpoints only for older clients.
@@ -474,6 +475,7 @@ pub(crate) async fn spawn_node_mock(
     let bundle_keypair = native_keypair.clone();
     let master_peer_id = native_keypair.peer_id();
     let device_peer_id = device_keypair.peer_id();
+    super::dm_room::register(&native_keypair);
 
     // Injected WS channels (the broker owns the other ends).
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2494,9 +2496,10 @@ async fn run_event_loop(
                                 // so the auto-download gate lets it through.
                                 requested_file_receipts.insert(file_id.clone(), std::time::Instant::now());
                                 hollow_log!("[HOLLOW-GUEST] Requesting public file {file_id} in {server_id} from {t}");
-                                super::crypto_handler::send_message_to_peer(
-                                    &ws_cmd_tx, &ws_room_peers, &t,
-                                    HavenMessage::FileRequest { file_id, chunks: Vec::new(), offset: 0 },
+                                super::olm_lane::carry(
+                                    &ws_cmd_tx, &t, Some(&server_id),
+                                    &HavenMessage::FileRequest { file_id, chunks: Vec::new(), offset: 0 },
+                                    super::olm_lane::NoSession::Queue,
                                 );
                             }
                             None => {
@@ -3516,7 +3519,7 @@ async fn run_event_loop(
                                         || room == dm_room_code(&local_peer_str, &super::resolver::resolve(&peer_id))
                                     {
                                         file_handler::advertise_auto_dl_pref_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, &peer_id,
+                                            &ws_cmd_tx, &local_peer_str, &peer_id,
                                         );
                                     }
 
@@ -3648,13 +3651,16 @@ async fn run_event_loop(
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
                                             let (since, gap) = store.dm_sync_anchor(&convo, multi_device);
-                                            send_message_to_peer(
-                                                &ws_cmd_tx, &ws_room_peers,
-                                                &peer_id, HavenMessage::DmSyncRequest {
+                                            // Without a session yet, the one it will form asks on its own
+                                            // (`request_dm_resync_after_rekey`).
+                                            super::olm_lane::carry(
+                                                &ws_cmd_tx, &peer_id, None,
+                                                &HavenMessage::DmSyncRequest {
                                                     since_timestamp: since,
                                                     both_directions: multi_device,
                                                     gap,
                                                 },
+                                                super::olm_lane::NoSession::Drop,
                                             );
                                         }
                                     }
@@ -4069,7 +4075,7 @@ async fn run_event_loop(
                                         || room == dm_room_code(&local_peer_str, &super::resolver::resolve(pid_str))
                                     {
                                         file_handler::advertise_auto_dl_pref_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, pid_str,
+                                            &ws_cmd_tx, &local_peer_str, pid_str,
                                         );
                                     }
 
@@ -4234,13 +4240,16 @@ async fn run_event_loop(
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
                                             let (since, gap) = store.dm_sync_anchor(&convo, multi_device);
-                                            send_message_to_peer(
-                                                &ws_cmd_tx, &ws_room_peers,
-                                                pid_str, HavenMessage::DmSyncRequest {
+                                            // Without a session yet, the one it will form asks on its own
+                                            // (`request_dm_resync_after_rekey`).
+                                            super::olm_lane::carry(
+                                                &ws_cmd_tx, pid_str, None,
+                                                &HavenMessage::DmSyncRequest {
                                                     since_timestamp: since,
                                                     both_directions: multi_device,
                                                     gap,
                                                 },
+                                                super::olm_lane::NoSession::Drop,
                                             );
                                         }
                                     }
@@ -4843,45 +4852,37 @@ async fn run_event_loop(
                                         continue; // Don't pass to handle_incoming_request.
                                     }
 
-                                    // Share envelopes ride HavenMessage (a relay-room broadcast, or SendDirect
-                                    // within a share room), not MLS, so they are intercepted before any Olm or
-                                    // MLS decryption attempt.
-                                    let is_share = matches!(msg,
-                                        HavenMessage::ShareManifestRequest { .. }
-                                        | HavenMessage::ShareManifestResponse { .. }
-                                        | HavenMessage::ShareHave { .. }
-                                        | HavenMessage::ShareChunkRequest { .. }
-                                        | HavenMessage::ShareChunkResponse { .. }
-                                    );
-                                    if is_share {
-                                        match msg {
-                                            HavenMessage::ShareManifestRequest { root_hash } => {
+                                    // Share control rides sealed under its link key; a plaintext copy
+                                    // falls to the lane check below.
+                                    if let HavenMessage::ShareSealed { root_hash, nonce, ct } = &msg {
+                                        match super::share_handler::open_control(&share_registry, &room, root_hash, nonce, ct) {
+                                            Some(HavenMessage::ShareManifestRequest { root_hash }) => {
                                                 super::share_handler::handle_envelope_share_manifest_request(
                                                     &mut share_registry, &ws_cmd_tx, &from, root_hash,
                                                 ).await;
                                             }
-                                            HavenMessage::ShareManifestResponse { root_hash, manifest_b64 } => {
+                                            Some(HavenMessage::ShareManifestResponse { root_hash, manifest_b64 }) => {
                                                 super::share_handler::handle_envelope_share_manifest_response(
                                                     &mut share_registry, &bundle_keypair, &event_tx, root_hash, manifest_b64,
                                                 ).await;
                                             }
-                                            HavenMessage::ShareHave { root_hash, bitmap_b64, chunk_count } => {
+                                            Some(HavenMessage::ShareHave { root_hash, bitmap_b64, chunk_count }) => {
                                                 super::share_handler::handle_envelope_share_have(
                                                     &mut share_registry, &from, root_hash, bitmap_b64, chunk_count,
                                                 ).await;
                                             }
-                                            HavenMessage::ShareChunkRequest { root_hash, indices } => {
+                                            Some(HavenMessage::ShareChunkRequest { root_hash, indices }) => {
                                                 super::share_handler::handle_envelope_share_chunk_request(
                                                     &mut share_registry, &mut seed_budget, &bundle_keypair, &ws_cmd_tx,
                                                     &event_tx, &webrtc_share_peers, &from, root_hash, indices,
                                                 ).await;
                                             }
-                                            HavenMessage::ShareChunkResponse { root_hash, index, data_b64 } => {
+                                            Some(HavenMessage::ShareChunkResponse { root_hash, index, data_b64 }) => {
                                                 super::share_handler::handle_envelope_share_chunk_response(
                                                     &mut share_registry, &bundle_keypair, &event_tx, root_hash, index, data_b64,
                                                 ).await;
                                             }
-                                            _ => {}
+                                            _ => hollow_log!("[HOLLOW-SECURITY] Dropped a sealed share frame from {from} in {room}: not a share we hold, or the link key does not open it"),
                                         }
                                         continue;
                                     }
@@ -5980,13 +5981,14 @@ fn request_dm_resync_after_rekey(
         let multi_device = !super::resolver::devices_for(master_peer_str).is_empty();
         let (since, gap) = store.dm_sync_anchor(&convo, multi_device);
         hollow_log!("[HOLLOW-SYNC] Post-rekey DM resync from {peer_str} since {since} (both={multi_device})");
-        send_message_to_peer(
-            ws_cmd_tx, ws_room_peers,
-            peer_str, HavenMessage::DmSyncRequest {
+        super::olm_lane::carry(
+            ws_cmd_tx, peer_str, None,
+            &HavenMessage::DmSyncRequest {
                 since_timestamp: since,
                 both_directions: multi_device,
                 gap,
             },
+            super::olm_lane::NoSession::Queue,
         );
     }
 }
@@ -7603,13 +7605,14 @@ async fn handle_incoming_request(
                             .unwrap_or(None)
                             .unwrap_or(0);
                             hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since} (both_directions={multi_device})");
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::DmSyncRequest {
+                            super::olm_lane::carry(
+                                ws_cmd_tx, peer_str, None,
+                                &HavenMessage::DmSyncRequest {
                                     since_timestamp: since,
                                     both_directions: multi_device,
                                     gap: None,
                                 },
+                                super::olm_lane::NoSession::Queue,
                             );
                         }
                     }
@@ -12891,12 +12894,13 @@ async fn handle_incoming_request(
                             Ok(bytes) => bytes,
                             Err(reason) => {
                                 hollow_log!("[HOLLOW-FILE] Cannot serve {file_id} to {peer_str} ({reason}) — answering file_unavail");
-                                super::crypto_handler::send_message_to_peer(
-                                    ws_cmd_tx, ws_room_peers, &peer_str,
-                                    HavenMessage::FileUnavailable {
+                                super::olm_lane::carry(
+                                    ws_cmd_tx, peer_str, None,
+                                    &HavenMessage::FileUnavailable {
                                         file_id: file_id.clone(),
                                         reason: reason.to_string(),
                                     },
+                                    super::olm_lane::NoSession::Queue,
                                 );
                                 return;
                             }
@@ -12969,12 +12973,10 @@ async fn handle_incoming_request(
                                         ws_cmd_tx, ws_room_peers,
                                     ).await;
                                 } else {
-                                    // Non-member on a PUBLIC channel (guest browser):
-                                    // plaintext header — the guest may hold no Olm
-                                    // session, and the content is public anyway.
-                                    super::crypto_handler::send_message_to_peer(
-                                        ws_cmd_tx, ws_room_peers, peer_str,
-                                        HavenMessage::PublicFileHeader {
+                                    // Non-member on a PUBLIC channel (guest browser).
+                                    super::olm_lane::carry(
+                                        ws_cmd_tx, peer_str, None,
+                                        &HavenMessage::PublicFileHeader {
                                             file_id: file_id.clone(),
                                             name: file_meta.file_name.clone(),
                                             ext: file_meta.file_ext.clone(),
@@ -12992,6 +12994,7 @@ async fn handle_incoming_request(
                                             author: served_author.clone(),
                                             sha256: file_meta.sha256.clone(),
                                         },
+                                        super::olm_lane::NoSession::Queue,
                                     );
                                 }
 
@@ -13270,10 +13273,7 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::EmoteRequest { hashes } => {
-            emotes::handle_emote_request(
-                ws_cmd_tx, ws_room_peers, peer_str, hashes,
-                db_path, db_passphrase,
-            );
+            emotes::handle_emote_request(ws_cmd_tx, peer_str, hashes, db_path, db_passphrase);
         }
 
         HavenMessage::EmoteAssets { bundle_json, missing } => {

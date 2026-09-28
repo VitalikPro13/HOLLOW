@@ -33,21 +33,7 @@ pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 30;
 /// VC signaling sub-rate-limiter: refill rate (tokens per second per peer).
 pub(crate) const VC_SIGNAL_RATE_REFILL: u32 = 10;
 
-/// Deterministic DM room code for a pair of peers (SHA-256, 32 hex chars).
-///
-/// PURE in its arguments, never a resolver lookup: both sides must derive the
-/// same room, and per-peer resolver state can diverge (one side ingested a
-/// device list the other did not) and would then compute a different room.
-/// Callers pass MASTER ids, so all of a master's devices share one room; a
-/// fan-out to a single device names that device only as `target_peer`.
-pub(crate) fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
-    use sha2::{Sha256, Digest};
-    let mut sorted = [peer_a, peer_b];
-    sorted.sort();
-    let combined = format!("dm-{}-{}", sorted[0], sorted[1]);
-    let hash = Sha256::digest(combined.as_bytes());
-    hex::encode(&hash[..16])
-}
+pub(crate) use super::dm_room::dm_room_code;
 
 /// A discovered peer on the local network.
 pub(crate) struct DiscoveredPeer {
@@ -2299,12 +2285,10 @@ pub(crate) enum HavenMessage {
         reason: String,
     },
 
-    /// Plaintext FileHeader answering a FileRequest from a NON-member for a file in
-    /// a PUBLIC channel. Members get the Olm-wrapped `MessageEnvelope::FileHeader`
-    /// instead; this exists because a guest may hold no Olm session with the
-    /// responder. The plaintext per-request AES key is consistent with the public
-    /// trust model, since the relay already sees public-channel content. Receivers
-    /// accept it ONLY for a file they explicitly requested, against the
+    /// FileHeader answering a FileRequest from a NON-member for a file in a PUBLIC
+    /// channel, over the Olm lane like the request. Members get
+    /// `MessageEnvelope::FileHeader` instead, whose ingest requires membership.
+    /// Receivers accept it ONLY for a file they explicitly requested, against the
     /// `pending_public_file_requests` receipt cap.
     #[serde(rename = "pub_file_hdr")]
     PublicFileHeader {
@@ -2701,7 +2685,8 @@ pub(crate) enum HavenMessage {
     // -- Hollow Share --
     // Share control lives in HavenMessage, not MessageEnvelope: MessageEnvelope
     // assumes a stable MLS group membership and a share swarm has none, since
-    // anyone with the link joins and leaves freely.
+    // anyone with the link joins and leaves freely. On the wire each rides inside
+    // `ShareSealed`.
 
     /// Sent by a peer that just joined a share swarm and needs the manifest.
     /// Any seeder in the room responds with ShareManifestResponse.
@@ -2743,13 +2728,24 @@ pub(crate) enum HavenMessage {
         index: u32,
         data_b64: String,
     },
+
+    /// A share control message sealed under a key derived from the share link
+    /// (`share_handler::seal_control`). The swarm is open to anyone who knows the
+    /// room, the relay included, so only the link key keeps its manifest and
+    /// requests to the link's holders.
+    #[serde(rename = "share_sealed")]
+    ShareSealed {
+        root_hash: String,
+        nonce: String,
+        ct: String,
+    },
 }
 
 // -- Hollow Share manifest --
 
-/// Manifest describing a shared file, transmitted in the clear over the swarm
-/// room: its SHA-256 IS the root_hash from the share link, so encrypting it
-/// would make discovery impossible. The decryption key is in the link only.
+/// Manifest describing a shared file. Its SHA-256 IS the root_hash in the share
+/// link, which also names the swarm room; it travels sealed under the link key
+/// like the rest of the share's control traffic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShareManifest {
     /// Format version; bump if the chunk hash domain or nonce derivation changes.
@@ -3839,7 +3835,8 @@ impl HavenMessage {
             | Self::ShareManifestRequest { .. }
             | Self::ShareHave { .. }
             | Self::ShareChunkRequest { .. }
-            | Self::ShareChunkResponse { .. } => true,
+            | Self::ShareChunkResponse { .. }
+            | Self::ShareSealed { .. } => true,
         }
     }
 
@@ -3878,7 +3875,19 @@ impl HavenMessage {
             | Self::PersonalEmoteSync { .. }
             | Self::SiblingServerAnnounce { .. }
             | Self::DmSiblingSyncRequest { .. }
+            | Self::DmSyncRequest { .. }
+            | Self::AutoDownloadPref { .. }
+            | Self::FileRequest { .. }
+            | Self::FileUnavailable { .. }
+            | Self::PublicFileHeader { .. }
+            | Self::EmoteRequest { .. }
+            | Self::EmoteAssets { .. }
             | Self::IdentityDestroyed { .. } => Lane::Carried,
+            Self::ShareManifestRequest { .. }
+            | Self::ShareManifestResponse { .. }
+            | Self::ShareHave { .. }
+            | Self::ShareChunkRequest { .. }
+            | Self::ShareChunkResponse { .. } => Lane::Share,
             Self::CallInvite { .. }
             | Self::CallAccept { .. }
             | Self::CallReject { .. }
@@ -3917,11 +3926,9 @@ impl HavenMessage {
             | Self::PublicChannelAddReaction { .. }
             | Self::PublicChannelRemoveReaction { .. }
             | Self::PublicChannelSyncResponse { .. }
-            | Self::ShareManifestResponse { .. }
             | Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
             | Self::MlsKeyPackage { .. }
-            | Self::DmSyncRequest { .. }
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
             | Self::ConferenceJoinRequest { .. }
@@ -3941,10 +3948,6 @@ impl HavenMessage {
             | Self::PublicChannelListResponse { .. }
             | Self::PublicChannelSyncRequest { .. }
             | Self::PublicChannelConfigChanged { .. }
-            | Self::AutoDownloadPref { .. }
-            | Self::FileRequest { .. }
-            | Self::FileUnavailable { .. }
-            | Self::PublicFileHeader { .. }
             | Self::RtcOffer { .. }
             | Self::RtcAnswer { .. }
             | Self::RtcIceCandidate { .. }
@@ -3953,8 +3956,6 @@ impl HavenMessage {
             | Self::RtcShareIceCandidate { .. }
             | Self::PeerExchange { .. }
             | Self::ProfileRequest
-            | Self::EmoteRequest { .. }
-            | Self::EmoteAssets { .. }
             | Self::ProfileRequestFor { .. }
             | Self::ProfileRelay { .. }
             | Self::RecoveryHello { .. }
@@ -3962,10 +3963,7 @@ impl HavenMessage {
             | Self::RecoveryTransferPlan { .. }
             | Self::RecoveryShardReceived { .. }
             | Self::RecoveryStop
-            | Self::ShareManifestRequest { .. }
-            | Self::ShareHave { .. }
-            | Self::ShareChunkRequest { .. }
-            | Self::ShareChunkResponse { .. } => Lane::Relay,
+            | Self::ShareSealed { .. } => Lane::Relay,
         }
     }
 }
@@ -3979,6 +3977,8 @@ pub(crate) enum Lane {
     Carried,
     /// Only inside [`MessageEnvelope::CallSignal`], whose arm whitelists it again.
     CallSignal,
+    /// Only inside [`HavenMessage::ShareSealed`], under the share's link key.
+    Share,
 }
 
 impl MessageEnvelope {

@@ -18,7 +18,7 @@ This file defines every enum and struct that crosses the Rust event loop boundar
 ## Utility Functions
 
 ### `types.rs:dm_room_code(peer_a, peer_b) -> String`
-Computes a deterministic DM room code. Sorts both peer IDs, hashes `"dm-{sorted[0]}-{sorted[1]}"` with SHA-256, truncates to 32 hex chars (128-bit). Both peers compute the same code so signaling matches them to the same WS relay room.
+Re-export of `node/dm_room.rs::dm_room_code` (design A-D1 phase E, 2026-09-28). The room is `hex(HMAC-SHA256(X25519(our master, their master), "hollow-dm-room1" | lo | hi))[..16]`, 32 hex chars: both ends derive the same name, but only the two identities can (a hash of the public ids let anyone who knew both find the room and watch its roster). Needs the local master registered with `dm_room::register` (done in `spawn_node`/`spawn_node_mock`, the push fetch and the iOS NSE); an unregistered pair gets an unguessable name that routes nowhere, logged. Results are cached per sorted pair.
 
 ---
 

@@ -8,6 +8,7 @@ Covers `share_handler.rs` -- Phase 7A backend for private, encrypted, zero-track
 
 Hollow Share is a BitTorrent-like file sharing system using:
 - **Relay rooms** for peer discovery and signaling (room ID = `share:{root_hash_hex}`).
+- **A sealed control lane** (2026-09-28, claim C-24): every share control message (`ShareManifestRequest/Response`, `ShareHave`, `ShareChunkRequest/Response`, all `Lane::Share`) travels inside `HavenMessage::ShareSealed { root_hash, nonce, ct }`: AES-256-GCM under `HMAC-SHA256(link key, "hollow-share-ctl1")`, associated data `"hollow-share-ctl1\0" | root_hash`. Send only via `seal_control()`; the swarm dispatcher opens it with `open_control()`, which refuses a share we do not hold, a frame from another room, a key that does not open it and an inner message naming another share. Olm could not do this job: anyone who knows the room name, the relay included, can join as an ordinary peer and would get the manifest through its own Olm session. A plaintext share message is dropped at the lane check.
 - **A DEDICATED WebRTC data channel** for chunk transfer — Share's own peer connection per peer, separate from the general `hollow-data` one, negotiated over the `rtc_share_offer` / `rtc_share_answer` / `rtc_share_ice` envelopes and tracked in `webrtc_share_peers` (never `webrtc_peers`). STUN-only for BOTH user and hidden/channel shares — `streamIceConfigProvider` is a plain alias of `shareIceConfigProvider`, so the `hidden` branch in `event_provider.dart` is a seam for future divergence, not a behavioural difference today. Until 2026-08-03 Share instead REUSED any already-open general connection, inheriting its TURN candidates — memory `project_share_data_channel_reuse_turn`.
 - **AES-256-GCM** encryption with per-chunk nonce derivation.
 - **SHA-256** manifest root hash for link integrity + per-chunk hash verification.
@@ -117,7 +118,7 @@ Extracted from a decoded link. Methods: `root_hash_hex()` returns hex string, `r
 
 ## ShareManifest (from types.rs)
 
-Describes a shared file. Transmitted in cleartext over the swarm room (the SHA-256 of the serialized manifest IS the root_hash, so encrypting it would make discovery impossible). The decryption key is only in the link.
+Describes a shared file. The SHA-256 of the serialized manifest IS the root_hash in the link and names the swarm room; the manifest itself travels sealed under the link key (see the control lane above), so only link holders read it.
 
 Fields: `version` (u16), `file_name`, `mime`, `total_size` (u64), `chunk_size` (u32, 262144 for v1), `chunk_count` (u32), `chunk_hashes` (Vec of `[u8; 32]` -- SHA-256 of each encrypted chunk), `created_at` (unix seconds), `note` (optional).
 
@@ -175,7 +176,7 @@ Hidden shares (channel file downloads) save to `vault_cache_dir()` for LRU manag
 
 1. Decodes the link via `decode_link()`.
 2. Joins the relay room.
-3. Sends `HavenMessage::ShareManifestRequest` to the room (broadcast to all peers).
+3. Sends a sealed `HavenMessage::ShareManifestRequest` to the room (broadcast to all peers). Nothing re-asks: if no seeder is in the room yet, the 10 s manifest timeout fails the probe.
 4. Creates a minimal registry entry with `manifest: None` and `manifest_requested_at: Some(now)` for timeout tracking.
 5. If `server_id` is provided, marks the entry as `hidden: true`.
 6. Does NOT create a DB entry or start downloading -- that happens only on ShareStart.
@@ -433,7 +434,7 @@ Two escape primitives, not one:
 
 ### broadcast_have()
 
-`share_handler.rs:broadcast_have()` -- Sends our Have bitmap to the share room. Base64-encodes the bitmap bytes, sends `HavenMessage::ShareHave` via `WsCommand::SendToRoom` (broadcast to all room peers).
+`share_handler.rs:broadcast_have()` -- Sends our Have bitmap to the share room. Base64-encodes the bitmap bytes, sends a sealed `HavenMessage::ShareHave` via `WsCommand::SendToRoom` (broadcast to all room peers).
 
 ---
 
@@ -483,7 +484,7 @@ Manifest integrity is verified at two levels:
 
 2. **Per-chunk hash:** Each chunk's SHA-256(ciphertext) must match the corresponding entry in `manifest.chunk_hashes[]`. Checked in both `handle_envelope_share_chunk_response()` (relay) and `handle_webrtc_share_chunk_complete()` (WebRTC). This prevents a malicious peer from serving corrupted chunk data.
 
-The encryption key is never in the manifest or on the wire -- only in the share link. So the manifest can be transmitted in cleartext for discovery, while the content remains encrypted.
+The encryption key is never in the manifest or on the wire -- only in the share link. The control lane's key is derived from it, so the manifest, the have maps and the requests are unreadable to anyone without the link, while the room name (the root hash) stays usable for discovery.
 
 ---
 
@@ -535,7 +536,7 @@ NodeCommand::ShareOpenLink
   -> handle_command_share_open_link()
      -> decode_link()
      -> WsCommand::JoinRoom
-     -> HavenMessage::ShareManifestRequest [broadcast]
+     -> ShareSealed(ShareManifestRequest) [broadcast]
      -> minimal registry entry [manifest_requested_at set]
 ```
 

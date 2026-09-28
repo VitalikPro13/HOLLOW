@@ -482,6 +482,8 @@ Design: `reports/planned/security/audit/design_A_frame_authority.md`. The seal l
 | Our full profile | ProfileRequest / ProfileRequestFor arms, `social::profile_request_allowed` | Own devices, friends, co-members, people we asked; a relayed profile only about someone the asker shares a server with. HOL-SEC-057 |
 | Share-audio output | Dart `onScreenAudioReceived` (call + voice providers) | Only the call's peer while we watch its share / a sharer we asked to watch. HOL-SEC-058 |
 | Parked destroy orders | `fetch::handle_kill_frame` | A junk or refused order is acked by its own stamp; bare ack only after a wipe. HOL-SEC-059 |
+| Anything `HavenMessage::lane()` marks Carried (sibling lane, server control, DM sync, file and emote asks, the guest file header, the auto-download advert) | swarm plaintext dispatch (lane check), Olm `Carried` arm | A plaintext copy is dropped before any handler; a carried one counts only as sent by the device whose Olm session decrypted it. Claim C-24, A-D1 |
+| Share control (manifest, haves, chunk requests) | swarm dispatch, `share_handler::open_control` | Only inside `ShareSealed`, opened with the link key, in that share's own room, naming that same share. A-D1 phase F |
 
 Decided for session 11 (plan items 13-16): all of C-24 into Olm/MLS in 0.12 (structural
 leaks included), a signed file content commitment, meeting host pinning, the relay and

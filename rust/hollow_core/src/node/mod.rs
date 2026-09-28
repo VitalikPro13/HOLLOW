@@ -6,6 +6,7 @@ pub(crate) mod conference;
 pub(crate) mod crdt_store;
 pub(crate) mod crypto_handler;
 pub(crate) mod destroy;
+pub(crate) mod dm_room;
 /// Embedded peer-forwarder bridge: the swarm to `forwarder::engine` seam for
 /// viewer-peer forwarders. Desktop-only, the same gate as the forwarder module.
 #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]

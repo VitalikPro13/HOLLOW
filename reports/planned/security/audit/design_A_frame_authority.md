@@ -187,6 +187,42 @@ vacuously. Left: C the join lane, D profiles (A28 decided: before acceptance onl
 and avatar), E DM room names from the masters' DH, F file and share traffic. The claim
 was reworded the same day: routing metadata is the relay's, data never is.
 
+BUILT (session 13, phases E and F):
+- E. A DM room is `hex(HMAC-SHA256(X25519(our master, their master), "hollow-dm-room1"
+  | lo | hi))[..16]` (`node/dm_room.rs`), so only the two identities can name it; the
+  X25519 keys are the Ed25519 master keys converted, which every device of both holds.
+  A small-order key names no room. The process keeps its own master keys by id, so the
+  harness's nodes share one process; they are registered before the event loop starts,
+  and in the push fetch and the iOS extension. `DmSyncRequest` (watermark, gap digest)
+  is carried; on presence it goes only over a session that already exists, because a
+  new session asks on its own (`request_dm_resync_after_rekey`). Old rooms are simply
+  abandoned (clean break).
+- F. `FileRequest`, `FileUnavailable`, `PublicFileHeader` (the guest's key now rides
+  Olm too), `EmoteRequest`, `EmoteAssets` and `AutoDownloadPref` are carried. Share
+  control could not ride Olm: the swarm room is named by the root hash, so a relay
+  joins it as an ordinary peer and would get the manifest through its own session.
+  It rides `ShareSealed` instead, AES-256-GCM under a key HMAC-derived from the link
+  key with the root hash as associated data (`share_handler::seal_control`), opened
+  only in that share's room and only as control for that share; a new `Lane::Share`
+  keeps the inner types off every other lane.
+- Tests: `c24_a_dm_room_is_named_by_the_two_master_keys`,
+  `c24_file_and_asset_traffic_rides_olm`, `c24_share_control_opens_only_with_the_link_key`,
+  a wiretap on the guest pull test, unit tests in `dm_room` and `share_handler`; tests
+  that injected these types in plaintext now send through a node's own session. Eleven
+  rules were put back one at a time and each failed its test.
+- Still readable, as routing: the 0x02 stream header's transfer id (the committed file
+  id, which nothing else the relay reads carries), the share room's root hash and the
+  data-channel SDP (`Rtc*`, `RtcShare*`).
+- Found, not fixed (predates this work): when two devices key each other at the same
+  moment, each rebuilds its session from the other's PreKey ("undecryptable with
+  existing session"), the sessions cross, and the next ordinary Olm message fails to
+  decrypt and forces a re-key. HEAD shows the same crossings; with more traffic carried,
+  a message sent in that window is lost more often (harness flakes under full load:
+  `destroy_friend_announce_flips_verified_and_banner` before the presence change above,
+  `peer_fallback_recovers_own_sends_correct_direction` about once in nine runs, and
+  possibly the two call tests session 12 noted, not checked). Glare should settle on one
+  session.
+
 ### A-D2. File content commitment (H8 remainder)
 
 No file carries a signed content hash: the message signature covers the file id only.

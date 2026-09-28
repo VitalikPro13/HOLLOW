@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use super::crypto_handler::{online_devices_for, send_message_to_peer_in_room, ws_room_for_peer};
+use super::crypto_handler::{online_devices_for, ws_room_for_peer};
 use super::types::{HavenMessage, NetworkEvent};
 use crate::crdt::server_state::ServerState;
 
@@ -224,15 +224,16 @@ async fn dispatch_one(
     requested_file_receipts.insert(file_id.to_string(), Instant::now());
     declined_file_ids.remove(file_id);
 
-    send_message_to_peer_in_room(
+    super::olm_lane::carry(
         ws_cmd_tx,
-        room,
         device,
-        HavenMessage::FileRequest {
+        Some(room),
+        &HavenMessage::FileRequest {
             file_id: file_id.to_string(),
             chunks: Vec::new(),
             offset,
         },
+        super::olm_lane::NoSession::Queue,
     );
     hollow_log!("[HOLLOW-FILE] Asking {device} for {file_id} in {room} (offset {offset})");
 

@@ -133,7 +133,6 @@ pub(crate) fn auto_download_allows(
 /// conversation, so no single override key applies.
 pub(crate) fn advertise_auto_dl_pref_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     local_peer_str: &str,
     peer_str: &str,
 ) {
@@ -143,9 +142,10 @@ pub(crate) fn advertise_auto_dl_pref_to_peer(
         let master = crate::node::resolver::resolve(peer_str);
         effective_auto_download_mb(&format!("dm:{master}"))
     };
-    send_message_to_peer(
-        ws_cmd_tx, ws_room_peers, peer_str,
-        HavenMessage::AutoDownloadPref { mb },
+    super::olm_lane::carry(
+        ws_cmd_tx, peer_str, None,
+        &HavenMessage::AutoDownloadPref { mb },
+        super::olm_lane::NoSession::Queue,
     );
 }
 
@@ -171,7 +171,7 @@ pub(crate) fn advertise_auto_dl_pref_to_all(
                     &crate::node::resolver::resolve(peer),
                 );
             if is_sibling || is_dm_room {
-                advertise_auto_dl_pref_to_peer(ws_cmd_tx, ws_room_peers, local_peer_str, peer);
+                advertise_auto_dl_pref_to_peer(ws_cmd_tx, local_peer_str, peer);
                 advertised.insert(peer);
             }
         }
@@ -2157,11 +2157,12 @@ pub(crate) async fn handle_request_file(
                 .map(|s| s.bytes_received)
                 .unwrap_or(0);
             hollow_log!("[HOLLOW-FILE] Requesting rowless file {file_id} from {t} (offset {offset})");
-            send_message_to_peer(
+            super::olm_lane::carry(
                 ws_cmd_tx,
-                ws_room_peers,
                 &t,
-                HavenMessage::FileRequest { file_id, chunks, offset },
+                None,
+                &HavenMessage::FileRequest { file_id, chunks, offset },
+                super::olm_lane::NoSession::Queue,
             );
         }
         None => {
@@ -2300,13 +2301,14 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     if pending_file_streams.contains_key(&transfer_id) || early_file_streams.contains_key(&transfer_id) {
         early_file_streams.remove(&transfer_id);
         hollow_log!("[HOLLOW-WEBRTC] Receiver fallback: requesting {transfer_id} via FileRequest");
-        send_message_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            &peer_id, HavenMessage::FileRequest {
+        super::olm_lane::carry(
+            &ws_cmd_tx, &peer_id, None,
+            &HavenMessage::FileRequest {
                 file_id: transfer_id,
                 chunks: vec![],
                 offset: 0,
             },
+            super::olm_lane::NoSession::Queue,
         );
     }
 }
@@ -2601,13 +2603,14 @@ fn hold_early_arrival_and_retry(
         retry_pfs.retry_count = next;
         // Keep the pending stream so a late header preserves the count.
         pending_file_streams.insert(file_id.to_string(), retry_pfs);
-        send_message_to_peer(
-            ws_cmd_tx, ws_room_peers,
-            &sender, HavenMessage::FileRequest {
+        super::olm_lane::carry(
+            ws_cmd_tx, &sender, None,
+            &HavenMessage::FileRequest {
                 file_id: file_id.to_string(),
                 chunks: vec![],
                 offset: 0,
             },
+            super::olm_lane::NoSession::Queue,
         );
         hollow_log!("[HOLLOW-STREAM] File {file_id} — safety re-request {next}/{FILE_DECRYPT_MAX_RETRIES} from {sender}");
     }

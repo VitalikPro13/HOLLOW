@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 pub(crate) use super::assets::AssetKind;
 use super::assets::MAX_BUNDLE_REPLY_BYTES;
-use super::crypto_handler::{online_devices_for, send_message_to_peer, ws_room_for_peer};
+use super::crypto_handler::{online_devices_for, ws_room_for_peer};
 use super::types::{HavenMessage, NetworkEvent};
 use crate::hollow_log;
 
@@ -130,13 +130,13 @@ fn dispatch_asks(
     for ((target, room, kind), mut group) in groups {
         group.sort();
         for chunk in group.chunks(kind.max_request_hashes()) {
-            let msg = HavenMessage::EmoteRequest { hashes: chunk.to_vec() };
-            let Ok(json) = serde_json::to_string(&msg) else { continue };
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: room.clone(),
-                target_peer: target.clone(),
-                data: json.into_bytes(),
-            });
+            super::olm_lane::carry(
+                ws_cmd_tx,
+                &target,
+                Some(&room),
+                &HavenMessage::EmoteRequest { hashes: chunk.to_vec() },
+                super::olm_lane::NoSession::Queue,
+            );
             for h in chunk {
                 if let Some(ask) = pending.get_mut(h) {
                     ask.asked.insert(target.clone());
@@ -459,7 +459,6 @@ pub(crate) fn handle_request_emotes(
 /// sweep. An empty bundle is therefore a legitimate reply.
 pub(crate) fn handle_emote_request(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, HashSet<String>>,
     peer_str: &str,
     hashes: Vec<String>,
     db_path: &str,
@@ -497,11 +496,12 @@ pub(crate) fn handle_emote_request(
     }
     let bundle = crate::api::showcase::encode_asset_bundle(&assets);
     let Ok(bundle_json) = String::from_utf8(bundle) else { return };
-    send_message_to_peer(
+    super::olm_lane::carry(
         ws_cmd_tx,
-        ws_room_peers,
         peer_str,
-        HavenMessage::EmoteAssets { bundle_json, missing },
+        None,
+        &HavenMessage::EmoteAssets { bundle_json, missing },
+        super::olm_lane::NoSession::Queue,
     );
 }
 
