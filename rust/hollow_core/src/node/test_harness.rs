@@ -25573,6 +25573,62 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
     drop((o, m));
 }
 
+/// A join in progress takes its answer only from its own reply key. Over Olm anyone we
+/// share a session with could hand the joiner a server state, such as someone kicked
+/// handing over a copy from before their kick with an admission of their own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_pending_join_takes_its_answer_only_from_its_reply_key() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 238, 239, 240).await;
+    // Sealed to a key no member holds, so nobody answers it through the join lane.
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: Some(fresh_reply_key()),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&server_id).contains(&j.device_id)).await, "J must be in the server room");
+
+    // The whole real log plus a genuine admission of J, carried over M's Olm session.
+    let mut ops = o.store().load_ops_for_server(&server_id, None).unwrap();
+    ops.push(forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+    }, 1, Some(&m.master_kp)));
+    carry_as(&m, &j, sync_response(&server_id, &ops)).await;
+    // A typing dot behind it on the same session is the barrier.
+    carry_as(&m, &j, super::types::HavenMessage::TypingIndicator { server_id: String::new(), channel_id: j.master_id.clone() }).await;
+    let (m_master, mut joined) = (m.master_id.clone(), false);
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id => {
+                joined = true;
+                false
+            }
+            NetworkEvent::TypingStarted { peer_id, .. } => *peer_id == m_master,
+            _ => false,
+        })
+        .await,
+        "the barrier arrives"
+    );
+    assert!(!joined, "a sync answer over Olm must not complete a pending join");
+
+    // The same answer sealed to J's reply key completes it.
+    let sealed = sealed_to_joiner(&j, &server_id, &m.device_id, &sync_response(&server_id, &ops)).await;
+    relay.inject(&server_id, &m.device_id, &j.device_id, sealed);
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "the reply-key answer completes it"
+    );
+    drop((o, m));
+}
+
 /// E7: a member re-adding a banned identity, or admitting anyone into a private
 /// server, is refused by every other member. An ordinary admission still lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

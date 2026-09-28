@@ -8610,7 +8610,13 @@ async fn handle_incoming_request(
                 // Handed back to the caller, which dispatches it as if it had arrived on
                 // its own from `peer_str`, the device whose ratchet decrypted it.
                 Ok(MessageEnvelope::Carried { msg, .. }) => {
-                    if msg.lane() == Lane::Carried {
+                    // The answer to a join of ours comes only from our reply key: over Olm,
+                    // anyone we share a session with could hand us a server state.
+                    let answers_our_join = matches!(&*msg, HavenMessage::SyncResponse { server_id, .. }
+                        if pending_server_joins.contains_key(server_id));
+                    if answers_our_join {
+                        hollow_log!("[HOLLOW-SECURITY] Dropped a sync answer over Olm from {peer_str} for a server we are still joining");
+                    } else if msg.lane() == Lane::Carried {
                         *carried_out = Some((msg, frame_ts_ms));
                     } else {
                         hollow_log!("[HOLLOW-SECURITY] Dropped a carried message from {peer_str} that belongs to another lane");
