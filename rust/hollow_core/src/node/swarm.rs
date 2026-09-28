@@ -11575,6 +11575,15 @@ async fn handle_incoming_request(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as i64;
+                // A mutual request converged on the later of the two stamps on the side
+                // that accepted it. The accepted row freezes its stamp, so ours takes that
+                // one first, or a later decline from us names a request it never saw.
+                if was_pending
+                    && let Some(stamp) = requested_at
+                    && stamp <= frame_ts_ms.saturating_add(super::frame_auth::LIVE_SKEW_MS)
+                {
+                    let _ = store.save_friend(&master, "pending", "outgoing", stamp);
+                }
                 let _ = store.save_friend(&master, "accepted", "", now);
             }
             if was_pending {

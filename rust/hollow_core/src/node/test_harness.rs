@@ -665,6 +665,21 @@ impl MockRelay {
             .unwrap_or_default()
     }
 
+    /// Deliver, in order, the held frames of one wire kind, and keep holding the rest.
+    pub(crate) fn release_held_kind(&self, from: &str, target: &str, kind: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let key = (from.to_string(), target.to_string());
+        let held = inner.held_directs.remove(&key).unwrap_or_default();
+        let (go, stay): (Vec<_>, Vec<_>) = held.into_iter().partition(|m| {
+            TapFrame { from: m.from.clone(), room: m.room.clone(), to: None, body: super::frame_auth::unchecked_body(&m.data).to_vec() }
+                .kind() == kind
+        });
+        for m in go {
+            inner.deliver_direct(&m.room, &m.from, target, m.data, m.direct);
+        }
+        inner.held_directs.insert(key, stay);
+    }
+
     /// Deliver, in order, what [`Self::hold_direct`] kept, and stop holding.
     pub(crate) fn release_held(&self, from: &str, target: &str) {
         let mut inner = self.inner.lock().unwrap();
@@ -1700,6 +1715,11 @@ impl TestNode {
 
     /// Friend-table status for a person (master-keyed): "accepted", "pending",
     /// or None if no row exists. Used by the reject/mutual-request tests.
+    /// This node's friend row for `master`: (status, direction, requested_at).
+    pub(crate) fn friend_row(&self, master: &str) -> Option<(String, String, i64)> {
+        self.store().get_friend_row(master).ok().flatten()
+    }
+
     pub(crate) fn friend_status(&self, master: &str) -> Option<String> {
         self.store().get_friend_status(master).ok().flatten()
     }
@@ -10774,6 +10794,63 @@ async fn reject_cancels_own_queued_request_no_refriend() {
 
     drop(al);
     drop(vm);
+}
+
+// Mutual requests where the accept outruns the request. VM asks second, so its stamp
+// is the later one; it reads AL's request first and auto-accepts on the later stamp,
+// and its accept reaches AL before VM's own request does. AL's row must take that
+// stamp too: an accepted row freezes its stamp, and a row frozen on AL's own made
+// AL's later decline name a request VM never saw, so VM stayed friends one-sided.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn mutual_request_accepted_before_the_request_lands_shares_one_stamp() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    // One device each, device == master, so the inbox deposits are directs the relay
+    // can hold like any other frame between the two.
+    const AL: u8 = 65;
+    const VM: u8 = 66;
+    let al_id = NativeKeypair::from_secret_bytes(&seed_bytes(AL)).peer_id();
+    let vm_id = NativeKeypair::from_secret_bytes(&seed_bytes(VM)).peer_id();
+    let al = spawn_node_with_friends(&relay, AL, AL, &[]).await;
+    let vm = spawn_node_with_friends(&relay, VM, VM, &[]).await;
+    assert!(wait_until(10, async || {
+        relay.room_devices(&format!("inbox:{al_id}")).contains(&al_id)
+            && relay.room_devices(&format!("inbox:{vm_id}")).contains(&vm_id)
+    })
+    .await);
+
+    relay.hold_direct(&al_id, &vm_id);
+    relay.hold_direct(&vm_id, &al_id);
+    let held = |from: &str, to: &str, kind: &str| relay.held_kinds(from, to).iter().any(|k| k == kind);
+
+    al.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: vm_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || held(&al_id, &vm_id, "friend_request")).await);
+    vm.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: al_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || held(&vm_id, &al_id, "friend_request")).await);
+
+    // VM reads AL's request with its own still out, so it auto-accepts.
+    relay.release_held(&al_id, &vm_id);
+    assert!(wait_until(10, async || held(&vm_id, &al_id, "friend_accept")).await,
+        "VM must auto-accept the mutual request: {:?}", relay.held_kinds(&vm_id, &al_id));
+
+    // The accept overtakes VM's request on the way to AL.
+    relay.release_held_kind(&vm_id, &al_id, "friend_accept");
+    assert!(wait_until(10, async || al.friend_status(&vm_id).as_deref() == Some("accepted")).await);
+    relay.release_held(&vm_id, &al_id);
+
+    let (al_row, vm_row) = (al.friend_row(&vm_id), vm.friend_row(&al_id));
+    let stamp = |row: &Option<(String, String, i64)>| row.as_ref().map(|r| r.2);
+    assert!(stamp(&al_row).is_some() && stamp(&al_row) == stamp(&vm_row),
+        "both sides must record the one request the friendship came from: AL {al_row:?}, VM {vm_row:?}");
+
+    // And so AL's decline is one VM recognises.
+    al.cmd_tx.send(NodeCommand::RejectFriendRequest { peer_id: vm_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || vm.friend_status(&al_id).is_none()).await,
+        "VM must drop AL on AL's decline, got {:?}", vm.friend_row(&al_id));
 }
 
 // Mutual friend requests converge to friends WITHOUT a reject prompt: an inbound
