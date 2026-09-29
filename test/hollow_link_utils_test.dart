@@ -261,6 +261,27 @@ void main() {
       expect(web!.fullUrl, native.fullUrl);
     });
 
+    test('a meeting link carries its key in both forms, and builds with it', () {
+      const key = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
+      final native = classifyHollowLink(
+          'hollow://conference/abcdef0123456789?key=$key&relay=box.example.com');
+      expect(native!.key, key);
+      expect(native.fullUrl,
+          'hollow://conference/abcdef0123456789?key=$key&relay=box.example.com');
+      final web = classifyHollowLink(
+          'https://hollow.anonlisten.com/join#conf=abcdef0123456789&key=$key&relay=box.example.com');
+      expect(web!.key, key);
+      expect(web.fullUrl, native.fullUrl);
+      final built = webConferenceInviteLink('abcdef0123456789',
+          relay: 'box.example.com', key: key);
+      expect(classifyHollowLink(built)!.key, key);
+      expect(classifyHollowLink(
+              'hollow://conference/abcdef0123456789?key=short')!.key,
+          isNull, reason: 'a key of the wrong shape is dropped');
+      expect(classifyHollowLink('hollow://conference/abcdef0123456789')!.key,
+          isNull, reason: 'a link made before meeting keys has none');
+    });
+
     test('absent relay leaves the link and its canonical form unchanged', () {
       final link = classifyHollowLink('hollow://join?server=abc123');
       expect(link!.relay, isNull);

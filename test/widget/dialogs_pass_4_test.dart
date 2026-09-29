@@ -290,7 +290,7 @@ void main() {
       ]);
       unawaited(showJoinConferenceDialog(host));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'meeting123');
+      await tester.enterText(find.byType(TextField), 'https://hollow.anonlisten.com/join#conf=abababababababababababababababababababab&key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc');
       await tester.tap(find.text('Join'));
       await tester.pumpAndSettle();
       expect(find.text('Join a meeting'), findsOneWidget);
@@ -477,6 +477,7 @@ class _Conference extends ConferenceNotifier {
       throw Exception('boom');
 
   @override
-  Future<void> requestJoin(String confId, {String? accessCode}) async =>
+  Future<void> requestJoin(String confId,
+          {String? linkKey, String? accessCode}) async =>
       throw Exception('boom');
 }

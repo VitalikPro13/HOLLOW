@@ -2344,9 +2344,13 @@ async fn run_event_loop(
                     NodeCommand::SubscribeChannels { server_id, channel_ids } => {
                         hollow_log!("[HOLLOW-TOPIC] Subscribe room={server_id} topics={channel_ids:?}");
                         subscribed_channels.insert(server_id.clone(), channel_ids.clone());
+                        let owner = server_states.get(&server_id).and_then(|s| s.anchor_owner());
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::Subscribe {
                             room_code: server_id.clone(),
-                            topics: channel_ids.clone(),
+                            topics: channel_ids
+                                .iter()
+                                .map(|cid| super::ring_auth::ring_topic(&server_id, owner.as_deref(), cid))
+                                .collect(),
                         });
                         // Relay offline catch-up on CHANNEL OPEN, the safety net for the connect-time
                         // sweep: refresh the ring registration (covering channels created since anyone
@@ -2386,7 +2390,7 @@ async fn run_event_loop(
                                 hollow_log!("[HOLLOW-TOPIC] Catch-up request (channel open) {server_id}/{cid} max_age={max_age_secs}s");
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
                                     room_code: server_id.clone(),
-                                    channel_id: cid,
+                                    channel_id: super::ring_auth::ring_topic(&server_id, owner.as_deref(), &cid),
                                     max_age_secs,
                                 });
                             }
@@ -2837,11 +2841,11 @@ async fn run_event_loop(
                     }
 
                     // -- Conference commands (node/conference.rs) --
-                    NodeCommand::ConferenceStart { conf_id, nonce, waiting_room, code_key, host_display_name, host_avatar_hash } => {
+                    NodeCommand::ConferenceStart { conf_id, nonce, link_key, waiting_room, code_key, host_display_name, host_avatar_hash } => {
                         super::conference::handle_conference_start(
                             &mut conference_host, &mut mls, &crypto_store, &ws_cmd_tx,
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
-                            &local_peer_str, conf_id, nonce, waiting_room, code_key,
+                            &local_peer_str, &device_peer_id, conf_id, nonce, link_key, waiting_room, code_key,
                             host_display_name, host_avatar_hash,
                         );
                     }
@@ -2854,10 +2858,10 @@ async fn run_event_loop(
                         );
                     }
 
-                    NodeCommand::ConferenceRequestJoin { conf_id, display_name, avatar_hash, code_key } => {
+                    NodeCommand::ConferenceRequestJoin { conf_id, link_key, display_name, avatar_hash, code_key } => {
                         super::conference::handle_conference_request_join(
                             &mut mls, &crypto_store, &ws_cmd_tx, &device_peer_id,
-                            conf_id, display_name, avatar_hash, code_key,
+                            conf_id, link_key, display_name, avatar_hash, code_key,
                         );
                     }
 
@@ -4100,9 +4104,13 @@ async fn run_event_loop(
                                     .insert((room.clone(), super::types::JOIN_TOPIC.to_string()))
                             {
                                 hollow_log!("[HOLLOW-TOPIC] Join-ring catch-up request (connect) for {room}");
+                                let owner = server_states
+                                    .get(&room)
+                                    .and_then(|s| s.anchor_owner())
+                                    .or_else(|| pending_server_joins.get(&room).and_then(|p| p.owner_pin.clone()));
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
                                     room_code: room.clone(),
-                                    channel_id: super::types::JOIN_TOPIC.to_string(),
+                                    channel_id: super::ring_auth::ring_topic(&room, owner.as_deref(), super::types::JOIN_TOPIC),
                                     max_age_secs: 0,
                                 });
                             }
@@ -5127,6 +5135,16 @@ async fn run_event_loop(
                                             hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live join frame from {from} in {room}");
                                             continue;
                                         }
+                                        inner
+                                    } else if let HavenMessage::MeetingSealed { nonce, ct } = &msg {
+                                        // The meeting lane: sealed under the meeting link's key, in that
+                                        // meeting's room, for the device that sealed it.
+                                        let opened = super::conference::meeting_key_for_room(&conference_host, &room)
+                                            .and_then(|key| super::conference::open_meeting(&key, &room, &from, nonce, ct));
+                                        let Some(inner) = opened else {
+                                            hollow_log!("[HOLLOW-SECURITY] Dropped a sealed meeting frame from {from} in {room}: no link key of ours opens it");
+                                            continue;
+                                        };
                                         inner
                                     } else if msg.lane() != Lane::Relay {
                                         // Claim C-24: what the relay must not read never counts in the clear.
@@ -9552,6 +9570,7 @@ async fn handle_incoming_request(
                     joiner_master: &member_master,
                     reply_key: &reply_key,
                     requested_at,
+                    join_ring: super::ring_auth::topic(state, super::types::JOIN_TOPIC),
                 };
 
                 // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices,
@@ -13338,6 +13357,7 @@ async fn handle_incoming_request(
                 return;
             };
             super::conference::clear_pending_knock(&conf_id);
+            super::conference::forget_meeting_key(&conf_id);
             let _ = event_tx.send(NetworkEvent::ConferenceEnded {
                 conf_id, by_peer_id: host_master,
             }).await;
@@ -13349,6 +13369,7 @@ async fn handle_incoming_request(
                 return;
             };
             super::conference::clear_pending_knock(&conf_id);
+            super::conference::forget_meeting_key(&conf_id);
             let _ = event_tx.send(NetworkEvent::ConferenceKicked {
                 conf_id, by_peer_id: host_master,
             }).await;

@@ -14,9 +14,10 @@ use crate::node;
 use crate::storage::messages::ConferenceRow;
 
 /// FFI-facing room descriptor. The access code never leaves Rust — Dart only
-/// learns whether one is set.
+/// learns whether one is set. `link_key` goes into the room's link.
 pub struct ConferenceInfo {
     pub conf_id: String,
+    pub link_key: String,
     pub name: String,
     pub waiting_room: bool,
     pub has_access_code: bool,
@@ -28,6 +29,7 @@ impl From<ConferenceRow> for ConferenceInfo {
     fn from(r: ConferenceRow) -> Self {
         ConferenceInfo {
             conf_id: r.conf_id,
+            link_key: r.link_key.unwrap_or_default(),
             name: r.name,
             waiting_room: r.waiting_room,
             has_access_code: r.access_code_hash.is_some(),
@@ -109,6 +111,10 @@ pub fn conference_upsert(
                 .unwrap_or(0)
         }),
         host_nonce,
+        link_key: match existing.as_ref().and_then(|e| e.link_key.clone()) {
+            Some(key) => Some(key),
+            None => Some(node::conference::new_link_key()?),
+        },
     };
     store.upsert_conference(&row)?;
     Ok(row.into())
@@ -140,12 +146,17 @@ pub fn conference_start(
     host_display_name: String,
     host_avatar_hash: String,
 ) -> Result<(), String> {
-    let (waiting_room, code_key, nonce) = {
+    let (waiting_room, code_key, nonce, link_key) = {
         let store_lock = get_store();
         let guard = store_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         let store = guard.as_ref().ok_or("Message store not open")?;
-        let row = store.get_conference(&conf_id)?.ok_or("Unknown conference")?;
-        (row.waiting_room, row.access_code_hash, row.host_nonce)
+        let mut row = store.get_conference(&conf_id)?.ok_or("Unknown conference")?;
+        // A room made before its link carried a key gets one now; its old link stops.
+        if row.link_key.is_none() {
+            row.link_key = Some(node::conference::new_link_key()?);
+            store.upsert_conference(&row)?;
+        }
+        (row.waiting_room, row.access_code_hash, row.host_nonce, row.link_key.unwrap_or_default())
     };
     let master = crate::api::network::get_local_peer_id()
         .ok_or("Hollow is still starting; try again in a moment")?;
@@ -153,7 +164,7 @@ pub fn conference_start(
         .filter(|n| node::conference::hosts_meeting(&conf_id, &master, Some(n)))
         .ok_or(OLD_ROOM)?;
     send_command(node::NodeCommand::ConferenceStart {
-        conf_id, nonce, waiting_room, code_key,
+        conf_id, nonce, link_key, waiting_room, code_key,
         host_display_name, host_avatar_hash,
     })
 }
@@ -164,16 +175,18 @@ pub fn conference_end(conf_id: String) -> Result<(), String> {
     send_command(node::NodeCommand::ConferenceEnd { conf_id })
 }
 
-/// (Joiner) knock: enter the relay room and send a join request. Watch for
-/// `ConferenceLobbyInfo` / `ConferenceAdmitted` / `ConferenceJoinDenied`.
+/// (Joiner) knock: enter the relay room and send a join request, sealed under the
+/// `link_key` the meeting link carries. Watch for `ConferenceLobbyInfo` /
+/// `ConferenceAdmitted` / `ConferenceJoinDenied`.
 #[frb]
 pub fn conference_request_join(
     conf_id: String,
+    link_key: String,
     display_name: String,
     avatar_hash: String,
     access_code: Option<String>,
 ) -> Result<(), String> {
-    if !node::conference::is_pinned_conf_id(&conf_id) {
+    if !node::conference::is_pinned_conf_id(&conf_id) || !node::conference::is_link_key(&link_key) {
         return Err(OLD_LINK.to_string());
     }
     let code_key = access_code
@@ -181,7 +194,7 @@ pub fn conference_request_join(
         .map(|c| node::conference::derive_code_key(&conf_id, &c))
         .transpose()?;
     send_command(node::NodeCommand::ConferenceRequestJoin {
-        conf_id, display_name, avatar_hash, code_key,
+        conf_id, link_key, display_name, avatar_hash, code_key,
     })
 }
 

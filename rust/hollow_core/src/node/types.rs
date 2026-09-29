@@ -1142,10 +1142,10 @@ pub(crate) enum NodeCommand {
     // -- Conference commands (node/conference.rs) --
     /// `code_key` is the room's stored `conference::derive_code_key` hex, `nonce` the
     /// founding nonce its id hashes from.
-    ConferenceStart { conf_id: String, nonce: String, waiting_room: bool, code_key: Option<String>, host_display_name: String, host_avatar_hash: String },
+    ConferenceStart { conf_id: String, nonce: String, link_key: String, waiting_room: bool, code_key: Option<String>, host_display_name: String, host_avatar_hash: String },
     ConferenceEnd { conf_id: String },
     /// `code_key` is derived from the typed code off the event loop (Argon2id).
-    ConferenceRequestJoin { conf_id: String, display_name: String, avatar_hash: String, code_key: Option<String> },
+    ConferenceRequestJoin { conf_id: String, link_key: String, display_name: String, avatar_hash: String, code_key: Option<String> },
     ConferenceAdmit { conf_id: String, peer_id: String },
     ConferenceDeny { conf_id: String, peer_id: String, reason: String },
     ConferenceKick { conf_id: String, peer_id: String },
@@ -1814,6 +1814,16 @@ pub(crate) enum HavenMessage {
     },
 
     // -- Conferences (node/conference.rs; reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
+    // The knock and every host frame ride inside `MeetingSealed`, under the key the
+    // meeting link carries: they hold names, avatar hashes and the host's master.
+
+    /// A meeting-lane message sealed under a key derived from the meeting link's key
+    /// (`conference::seal_meeting`), bound to the meeting's room and its sender.
+    #[serde(rename = "meeting_sealed")]
+    MeetingSealed {
+        nonce: String,
+        ct: String,
+    },
 
     /// Joiner to the conf room: knock on the door, carrying a fresh MLS KeyPackage
     /// so admission is a single host-side commit. `avatar_hash` is a HASH (a
@@ -3983,6 +3993,7 @@ impl HavenMessage {
             | Self::RecoveryShardReceived { .. }
             | Self::RecoveryStop
             | Self::RecoverySealed { .. }
+            | Self::MeetingSealed { .. }
             | Self::ShareManifestRequest { .. }
             | Self::ShareHave { .. }
             | Self::ShareChunkRequest { .. }
@@ -4054,6 +4065,14 @@ impl HavenMessage {
             | Self::RecoveryTransferPlan { .. }
             | Self::RecoveryShardReceived { .. }
             | Self::RecoveryStop => Lane::Recovery,
+            Self::ConferenceJoinRequest { .. }
+            | Self::ConferenceJoinDenied { .. }
+            | Self::ConferenceLobbyInfo { .. }
+            | Self::ConferenceEnded { .. }
+            | Self::ConferenceKicked { .. } => Lane::Meeting,
+            // A meeting's Welcome carries the nonce that, with the meeting id, picks
+            // its host out of every master the relay knows.
+            Self::MlsWelcome { server_id, .. } if super::conference::is_conference_sid(server_id) => Lane::Meeting,
             Self::CallInvite { .. }
             | Self::CallAccept { .. }
             | Self::CallReject { .. }
@@ -4093,12 +4112,7 @@ impl HavenMessage {
             | Self::MlsKeyPackage { .. }
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
-            | Self::ConferenceJoinRequest { .. }
-            | Self::ConferenceJoinDenied { .. }
-            | Self::ConferenceLobbyInfo { .. }
             | Self::ConferenceChat { .. }
-            | Self::ConferenceEnded { .. }
-            | Self::ConferenceKicked { .. }
             | Self::SiblingProveRequest { .. }
             | Self::SiblingProveResponse { .. }
             | Self::LinkSnapshotRequest { .. }
@@ -4118,6 +4132,7 @@ impl HavenMessage {
             | Self::PeerExchange { .. }
             | Self::DeviceListTombstone { .. }
             | Self::RecoverySealed { .. }
+            | Self::MeetingSealed { .. }
             | Self::ShareSealed { .. } => Lane::Relay,
         }
     }
@@ -4139,6 +4154,8 @@ pub(crate) enum Lane {
     Join,
     /// Only inside [`HavenMessage::RecoverySealed`], under a pool's invite token.
     Recovery,
+    /// Only inside [`HavenMessage::MeetingSealed`], under the meeting link's key.
+    Meeting,
 }
 
 impl MessageEnvelope {

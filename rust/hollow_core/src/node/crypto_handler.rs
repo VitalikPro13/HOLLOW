@@ -2764,23 +2764,25 @@ pub(crate) fn mls_envelope_fits_group(
 /// decryptable by every member, so one encryption serves both paths.
 ///
 /// `use_subgroup` encrypts under the per-channel subgroup and stamps
-/// `channel_id` so the receiver decrypts under the same one. The relay routing
-/// `topic` is the channel id either way.
+/// `channel_id` so the receiver decrypts under the same one. `ring` is the relay
+/// topic (`ring_auth::topic`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_mls_broadcast_topic(
     mls: &mut MlsManager,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
-    topic: &str,
+    channel: &str,
+    ring: &str,
     use_subgroup: bool,
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
 ) -> Result<Vec<u8>, String> {
     let group_key = if use_subgroup {
-        crate::crypto::subgroup_id(server_id, topic)
+        crate::crypto::subgroup_id(server_id, channel)
     } else {
         server_id.to_string()
     };
-    let channel_id = if use_subgroup { Some(topic.to_string()) } else { None };
+    let channel_id = if use_subgroup { Some(channel.to_string()) } else { None };
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
@@ -2793,10 +2795,10 @@ pub(crate) fn send_mls_broadcast_topic(
         channel_id,
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
-    hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={topic} group={group_key} ({} bytes)", data.len());
+    hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={ring} group={group_key} ({} bytes)", data.len());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
-        topic: topic.to_string(),
+        topic: ring.to_string(),
         data: data.clone(),
     });
     Ok(data)

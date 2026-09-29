@@ -53,15 +53,18 @@ Future<void> conferenceStart({
 Future<void> conferenceEnd({required String confId}) =>
     RustLib.instance.api.crateApiConferenceConferenceEnd(confId: confId);
 
-/// (Joiner) knock: enter the relay room and send a join request. Watch for
-/// `ConferenceLobbyInfo` / `ConferenceAdmitted` / `ConferenceJoinDenied`.
+/// (Joiner) knock: enter the relay room and send a join request, sealed under the
+/// `link_key` the meeting link carries. Watch for `ConferenceLobbyInfo` /
+/// `ConferenceAdmitted` / `ConferenceJoinDenied`.
 Future<void> conferenceRequestJoin({
   required String confId,
+  required String linkKey,
   required String displayName,
   required String avatarHash,
   String? accessCode,
 }) => RustLib.instance.api.crateApiConferenceConferenceRequestJoin(
   confId: confId,
+  linkKey: linkKey,
   displayName: displayName,
   avatarHash: avatarHash,
   accessCode: accessCode,
@@ -108,9 +111,10 @@ Future<PlatformInt64> conferenceSendChat({
 );
 
 /// FFI-facing room descriptor. The access code never leaves Rust — Dart only
-/// learns whether one is set.
+/// learns whether one is set. `link_key` goes into the room's link.
 class ConferenceInfo {
   final String confId;
+  final String linkKey;
   final String name;
   final bool waitingRoom;
   final bool hasAccessCode;
@@ -119,6 +123,7 @@ class ConferenceInfo {
 
   const ConferenceInfo({
     required this.confId,
+    required this.linkKey,
     required this.name,
     required this.waitingRoom,
     required this.hasAccessCode,
@@ -129,6 +134,7 @@ class ConferenceInfo {
   @override
   int get hashCode =>
       confId.hashCode ^
+      linkKey.hashCode ^
       name.hashCode ^
       waitingRoom.hashCode ^
       hasAccessCode.hashCode ^
@@ -141,6 +147,7 @@ class ConferenceInfo {
       other is ConferenceInfo &&
           runtimeType == other.runtimeType &&
           confId == other.confId &&
+          linkKey == other.linkKey &&
           name == other.name &&
           waitingRoom == other.waitingRoom &&
           hasAccessCode == other.hasAccessCode &&

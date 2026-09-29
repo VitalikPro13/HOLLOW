@@ -36,9 +36,17 @@ String _keyParam(String? key) =>
     key != null && _joinKeyRegex.hasMatch(key) ? '&key=$key' : '';
 
 /// Canonical shareable conference invite, on the same fragment rule: the conf
-/// id never reaches any server log.
-String webConferenceInviteLink(String confId, {required String relay}) =>
-    '$hollowWebJoinBase#conf=$confId${_relayParam(relay, '&')}';
+/// id never reaches any server log. [key] is the room's link key: a knock is
+/// sealed under it, so a link without one cannot join.
+String webConferenceInviteLink(String confId,
+        {required String relay, String? key}) =>
+    '$hollowWebJoinBase#conf=$confId${_keyParam(key)}${_relayParam(relay, '&')}';
+
+/// The query of a `hollow://conference/<id>` link: its key, then its relay.
+String _conferenceQuery(String? key, String? relay) {
+  final params = '${_keyParam(key)}${_relayParam(relay, '&')}';
+  return params.isEmpty ? '' : '?${params.substring(1)}';
+}
 
 /// Rooms are ephemeral, so their invite skips the website bounce.
 String roomInviteLink(String roomCode, {required String relay}) =>
@@ -58,7 +66,8 @@ final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 /// A master peer id: base58, so no 0, O, I or l.
 final _peerIdRegex = RegExp(r'^[1-9A-HJ-NP-Za-km-z]{20,128}$');
 
-/// A server's join key: 32 bytes as unpadded URL-safe base64.
+/// A server's join key or a meeting's link key: 32 bytes as unpadded URL-safe
+/// base64.
 final _joinKeyRegex = RegExp(r'^[A-Za-z0-9_-]{43}$');
 
 /// A Hollow Shop support code. Longer floor than an invite id, because these
@@ -161,8 +170,8 @@ class HollowLink {
   /// The owner a server invite pins, for a server founded before 0.12.
   final String? owner;
 
-  /// The join key a server invite carries; null on a link made before 0.12,
-  /// which cannot join.
+  /// The join key a server invite carries, or the key a meeting link does; null
+  /// on a link made before 0.12, which cannot join.
   final String? key;
 
   const HollowLink({
@@ -233,11 +242,13 @@ HollowLink? classifyHollowLink(String url) {
     } else if (uri.host == 'conference') {
       final confId = uri.path.length > 1 ? uri.path.substring(1) : '';
       if (confId.isNotEmpty && _inviteIdRegex.hasMatch(confId)) {
+        final key = keyOf(params);
         return HollowLink(
           type: HollowLinkType.conference,
-          fullUrl: 'hollow://conference/$confId${_relayParam(relay, '?')}',
+          fullUrl: 'hollow://conference/$confId${_conferenceQuery(key, relay)}',
           id: confId,
           relay: relay,
+          key: key,
         );
       }
     } else if (uri.host == 'redeem') {
@@ -302,11 +313,13 @@ HollowLink? classifyHollowLink(String url) {
     }
     final confId = params['conf'];
     if (confId != null && _inviteIdRegex.hasMatch(confId)) {
+      final key = keyOf(params);
       return HollowLink(
         type: HollowLinkType.conference,
-        fullUrl: 'hollow://conference/$confId${_relayParam(relay, '?')}',
+        fullUrl: 'hollow://conference/$confId${_conferenceQuery(key, relay)}',
         id: confId,
         relay: relay,
+        key: key,
       );
     }
   }

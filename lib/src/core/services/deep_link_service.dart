@@ -204,7 +204,7 @@ class DeepLinkService {
     }
     unawaited(container
         .read(conferenceProvider.notifier)
-        .requestJoin(link.id)
+        .requestJoin(link.id, linkKey: link.key)
         .catchError((_) {}));
   }
 

@@ -4,6 +4,10 @@
 //! could stretch retention to a week or stop the rings every late joiner and parked
 //! join depends on. The relay's side is relay-uws/src/ring_auth.h; the payload is
 //! pinned in both.
+//!
+//! A legacy (32-hex) id names no owner, so anyone may file a lock under one in its
+//! own name. Its ring topics therefore carry the owner (`ring_topic`), and the relay
+//! lets a control touch only the topics of the owner it is signed for.
 
 use base64::Engine;
 
@@ -17,6 +21,21 @@ pub(crate) struct RingAuth {
     pub owner: String,
     pub ts_ms: i64,
     pub sig: String,
+}
+
+/// The relay topic a server channel's frames ride: the channel id, and for a legacy
+/// id the owner in front, so rings filed under the id in someone else's name never
+/// meet the real ones.
+pub(crate) fn ring_topic(server_id: &str, owner: Option<&str>, channel: &str) -> String {
+    match owner {
+        Some(owner) if !crate::crdt::anchor::is_genesis_id(server_id) => format!("{owner}.{channel}"),
+        _ => channel.to_string(),
+    }
+}
+
+/// `ring_topic` for a server we hold.
+pub(crate) fn topic(state: &crate::crdt::server_state::ServerState, channel: &str) -> String {
+    ring_topic(&state.server_id, state.anchor_owner().as_deref(), channel)
 }
 
 /// The exact bytes a ring control signs.
@@ -59,7 +78,8 @@ pub(crate) fn sign(
 }
 
 /// The relay's rule (`ring_auth::authorized`): fresh within ten minutes, every
-/// channel newline-free, signed by the change key of the newest link it holds.
+/// channel newline-free and inside its owner's topics, signed by the change key of
+/// the newest link it holds.
 #[cfg(test)]
 pub(crate) fn relay_accepts(
     room: &str,
@@ -79,6 +99,10 @@ pub(crate) fn relay_accepts(
         !c.is_empty() && c.len() <= 128 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_~.".contains(&b))
     };
     if !channels.iter().all(shaped) {
+        return false;
+    }
+    let prefix = ring_topic(room, Some(&auth.owner), "");
+    if !channels.iter().all(|c| c.len() > prefix.len() && c.starts_with(&prefix)) {
         return false;
     }
     let (Ok(key), Ok(sig)) = (
@@ -127,5 +151,35 @@ mod tests {
         let stale_key = sign(server, "", 3600, false, &channels, &first.link, &first.change).unwrap();
         assert!(!relay_accepts(server, &stale_key, 3600, false, &channels, &chain, now), "a moved lock's key no longer counts");
         assert!(sign(server, "", 3600, false, &channels, &second.link, &first.change).is_none(), "a key that is not the link's");
+    }
+
+    /// Pinned against relay-uws/test/test_ring_auth.cpp (`topic_prefix`).
+    #[test]
+    fn a_legacy_servers_topics_carry_its_owner() {
+        let genesis = "0123456789abcdef0123456789abcdef01234567";
+        let legacy = "0123456789abcdef0123456789abcdef";
+        assert_eq!(ring_topic(genesis, Some("12D3KooWOwner"), "general"), "general");
+        assert_eq!(ring_topic(legacy, Some("12D3KooWOwner"), "general"), "12D3KooWOwner.general");
+        assert_eq!(ring_topic(legacy, None, "~join"), "~join", "no owner known, no prefix");
+    }
+
+    #[test]
+    fn a_legacy_control_reaches_only_its_owners_topics() {
+        let server = "0123456789abcdef0123456789abcdef";
+        let owner = NativeKeypair::from_secret_bytes(&[8; 32]);
+        let owner_id = owner.peer_id();
+        let lock = super::super::join_lock::mint_base(server, 1, &owner, None).unwrap();
+        let chain = vec![lock.link.clone()];
+        let own = vec![ring_topic(server, Some(&owner_id), "general")];
+        let auth = sign(server, &owner_id, 3600, false, &own, &lock.link, &lock.change).unwrap();
+        assert!(relay_accepts(server, &auth, 3600, false, &own, &chain, auth.ts_ms));
+
+        let plain = vec!["general".to_string()];
+        let auth = sign(server, &owner_id, 3600, false, &plain, &lock.link, &lock.change).unwrap();
+        assert!(!relay_accepts(server, &auth, 3600, false, &plain, &chain, auth.ts_ms), "a plain channel id");
+
+        let other = vec![ring_topic(server, Some("12D3KooWSomeoneElse"), "general")];
+        let auth = sign(server, &owner_id, 3600, false, &other, &lock.link, &lock.change).unwrap();
+        assert!(!relay_accepts(server, &auth, 3600, false, &other, &chain, auth.ts_ms), "another owner's topic");
     }
 }

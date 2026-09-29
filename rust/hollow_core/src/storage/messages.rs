@@ -1045,6 +1045,8 @@ impl MessageStore {
 
         // The founding nonce a meeting id hashes from with its host's master.
         migrate(conn, "ALTER TABLE conferences ADD COLUMN host_nonce TEXT;");
+        // The key a meeting link carries next to the id (`conference::new_link_key`).
+        migrate(conn, "ALTER TABLE conferences ADD COLUMN link_key TEXT;");
 
         // Content-sync FTS: the FTS table reads the main table on demand and triggers
         // keep it in sync.
@@ -4323,19 +4325,20 @@ impl MessageStore {
 
     pub fn upsert_conference(&self, row: &ConferenceRow) -> Result<(), String> {
         self.conn.execute(
-            "INSERT INTO conferences (conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at, host_nonce)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO conferences (conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at, host_nonce, link_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(conf_id) DO UPDATE SET
                 name = excluded.name,
                 waiting_room = excluded.waiting_room,
                 access_code_hash = excluded.access_code_hash,
                 co_hosts = excluded.co_hosts,
                 broadcast_mode = excluded.broadcast_mode,
-                host_nonce = COALESCE(conferences.host_nonce, excluded.host_nonce)",
+                host_nonce = COALESCE(conferences.host_nonce, excluded.host_nonce),
+                link_key = COALESCE(conferences.link_key, excluded.link_key)",
             rusqlite::params![
                 row.conf_id, row.name, row.waiting_room as i64,
                 row.access_code_hash, row.co_hosts, row.broadcast_mode as i64,
-                row.created_at, row.host_nonce,
+                row.created_at, row.host_nonce, row.link_key,
             ],
         ).map_err(|e| format!("Failed to upsert conference: {e}"))?;
         Ok(())
@@ -4343,7 +4346,7 @@ impl MessageStore {
 
     pub fn list_conferences(&self) -> Result<Vec<ConferenceRow>, String> {
         let mut stmt = self.conn.prepare(
-            "SELECT conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at, host_nonce
+            "SELECT conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at, host_nonce, link_key
              FROM conferences ORDER BY created_at DESC",
         ).map_err(|e| format!("Failed to prepare conference query: {e}"))?;
         let rows = stmt.query_map([], |row| {
@@ -4356,6 +4359,7 @@ impl MessageStore {
                 broadcast_mode: row.get::<_, i64>(5)? != 0,
                 created_at: row.get(6)?,
                 host_nonce: row.get(7)?,
+                link_key: row.get(8)?,
             })
         }).map_err(|e| format!("Failed to query conferences: {e}"))?;
         collect_rows(rows, "conference")
@@ -6320,6 +6324,8 @@ pub struct ConferenceRow {
     /// The nonce the room's id hashes from with the host's master; `None` on a room
     /// made before 0.12, which cannot be started.
     pub host_nonce: Option<String>,
+    /// The key the room's link carries; kept once set, so the link stays the same.
+    pub link_key: Option<String>,
     /// JSON array of co-host master ids (phase 2 enforcement).
     pub co_hosts: String,
     pub broadcast_mode: bool,

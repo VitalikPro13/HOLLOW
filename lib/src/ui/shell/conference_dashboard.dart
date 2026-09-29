@@ -473,7 +473,6 @@ class _JoinConferenceDialog extends ConsumerStatefulWidget {
 
 class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog>
     with HollowDialogAction {
-  static final _idRe = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
   final _controller = TextEditingController();
   String? _error;
 
@@ -502,23 +501,25 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog>
             }}, not a meeting link");
         return;
       }
-    } else if (_idRe.hasMatch(text)) {
-      confId = text; // bare meeting id
     }
     if (confId == null) {
-      setState(() => _error = 'Paste a meeting link or its id');
+      setState(() => _error = 'Paste the meeting link');
       return;
     }
     final id = confId;
     // The relay check may ask to switch relays, so it runs before the
     // dialog shows its own busy state.
     if (!await ensureRelayForInviteId(context, ref,
-        type: HollowLinkType.conference, id: id, relay: link?.relay)) {
+        type: HollowLinkType.conference,
+        id: id,
+        relay: link?.relay,
+        key: link?.key)) {
       return;
     }
     if (!mounted) return;
     final notifier = ref.read(conferenceProvider.notifier);
-    if (await runDialogAction(() => notifier.requestJoin(id),
+    if (await runDialogAction(
+            () => notifier.requestJoin(id, linkKey: link?.key),
             fallback: "Couldn't reach the meeting. Try again.") &&
         mounted) {
       Navigator.of(context).pop();
@@ -536,7 +537,7 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const HollowDialogText('Paste a meeting invite link or its id.'),
+          const HollowDialogText('Paste a meeting invite link.'),
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _controller,
@@ -810,8 +811,9 @@ class _CallViewState extends ConsumerState<_CallView> {
                   compact: true,
                   icon: const Icon(LucideIcons.link, size: 14),
                   onPressed: () {
-                    final link = webConferenceInviteLink(conf.activeConfId!,
-                        relay: ref.read(relayDomainProvider));
+                    final room = conf.roomById(conf.activeConfId!);
+                    if (room == null) return;
+                    final link = room.inviteLink(ref.read(relayDomainProvider));
                     Clipboard.setData(ClipboardData(text: link));
                     HollowToast.show(context, 'Invite link copied',
                         type: HollowToastType.success);

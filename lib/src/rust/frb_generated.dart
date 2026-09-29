@@ -278,6 +278,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiConferenceConferenceRequestJoin({
     required String confId,
+    required String linkKey,
     required String displayName,
     required String avatarHash,
     String? accessCode,
@@ -3114,6 +3115,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<void> crateApiConferenceConferenceRequestJoin({
     required String confId,
+    required String linkKey,
     required String displayName,
     required String avatarHash,
     String? accessCode,
@@ -3123,6 +3125,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(confId, serializer);
+          sse_encode_String(linkKey, serializer);
           sse_encode_String(displayName, serializer);
           sse_encode_String(avatarHash, serializer);
           sse_encode_opt_String(accessCode, serializer);
@@ -3138,7 +3141,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiConferenceConferenceRequestJoinConstMeta,
-        argValues: [confId, displayName, avatarHash, accessCode],
+        argValues: [confId, linkKey, displayName, avatarHash, accessCode],
         apiImpl: this,
       ),
     );
@@ -3147,7 +3150,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiConferenceConferenceRequestJoinConstMeta =>
       const TaskConstMeta(
         debugName: "conference_request_join",
-        argNames: ["confId", "displayName", "avatarHash", "accessCode"],
+        argNames: [
+          "confId",
+          "linkKey",
+          "displayName",
+          "avatarHash",
+          "accessCode",
+        ],
       );
 
   @override
@@ -15622,15 +15631,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ConferenceInfo dco_decode_conference_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return ConferenceInfo(
       confId: dco_decode_String(arr[0]),
-      name: dco_decode_String(arr[1]),
-      waitingRoom: dco_decode_bool(arr[2]),
-      hasAccessCode: dco_decode_bool(arr[3]),
-      broadcastMode: dco_decode_bool(arr[4]),
-      createdAt: dco_decode_i_64(arr[5]),
+      linkKey: dco_decode_String(arr[1]),
+      name: dco_decode_String(arr[2]),
+      waitingRoom: dco_decode_bool(arr[3]),
+      hasAccessCode: dco_decode_bool(arr[4]),
+      broadcastMode: dco_decode_bool(arr[5]),
+      createdAt: dco_decode_i_64(arr[6]),
     );
   }
 
@@ -18803,6 +18813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ConferenceInfo sse_decode_conference_info(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_confId = sse_decode_String(deserializer);
+    var var_linkKey = sse_decode_String(deserializer);
     var var_name = sse_decode_String(deserializer);
     var var_waitingRoom = sse_decode_bool(deserializer);
     var var_hasAccessCode = sse_decode_bool(deserializer);
@@ -18810,6 +18821,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_createdAt = sse_decode_i_64(deserializer);
     return ConferenceInfo(
       confId: var_confId,
+      linkKey: var_linkKey,
       name: var_name,
       waitingRoom: var_waitingRoom,
       hasAccessCode: var_hasAccessCode,
@@ -23026,6 +23038,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.confId, serializer);
+    sse_encode_String(self.linkKey, serializer);
     sse_encode_String(self.name, serializer);
     sse_encode_bool(self.waitingRoom, serializer);
     sse_encode_bool(self.hasAccessCode, serializer);

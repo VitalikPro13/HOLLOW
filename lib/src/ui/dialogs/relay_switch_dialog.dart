@@ -72,7 +72,8 @@ Future<bool> ensureRelayForInviteId(
 }) async {
   if (relay == null) return true;
   final built = switch (type) {
-    HollowLinkType.conference => webConferenceInviteLink(id, relay: relay),
+    HollowLinkType.conference =>
+      webConferenceInviteLink(id, relay: relay, key: key),
     HollowLinkType.roomInvite => roomInviteLink(id, relay: relay),
     _ => webServerInviteLink(id, relay: relay, owner: owner, key: key),
   };

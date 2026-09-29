@@ -878,7 +878,8 @@ impl MockRelay {
                     return;
                 }
                 if clear {
-                    inner.topic_buffers.retain(|(r, _), _| r != &room_code);
+                    let prefix = super::ring_auth::ring_topic(&room_code, Some(&auth.owner), "");
+                    inner.topic_buffers.retain(|(r, t), _| r != &room_code || !t.starts_with(&prefix));
                 } else {
                     for c in channels {
                         inner.topic_buffers.entry((room_code.clone(), c)).or_default();
@@ -11952,6 +11953,128 @@ async fn authz_only_the_servers_authority_changes_its_rings() {
     );
 }
 
+/// A legacy (32-hex) id names no owner, so anyone may file a lock under it in their
+/// own name. Its rings follow the owner their topics carry: a stranger who signs for
+/// rings FIRST gets rings of its own that no member uses, can neither name the
+/// owner's topics nor stop them, and the owner's registration still makes them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 131;
+    const B: u8 = 132;
+    const S: u8 = 133;
+    let ids: Vec<String> = [O, B].iter().map(|t| keys(*t).peer_id()).collect();
+    let o = spawn_node_with_friends(&relay, O, O, &[&ids[1]]).await;
+    let b = spawn_node_with_friends(&relay, B, B, &[&ids[0]]).await;
+    expect_dm_pair_ready(&relay, &o, &b, 15).await;
+
+    let server_id = "7a3c".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Ring Server".into(), ids[0].clone());
+    super::swarm::install_op_signer(&mut legacy, &keys(O));
+    let add_b = legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: ids[1].clone(), display_name: "b".into(), follow: None,
+    }).unwrap();
+    legacy.owner_pin = None;
+    let json = serde_json::to_string(&legacy).unwrap();
+    for node in [&o, &b] {
+        let store = node.store();
+        store.save_server_state(&server_id, &json).unwrap();
+        store.insert_crdt_op(&add_b).unwrap();
+    }
+
+    // Before the owner is back: a stranger who knows the id files a lock under it in
+    // its own name and signs for rings of its own.
+    let s_kp = keys(S);
+    let s_id = s_kp.peer_id();
+    let mut stranger = raw_socket(&relay, &s_id);
+    stranger.cmd_tx.send(WsCommand::JoinRoom { room_code: server_id.clone() }).unwrap();
+    assert!(wait_until(5, async || relay.room_devices(&server_id).contains(&s_id)).await);
+    let lock = super::join_lock::mint_base(&server_id, 1, &s_kp, None).unwrap();
+    stranger
+        .cmd_tx
+        .send(WsCommand::LockPut { server: server_id.clone(), owner: s_id.clone(), links: vec![lock.link.clone()] })
+        .unwrap();
+    assert!(stranger.lock_answered().await, "the relay takes a stranger's lock under its own name");
+    let general = general_channel_of(&server_id);
+    let squat = |channel: &str| super::ring_auth::ring_topic(&server_id, Some(&s_id), channel);
+    let owner_topic = |channel: &str| super::ring_auth::ring_topic(&server_id, Some(&ids[0]), channel);
+    let own = vec![squat(&general), squat(super::types::JOIN_TOPIC)];
+    let signed = super::ring_auth::sign(&server_id, &s_id, 604800, false, &own, &lock.link, &lock.change).unwrap();
+    stranger
+        .cmd_tx
+        .send(WsCommand::SetTopicBuffer {
+            room_code: server_id.clone(),
+            channels: own.clone(),
+            retention_secs: 604800,
+            clear: false,
+            auth: Some(signed),
+        })
+        .unwrap();
+    assert!(
+        wait_until(5, async || relay.topic_registered(&server_id, &squat(&general))).await,
+        "a stranger's lock makes rings of its own",
+    );
+    let reach = vec![owner_topic(&general)];
+    let signed = super::ring_auth::sign(&server_id, &s_id, 604800, false, &reach, &lock.link, &lock.change).unwrap();
+    stranger
+        .cmd_tx
+        .send(WsCommand::SetTopicBuffer {
+            room_code: server_id.clone(),
+            channels: reach,
+            retention_secs: 604800,
+            clear: false,
+            auth: Some(signed),
+        })
+        .unwrap();
+    stranger.cmd_tx.send(WsCommand::LockGet { locks: vec![(server_id.clone(), s_id.clone())] }).unwrap();
+    assert!(stranger.lock_answered().await, "a lock read queued behind the control is answered");
+    assert!(!relay.topic_registered(&server_id, &owner_topic(&general)), "but never one in the owner's topics");
+
+    // The owner comes back and turns catch-up on: signing second no longer matters.
+    let o = restart_node(&relay, o, O, O).await;
+    let _b = restart_node(&relay, b, B, B).await;
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "relay_catchup_secs".to_string(),
+            value: "86400".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(30, async || {
+            relay.topic_registered(&server_id, &owner_topic(&general))
+                && relay.topic_registered(&server_id, &owner_topic(super::types::JOIN_TOPIC))
+        })
+        .await,
+        "the owner's registration makes its rings after a stranger signed first",
+    );
+    assert!(!relay.topic_registered(&server_id, &general), "members name the owner in every topic");
+
+    // The stranger's signed clear stops its own rings and nothing else.
+    let clear = super::ring_auth::sign(&server_id, &s_id, 0, true, &[], &lock.link, &lock.change).unwrap();
+    stranger
+        .cmd_tx
+        .send(WsCommand::SetTopicBuffer {
+            room_code: server_id.clone(),
+            channels: Vec::new(),
+            retention_secs: 0,
+            clear: true,
+            auth: Some(clear),
+        })
+        .unwrap();
+    assert!(wait_until(5, async || !relay.topic_registered(&server_id, &squat(&general))).await);
+    assert!(
+        relay.topic_registered(&server_id, &owner_topic(&general))
+            && relay.topic_registered(&server_id, &owner_topic(super::types::JOIN_TOPIC)),
+        "the owner's rings stand",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_relay_catchup_covers_all_channels() {
@@ -14755,6 +14878,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
         .send(NodeCommand::ConferenceStart {
             conf_id: conf_id.clone(),
             nonce: "harness-n1".to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
             waiting_room: true,
             code_key: None,
             host_display_name: "Hosty".to_string(),
@@ -14767,6 +14891,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     bee.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
             display_name: "Bee".to_string(),
             avatar_hash: String::new(),
             code_key: None,
@@ -14873,6 +14998,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     mallory.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
             display_name: "Mallory".to_string(),
             avatar_hash: String::new(),
             code_key: None,
@@ -14905,6 +15031,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
         .send(NodeCommand::ConferenceStart {
             conf_id: coded_id.clone(),
             nonce: "harness-n2".to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
             waiting_room: true,
             code_key: Some(super::conference::derive_code_key(&coded_id, "tiger").unwrap()),
             host_display_name: "Hosty".to_string(),
@@ -14917,6 +15044,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     mallory.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: coded_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
             display_name: "Mallory".to_string(),
             avatar_hash: String::new(),
             code_key: Some(super::conference::derive_code_key(&coded_id, "wrong").unwrap()),
@@ -17828,6 +17956,21 @@ fn raw_socket(relay: &MockRelay, device_id: &str) -> RawSocket {
 }
 
 impl RawSocket {
+    /// Whether a lock chain answer arrives: the relay handles one socket's commands in
+    /// order, so it also says every command sent before the ask was handled.
+    async fn lock_answered(&mut self) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(ev) = self.event_rx.recv().await {
+                if matches!(ev, WsEvent::LockChain { .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Every event delivered within `ms`.
     async fn events(&mut self, ms: u64) -> Vec<WsEvent> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -27752,6 +27895,7 @@ async fn meeting_participants_see_each_others_card_once_admitted() {
         .send(NodeCommand::ConferenceStart {
             conf_id: conf_id.clone(),
             nonce: "harness-cards".to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
             waiting_room: true,
             code_key: None,
             host_display_name: "Hosty Name".to_string(),
@@ -27763,6 +27907,7 @@ async fn meeting_participants_see_each_others_card_once_admitted() {
     bee.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
             display_name: "Bee Name".to_string(),
             avatar_hash: String::new(),
             code_key: None,
@@ -27816,6 +27961,7 @@ async fn a_meeting_card_claiming_another_master_is_not_stored() {
         .send(NodeCommand::ConferenceStart {
             conf_id: conf_id.clone(),
             nonce: "harness-borrowed-card".to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
             waiting_room: true,
             code_key: None,
             host_display_name: "Hosty".to_string(),
@@ -27827,6 +27973,7 @@ async fn a_meeting_card_claiming_another_master_is_not_stored() {
     bee.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
             display_name: "Bee".to_string(),
             avatar_hash: String::new(),
             code_key: None,
@@ -28110,6 +28257,31 @@ async fn authz_a_holder_cannot_substitute_a_files_bytes() {
     );
 }
 
+/// The key every harness meeting link carries: 32 bytes of 7, unpadded URL-safe base64.
+const MEETING_LINK_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+
+/// `msg` sealed into meeting `conf_id`'s lane as device `sender`, the way someone holding
+/// the link seals it.
+fn meeting_frame(conf_id: &str, sender: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
+    super::conference::seal_meeting(MEETING_LINK_KEY, conf_id, sender, msg).expect("the harness key seals")
+}
+
+/// The meeting-lane frames `device` sent in meeting `conf_id` whose inner type is `kind`,
+/// opened with the link key the way anyone holding the link can.
+fn meeting_frames_of_type(relay: &MockRelay, device: &str, conf_id: &str, kind: &str) -> Vec<serde_json::Value> {
+    let room = super::conference::conf_server_id(conf_id);
+    frames_of_type(relay, device, "meeting_sealed")
+        .into_iter()
+        .filter_map(|v| {
+            let inner = super::conference::open_meeting(
+                MEETING_LINK_KEY, &room, device, v["nonce"].as_str()?, v["ct"].as_str()?,
+            )?;
+            serde_json::to_value(inner).ok()
+        })
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some(kind))
+        .collect()
+}
+
 /// Start a meeting on `host` whose id names it and return the id.
 async fn start_pinned_meeting(relay: &MockRelay, host: &mut TestNode, nonce: &str, code: Option<&str>) -> String {
     let conf_id = super::conference::derive_conf_id(&host.master_id, nonce);
@@ -28117,6 +28289,7 @@ async fn start_pinned_meeting(relay: &MockRelay, host: &mut TestNode, nonce: &st
         .send(NodeCommand::ConferenceStart {
             conf_id: conf_id.clone(),
             nonce: nonce.to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
             waiting_room: true,
             code_key: code.map(|c| super::conference::derive_code_key(&conf_id, c).unwrap()),
             host_display_name: "Hosty".to_string(),
@@ -28160,9 +28333,10 @@ async fn surfaces_before_barrier(
 }
 
 /// A-D3 (S-29..S-32, A16): a meeting id names its host, so a room member who is not
-/// the host cannot run the lobby: its lobby info, denial and end are dropped, even
-/// replaying the host's own proof, and its Welcome is refused, so it never becomes
-/// the knocker's committer or SFrame source.
+/// the host cannot run the lobby, even holding the link and sealing its frames under
+/// its key: its lobby info, denial and end are dropped, even replaying the host's own
+/// proof, and its Welcome is refused, so it never becomes the knocker's committer or
+/// SFrame source.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
@@ -28184,6 +28358,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
     knocker.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
             display_name: "Kay".to_string(),
             avatar_hash: String::new(),
             code_key: None,
@@ -28201,7 +28376,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
     );
 
     // The rogue replays the host's own proof and then offers its own.
-    let lobby = frames_of_type(&relay, &host.device_id, "conf_lobby").remove(0);
+    let lobby = meeting_frames_of_type(&relay, &host.device_id, &conf_id, "conf_lobby").remove(0);
     let host_proof: super::types::ConfHost = serde_json::from_value(lobby["host"].clone()).unwrap();
     let rogue_key = keys(217);
     let own_proof = super::types::ConfHost {
@@ -28217,7 +28392,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
             },
             HavenMessage::ConferenceJoinDenied { conf_id: conf_id.clone(), reason: "declined".into(), host: proof.clone() },
         ] {
-            relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, frame(&msg));
+            relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, meeting_frame(&conf_id, &rogue.device_id, &msg));
         }
     }
     let obeyed = surfaces_before_barrier(&relay, &mut knocker, |ev| {
@@ -28229,14 +28404,14 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
 
     // The rogue builds its own group under the meeting's id around the knocker's
     // KeyPackage, and Welcomes it with a nonce of its own.
-    let knock = frames_of_type(&relay, &knocker.device_id, "conf_join_req").remove(0);
+    let knock = meeting_frames_of_type(&relay, &knocker.device_id, &conf_id, "conf_join_req").remove(0);
     let key_package = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, knock["key_package"].as_str().unwrap())
         .unwrap();
     let mut substitute = crate::crypto::MlsManager::new(&rogue_key, &rogue_key).unwrap();
     substitute.create_group(&conf_sid).unwrap();
     let (_, welcome) = substitute.add_member(&conf_sid, &key_package).unwrap();
     drain_events(&mut host);
-    relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, frame(&HavenMessage::MlsWelcome {
+    relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, meeting_frame(&conf_id, &rogue.device_id, &HavenMessage::MlsWelcome {
         server_id: conf_sid.clone(),
         welcome: b64(&welcome),
         channel_id: None,
@@ -28272,9 +28447,9 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
     assert!(members.contains(&host.device_id), "the knocker's group is the host's: {members:?}");
 
     relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id,
-        frame(&HavenMessage::ConferenceKicked { conf_id: conf_id.clone(), host: host_proof.clone() }));
+        meeting_frame(&conf_id, &rogue.device_id, &HavenMessage::ConferenceKicked { conf_id: conf_id.clone(), host: host_proof.clone() }));
     relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id,
-        frame(&HavenMessage::ConferenceEnded { conf_id: conf_id.clone(), host: host_proof }));
+        meeting_frame(&conf_id, &rogue.device_id, &HavenMessage::ConferenceEnded { conf_id: conf_id.clone(), host: host_proof }));
     let ended = surfaces_before_barrier(&relay, &mut knocker, |ev| {
         matches!(ev, NetworkEvent::ConferenceEnded { .. } | NetworkEvent::ConferenceKicked { .. })
     })
@@ -28289,6 +28464,166 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
         })
         .await,
         "the host ends it",
+    );
+}
+
+/// The meeting lane (C-24): a knock and the host's frames hold names, avatar hashes, a
+/// KeyPackage and the host's founding nonce, so they ride sealed under the key the
+/// link carries. The relay reads none of them over a whole meeting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn c24_a_meeting_shows_the_relay_no_name_and_no_host() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let mut host = spawn_node_on(&relay, 221, 221).await;
+    let mut knocker = spawn_node_on(&relay, 222, 222).await;
+    expect_on_relay(&relay, &[&host, &knocker]).await;
+    drain_events(&mut host);
+    drain_events(&mut knocker);
+
+    let conf_id = start_pinned_meeting(&relay, &mut host, "wire-nonce-n1", None).await;
+    knocker.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
+            display_name: "Kay Wiretap".to_string(),
+            avatar_hash: "avatar-hash-wiretap".to_string(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    let knocker_dev = knocker.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, display_name, .. }
+                if *peer_id == knocker_dev && display_name == "Kay Wiretap")
+        })
+        .await,
+        "the host reads the knock",
+    );
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceLobbyInfo { host_name, .. } if host_name == "Hosty")
+        })
+        .await,
+        "the knocker reads the lobby",
+    );
+    host.cmd_tx
+        .send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: knocker.device_id.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceAdmitted { conf_id: c } if *c == conf_id)
+        })
+        .await,
+        "the sealed Welcome admits the knocker",
+    );
+    host.cmd_tx.send(NodeCommand::ConferenceEnd { conf_id: conf_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceEnded { conf_id: c, .. } if *c == conf_id)
+        })
+        .await,
+        "the sealed end reaches the knocker",
+    );
+
+    let tap = relay.wiretap();
+    let clear: Vec<String> = tap
+        .frames
+        .iter()
+        .map(|f| f.kind())
+        .filter(|k| k.starts_with("conf_") && k != "conf_chat")
+        .collect();
+    assert_eq!(clear, Vec::<String>::new(), "a meeting frame reached the relay in the clear");
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new());
+    assert_eq!(tap.readable("Kay Wiretap"), Vec::<String>::new(), "the relay read the knocker's name");
+    assert_eq!(tap.readable("avatar-hash-wiretap"), Vec::<String>::new(), "the relay read the knocker's avatar");
+    assert_eq!(tap.readable("Hosty"), Vec::<String>::new(), "the relay read the host's name");
+    assert_eq!(tap.readable("wire-nonce-n1"), Vec::<String>::new(), "the relay read the nonce that names the host");
+    assert_eq!(tap.readable(MEETING_LINK_KEY), Vec::<String>::new(), "the relay read the link key");
+}
+
+/// A meeting frame counts only sealed under the link's key, in its own meeting: a
+/// plaintext knock, one sealed under another key, one sealed in one meeting naming
+/// another, and a knock from a link without a key all stay out of the waiting room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_meeting_frame_counts_only_under_its_link_key() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 226, 226).await;
+    let mut rogue = spawn_node_on(&relay, 227, 227).await;
+    let old_link = spawn_node_on(&relay, 228, 228).await;
+    expect_on_relay(&relay, &[&host, &rogue, &old_link]).await;
+    drain_events(&mut host);
+    drain_events(&mut rogue);
+
+    relay.set_recording(&rogue.device_id, true);
+    relay.set_recording(&old_link.device_id, true);
+    let conf_a = start_pinned_meeting(&relay, &mut host, "lane-n1", None).await;
+    let conf_b = start_pinned_meeting(&relay, &mut host, "lane-n2", None).await;
+    let (room_a, room_b) = (super::conference::conf_server_id(&conf_a), super::conference::conf_server_id(&conf_b));
+
+    // A real knock on A gives the rogue a KeyPackage bound to its device.
+    rogue.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_a.clone(),
+            link_key: MEETING_LINK_KEY.to_string(),
+            display_name: "Rogue".to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    let rogue_dev = rogue.device_id.clone();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { conf_id: c, peer_id, .. } if *c == conf_a && *peer_id == rogue_dev)
+        })
+        .await,
+        "a sealed knock under the link key reaches the waiting room",
+    );
+    let mut knock = meeting_frames_of_type(&relay, &rogue.device_id, &conf_a, "conf_join_req").remove(0);
+    knock["conf_id"] = conf_b.clone().into();
+    let knock_b: super::types::HavenMessage = serde_json::from_value(knock).unwrap();
+    let knocks_b = |ev: &NetworkEvent| {
+        matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { conf_id: c, .. } if *c == conf_b)
+    };
+
+    relay.inject(&room_b, &rogue.device_id, &host.device_id, frame(&knock_b));
+    assert!(!surfaces_before_barrier(&relay, &mut host, knocks_b).await, "a plaintext knock counted");
+
+    let other_key = super::conference::new_link_key().unwrap();
+    let sealed_other = super::conference::seal_meeting(&other_key, &conf_b, &rogue.device_id, &knock_b).unwrap();
+    relay.inject(&room_b, &rogue.device_id, &host.device_id, sealed_other);
+    assert!(!surfaces_before_barrier(&relay, &mut host, knocks_b).await, "a knock under another key counted");
+
+    relay.inject(&room_a, &rogue.device_id, &host.device_id, meeting_frame(&conf_a, &rogue.device_id, &knock_b));
+    assert!(!surfaces_before_barrier(&relay, &mut host, knocks_b).await, "a knock sealed in A counted for B");
+
+    old_link.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_b.clone(),
+            link_key: String::new(),
+            display_name: "Old".to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+    assert!(!surfaces_before_barrier(&relay, &mut host, knocks_b).await, "a link without a key knocked");
+    assert!(frames_of_type(&relay, &old_link.device_id, "meeting_sealed").is_empty(), "a keyless link sent a knock");
+
+    relay.inject(&room_b, &rogue.device_id, &host.device_id, meeting_frame(&conf_b, &rogue.device_id, &knock_b));
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(8), knocks_b).await,
+        "the same knock sealed in B under the link key counts, so the refusals were the lane's",
     );
 }
 
@@ -28319,7 +28654,7 @@ async fn authz_a_knock_proves_its_code_only_for_its_own_device() {
         let tx = node.cmd_tx.clone();
         async move {
             tx.send(NodeCommand::ConferenceRequestJoin {
-                conf_id, display_name: "K".into(), avatar_hash: String::new(), code_key,
+                conf_id, link_key: MEETING_LINK_KEY.to_string(), display_name: "K".into(), avatar_hash: String::new(), code_key,
             })
             .await
             .unwrap();
@@ -28345,10 +28680,11 @@ async fn authz_a_knock_proves_its_code_only_for_its_own_device() {
         .await,
         "a wrong code is denied",
     );
-    let lifted = frames_of_type(&relay, &knocker.device_id, "conf_join_req").remove(0);
-    let mut replay = frames_of_type(&relay, &rogue.device_id, "conf_join_req").remove(0);
+    let lifted = meeting_frames_of_type(&relay, &knocker.device_id, &conf_id, "conf_join_req").remove(0);
+    let mut replay = meeting_frames_of_type(&relay, &rogue.device_id, &conf_id, "conf_join_req").remove(0);
     replay["code_proof"] = lifted["code_proof"].clone();
-    relay.inject(&conf_sid, &rogue.device_id, &host.device_id, serde_json::to_vec(&replay).unwrap());
+    let replay: super::types::HavenMessage = serde_json::from_value(replay).unwrap();
+    relay.inject(&conf_sid, &rogue.device_id, &host.device_id, meeting_frame(&conf_id, &rogue.device_id, &replay));
     assert!(
         wait_event(&mut rogue, std::time::Duration::from_secs(8), |ev| {
             matches!(ev, NetworkEvent::ConferenceJoinDenied { reason, .. } if reason == "wrong_code")

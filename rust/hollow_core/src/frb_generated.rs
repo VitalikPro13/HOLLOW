@@ -1575,6 +1575,7 @@ fn wire__crate__api__conference__conference_request_join_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_conf_id = <String>::sse_decode(&mut deserializer);
+            let api_link_key = <String>::sse_decode(&mut deserializer);
             let api_display_name = <String>::sse_decode(&mut deserializer);
             let api_avatar_hash = <String>::sse_decode(&mut deserializer);
             let api_access_code = <Option<String>>::sse_decode(&mut deserializer);
@@ -1583,6 +1584,7 @@ fn wire__crate__api__conference__conference_request_join_impl(
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::api::conference::conference_request_join(
                         api_conf_id,
+                        api_link_key,
                         api_display_name,
                         api_avatar_hash,
                         api_access_code,
@@ -14819,6 +14821,7 @@ impl SseDecode for crate::api::conference::ConferenceInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_confId = <String>::sse_decode(deserializer);
+        let mut var_linkKey = <String>::sse_decode(deserializer);
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_waitingRoom = <bool>::sse_decode(deserializer);
         let mut var_hasAccessCode = <bool>::sse_decode(deserializer);
@@ -14826,6 +14829,7 @@ impl SseDecode for crate::api::conference::ConferenceInfo {
         let mut var_createdAt = <i64>::sse_decode(deserializer);
         return crate::api::conference::ConferenceInfo {
             conf_id: var_confId,
+            link_key: var_linkKey,
             name: var_name,
             waiting_room: var_waitingRoom,
             has_access_code: var_hasAccessCode,
@@ -20381,6 +20385,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conference::ConferenceInfo {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.conf_id.into_into_dart().into_dart(),
+            self.link_key.into_into_dart().into_dart(),
             self.name.into_into_dart().into_dart(),
             self.waiting_room.into_into_dart().into_dart(),
             self.has_access_code.into_into_dart().into_dart(),
@@ -23863,6 +23868,7 @@ impl SseEncode for crate::api::conference::ConferenceInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.conf_id, serializer);
+        <String>::sse_encode(self.link_key, serializer);
         <String>::sse_encode(self.name, serializer);
         <bool>::sse_encode(self.waiting_room, serializer);
         <bool>::sse_encode(self.has_access_code, serializer);

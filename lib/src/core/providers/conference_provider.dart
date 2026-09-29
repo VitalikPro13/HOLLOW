@@ -62,8 +62,12 @@ class ConferenceRoom {
   /// Millisecond epoch.
   final int createdAt;
 
+  /// The key the room's link carries next to its id.
+  final String linkKey;
+
   const ConferenceRoom({
     required this.confId,
+    required this.linkKey,
     required this.name,
     required this.waitingRoom,
     required this.hasAccessCode,
@@ -74,6 +78,7 @@ class ConferenceRoom {
   factory ConferenceRoom.fromInfo(conference_api.ConferenceInfo info) =>
       ConferenceRoom(
         confId: info.confId,
+        linkKey: info.linkKey,
         name: info.name,
         waitingRoom: info.waitingRoom,
         hasAccessCode: info.hasAccessCode,
@@ -82,7 +87,7 @@ class ConferenceRoom {
       );
 
   String inviteLink(String relay) =>
-      webConferenceInviteLink(confId, relay: relay);
+      webConferenceInviteLink(confId, relay: relay, key: linkKey);
 }
 
 /// Someone knocking on the host's waiting room. Carries the display name and
@@ -112,6 +117,9 @@ class ConferenceState {
 
   /// The meeting we're hosting or trying to join (null = none).
   final String? activeConfId;
+
+  /// The key of the link we knocked with, kept for a retry with an access code.
+  final String? activeLinkKey;
   final bool isHost;
   final ConferenceLobbyStatus lobbyStatus;
 
@@ -134,6 +142,7 @@ class ConferenceState {
     this.roomsLoaded = false,
     this.roomsError,
     this.activeConfId,
+    this.activeLinkKey,
     this.isHost = false,
     this.lobbyStatus = ConferenceLobbyStatus.none,
     this.denyReason,
@@ -158,6 +167,7 @@ class ConferenceState {
     Object? roomsError,
     bool clearRoomsError = false,
     String? activeConfId,
+    String? activeLinkKey,
     bool? isHost,
     ConferenceLobbyStatus? lobbyStatus,
     String? denyReason,
@@ -181,6 +191,7 @@ class ConferenceState {
       roomsLoaded: roomsLoaded ?? this.roomsLoaded,
       roomsError: nextRoomsError,
       activeConfId: activeConfId ?? this.activeConfId,
+      activeLinkKey: activeLinkKey ?? this.activeLinkKey,
       isHost: isHost ?? this.isHost,
       lobbyStatus: lobbyStatus ?? this.lobbyStatus,
       denyReason: denyReason ?? this.denyReason,
@@ -421,15 +432,22 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   }
 
   /// (Joiner) knock on a conference: enters the relay room and sends the join
-  /// request. Progress arrives via ConferenceLobbyInfo / Admitted / Denied.
-  Future<void> requestJoin(String confId, {String? accessCode}) async {
+  /// request, sealed under [linkKey] from the meeting link (a retry with an access
+  /// code reuses the one it knocked with). Progress arrives via
+  /// ConferenceLobbyInfo / Admitted / Denied.
+  Future<void> requestJoin(String confId,
+      {String? linkKey, String? accessCode}) async {
     if (ref.read(callProvider).status != CallStatus.idle) {
       _toast('Leave your call first', HollowToastType.error);
       return;
     }
-    // A meeting made before 0.12 has an id that names no host, so Rust will not
-    // knock on it.
-    if (!_hostPinnedConfId.hasMatch(confId)) {
+    final key = linkKey ??
+        (state.activeConfId == confId ? state.activeLinkKey : null);
+    // A meeting made before 0.12 has an id that names no host, and a link made
+    // before its key existed cannot seal a knock, so Rust knocks on neither.
+    if (!_hostPinnedConfId.hasMatch(confId) ||
+        key == null ||
+        !_linkKeyShape.hasMatch(key)) {
       _toast('This meeting link is from before the update. Ask the host for a new one.',
           HollowToastType.error);
       return;
@@ -459,6 +477,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     final retrying = state.activeConfId == confId;
     state = state.copyWith(
       activeConfId: confId,
+      activeLinkKey: key,
       isHost: false,
       lobbyStatus: ConferenceLobbyStatus.waiting,
       denyReason: null,
@@ -474,6 +493,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     try {
       await conference_api.conferenceRequestJoin(
         confId: confId,
+        linkKey: key,
         displayName: displayName,
         avatarHash: avatarHash,
         accessCode: accessCode,
@@ -680,6 +700,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
 
 /// A meeting id that names its host (40 lowercase hex); older rooms had 32.
 final _hostPinnedConfId = RegExp(r'^[0-9a-f]{40}$');
+final _linkKeyShape = RegExp(r'^[A-Za-z0-9_-]{43}$');
 
 final conferenceProvider =
     NotifierProvider<ConferenceNotifier, ConferenceState>(

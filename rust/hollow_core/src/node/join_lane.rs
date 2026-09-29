@@ -199,6 +199,8 @@ pub(crate) struct Answer<'a> {
     pub joiner_master: &'a str,
     pub reply_key: &'a str,
     pub requested_at: i64,
+    /// The relay topic of the server's join ring (`ring_auth::topic`).
+    pub join_ring: String,
 }
 
 impl Answer<'_> {

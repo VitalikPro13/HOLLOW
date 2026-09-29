@@ -778,6 +778,7 @@ pub(crate) fn register_relay_catchup(
     // `relay_catchup_secs == 0` (the owner turned catch-up off) means no ring at
     // all, so a parked join degrades to "pending until co-presence".
     channels.push(super::types::JOIN_TOPIC.to_string());
+    let channels: Vec<String> = channels.iter().map(|c| super::ring_auth::topic(state, c)).collect();
     hollow_log!("[HOLLOW-TOPIC] Registering relay catch-up rings for {server_id}: {} channel(s) + the join ring, retention {secs}s", channels.len() - 1);
     // Signed when we hold the lock's change key; unsigned it only keeps the rings
     // the owner, an admin or a mod made from idling out.
@@ -855,6 +856,7 @@ pub(crate) async fn request_channel_catchups(
     // Gather the channel list and DROP the borrow before crossing the await:
     // the watermark lookup is answered on the CrdtStore actor's long-lived
     // connection, never by opening a SQLCipher handle per channel here.
+    let owner = state.and_then(|s| s.anchor_owner());
     let fresh_channels: Vec<String> = match state {
         Some(state) if state.relay_catchup_secs() > 0 => {
             register_relay_catchup(ws_cmd_tx, state, room, master);
@@ -879,7 +881,7 @@ pub(crate) async fn request_channel_catchups(
         hollow_log!("[HOLLOW-TOPIC] Catch-up request ({tag}) {room}/{cid} max_age={max_age_secs}s");
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
             room_code: room.to_string(),
-            channel_id: cid,
+            channel_id: super::ring_auth::ring_topic(room, owner.as_deref(), &cid),
             max_age_secs,
         });
     }
@@ -1258,7 +1260,7 @@ pub(crate) fn deposit_parked_join(
     };
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
-        topic: super::types::JOIN_TOPIC.to_string(),
+        topic: super::ring_auth::ring_topic(server_id, pending.owner_pin.as_deref(), super::types::JOIN_TOPIC),
         data,
     });
     hollow_log!(
@@ -1293,7 +1295,7 @@ pub(crate) fn publish_join_resolution(
     for data in [for_members, for_joiner].into_iter().flatten() {
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
             room_code: answer.server_id.to_string(),
-            topic: super::types::JOIN_TOPIC.to_string(),
+            topic: answer.join_ring.clone(),
             data,
         });
     }

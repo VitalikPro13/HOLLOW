@@ -260,6 +260,7 @@ void main() {
     unawaited(showConferenceRoomFormDialog(host,
         room: const ConferenceRoom(
             confId: 'c1',
+            linkKey: '',
             name: 'Weekly sync',
             waitingRoom: true,
             hasAccessCode: true,
@@ -270,6 +271,7 @@ void main() {
     unawaited(showConferenceRoomFormDialog(host,
         room: const ConferenceRoom(
             confId: 'c1',
+            linkKey: '',
             name: 'Weekly sync',
             waitingRoom: true,
             hasAccessCode: true,
@@ -280,7 +282,8 @@ void main() {
     unawaited(showJoinConferenceDialog(host));
   }, extra: [conferenceProvider.overrideWith(_Conference.new)],
       then: (t) async {
-    await t.enterText(find.byType(TextField), 'weekly-sync-4821');
+    await t.enterText(find.byType(TextField),
+        'https://hollow.anonlisten.com/join#conf=abababababababababababababababababababab&key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc');
     await tap(t, 'Join');
   });
   both('label_gate_confirm', (t) async {
@@ -552,7 +555,8 @@ class _Conference extends ConferenceNotifier {
       throw Exception('boom');
 
   @override
-  Future<void> requestJoin(String confId, {String? accessCode}) async =>
+  Future<void> requestJoin(String confId,
+          {String? linkKey, String? accessCode}) async =>
       throw Exception('boom');
 }
 

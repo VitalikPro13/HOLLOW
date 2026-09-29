@@ -391,7 +391,7 @@ class _ConferenceInviteCard extends ConsumerWidget {
     }
     unawaited(ref
         .read(conferenceProvider.notifier)
-        .requestJoin(link.id)
+        .requestJoin(link.id, linkKey: link.key)
         .catchError((_) {}));
   }
 }

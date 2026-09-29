@@ -17,6 +17,10 @@
 //! founding nonce, so every host frame and the admitting Welcome prove their host and
 //! nobody else in the room can run the lobby. A knock proves the access code for the
 //! knocking device only, so it is worth nothing to anyone who sees it.
+//!
+//! **The link carries a key** (`key=`, like a server invite): the knock and every host
+//! frame ride the meeting lane sealed under it, since they hold names, avatar hashes,
+//! KeyPackages and the host's master. The relay sees a room and the devices in it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -27,10 +31,8 @@ use tokio::sync::mpsc;
 
 use crate::crypto::{CryptoStore, MlsManager};
 
-use super::crypto_handler::{
-    broadcast_mls_commit, persist_mls_state, send_message_to_peer_in_room,
-};
-use super::types::{ConfHost, HavenMessage, NetworkEvent};
+use super::crypto_handler::{broadcast_mls_commit, persist_mls_state};
+use super::types::{ConfHost, HavenMessage, Lane, NetworkEvent};
 use super::ws_client::WsCommand;
 
 /// Virtual server-id / WS room-code / MLS group-key prefix.
@@ -135,6 +137,137 @@ pub(crate) fn knock_proof_holds(code_key: &str, conf_id: &str, device: &str, pro
     }
 }
 
+// ── The meeting lane ─────────────────────────────────────────────────
+
+const MEETING_DOMAIN: &[u8] = b"hollow-meeting1";
+
+/// A fresh meeting link key: 32 random bytes as unpadded URL-safe base64, the shape
+/// of a server invite's `key=`.
+pub(crate) fn new_link_key() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| format!("RNG error: {e}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub(crate) fn is_link_key(key: &str) -> bool {
+    key.len() == 43 && base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key).is_ok_and(|k| k.len() == 32)
+}
+
+fn framed(parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        out.extend_from_slice(part);
+    }
+    out
+}
+
+fn meeting_cipher(link_key: &str, conf_id: &str) -> Option<aes_gcm::Aes256Gcm> {
+    use hmac::Mac;
+    let key = zeroize::Zeroizing::new(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(link_key).ok().filter(|k| k.len() == 32)?,
+    );
+    let mut mac = <hmac::Hmac<Sha256> as Mac>::new_from_slice(&key).ok()?;
+    mac.update(&framed(&[MEETING_DOMAIN, conf_id.as_bytes()]));
+    let key = zeroize::Zeroizing::new(mac.finalize().into_bytes());
+    <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key.as_slice()).ok()
+}
+
+/// A sealed frame opens only in its meeting's room and only as the device that sealed it.
+fn meeting_aad(room: &str, sender: &str) -> Vec<u8> {
+    framed(&[MEETING_DOMAIN, room.as_bytes(), sender.as_bytes()])
+}
+
+/// The meeting a meeting-lane message speaks for.
+fn meeting_named(msg: &HavenMessage) -> Option<&str> {
+    match msg {
+        HavenMessage::ConferenceJoinRequest { conf_id, .. }
+        | HavenMessage::ConferenceJoinDenied { conf_id, .. }
+        | HavenMessage::ConferenceLobbyInfo { conf_id, .. }
+        | HavenMessage::ConferenceEnded { conf_id, .. }
+        | HavenMessage::ConferenceKicked { conf_id, .. } => Some(conf_id),
+        HavenMessage::MlsWelcome { server_id, .. } => conf_id_from_sid(server_id),
+        _ => None,
+    }
+}
+
+/// The wire bytes of a meeting-lane message from our device `sender`.
+pub(crate) fn seal_meeting(link_key: &str, conf_id: &str, sender: &str, msg: &HavenMessage) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, Payload};
+    debug_assert_eq!(msg.lane(), Lane::Meeting, "only meeting traffic rides the meeting lane");
+    let plain = serde_json::to_vec(msg).ok()?;
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).ok()?;
+    let aad = meeting_aad(&conf_server_id(conf_id), sender);
+    let ct = meeting_cipher(link_key, conf_id)?
+        .encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &aad })
+        .ok()?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    serde_json::to_vec(&HavenMessage::MeetingSealed { nonce: engine.encode(nonce), ct: engine.encode(ct) }).ok()
+}
+
+/// The meeting message inside a `MeetingSealed` that `sender` put into `room`. `None`
+/// unless the link key opens it for that room and sender, and what it holds is meeting
+/// traffic for that same meeting.
+pub(crate) fn open_meeting(link_key: &str, room: &str, sender: &str, nonce: &str, ct: &str) -> Option<HavenMessage> {
+    use aes_gcm::aead::{Aead, Payload};
+    let conf_id = conf_id_from_sid(room)?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let nonce: [u8; 12] = engine.decode(nonce).ok()?.try_into().ok()?;
+    let ct = engine.decode(ct).ok()?;
+    let plain = meeting_cipher(link_key, conf_id)?
+        .decrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &ct, aad: &meeting_aad(room, sender) })
+        .ok()?;
+    let msg: HavenMessage = serde_json::from_slice(&plain).ok()?;
+    (msg.lane() == Lane::Meeting && meeting_named(&msg) == Some(conf_id)).then_some(msg)
+}
+
+/// A meeting-lane message to one device in the meeting's room.
+fn send_sealed_to(ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>, seal: &MeetingSeal, conf_id: &str, peer: &str, msg: &HavenMessage) {
+    if let Some(data) = seal_meeting(&seal.link_key, conf_id, &seal.device, msg) {
+        let _ = ws_cmd_tx.send(WsCommand::SendDirect {
+            room_code: conf_server_id(conf_id),
+            target_peer: peer.to_string(),
+            data,
+        });
+    }
+}
+
+/// What we seal our meeting frames with: the link key, as our device.
+#[derive(Clone)]
+pub(crate) struct MeetingSeal {
+    pub link_key: String,
+    pub device: String,
+}
+
+/// The link keys of meetings we joined or knock on (host side: `ConferenceHostState`).
+/// Process-global like `PENDING_KNOCKS`, since the arms that end a meeting do not
+/// thread conference state.
+static MEETING_KEYS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+fn remember_meeting_key(conf_id: &str, link_key: &str) {
+    if let Ok(mut g) = MEETING_KEYS.lock() {
+        g.get_or_insert_with(HashMap::new).insert(conf_id.to_string(), link_key.to_string());
+    }
+}
+
+pub(crate) fn forget_meeting_key(conf_id: &str) {
+    if let Ok(mut g) = MEETING_KEYS.lock()
+        && let Some(map) = g.as_mut()
+    {
+        map.remove(conf_id);
+    }
+}
+
+/// The link key a frame in `room` opens under: the meeting we host, or one we joined.
+pub(crate) fn meeting_key_for_room(conference_host: &HashMap<String, ConferenceHostState>, room: &str) -> Option<String> {
+    let conf_id = conf_id_from_sid(room)?;
+    conference_host
+        .get(conf_id)
+        .map(|h| h.seal.link_key.clone())
+        .or_else(|| MEETING_KEYS.lock().ok()?.as_ref()?.get(conf_id).cloned())
+}
+
 /// A joiner parked in the waiting room (host side). Only the KeyPackage is
 /// held — admission commits the MLS add without a second round-trip; the
 /// name/avatar shown in the host panel live in Dart (from the request event).
@@ -150,6 +283,7 @@ struct PendingKnock {
     avatar_hash: String,
     /// Already-derived proof (re-derivation would need the raw code).
     code_proof: String,
+    seal: MeetingSeal,
     last_sent: std::time::Instant,
 }
 
@@ -158,10 +292,10 @@ struct PendingKnock {
 /// shared across in-process test nodes — tests use distinct conf ids.
 static PENDING_KNOCKS: Mutex<Option<HashMap<String, PendingKnock>>> = Mutex::new(None);
 
-fn note_pending_knock(conf_id: &str, display_name: String, avatar_hash: String, code_proof: String) {
+fn note_pending_knock(conf_id: &str, display_name: String, avatar_hash: String, code_proof: String, seal: MeetingSeal) {
     if let Ok(mut g) = PENDING_KNOCKS.lock() {
         g.get_or_insert_with(HashMap::new).insert(conf_id.to_string(), PendingKnock {
-            display_name, avatar_hash, code_proof,
+            display_name, avatar_hash, code_proof, seal,
             last_sent: std::time::Instant::now(),
         });
     }
@@ -218,7 +352,7 @@ fn reknock(
     min_gap: std::time::Duration,
 ) {
     let Some(conf_id) = conf_id_from_sid(room_code) else { return; };
-    let (display_name, avatar_hash, code_proof) = {
+    let (display_name, avatar_hash, code_proof, seal) = {
         let Ok(mut g) = PENDING_KNOCKS.lock() else { return; };
         let Some(map) = g.as_mut() else { return; };
         let Some(knock) = map.get_mut(conf_id) else { return; };
@@ -226,7 +360,7 @@ fn reknock(
             return;
         }
         knock.last_sent = std::time::Instant::now();
-        (knock.display_name.clone(), knock.avatar_hash.clone(), knock.code_proof.clone())
+        (knock.display_name.clone(), knock.avatar_hash.clone(), knock.code_proof.clone(), knock.seal.clone())
     };
     let kp = match super::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
         Ok(kp) => base64::engine::general_purpose::STANDARD.encode(kp),
@@ -235,13 +369,14 @@ fn reknock(
             return;
         }
     };
-    let data = serde_json::to_vec(&HavenMessage::ConferenceJoinRequest {
+    let knock = HavenMessage::ConferenceJoinRequest {
         conf_id: conf_id.to_string(),
         display_name,
         avatar_hash,
         key_package: kp,
         code_proof,
-    }).unwrap_or_default();
+    };
+    let Some(data) = seal_meeting(&seal.link_key, conf_id, &seal.device, &knock) else { return; };
     let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: room_code.to_string(), data });
     hollow_log!("[HOLLOW-CONF] Re-knocked on conference {conf_id} with a fresh KeyPackage");
 }
@@ -253,6 +388,7 @@ pub(crate) struct ConferenceHostState {
     pub code_key: Option<String>,
     /// What every frame we send as host carries.
     pub host: ConfHost,
+    pub seal: MeetingSeal,
     pub host_display_name: String,
     pub host_avatar_hash: String,
     pub pending: HashMap<String, ConfPendingJoin>,
@@ -272,13 +408,19 @@ pub(crate) fn handle_conference_start(
     voice_channel_participants: &mut HashMap<String, HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     local_peer_str: &str,
+    device_peer_id: &str,
     conf_id: String,
     nonce: String,
+    link_key: String,
     waiting_room: bool,
     code_key: Option<String>,
     host_display_name: String,
     host_avatar_hash: String,
 ) {
+    if !is_link_key(&link_key) {
+        hollow_log!("[HOLLOW-CONF] Cannot start {conf_id}: the room has no link key");
+        return;
+    }
     if derive_conf_id(local_peer_str, &nonce) != conf_id {
         hollow_log!("[HOLLOW-CONF] Cannot start {conf_id}: its id does not name us as host");
         return;
@@ -306,6 +448,7 @@ pub(crate) fn handle_conference_start(
         waiting_room,
         code_key,
         host: ConfHost { master: local_peer_str.to_string(), nonce, cert },
+        seal: MeetingSeal { link_key, device: device_peer_id.to_string() },
         host_display_name,
         host_avatar_hash,
         pending: HashMap::new(),
@@ -331,11 +474,10 @@ pub(crate) fn handle_conference_end(
         hollow_log!("[HOLLOW-CONF] End for {conf_id} we aren't hosting — ignoring");
         return;
     };
-    let data = serde_json::to_vec(&HavenMessage::ConferenceEnded {
-        conf_id: conf_id.to_string(),
-        host: ended.host,
-    }).unwrap_or_default();
-    let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid.clone(), data });
+    let end = HavenMessage::ConferenceEnded { conf_id: conf_id.to_string(), host: ended.host };
+    if let Some(data) = seal_meeting(&ended.seal.link_key, conf_id, &ended.seal.device, &end) {
+        let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid.clone(), data });
+    }
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: sid.clone() });
     if let Some(mls_mgr) = mls.as_mut() {
         if mls_mgr.has_group(&sid) {
@@ -357,12 +499,13 @@ pub(crate) fn handle_conference_request_join(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     device_peer_id: &str,
     conf_id: String,
+    link_key: String,
     display_name: String,
     avatar_hash: String,
     code_key: Option<String>,
 ) {
-    if !is_pinned_conf_id(&conf_id) {
-        hollow_log!("[HOLLOW-CONF] Not knocking on {conf_id}: its id names no host");
+    if !is_pinned_conf_id(&conf_id) || !is_link_key(&link_key) {
+        hollow_log!("[HOLLOW-CONF] Not knocking on {conf_id}: its link names no host or carries no key");
         return;
     }
     let sid = conf_server_id(&conf_id);
@@ -380,18 +523,22 @@ pub(crate) fn handle_conference_request_join(
     let code_proof = code_key
         .map(|key| knock_proof(&key, &conf_id, device_peer_id))
         .unwrap_or_default();
+    let seal = MeetingSeal { link_key, device: device_peer_id.to_string() };
+    remember_meeting_key(&conf_id, &seal.link_key);
     // Remember the knock so PeerJoined/RoomMembers arms can RE-SEND it when
     // the host appears (knocking into an empty room otherwise waits forever).
-    note_pending_knock(&conf_id, display_name.clone(), avatar_hash.clone(), code_proof.clone());
+    note_pending_knock(&conf_id, display_name.clone(), avatar_hash.clone(), code_proof.clone(), seal.clone());
     let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: sid.clone() });
-    let data = serde_json::to_vec(&HavenMessage::ConferenceJoinRequest {
-        conf_id,
+    let knock = HavenMessage::ConferenceJoinRequest {
+        conf_id: conf_id.clone(),
         display_name,
         avatar_hash,
         key_package: kp,
         code_proof,
-    }).unwrap_or_default();
-    let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid, data });
+    };
+    if let Some(data) = seal_meeting(&seal.link_key, &conf_id, &seal.device, &knock) {
+        let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid, data });
+    }
 }
 
 /// Leave a conference (joiner side, or a host tile closing without ending the
@@ -404,6 +551,7 @@ pub(crate) fn handle_conference_leave(
     conf_id: &str,
 ) {
     clear_pending_knock(conf_id);
+    forget_meeting_key(conf_id);
     clear_card_audience(conf_id);
     clear_conf_voice_state(voice_channel_participants, voice_channel_gossip_mode, conf_id);
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: conf_server_id(conf_id) });
@@ -451,22 +599,20 @@ pub(crate) async fn handle_inbound_join_request(
         return;
     }
 
-    let sid = conf_server_id(&conf_id);
-
     if let Some(key) = &host_state.code_key
         && !knock_proof_holds(key, &conf_id, sender_peer, &code_proof)
     {
-        send_message_to_peer_in_room(ws_cmd_tx, &sid, sender_peer,
-            HavenMessage::ConferenceJoinDenied {
-                conf_id, reason: "wrong_code".to_string(), host: host_state.host.clone(),
+        send_sealed_to(ws_cmd_tx, &host_state.seal, &conf_id, sender_peer,
+            &HavenMessage::ConferenceJoinDenied {
+                conf_id: conf_id.clone(), reason: "wrong_code".to_string(), host: host_state.host.clone(),
             });
         return;
     }
 
     // Lobby banner: who they're waiting for. Sent even on auto-admit — the
     // joiner's UI shows it during the Welcome round-trip.
-    send_message_to_peer_in_room(ws_cmd_tx, &sid, sender_peer,
-        HavenMessage::ConferenceLobbyInfo {
+    send_sealed_to(ws_cmd_tx, &host_state.seal, &conf_id, sender_peer,
+        &HavenMessage::ConferenceLobbyInfo {
             conf_id: conf_id.clone(),
             host_name: host_state.host_display_name.clone(),
             host_avatar_hash: host_state.host_avatar_hash.clone(),
@@ -475,8 +621,9 @@ pub(crate) async fn handle_inbound_join_request(
 
     if !host_state.waiting_room {
         let nonce = host_state.host.nonce.clone();
+        let seal = host_state.seal.clone();
         admit_peer(mls, crypto_store, ws_cmd_tx, event_tx,
-            &conf_id, &nonce, sender_peer, &key_package_b64).await;
+            &conf_id, &nonce, &seal, sender_peer, &key_package_b64).await;
         return;
     }
 
@@ -500,6 +647,7 @@ pub(crate) async fn admit_peer(
     event_tx: &mpsc::Sender<NetworkEvent>,
     conf_id: &str,
     nonce: &str,
+    seal: &MeetingSeal,
     peer_id: &str,
     key_package_b64: &str,
 ) {
@@ -526,8 +674,8 @@ pub(crate) async fn admit_peer(
     persist_mls_state(mls_mgr, crypto_store);
 
     let welcome_b64 = base64::engine::general_purpose::STANDARD.encode(welcome);
-    send_message_to_peer_in_room(ws_cmd_tx, &sid, peer_id,
-        HavenMessage::MlsWelcome {
+    send_sealed_to(ws_cmd_tx, seal, conf_id, peer_id,
+        &HavenMessage::MlsWelcome {
             server_id: sid.clone(), welcome: welcome_b64, channel_id: None,
             conf_nonce: Some(nonce.to_string()),
         });
@@ -561,8 +709,9 @@ pub(crate) async fn handle_conference_admit(
         return;
     };
     let nonce = host_state.host.nonce.clone();
+    let seal = host_state.seal.clone();
     admit_peer(mls, crypto_store, ws_cmd_tx, event_tx,
-        conf_id, &nonce, peer_id, &pending.key_package_b64).await;
+        conf_id, &nonce, &seal, peer_id, &pending.key_package_b64).await;
 }
 
 /// Host declines a waiting-room entry (FFI `conference_deny`).
@@ -575,8 +724,8 @@ pub(crate) fn handle_conference_deny(
 ) {
     let Some(host_state) = conference_host.get_mut(conf_id) else { return; };
     if host_state.pending.remove(peer_id).is_none() { return; }
-    send_message_to_peer_in_room(ws_cmd_tx, &conf_server_id(conf_id), peer_id,
-        HavenMessage::ConferenceJoinDenied {
+    send_sealed_to(ws_cmd_tx, &host_state.seal, conf_id, peer_id,
+        &HavenMessage::ConferenceJoinDenied {
             conf_id: conf_id.to_string(), reason, host: host_state.host.clone(),
         });
     hollow_log!("[HOLLOW-CONF] Denied {peer_id} for conference {conf_id}");
@@ -594,7 +743,7 @@ pub(crate) async fn handle_conference_kick(
     conf_id: &str,
     peer_id: &str,
 ) {
-    let Some(host) = conference_host.get(conf_id).map(|h| h.host.clone()) else {
+    let Some((host, seal)) = conference_host.get(conf_id).map(|h| (h.host.clone(), h.seal.clone())) else {
         hollow_log!("[HOLLOW-CONF] Kick for {conf_id} we aren't hosting — ignoring");
         return;
     };
@@ -615,8 +764,8 @@ pub(crate) async fn handle_conference_kick(
     let epoch = mls_mgr.epoch(&sid).ok();
     broadcast_mls_commit(mls_mgr, ws_cmd_tx, &sid, None,
         base64::engine::general_purpose::STANDARD.encode(commit), epoch);
-    send_message_to_peer_in_room(ws_cmd_tx, &sid, peer_id,
-        HavenMessage::ConferenceKicked { conf_id: conf_id.to_string(), host });
+    send_sealed_to(ws_cmd_tx, &seal, conf_id, peer_id,
+        &HavenMessage::ConferenceKicked { conf_id: conf_id.to_string(), host });
     // Rotate our own cryptors to the post-remove epoch.
     if let Ok(sframe_key) = mls_mgr.export_secret(&sid, "sframe", b"", 32) {
         let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
@@ -917,5 +1066,43 @@ mod tests {
         assert!(!knock_proof_holds(&key, &conf_id, "dev-k", &knock_proof(&wrong, &conf_id, "dev-k")), "another code");
         assert!(!knock_proof_holds(&key, &conf_id, "dev-k", ""), "no proof");
         assert_ne!(derive_code_key(&other_room, "tiger").unwrap(), key, "the key is salted by the meeting");
+    }
+
+    fn sealed_parts(sealed: &[u8]) -> (String, String) {
+        match serde_json::from_slice::<HavenMessage>(sealed).expect("sealed frame parses") {
+            HavenMessage::MeetingSealed { nonce, ct } => (nonce, ct),
+            other => panic!("expected meeting_sealed, got {}", other.wire_kind()),
+        }
+    }
+
+    /// A meeting frame opens only under its link key, in its meeting's room, for the
+    /// device that sealed it, and only as meeting traffic for that same meeting.
+    #[test]
+    fn a_meeting_frame_opens_only_under_its_key_in_its_room_for_its_sender() {
+        let key = new_link_key().unwrap();
+        assert!(is_link_key(&key) && !is_link_key("") && !is_link_key(&key[..42]));
+        let (conf_a, conf_b) = (derive_conf_id("host", "n1"), derive_conf_id("host", "n2"));
+        let (room_a, room_b) = (conf_server_id(&conf_a), conf_server_id(&conf_b));
+        let end = |conf_id: &str| HavenMessage::ConferenceEnded {
+            conf_id: conf_id.to_string(),
+            host: ConfHost { master: "m".into(), nonce: "n1".into(), cert: "c".into() },
+        };
+
+        let (n, c) = sealed_parts(&seal_meeting(&key, &conf_a, "dev", &end(&conf_a)).unwrap());
+        assert!(matches!(open_meeting(&key, &room_a, "dev", &n, &c), Some(HavenMessage::ConferenceEnded { .. })));
+        assert!(open_meeting(&key, &room_a, "other", &n, &c).is_none(), "it speaks only for its sealer");
+        assert!(open_meeting(&key, &room_b, "dev", &n, &c).is_none(), "only in its own meeting's room");
+        assert!(open_meeting(&new_link_key().unwrap(), &room_a, "dev", &n, &c).is_none(), "another key opens nothing");
+
+        let (n, c) = sealed_parts(&seal_meeting(&key, &conf_a, "dev", &end(&conf_b)).unwrap());
+        assert!(open_meeting(&key, &room_a, "dev", &n, &c).is_none(), "a frame sealed in A never speaks for B");
+
+        let welcome = |sid: &str| HavenMessage::MlsWelcome {
+            server_id: sid.to_string(), welcome: String::new(), channel_id: None, conf_nonce: Some("n1".into()),
+        };
+        let (n, c) = sealed_parts(&seal_meeting(&key, &conf_a, "dev", &welcome(&room_a)).unwrap());
+        assert!(open_meeting(&key, &room_a, "dev", &n, &c).is_some(), "a meeting's Welcome rides its lane");
+        assert_eq!(welcome("server-id").lane(), Lane::Relay, "a server's Welcome does not");
+        assert_eq!(welcome(&room_a).lane(), Lane::Meeting, "and a meeting's is never read in the clear");
     }
 }

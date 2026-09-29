@@ -1701,7 +1701,9 @@ async fn send_channel_file(
                 sha256: Some(sha256.to_string()),
             }),
         };
-        super::message_ops::send_public_channel_msg(ws_cmd_tx, sid, cid, &msg);
+        if let Some(server) = server_states.get(sid) {
+            super::message_ops::send_public_channel_msg(ws_cmd_tx, server, cid, &msg);
+        }
     } else {
         broadcast_channel_caption_mls(mls, server_states, ws_cmd_tx, crypto_store, sid, cid, &envelope);
     }
@@ -1797,15 +1799,16 @@ fn broadcast_channel_caption_mls(
     envelope: &MessageEnvelope,
 ) {
     if let Some(mls_mgr) = mls {
-        let use_subgroup = server_states.get(sid)
-            .is_some_and(|s| s.channel_uses_subgroup(cid));
+        let server = server_states.get(sid);
+        let use_subgroup = server.is_some_and(|s| s.channel_uses_subgroup(cid));
+        let ring = server.map_or_else(|| cid.to_string(), |s| super::ring_auth::topic(s, cid));
         let group_key = if use_subgroup {
             crate::crypto::subgroup_id(sid, cid)
         } else {
             sid.to_string()
         };
         if mls_mgr.has_group(&group_key) {
-            if let Err(e) = send_mls_broadcast_topic(mls_mgr, ws_cmd_tx, sid, cid, use_subgroup, envelope, crypto_store) {
+            if let Err(e) = send_mls_broadcast_topic(mls_mgr, ws_cmd_tx, sid, cid, &ring, use_subgroup, envelope, crypto_store) {
                 hollow_log!("[HOLLOW-MLS] Channel file message broadcast failed: {e}");
             }
         }
@@ -1879,7 +1882,9 @@ async fn broadcast_channel_file_header(
     };
     let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
     if mls_ok
-        && let Err(e) = send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, use_subgroup, header, crypto_store)
+        && let Err(e) = send_mls_broadcast_topic(
+            mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, &super::ring_auth::topic(state, cid), use_subgroup, header, crypto_store,
+        )
     {
         hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
     }
