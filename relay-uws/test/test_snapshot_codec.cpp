@@ -72,6 +72,8 @@ static snapshot::Data sample() {
 
     d.marks.push_back({"12D3KooWMasterOne", 7});
     d.marks.push_back({"12D3KooWMasterTwo", 1ull << 40});
+    d.locks.push_back({"0123456789abcdef0123456789abcdef|12D3KooWOwner", R"([{"n":1,"door":"d","change":"c","sig":"s","owner":"o"}])"});
+    d.locks.push_back({"8ef8bc89d3891dca86ff72c6783e396351aed5ba", "[]"});
     return d;
 }
 
@@ -233,6 +235,10 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
     for (size_t i = 0; i < a.marks.size(); i++) {
         if (a.marks[i].master != b.marks[i].master || a.marks[i].version != b.marks[i].version) return false;
     }
+    if (a.locks.size() != b.locks.size()) return false;
+    for (size_t i = 0; i < a.locks.size(); i++) {
+        if (a.locks[i].key != b.locks[i].key || a.locks[i].links_json != b.locks[i].links_json) return false;
+    }
     return true;
 }
 
@@ -256,7 +262,23 @@ int main() {
         check("device-list marks survive, in order", out.marks.size() == 2 &&
                                                      out.marks[0].master == "12D3KooWMasterOne" &&
                                                      out.marks[1].version == (1ull << 40));
+        check("join lock chains survive, in order", out.locks.size() == 2 &&
+                                                   out.locks[0].key == "0123456789abcdef0123456789abcdef|12D3KooWOwner" &&
+                                                   out.locks[1].links_json == "[]");
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
+    }
+
+    // The relay that introduces the join locks takes back what a v3 build handed
+    // over: the same bytes, less the lock count, under version 3.
+    {
+        snapshot::Data in = sample();
+        in.locks.clear();
+        std::string bytes = snapshot::encode(in);
+        std::string v3 = bytes.substr(0, bytes.size() - 8) + bytes.substr(bytes.size() - 4);
+        v3[4] = 3;
+        snapshot::Data out;
+        check("a v3 snapshot decodes under this reader", snapshot::decode(v3, out));
+        check("and carries no join locks", out.locks.empty() && same(in, out));
     }
 
     // An empty relay is a valid snapshot too.

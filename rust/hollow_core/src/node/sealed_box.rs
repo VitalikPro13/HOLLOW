@@ -36,43 +36,88 @@ pub(crate) fn key_from_text(text: &str) -> Option<[u8; 32]> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text).ok()?.try_into().ok()
 }
 
-fn cipher(shared: &[u8; 32], eph: &[u8; 32], to: &[u8; 32], domain: &[u8]) -> Option<(aes_gcm::Aes256Gcm, [u8; 12])> {
-    let salt = [eph.as_slice(), to.as_slice()].concat();
+/// `salt` names every public key the agreements used, so a box never opens under
+/// another key set that happens to agree on the same values.
+fn cipher(shared: &[u8], salt: &[u8], domain: &[u8]) -> Option<(aes_gcm::Aes256Gcm, [u8; 12])> {
     let mut okm = Zeroizing::new([0u8; 44]);
-    Hkdf::<Sha256>::new(Some(&salt), shared).expand(domain, okm.as_mut_slice()).ok()?;
+    Hkdf::<Sha256>::new(Some(salt), shared).expand(domain, okm.as_mut_slice()).ok()?;
     let cipher = aes_gcm::Aes256Gcm::new_from_slice(&okm[..32]).ok()?;
     Some((cipher, okm[32..].try_into().ok()?))
+}
+
+/// One X25519 agreement, `None` when it is not contributory: a small-order key agrees
+/// on the same value with everyone.
+fn agree(secret: &[u8; 32], public: &[u8; 32]) -> Option<Zeroizing<[u8; 32]>> {
+    let shared = StaticSecret::from(*secret).diffie_hellman(&PublicKey::from(*public));
+    shared.was_contributory().then(|| Zeroizing::new(shared.to_bytes()))
+}
+
+fn seal_with(eph_secret: &[u8; 32], shared: &[u8], salt: &[u8], domain: &[u8], aad: &[u8], plain: &[u8]) -> Option<Sealed> {
+    let (cipher, nonce) = cipher(shared, salt, domain)?;
+    let ct = cipher.encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: plain, aad }).ok()?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    Some(Sealed { eph: engine.encode(public_of(eph_secret)), ct: engine.encode(ct) })
+}
+
+fn decode(eph: &str, ct: &str) -> Option<([u8; 32], Vec<u8>)> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    Some((engine.decode(eph).ok()?.try_into().ok()?, engine.decode(ct).ok()?))
+}
+
+fn open_with(shared: &[u8], salt: &[u8], domain: &[u8], aad: &[u8], ct: &[u8]) -> Option<Vec<u8>> {
+    let (cipher, nonce) = cipher(shared, salt, domain)?;
+    cipher.decrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: ct, aad }).ok()
 }
 
 /// Seal `plain` to `to`. `domain` names what the box is for, and a box opens only
 /// under the same domain and `aad`.
 pub(crate) fn seal(to: &[u8; 32], domain: &[u8], aad: &[u8], plain: &[u8]) -> Option<Sealed> {
-    let eph_secret = StaticSecret::from(*new_secret()?);
-    let eph = PublicKey::from(&eph_secret).to_bytes();
-    let shared = eph_secret.diffie_hellman(&PublicKey::from(*to));
-    // A small-order recipient agrees on the same value with everyone.
-    if !shared.was_contributory() {
-        return None;
-    }
-    let (cipher, nonce) = cipher(shared.as_bytes(), &eph, to, domain)?;
-    let ct = cipher.encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: plain, aad }).ok()?;
-    let engine = base64::engine::general_purpose::STANDARD;
-    Some(Sealed { eph: engine.encode(eph), ct: engine.encode(ct) })
+    let eph_secret = new_secret()?;
+    let shared = agree(&eph_secret, to)?;
+    let salt = [public_of(&eph_secret).as_slice(), to].concat();
+    seal_with(&eph_secret, shared.as_slice(), &salt, domain, aad, plain)
 }
 
 /// The plaintext of a box sealed to the public half of `secret`, if it opens.
 pub(crate) fn open(secret: &[u8; 32], domain: &[u8], aad: &[u8], eph: &str, ct: &str) -> Option<Vec<u8>> {
-    let engine = base64::engine::general_purpose::STANDARD;
-    let eph: [u8; 32] = engine.decode(eph).ok()?.try_into().ok()?;
-    let ct = engine.decode(ct).ok()?;
-    let ours = StaticSecret::from(*secret);
-    let to = PublicKey::from(&ours).to_bytes();
-    let shared = ours.diffie_hellman(&PublicKey::from(eph));
-    if !shared.was_contributory() {
-        return None;
-    }
-    let (cipher, nonce) = cipher(shared.as_bytes(), &eph, &to, domain)?;
-    cipher.decrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &ct, aad }).ok()
+    let (eph, ct) = decode(eph, ct)?;
+    let shared = agree(secret, &eph)?;
+    let salt = [eph.as_slice(), &public_of(secret)].concat();
+    open_with(shared.as_slice(), &salt, domain, aad, &ct)
+}
+
+/// Seal `plain` to two keys at once: opening it takes both secrets.
+pub(crate) fn seal_to_both(a: &[u8; 32], b: &[u8; 32], domain: &[u8], aad: &[u8], plain: &[u8]) -> Option<Sealed> {
+    let eph_secret = new_secret()?;
+    let shared = Zeroizing::new([agree(&eph_secret, a)?.as_slice(), agree(&eph_secret, b)?.as_slice()].concat());
+    let salt = [public_of(&eph_secret).as_slice(), a, b].concat();
+    seal_with(&eph_secret, &shared, &salt, domain, aad, plain)
+}
+
+/// The plaintext of a [`seal_to_both`] box, opened with both secrets.
+pub(crate) fn open_with_both(a: &[u8; 32], b: &[u8; 32], domain: &[u8], aad: &[u8], eph: &str, ct: &str) -> Option<Vec<u8>> {
+    let (eph, ct) = decode(eph, ct)?;
+    let shared = Zeroizing::new([agree(a, &eph)?.as_slice(), agree(b, &eph)?.as_slice()].concat());
+    let salt = [eph.as_slice(), &public_of(a), &public_of(b)].concat();
+    open_with(&shared, &salt, domain, aad, &ct)
+}
+
+/// Seal `plain` to `to` from the holder of `ours`: the box opens only for `to`, and
+/// only against our public half, so it also proves we hold `ours`.
+pub(crate) fn seal_from(to: &[u8; 32], ours: &[u8; 32], domain: &[u8], aad: &[u8], plain: &[u8]) -> Option<Sealed> {
+    let eph_secret = new_secret()?;
+    let shared = Zeroizing::new([agree(&eph_secret, to)?.as_slice(), agree(ours, to)?.as_slice()].concat());
+    let salt = [public_of(&eph_secret).as_slice(), to, &public_of(ours)].concat();
+    seal_with(&eph_secret, &shared, &salt, domain, aad, plain)
+}
+
+/// The plaintext of a [`seal_from`] box: sealed to the public half of `secret` by
+/// the holder of the secret behind `from`.
+pub(crate) fn open_from(secret: &[u8; 32], from: &[u8; 32], domain: &[u8], aad: &[u8], eph: &str, ct: &str) -> Option<Vec<u8>> {
+    let (eph, ct) = decode(eph, ct)?;
+    let shared = Zeroizing::new([agree(secret, &eph)?.as_slice(), agree(secret, from)?.as_slice()].concat());
+    let salt = [eph.as_slice(), &public_of(secret), from].concat();
+    open_with(&shared, &salt, domain, aad, &ct)
 }
 
 #[cfg(test)]
@@ -125,6 +170,29 @@ mod tests {
         let engine = base64::engine::general_purpose::STANDARD;
         let sealed = seal(&public_of(&new_secret().unwrap()), DOMAIN, b"", b"x").unwrap();
         assert!(open(&new_secret().unwrap(), DOMAIN, b"", &engine.encode(weak), &sealed.ct).is_none());
+    }
+
+    #[test]
+    fn a_box_to_both_keys_needs_both_secrets() {
+        let (a, b, other) = (new_secret().unwrap(), new_secret().unwrap(), new_secret().unwrap());
+        let sealed = seal_to_both(&public_of(&a), &public_of(&b), DOMAIN, b"aad", b"hi").unwrap();
+        assert_eq!(open_with_both(&a, &b, DOMAIN, b"aad", &sealed.eph, &sealed.ct).as_deref(), Some(&b"hi"[..]));
+        assert!(open_with_both(&a, &other, DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "the second key is missing");
+        assert!(open_with_both(&other, &b, DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "the first key is missing");
+        assert!(open_with_both(&b, &a, DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "the keys in the other order");
+        assert!(open(&a, DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "one key alone");
+    }
+
+    #[test]
+    fn a_box_from_a_key_opens_only_against_that_key() {
+        let (to, ours, other) = (new_secret().unwrap(), new_secret().unwrap(), new_secret().unwrap());
+        let sealed = seal_from(&public_of(&to), &ours, DOMAIN, b"aad", b"hi").unwrap();
+        assert_eq!(open_from(&to, &public_of(&ours), DOMAIN, b"aad", &sealed.eph, &sealed.ct).as_deref(), Some(&b"hi"[..]));
+        assert!(open_from(&to, &public_of(&other), DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "claimed from another key");
+        assert!(open_from(&other, &public_of(&ours), DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "another recipient");
+        assert!(open(&to, DOMAIN, b"aad", &sealed.eph, &sealed.ct).is_none(), "a plain box is not this box");
+        let forged = seal_from(&public_of(&to), &other, DOMAIN, b"aad", b"hi").unwrap();
+        assert!(open_from(&to, &public_of(&ours), DOMAIN, b"aad", &forged.eph, &forged.ct).is_none(), "sealed without our key");
     }
 
     #[test]

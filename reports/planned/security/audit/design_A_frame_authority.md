@@ -271,6 +271,76 @@ BUILT (session 15, phase C, the join lane):
   card a joiner shows the members (phase D) still rides Olm, so it opens a session with a
   stranger member; it could ride inside the join box.
 
+BUILT (session 16, the join lock; replaces the permanent join key for sealing):
+- Two keys, one number. The door key (X25519) is held by every member and opens join
+  requests; the change key (Ed25519) is held by the owner, admins and mods and signs
+  the next lock. A lock link is `{n, door, change, sig}` plus `{owner, nonce}` when the
+  owner signs it; the signed payload is `hollow-lock1\n{server}\n{n}\n{door}\n{change}\n`
+  then `base\n{owner key}\n{nonce}` or `next` (`node/join_lock.rs`). A chain verifies
+  from an owner-signed link (a self-certifying id must hash from the owner and the
+  founding nonce, any other id is pinned by the invite's `owner=`), each later link
+  signed by the change key before it, or a newer owner-signed link.
+- The relay is a notice board (`relay-uws/src/join_lock.h`, `lock_get` / `lock_put`,
+  snapshot codec v4): it takes a submitted chain or next links only by one rule, the
+  first valid extension of its newest lock wins, an owner-signed link past the newest
+  resets a fork, a shorter chain ending in the same lock compacts it. Records are keyed
+  by server id (self-certifying) or server id and owner (any other), so nobody files a
+  chain under another owner's name; at most 256 links, 100,000 records, the least
+  recently used goes first. The Rust mirror (`relay_put`) drives the harness relay; a
+  signed vector is pinned in both languages.
+- Members hold the lock in the CRDT (`CrdtPayload::JoinLock`, `crdt/lock_state.rs`): the
+  links, each door's secret, and the change key sealed to each owner, admin and mod by
+  master. An op is taken only from an owner, admin or mod, an owner-signed link only
+  from the owner, any other link only as a successor of one held, a door only its own
+  secret, grants only to owners, admins and mods. The door stays readable to members
+  (the op log is served to members only); eight older doors are kept so a request
+  sealed just before a change still opens.
+- When it moves (`node/lock_keeper.rs`): a member leaving, a kick, a ban, or an owner,
+  admin or mod losing that rank marks it due; an online owner, admin or mod (in its
+  place among those online, 3 s apart, the remover first) mints the next link from the
+  relay's newest, the relay takes it, and only then is the op written, with the door
+  for everyone and the change key for every owner, admin and mod. A kick, ban or
+  demotion moves it at once; a leave, when one of them is next online. Any member puts
+  the chain back on a relay that forgot it; the owner makes the first lock, compacts
+  the chain when online, and resets past a newest lock whose change key never reached
+  it (a rogue fork) after 60 s. Whoever holds the change key grants it to a new mod.
+  A leaver's own app deletes the server state and its ops, the doors in them included.
+- Sealing: a request goes to the door AND the invite key (`key=` stays static as the
+  invite capability, so knowing the id is not enough to ask). Every answer to a joiner
+  is sealed to its reply key FROM the member's newest door (`seal_from`), the frame
+  naming the door's number and public half. A joiner seals only to a chain it verified
+  itself, and judges each answer against a read of the lock it asks for after that
+  answer arrived: from the newest door it counts; from an older one it is never read,
+  and the joiner asks again from the newest door under a new nonce (once per lock), which
+  a member that already admitted it answers by serving its state again (a parked copy
+  sealed after its admission). So a removed member's door opens no later request and
+  its answers, stale admissions included, never count.
+- A refusal never ends a join: the tile shows the reason, the row, the room and the ring
+  copy stay, and a real admission still completes it (the tile goes). A question (NSFW
+  consent, a Twitch proof) goes to the user once per ask and the ask stays open under
+  it; answering asks again with it, cancelling discards the join (the user's choice).
+- A completed join keeps taking sync answers sealed to its reply key from the door it
+  verified for 5 minutes, so a real admission merges on top of a stale one.
+- The joiner's signed card (and avatar up to 256 KB, live copy only) rides inside the
+  sealed request; the member stores it only when it names the requester's master. The
+  separate Olm card send at the join sites is gone.
+- Tests: 10 harness tests (`join_lock_*`: a removed member's door neither reads nor
+  answers a join; a lock read before a removal is read again before an answer counts;
+  an answer from a door that moved is answered again; the lock moves after a leave and
+  a leaver's refusal never ends the join; a stale admission is overtaken by the real
+  one; a demoted mod loses the change key; a member puts the chain back on a relay that
+  forgot it; the owner resets a rogue mod's fork; a joiner seals only to a chain its
+  owner signed; the card rides inside the request), CRDT unit test of the op rules,
+  unit tests for the chain, the relay rule, the boxes and grants, the C++ test
+  (`relay-uws/test/test_join_lock.cpp`, 36 checks, the same pinned vector) and the codec
+  round trip. Updated: the parked refusal and NSFW consent tests (the ask stays open).
+- Residuals, as agreed: a member who leaves on its own with a modified client that kept
+  the door can still read requests and answer them until an owner, admin or mod is
+  next online (its stale "you're in" is overtaken as soon as a real member answers);
+  insiders misbehaving while members; a relay can withhold the chain (joins wait) but
+  never forge one. Deploy order: the relay first (a 0.12 client on a relay without
+  `lock_get` never gets a lock, so nobody can join), self-hosted relays included.
+
 ### A-D2. File content commitment (H8 remainder)
 
 No file carries a signed content hash: the message signature covers the file id only.

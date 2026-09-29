@@ -281,6 +281,10 @@ pub struct ServerState {
     /// The Owner's join secret (`JoinKeySet`), 64 hex. Carried by checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join_secret: Option<AdminLwwReg<super::operations::JoinSecret>>,
+    /// The join lock (`JoinLock`): chain, door secrets, sealed change keys. Carried by
+    /// checkpoints.
+    #[serde(default, skip_serializing_if = "super::lock_state::JoinLockState::is_empty")]
+    pub join_lock: super::lock_state::JoinLockState,
     /// The owner this replica is anchored to: the founder of a self-certifying id,
     /// the pin an invite carried, or the owner of the first checkpoint or snapshot we
     /// accepted. The owner never changes, so neither does this once set.
@@ -323,7 +327,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, owner_pin, checkpoint_hlc,
+            member_record, join_secret, join_lock, owner_pin, checkpoint_hlc,
             op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
         } = self;
         ServerState {
@@ -349,6 +353,7 @@ impl ServerState {
             deleted: *deleted,
             member_record: member_record.clone(),
             join_secret: join_secret.clone(),
+            join_lock: join_lock.clone(),
             owner_pin: owner_pin.clone(),
             checkpoint_hlc: checkpoint_hlc.clone(),
             op_log: Vec::new(),
@@ -385,6 +390,7 @@ impl ServerState {
             deleted: false,
             member_record: HashMap::new(),
             join_secret: None,
+            join_lock: Default::default(),
             owner_pin: None,
             checkpoint_hlc: None,
             op_log: Vec::new(),
@@ -730,7 +736,7 @@ impl ServerState {
 
         let ServerState {
             name, roles, nicknames, twitch_usernames, storage_pledges, settings,
-            role_permissions, banned_members, muted_members, channel_grants, join_secret,
+            role_permissions, banned_members, muted_members, channel_grants, join_secret, join_lock,
             // No timestamp of their own — these converge through the ops that
             // write them, never through an LWW register.
             server_id: _, channels: _, members: _, pinned_messages: _,
@@ -746,6 +752,7 @@ impl ServerState {
         if join_secret.as_mut().is_some_and(|reg| reg.clamp_hlc(max_ms)) {
             clamped += 1;
         }
+        clamped += join_lock.clamp_hlcs(max_ms);
         clamped += clamp_map(roles, max_ms);
         clamped += clamp_map(nicknames, max_ms);
         clamped += clamp_map(twitch_usernames, max_ms);
@@ -871,6 +878,10 @@ impl ServerState {
                 }
             }
 
+            CrdtPayload::JoinLock { link, door, grants } => {
+                self.join_lock.apply(link, door.as_ref(), grants, &op.hlc);
+            }
+
             CrdtPayload::ServerDeleted { .. } => {
                 // Tombstone: latch `deleted` and drain membership so the server can no
                 // longer be acted upon, but KEEP `server_id` and `op_log` so this node
@@ -950,6 +961,9 @@ impl ServerState {
             }
 
             CrdtPayload::MemberRemoved { peer_id } => {
+                if self.members.contains_key(peer_id) {
+                    self.join_lock.note_removal(&op.hlc);
+                }
                 self.close_span(peer_id, op.hlc.physical_ms);
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
@@ -1048,11 +1062,16 @@ impl ServerState {
                 // HLC LWW and authority is enforced by can_change_role at author and
                 // ingest. Old clients still merge priority-first, so keep sending it.
                 // Old clients still merge priority-first, so keep sending it.
+                let was_moderation = self.roles.get(peer_id).is_some_and(|r| r.read().priority() >= MemberRole::Moderator.priority());
                 let entry = self.roles.entry(peer_id.clone()).or_insert_with(|| {
                     AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority)
                 });
                 let remote = AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority);
                 entry.merge(&remote);
+                // A demoted mod still holds the change key the lock must now leave behind.
+                if was_moderation && entry.read().priority() < MemberRole::Moderator.priority() {
+                    self.join_lock.note_removal(&op.hlc);
+                }
             }
 
             CrdtPayload::NicknameChanged { peer_id, nickname } => {
@@ -1123,6 +1142,9 @@ impl ServerState {
                 let remote = AdminLwwReg::new(true, op.hlc.clone(), priority);
                 entry.merge(&remote);
                 // Also remove from server (ban = kick + prevent rejoin)
+                if self.members.contains_key(peer_id) {
+                    self.join_lock.note_removal(&op.hlc);
+                }
                 self.close_span(peer_id, op.hlc.physical_ms);
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
@@ -1270,7 +1292,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret,
+            member_record, join_secret, join_lock,
             owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
             held: _, signer: _,
         } = base;
@@ -1295,6 +1317,7 @@ impl ServerState {
         self.deleted = deleted;
         self.member_record = member_record;
         self.join_secret = join_secret;
+        self.join_lock = join_lock;
         self.owner_pin = Some(owner.to_string());
         self.checkpoint_hlc = Some(covers.clone());
         // The owner is trusted with the values, never with timestamps that would
@@ -1311,7 +1334,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            member_record, join_secret, checkpoint_hlc,
+            member_record, join_secret, join_lock, checkpoint_hlc,
             owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, signer: _,
         } = fresh;
         self.name = name;
@@ -1335,6 +1358,7 @@ impl ServerState {
         self.deleted = deleted;
         self.member_record = member_record;
         self.join_secret = join_secret;
+        self.join_lock = join_lock;
         self.checkpoint_hlc = checkpoint_hlc;
     }
 
@@ -1468,6 +1492,49 @@ impl ServerState {
     pub fn join_public_text(&self) -> Option<String> {
         let secret = self.join_secret()?;
         Some(crate::node::sealed_box::key_to_text(&crate::node::sealed_box::public_of(&secret)))
+    }
+
+    /// The founding nonce of a self-certifying id: its founding op is never pruned.
+    pub fn founding_nonce(&self) -> Option<String> {
+        self.op_log.iter().find_map(|op| match &op.payload {
+            CrdtPayload::ServerCreated { nonce, .. } if !nonce.is_empty() => Some(nonce.clone()),
+            _ => None,
+        })
+    }
+
+    /// Whether `master` is the owner, an admin or a mod: who holds the change key.
+    pub fn holds_moderation(&self, master: &str) -> bool {
+        self.members.contains_key(master)
+            && self.roles.get(master).is_some_and(|r| r.read().priority() >= MemberRole::Moderator.priority())
+    }
+
+    /// Every owner, admin and mod, by master.
+    pub fn moderation_masters(&self) -> Vec<String> {
+        let mut masters: Vec<String> = self.members.keys().filter(|m| self.holds_moderation(m)).cloned().collect();
+        masters.sort();
+        masters
+    }
+
+    /// A join lock op: from an owner, admin or mod; an owner-signed link only from
+    /// the owner; any other link a successor of one we hold; a door only its own
+    /// secret; grants only to owners, admins and mods.
+    fn join_lock_allowed(
+        &self,
+        op: &CrdtOp,
+        role: &MemberRole,
+        link: &crate::node::join_lock::LockLink,
+        door: Option<&super::operations::JoinSecret>,
+        grants: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let Some(owner) = self.anchor_owner() else { return false };
+        role.priority() >= MemberRole::Moderator.priority()
+            && (!link.is_base() || (*role == MemberRole::Owner && op.author == owner))
+            && self.join_lock.link_allowed(&self.server_id, link, &owner)
+            && door.is_none_or(|d| super::lock_state::door_matches(d, link))
+            && grants.len() <= 64
+            && grants.iter().all(|(master, grant)| {
+                crate::node::join_lock::grant_shape(grant) && self.holds_moderation(master)
+            })
     }
 
     fn author_priority(&self, author: &str) -> u8 {
@@ -1650,6 +1717,7 @@ impl ServerState {
             }
             CrdtPayload::ServerRenamed { .. } => has(Permission::MANAGE_SERVER),
             CrdtPayload::JoinKeySet { secret } => role == MemberRole::Owner && join_secret_shape(&secret.0).is_some(),
+            CrdtPayload::JoinLock { link, door, grants } => self.join_lock_allowed(op, &role, link, door.as_ref(), grants),
             CrdtPayload::ServerSettingChanged { key, value } => {
                 self.setting_allowed_for(&role, perms, key, value)
             }
@@ -2277,6 +2345,81 @@ mod tests {
         });
         assert!(!skeleton.op_allowed(&other), "a pinned joiner takes only the pinned owner");
         assert!(skeleton.op_allowed(&founding));
+    }
+
+    /// The join lock op: an owner-signed link only from the owner, any other only a
+    /// successor its predecessor's change key signed and only from an owner, admin or
+    /// mod, a door only its own secret, grants only to owners, admins and mods. A
+    /// removal or a demotion makes it due to move; a newer door settles that.
+    #[test]
+    fn a_join_lock_op_is_judged_by_who_may_move_the_lock() {
+        use crate::node::join_lock::{mint_base, mint_next};
+        let (owner_kp, owner, _) = keys(1);
+        let server = "0123456789abcdef0123456789abcdef".to_string();
+        let mut s = test_state(server.clone(), "S".into(), owner.clone());
+        for id in ["moder", "alice", "bob"] {
+            let op = s.create_op(CrdtPayload::MemberAdded { peer_id: id.into(), display_name: id.into(), follow: None });
+            let _ = s.apply_op(&op);
+        }
+        let op = s.create_op(CrdtPayload::RoleChanged { peer_id: "moder".into(), role: MemberRole::Moderator, priority: 3 });
+        let _ = s.apply_op(&op);
+        let door_of = |lock: &crate::node::join_lock::NewLock| Some(JoinSecret(hex::encode(lock.door.as_slice())));
+        let grant = format!("{}={}", "A".repeat(43), format_args!(".{}", "B".repeat(64)));
+        let grants = |to: &str| std::collections::BTreeMap::from([(to.to_string(), grant.clone())]);
+        let lock_op = |s: &mut ServerState, author: &str, link: &crate::node::join_lock::LockLink, door, grants| {
+            op_by(s, author, CrdtPayload::JoinLock { link: link.clone(), door, grants })
+        };
+
+        let first = mint_base(&server, 1, &owner_kp, None).unwrap();
+        let by_mod = lock_op(&mut s, "moder", &first.link, door_of(&first), grants("moder"));
+        assert!(!s.op_allowed(&by_mod), "an owner-signed link comes from the owner only");
+        let base = lock_op(&mut s, &owner, &first.link, door_of(&first), grants("moder"));
+        assert!(s.op_allowed(&base));
+        let _ = s.apply_op(&base);
+        assert!(s.join_lock.has_lock());
+        assert_eq!(s.join_lock.newest_door().map(|(n, _, _)| n), Some(1));
+        assert!(!s.join_lock.rotation_due());
+
+        let next = mint_next(&server, &first.link, &first.change).unwrap();
+        let by_member = lock_op(&mut s, "alice", &next.link, door_of(&next), Default::default());
+        assert!(!s.op_allowed(&by_member), "a plain member moves nothing");
+        let stray = mint_next(&server, &first.link, &crate::node::sealed_box::new_secret().unwrap());
+        assert!(stray.is_none(), "only the change key signs a successor");
+        let wrong_door = lock_op(&mut s, "moder", &next.link, door_of(&first), Default::default());
+        assert!(!s.op_allowed(&wrong_door), "a door is only its own secret");
+        let to_member = lock_op(&mut s, "moder", &next.link, door_of(&next), grants("alice"));
+        assert!(!s.op_allowed(&to_member), "the change key goes to owners, admins and mods only");
+        let skipped = mint_next(&server, &next.link, &next.change).unwrap();
+        let ahead = lock_op(&mut s, "moder", &skipped.link, door_of(&skipped), Default::default());
+        assert!(!s.op_allowed(&ahead), "no successor of a lock we do not hold");
+
+        let leave = op_by(&mut s, "bob", CrdtPayload::MemberRemoved { peer_id: "bob".into() });
+        let _ = s.apply_op(&leave);
+        assert!(s.join_lock.rotation_due(), "a leave makes the lock due to move");
+        let moved = lock_op(&mut s, "moder", &next.link, door_of(&next), grants("moder"));
+        assert!(s.op_allowed(&moved));
+        let _ = s.apply_op(&moved);
+        assert!(!s.join_lock.rotation_due(), "the newer door settles it");
+        assert_eq!(s.join_lock.door_secrets(1).len(), 1, "the older door still opens a request sealed to it");
+        assert_eq!(s.join_lock.chain().len(), 2);
+
+        let ban = op_by(&mut s, &owner, CrdtPayload::MemberBanned { peer_id: "alice".into() });
+        let _ = s.apply_op(&ban);
+        assert!(s.join_lock.rotation_due(), "a ban makes it due to move");
+        let third = mint_next(&server, &next.link, &next.change).unwrap();
+        let settled = lock_op(&mut s, "moder", &third.link, door_of(&third), grants("moder"));
+        let _ = s.apply_op(&settled);
+        assert!(!s.join_lock.rotation_due());
+
+        let demote = s.create_op(CrdtPayload::RoleChanged { peer_id: "moder".into(), role: MemberRole::Member, priority: 3 });
+        let _ = s.apply_op(&demote);
+        assert!(s.join_lock.rotation_due(), "a demoted mod still holds the change key");
+        assert!(!format!("{s:?}").contains(&hex::encode(next.door.as_slice())), "no door ever prints");
+
+        let mut rebuilt = ServerState::skeleton(server.clone());
+        rebuilt.rebase_on(s.lean_snapshot(), &owner, &demote.hlc);
+        assert_eq!(rebuilt.join_lock.chain(), s.join_lock.chain(), "a checkpoint carries the lock");
+        assert!(rebuilt.join_lock.rotation_due(), "and that it is due to move");
     }
 
     #[test]

@@ -127,6 +127,16 @@ std::string hex_encode(const uint8_t* data, size_t len) {
     return result;
 }
 
+std::string sha256_hex(const std::string& message) {
+    unsigned char digest[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(digest, reinterpret_cast<const unsigned char*>(message.data()), message.size());
+    return hex_encode(digest, sizeof(digest));
+}
+
+std::string genesis_server_id(const std::string& owner_peer_id, const std::string& nonce) {
+    return sha256_hex("hollow-server1:" + owner_peer_id + ":" + nonce).substr(0, 40);
+}
+
 uint64_t now_unix_secs() {
     auto now = std::chrono::system_clock::now();
     auto epoch = now.time_since_epoch();

@@ -138,6 +138,12 @@ pub enum WsCommand {
     KillAck { issued_at_ms: Option<i64> },
     /// Drop this device's push token from the relay (wipe step 5). No reply.
     UnregisterPushToken,
+    /// Ask the relay for the join lock chains of these servers, as (server id, owner
+    /// id or empty). One `LockChain` answers each.
+    LockGet { locks: Vec<(String, String)> },
+    /// Offer the relay a join lock chain (or its next links) for a server. Answered
+    /// by a `LockChain` naming whether the relay took it.
+    LockPut { server: String, owner: String, links: Vec<super::join_lock::LockLink> },
     /// File a user report with the relay. One-shot — deliberately NOT cached
     /// in `track_room_change`, so it is never re-sent on reconnect (the relay
     /// also dedups per (reporter, target, category) via hashed keys).
@@ -201,6 +207,10 @@ pub enum WsEvent {
     /// A destruction order the relay parked for this device, handed over right
     /// after auth. Opaque here: the swarm verifies it against OUR master.
     KillSignal { blob: String, issued_at_ms: i64 },
+    /// The join lock chain the relay holds for a server (empty when none). `put` is
+    /// set on the answer to our own `LockPut`: whether its newest lock is now the
+    /// relay's. Unverified here: whoever reads it checks it back to the owner.
+    LockChain { server: String, links: Vec<super::join_lock::LockLink>, put: Option<bool> },
 }
 
 impl WsEvent {
@@ -234,6 +244,7 @@ impl WsEvent {
             Self::LinkCodeError { .. } => "LinkCodeError",
             Self::LinkCodeResolved { .. } => "LinkCodeResolved",
             Self::KillSignal { .. } => "KillSignal",
+            Self::LockChain { .. } => "LockChain",
         }
     }
 }
@@ -304,6 +315,11 @@ enum ServerMsg {
     LinkCodeResolved { code: String, peer_id: String },
     KillSignal { #[serde(default)] blob: String, #[serde(default)] issued_at_ms: i64 },
     KillDeposited { #[serde(default)] stored: u32 },
+    LockChain {
+        server: String,
+        #[serde(default)] links: Vec<super::join_lock::LockLink>,
+        #[serde(default)] put: Option<bool>,
+    },
 }
 
 // -- State --
@@ -1117,6 +1133,26 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::LockGet { locks } => {
+            let locks: Vec<serde_json::Value> = locks
+                .iter()
+                .map(|(server, owner)| serde_json::json!({ "server": server, "owner": owner }))
+                .collect();
+            let msg = serde_json::json!({ "type": "lock_get", "locks": locks });
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] LockGet send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::LockPut { server, owner, links } => {
+            let msg = serde_json::json!({ "type": "lock_put", "server": server, "owner": owner, "links": links });
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] LockPut send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::UnregisterPushToken => {
             let msg = serde_json::json!({ "type": "unregister_push_token" });
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
@@ -1321,6 +1357,7 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             hollow_log!("[HOLLOW-DESTROY] Relay parked {stored} destruction order(s)");
             return;
         }
+        ServerMsg::LockChain { server, links, put } => WsEvent::LockChain { server, links, put },
         ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
     };
 

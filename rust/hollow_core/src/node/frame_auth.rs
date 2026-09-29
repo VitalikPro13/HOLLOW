@@ -29,7 +29,7 @@ pub(crate) const ROUTE_ROOM: &str = "*";
 /// minutes at most.
 pub(crate) const LIVE_SKEW_MS: i64 = 300_000;
 
-const NONCE_LEN: usize = 16;
+pub(crate) const NONCE_LEN: usize = 16;
 const SIG_LEN: usize = 64;
 
 /// More live frames than the per-sender rate limit admits in a replay window: an

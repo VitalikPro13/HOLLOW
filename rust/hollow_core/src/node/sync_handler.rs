@@ -1242,10 +1242,10 @@ pub(crate) fn deposit_parked_join(
     server_id: &str,
     our_device: &str,
     pending: &PendingJoin,
-) {
+) -> bool {
     let Some(data) = super::join_lane::request_frame(server_id, our_device, pending, true) else {
-        hollow_log!("[HOLLOW-CRDT] No join key for {server_id}: nothing deposited in the join ring");
-        return;
+        hollow_log!("[HOLLOW-CRDT] No verified join lock for {server_id} yet: nothing deposited in the join ring");
+        return false;
     };
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
@@ -1256,13 +1256,14 @@ pub(crate) fn deposit_parked_join(
         "[HOLLOW-CRDT] Deposited parked join for {server_id} (nonce {}) into the join ring",
         pending.requested_at
     );
+    true
 }
 
 /// Publish a member's answer to a join into the room's `~join` ring.
 ///
-/// Two copies: one sealed to the join key tells the OTHER members the join is
-/// resolved (with the admitting op), so a member returning later does not re-serve
-/// it; a refusal also goes sealed to the joiner, who may not be here.
+/// Two copies: one sealed to our newest door and the invite key tells the OTHER
+/// members the join is resolved (with the admitting op), so a member returning later
+/// does not re-serve it; a refusal also goes sealed to the joiner, who may not be here.
 pub(crate) fn publish_join_resolution(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     answer: &super::join_lane::Answer<'_>,
@@ -1278,9 +1279,7 @@ pub(crate) fn publish_join_resolution(
         reason: reason.to_string(),
         op_json,
     };
-    let for_members = answer.join_key.and_then(|key| {
-        super::join_lane::seal_to_members(&key, answer.server_id, answer.our_device, &resolved(op_json))
-    });
+    let for_members = answer.sealed_to_members(&resolved(op_json));
     let for_joiner = (!admitted).then(|| answer.sealed_to_joiner(&resolved(None))).flatten();
     for data in [for_members, for_joiner].into_iter().flatten() {
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
@@ -1338,52 +1337,36 @@ pub(crate) fn is_interactive_reason(reason: &str) -> bool {
 
 /// ONE place where a refusal lands on the joiner, whichever leg carried it.
 ///
-/// Always leaves the room: "no row means we are not in that room" is the invariant
-/// that stops the relay replaying a late admission's buffered snapshot at us.
-#[allow(clippy::too_many_arguments)]
+/// A refusal never ends the join: a member removed a moment ago, or one whose client
+/// was changed, can send one, so the ask stays open (row, room, ring copy) and a real
+/// admission still completes it. The tile shows the reason until the user discards it.
+/// A question (NSFW consent, a Twitch proof) goes to the user once; their answer asks
+/// again with it, their cancel discards the ask, and meanwhile it stays open but does
+/// not park.
 pub(crate) async fn handle_join_refused(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     crdt_store: &CrdtStore,
-    mls: &mut Option<MlsManager>,
-    crypto_store: &CryptoStore,
     server_id: String,
     reason: String,
 ) {
-    let Some(mut pending) = pending_server_joins.remove(&server_id) else { return };
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-        room_code: server_id.clone(),
-    });
-    // Whichever branch runs, this ask is over. The package is taken off the entry
-    // HERE, so neither branch writes a row naming a package that no longer exists,
-    // and it is reclaimed at the end of the branch.
-    let spent = pending.key_package.take();
-
+    let Some(pending) = pending_server_joins.get_mut(&server_id) else { return };
     if is_interactive_reason(&reason) {
-        // The row goes: the user's answer re-requests through `handle_join_server`
-        // with a FRESH row carrying the consent or the proof. Keeping the old row
-        // would restore a tile, re-serve the question, and pop the dialog at launch.
-        hollow_log!("[HOLLOW-CRDT] Join for {server_id} needs an answer from the user: {reason}");
-        crdt_store.delete_pending_join(server_id.clone());
-        // Tile first, then the question: the tile is about to be answered by a
-        // dialog and must not still sit behind it, and a UI that sees only one of
-        // the two events gets the safer one.
-        let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
-            server_id: server_id.clone(),
-            state: "discarded".to_string(),
-            reason: String::new(),
-        }).await;
-        let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
-            server_id: server_id.clone(),
-            reason,
-        }).await;
-        discard_join_key_package(mls, crypto_store, &server_id, spent.as_deref());
+        // Once per ask: every member that reads it asks the same question.
+        if !pending.asked {
+            hollow_log!("[HOLLOW-CRDT] Join for {server_id} needs an answer from the user: {reason}");
+            pending.asked = true;
+            let _ = event_tx.send(NetworkEvent::TwitchJoinRejected { server_id, reason }).await;
+        }
         return;
     }
-
-    hollow_log!("[HOLLOW-CRDT] Join for {server_id} refused: {reason}");
-    crdt_store.upsert_pending_join(pending_join_row(&server_id, &pending, "rejected", &reason));
+    if pending.refused.as_deref() == Some(reason.as_str()) {
+        return;
+    }
+    hollow_log!("[HOLLOW-CRDT] Join for {server_id} refused: {reason}; the ask stays open for a real admission");
+    pending.refused = Some(reason.clone());
+    let (state, _) = tile_state(pending);
+    crdt_store.upsert_pending_join(pending_join_row(&server_id, pending, state, &reason));
     // A join inside its LIVE window keeps today's surfaces: the user is standing in
     // front of the dialog they triggered. A PARKED one is answered hours later with
     // nobody watching, so the tile is the only surface and a toast would be noise.
@@ -1394,11 +1377,10 @@ pub(crate) async fn handle_join_refused(
         }).await;
     }
     let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
-        server_id: server_id.clone(),
+        server_id,
         state: "rejected".to_string(),
         reason,
     }).await;
-    discard_join_key_package(mls, crypto_store, &server_id, spent.as_deref());
 }
 
 /// Refuse a join, by both legs.
@@ -1487,7 +1469,16 @@ pub(crate) async fn handle_join_server(
         .and_then(super::join_lane::ReplySecret::from_stored)
         .or_else(|| pending_server_joins.get(&server_id).and_then(|p| p.reply_secret.clone()))
         .or_else(super::join_lane::ReplySecret::new);
-    let pending = PendingJoin {
+    // Who is asking rides inside the sealed request, so no member needs an Olm
+    // session with a stranger to learn a name.
+    let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
+    let avatar_b64 = card
+        .as_ref()
+        .and_then(|c| super::profile_card::own_avatar(&c.master, db_path, db_passphrase))
+        .filter(|b| b.len() <= JOIN_AVATAR_MAX_BYTES)
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+        .unwrap_or_default();
+    let mut pending = PendingJoin {
         twitch_proof_json: twitch_proof_json.clone(),
         nsfw_confirmed,
         requested_at,
@@ -1498,24 +1489,35 @@ pub(crate) async fn handle_join_server(
         owner_pin,
         join_key: Some(join_key),
         reply_secret,
+        // A lock read a moment ago for this same join still holds.
+        lock: pending_server_joins.get(&server_id).and_then(|p| p.lock.clone()).filter(|l| l.fresh()),
+        card,
+        avatar_b64,
+        ..Default::default()
     };
     // Persist BEFORE anything can go wrong: a crash inside the 15s live window
     // still leaves a row the boot path picks up, and a join that completes
     // deletes it.
     crdt_store.upsert_pending_join(pending_join_row(&server_id, &pending, "pending", ""));
-    pending_server_joins.insert(server_id.clone(), pending.clone());
 
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: server_id.clone(),
     });
 
-    if let Some(room_peers) = ws_room_peers.get(&server_id) {
-        for peer in room_peers.iter() {
-            if super::join_lane::send_request(ws_cmd_tx, &server_id, device_peer_id, &pending, peer) {
-                hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
+    // Every copy is sealed to the door the relay's lock names: with none read yet,
+    // the answer to the ask sends them.
+    if pending.lock.is_some() {
+        if let Some(room_peers) = ws_room_peers.get(&server_id) {
+            for peer in room_peers.iter() {
+                if super::join_lane::send_request(ws_cmd_tx, &server_id, device_peer_id, &pending, peer) {
+                    hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
+                }
             }
         }
+    } else {
+        request_join_lock(ws_cmd_tx, &server_id, &mut pending);
     }
+    pending_server_joins.insert(server_id.clone(), pending);
     // If no peers found yet, the PeerJoined/RoomMembers handler
     // will pick up pending_server_joins and send the request then.
 
@@ -1551,6 +1553,273 @@ pub(crate) async fn handle_join_server(
     }
 }
 
+/// Largest avatar a live join request carries; a bigger one arrives once we are in.
+const JOIN_AVATAR_MAX_BYTES: usize = 256 * 1024;
+
+/// Between two asks for the lock of a server we are joining, unless an answer waits.
+const JOIN_LOCK_ASK_GAP: Duration = Duration::from_secs(1);
+/// Unanswered asks we keep track of.
+const MAX_LOCK_ASKS: usize = 32;
+
+/// The row state a pending join's tile shows: a refusal keeps its reason.
+pub(crate) fn tile_state(pending: &PendingJoin) -> (&'static str, String) {
+    match &pending.refused {
+        Some(reason) => ("rejected", reason.clone()),
+        None => ("pending", String::new()),
+    }
+}
+
+/// Ask the relay for the join lock of a server we are joining.
+pub(crate) fn request_join_lock(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    pending: &mut PendingJoin,
+) {
+    if pending.lock_asked_at.is_some_and(|t| t.elapsed() < JOIN_LOCK_ASK_GAP) {
+        return;
+    }
+    ask_join_lock(ws_cmd_tx, server_id, pending);
+}
+
+fn ask_join_lock(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    pending: &mut PendingJoin,
+) {
+    let now = std::time::Instant::now();
+    pending.lock_asked_at = Some(now);
+    if pending.lock_asks.len() >= MAX_LOCK_ASKS {
+        pending.lock_asks.pop_front();
+    }
+    pending.lock_asks.push_back(now);
+    let owner = pending.owner_pin.clone().unwrap_or_default();
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LockGet { locks: vec![(server_id.to_string(), owner)] });
+}
+
+/// An answer to our join counts only against a read of the lock asked after it
+/// arrived: that read reflects every removal before it, so an answer from the door
+/// of someone removed by then is never taken. Returns false when too many wait.
+pub(crate) fn hold_join_answer(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    pending: &mut PendingJoin,
+    held: HeldAnswer,
+) -> bool {
+    if pending.held.len() >= MAX_HELD_ANSWERS {
+        return false;
+    }
+    pending.held.push(held);
+    ask_join_lock(ws_cmd_tx, server_id, pending);
+    true
+}
+
+/// The relay's lock for a server we are joining: verified back to the owner the id
+/// or the invite names, it is what every copy is sealed to and the oldest door an
+/// answer may come from. The first one we read sends the copies that waited for it.
+/// Returns the answers that waited for it, to be judged again.
+pub(crate) fn handle_join_lock_chain(
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    crdt_store: &CrdtStore,
+    our_device: &str,
+    server_id: &str,
+    links: Vec<super::join_lock::LockLink>,
+) -> Vec<HeldAnswer> {
+    let Some(pending) = pending_server_joins.get_mut(server_id) else { return Vec::new() };
+    let asked = pending.lock_asks.pop_front();
+    if super::join_lock::verify_chain(server_id, &links, pending.owner_pin.as_deref()).is_none() {
+        hollow_log!("[HOLLOW-CRDT] No join lock for {server_id} we can verify yet ({} link(s) on the relay); waiting for a member to put it back", links.len());
+        return Vec::new();
+    }
+    let first = pending.lock.is_none();
+    pending.lock = Some(super::join_lock::VerifiedLock { links, checked_at: std::time::Instant::now() });
+    if first && !pending.asked {
+        for peer in ws_room_peers.get(server_id).into_iter().flatten() {
+            if super::join_lane::send_request(ws_cmd_tx, server_id, our_device, pending, peer) {
+                hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
+            }
+        }
+    }
+    if pending.parked && pending.last_deposited_at == 0 && deposit_parked_join(ws_cmd_tx, server_id, our_device, pending) {
+        pending.last_deposited_at = super::types::now_ms();
+        let (state, reason) = tile_state(pending);
+        crdt_store.upsert_pending_join(pending_join_row(server_id, pending, state, &reason));
+    }
+    let Some(asked) = asked else { return Vec::new() };
+    let (ready, waiting) = std::mem::take(&mut pending.held).into_iter().partition(|h| h.arrived_at <= asked);
+    pending.held = waiting;
+    ready
+}
+
+/// How often a join with no lock yet, or with answers waiting on one, asks again.
+const JOIN_LOCK_REASK: Duration = Duration::from_secs(15);
+
+/// Joins still missing a lock, or holding answers for one, ask the relay again: a
+/// member coming back puts the chain back, and a held answer waits on the reply.
+pub(crate) fn reask_join_locks(
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) {
+    for (server_id, pending) in pending_server_joins.iter_mut() {
+        let waiting = pending.lock.is_none() || !pending.held.is_empty();
+        if waiting && pending.lock_asked_at.is_none_or(|t| t.elapsed() >= JOIN_LOCK_REASK) {
+            request_join_lock(ws_cmd_tx, server_id, pending);
+        }
+    }
+}
+
+/// An answer to our join came from a door older than the relay's newest: from a
+/// member who answered just before the lock moved, or from someone it moved to shut
+/// out. Ask again, once per lock, sealed to the newest door under a new nonce, so a
+/// member answers from that door (one that already admitted us sends our state).
+pub(crate) fn reask_join(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    crdt_store: &CrdtStore,
+    server_id: &str,
+    our_device: &str,
+    pending: &mut PendingJoin,
+) {
+    let Some(tip) = pending.lock.as_ref().and_then(|l| l.newest()).map(|l| l.n) else { return };
+    if pending.asked || pending.reasked_for == Some(tip) {
+        return;
+    }
+    hollow_log!("[HOLLOW-CRDT] Asking again to join {server_id} from join lock {tip}");
+    pending.reasked_for = Some(tip);
+    pending.requested_at = super::types::now_ms();
+    for peer in ws_room_peers.get(server_id).into_iter().flatten() {
+        super::join_lane::send_request(ws_cmd_tx, server_id, our_device, pending, peer);
+    }
+    if pending.parked && deposit_parked_join(ws_cmd_tx, server_id, our_device, pending) {
+        pending.last_deposited_at = super::types::now_ms();
+    }
+    let (state, reason) = tile_state(pending);
+    crdt_store.upsert_pending_join(pending_join_row(server_id, pending, state, &reason));
+}
+
+/// A device came into the room of a server we are joining: ask it, or first read the
+/// lock, which a member coming back may just have put back on the relay.
+pub(crate) fn send_pending_request(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    our_device: &str,
+    pending: &mut PendingJoin,
+    target: &str,
+) {
+    if pending.asked {
+        return;
+    }
+    if super::join_lane::send_request(ws_cmd_tx, server_id, our_device, pending, target) {
+        hollow_log!("[HOLLOW-CRDT] Sent pending join request to {target} for {server_id}");
+    } else {
+        request_join_lock(ws_cmd_tx, server_id, pending);
+    }
+}
+
+/// What becomes of a sealed answer to our join.
+pub(crate) enum JoinAnswer {
+    Open(Box<HavenMessage>),
+    /// From a door older than the relay's newest: see `reask_join`.
+    Stale,
+    Dropped,
+}
+
+/// An answer held until a read of the lock asked after it arrived: it counts only
+/// from the newest door that read shows. One from an older door is from someone
+/// that door no longer admits, or from a member who answered just before the lock
+/// moved; it is never read, only a reason to ask again.
+pub(crate) fn judge_join_answer(pending: &PendingJoin, server_id: &str, our_device: &str, held: &HeldAnswer) -> JoinAnswer {
+    let (Some(reply), Some(tip)) = (pending.reply_secret.as_ref(), pending.lock.as_ref().and_then(|l| l.newest())) else {
+        return JoinAnswer::Dropped;
+    };
+    let open_with = |door: [u8; 32]| {
+        super::join_lane::open_for_joiner(reply, &door, server_id, &held.from, our_device, held.n, &held.eph, &held.ct)
+    };
+    if held.n == tip.n {
+        return tip.door_key().and_then(open_with).map_or(JoinAnswer::Dropped, |msg| JoinAnswer::Open(Box::new(msg)));
+    }
+    let from_its_door = held.n < tip.n && super::sealed_box::key_from_text(&held.door).and_then(open_with).is_some();
+    if !from_its_door {
+        return JoinAnswer::Dropped;
+    }
+    hollow_log!("[HOLLOW-SECURITY] Dropped an answer to our join of {server_id} from {} sealed from door {}, the relay's newest is {}", held.from, held.n, tip.n);
+    JoinAnswer::Stale
+}
+
+/// What a join about to complete leaves behind for `recent_join_answer`.
+pub(crate) fn recent_join_of(pending: &PendingJoin) -> Option<RecentJoin> {
+    Some(RecentJoin {
+        reply: pending.reply_secret.clone()?,
+        door: pending.lock.as_ref()?.newest()?.clone(),
+        until: std::time::Instant::now() + RECENT_JOIN_WINDOW,
+    })
+}
+
+/// After an answer to our join was dispatched: when it completed the join, keep
+/// taking that join's answers for a while.
+pub(crate) fn note_completed_join(
+    recent: &mut HashMap<String, RecentJoin>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    server_states: &HashMap<String, ServerState>,
+    local_peer_str: &str,
+    server_id: &str,
+    joining: Option<RecentJoin>,
+) {
+    let Some(joining) = joining else { return };
+    if !pending_server_joins.contains_key(server_id) && server_states.get(server_id).is_some_and(|s| s.is_member(local_peer_str)) {
+        recent.insert(server_id.to_string(), joining);
+    }
+}
+
+/// Write a join lock op and send it to every member and our own other devices.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn author_join_lock_op(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    event_tx: &EventTx,
+    local_peer_str: &str,
+    local_device_id: &str,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+    server_id: &str,
+    payload: CrdtPayload,
+) {
+    let Some(state) = server_states.get_mut(server_id) else { return };
+    let Some(op) = author_op(state, crdt_store, server_id, payload) else {
+        hollow_log!("[HOLLOW-CRDT] A join lock op for {server_id} did not pass our own rules");
+        return;
+    };
+    broadcast_op_mls_first(mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op, crypto_store);
+    if let Ok(op_json) = serde_json::to_string(&op) {
+        super::olm_lane::carry_to_own_siblings(
+            ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id,
+            &HavenMessage::CrdtOpBroadcast { server_id: server_id.to_string(), op_json },
+            super::olm_lane::NoSession::Queue,
+        );
+    }
+}
+
+/// A sync answer to a join that completed a moment ago, from the door we verified:
+/// a real admission arriving after a stale one merges into it.
+pub(crate) fn recent_join_answer(
+    recent: &mut HashMap<String, RecentJoin>,
+    server_id: &str,
+    our_device: &str,
+    held: &HeldAnswer,
+) -> Option<HavenMessage> {
+    let now = std::time::Instant::now();
+    recent.retain(|_, r| r.until > now);
+    let join = recent.get(server_id).filter(|r| r.door.n == held.n)?;
+    let msg = super::join_lane::open_for_joiner(
+        &join.reply, &join.door.door_key()?, server_id, &held.from, our_device, held.n, &held.eph, &held.ct,
+    )?;
+    matches!(msg, HavenMessage::SyncResponse { .. }).then_some(msg)
+}
+
 // ── 8b. RetryPendingJoin ──────────────────────────────────────────────
 
 /// Re-send a still-pending `ServerJoinRequest` to every peer in the server room.
@@ -1565,6 +1834,9 @@ pub(crate) fn handle_retry_pending_join(
     server_id: String,
 ) {
     let Some(pending) = pending_server_joins.get(&server_id) else { return };
+    if pending.asked {
+        return;
+    }
     let Some(room_peers) = ws_room_peers.get(&server_id) else { return };
     hollow_log!(
         "[HOLLOW-CRDT] Join for {server_id} still pending after the coordinator window — re-asking {} peer(s)",
@@ -2900,7 +3172,8 @@ pub(crate) async fn handle_check_pending_join_timeout(
     // Already gone = the join completed or was discarded; already parked = a
     // stale timer from an earlier attempt. Both are no-ops.
     let Some(pending) = pending_server_joins.get_mut(&server_id) else { return };
-    if pending.parked {
+    // A member is asking the user something: it is here, and the answer asks again.
+    if pending.parked || pending.asked {
         return;
     }
     if only_if_empty {
@@ -2924,12 +3197,18 @@ pub(crate) async fn handle_check_pending_join_timeout(
         hollow_log!("[HOLLOW-CRDT] No answer within the live window for {server_id} — parking the join");
     }
     pending.parked = true;
-    pending.last_deposited_at = super::types::now_ms();
-    deposit_parked_join(ws_cmd_tx, &server_id, local_device_id, pending);
-    crdt_store.upsert_pending_join(pending_join_row(&server_id, pending, "pending", ""));
-    let _ = event_tx.send(NetworkEvent::ServerJoinParked {
-        server_id,
-    }).await;
+    // With no verified lock yet the copy goes when one arrives (`handle_join_lock_chain`).
+    if deposit_parked_join(ws_cmd_tx, &server_id, local_device_id, pending) {
+        pending.last_deposited_at = super::types::now_ms();
+    }
+    // A refused join parks too, for a real admission, but its tile keeps the reason.
+    let (state, reason) = tile_state(pending);
+    crdt_store.upsert_pending_join(pending_join_row(&server_id, pending, state, &reason));
+    if pending.refused.is_none() {
+        let _ = event_tx.send(NetworkEvent::ServerJoinParked {
+            server_id,
+        }).await;
+    }
 }
 
 // ── 17b. DiscardPendingJoin (user action) ─────────────────────────────
@@ -3118,6 +3397,7 @@ async fn emit_crdt_apply_event(
             }
             CrdtPayload::ServerSettingChanged { .. }
             | CrdtPayload::JoinKeySet { .. }
+            | CrdtPayload::JoinLock { .. }
             | CrdtPayload::ServerCheckpoint { .. }
             | CrdtPayload::ServerRenamed { .. }
             | CrdtPayload::RolePermissionsChanged { .. }

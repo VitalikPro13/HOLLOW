@@ -81,6 +81,9 @@ struct RelayInner {
     /// list: one entry per target, overwritten only by a NEWER deposit, handed over
     /// on that device's next auth and deleted only by its own ack.
     kill_list: HashMap<String, KillEntry>,
+    /// Join lock chains by record key (`join_lock::record_key`), held by the rule the
+    /// real relay applies (`join_lock::relay_put`).
+    locks: HashMap<String, Vec<super::join_lock::LockLink>>,
     /// Everything the relay can read while a test has the tap on (claim C-24).
     tap: Option<Wiretap>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
@@ -193,6 +196,32 @@ impl Wiretap {
     }
 }
 
+/// The relay's handling of one `lock_put`, as `relay-uws` does it: the chain it holds
+/// afterwards, and whether the submitted newest lock is now its own.
+fn relay_lock_put(
+    locks: &mut HashMap<String, Vec<super::join_lock::LockLink>>,
+    server: &str,
+    owner: &str,
+    links: &[super::join_lock::LockLink],
+) -> (Vec<super::join_lock::LockLink>, bool) {
+    let key = super::join_lock::record_key(server, owner);
+    let stored = locks.get(&key).cloned().unwrap_or_default();
+    let names_owner = links.first().is_none_or(|first| {
+        !first.is_base()
+            || crate::crdt::anchor::is_genesis_id(server)
+            || super::join_lock::base_owner(server, first).as_deref() == Some(owner)
+    });
+    let Some(next) = names_owner.then(|| super::join_lock::relay_put(server, &stored, links)).flatten() else {
+        return (stored, false);
+    };
+    locks.insert(key, next.clone());
+    let accepted = match (next.last(), links.last()) {
+        (Some(tip), Some(ours)) => tip.same_lock(ours),
+        _ => false,
+    };
+    (next, accepted)
+}
+
 #[derive(Clone)]
 struct KillEntry {
     blob: String,
@@ -281,6 +310,29 @@ impl MockRelay {
             .kill_list
             .get(target)
             .map(|e| (e.blob.clone(), e.issued_at_ms, e.issuer.clone()))
+    }
+
+    /// The join lock chain the relay holds for a server.
+    pub(crate) fn lock_chain(&self, server: &str, owner: &str) -> Vec<super::join_lock::LockLink> {
+        let inner = self.inner.lock().unwrap();
+        inner.locks.get(&super::join_lock::record_key(server, owner)).cloned().unwrap_or_default()
+    }
+
+    /// A hostile relay: `links` become the chain it hands out for the server, by no rule.
+    pub(crate) fn plant_lock(&self, server: &str, owner: &str, links: Vec<super::join_lock::LockLink>) {
+        self.inner.lock().unwrap().locks.insert(super::join_lock::record_key(server, owner), links);
+    }
+
+    /// A relay restart without the memfd snapshot: every join lock chain is gone.
+    pub(crate) fn forget_locks(&self) {
+        self.inner.lock().unwrap().locks.clear();
+    }
+
+    /// A `lock_put` from a client that is not one of the test's nodes (a rogue mod's
+    /// modified client), judged by the same rule. Returns whether the relay took it.
+    pub(crate) fn put_lock(&self, server: &str, owner: &str, links: &[super::join_lock::LockLink]) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        relay_lock_put(&mut inner.locks, server, owner, links).1
     }
 
     /// Enable the load meter (scaling benchmark). Resets counts to zero. After
@@ -944,6 +996,20 @@ impl MockRelay {
                             issued_at_ms,
                         });
                     }
+                }
+            }
+            WsCommand::LockGet { locks } => {
+                for (server, owner) in locks.into_iter().take(256) {
+                    let links = inner.locks.get(&super::join_lock::record_key(&server, &owner)).cloned().unwrap_or_default();
+                    if let Some(conn) = inner.conns.get(from) {
+                        let _ = conn.event_tx.send(WsEvent::LockChain { server, links, put: None });
+                    }
+                }
+            }
+            WsCommand::LockPut { server, owner, links } => {
+                let (current, accepted) = relay_lock_put(&mut inner.locks, &server, &owner, &links);
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(WsEvent::LockChain { server, links: current, put: Some(accepted) });
                 }
             }
             WsCommand::KillAck { issued_at_ms } => {
@@ -2155,7 +2221,26 @@ async fn create_server_and_wait(node: &mut TestNode, name: &str) -> String {
     let server_id = server_id.expect("ServerCreated carried a server_id");
     let secret = node.live_server_state(&server_id).await.and_then(|s| s.join_secret());
     JOIN_SECRETS.lock().unwrap().insert(server_id.clone(), *secret.expect("a new server has its join key"));
+    SERVER_OWNERS.lock().unwrap().insert(server_id.clone(), node.master_id.clone());
+    // No one can ask to join before the owner's first lock is on the relay and in the state.
+    assert!(
+        wait_until(15, async || node.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.has_lock())).await,
+        "the owner makes the server's first join lock",
+    );
     server_id
+}
+
+/// The owner of every server the harness created: the relay keys a lock chain by it.
+static SERVER_OWNERS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn owner_of(server_id: &str) -> String {
+    SERVER_OWNERS.lock().unwrap().get(server_id).cloned().unwrap_or_default()
+}
+
+/// The newest join lock the relay shows for a harness-created server.
+fn relay_tip(relay: &MockRelay, server_id: &str) -> super::join_lock::LockLink {
+    relay.lock_chain(server_id, &owner_of(server_id)).last().cloned().expect("the server's join lock is on the relay")
 }
 
 /// The join secret of every server the harness created: what its members hold.
@@ -2183,11 +2268,12 @@ fn fresh_reply_key() -> String {
     super::sealed_box::key_to_text(&super::sealed_box::public_of(&super::sealed_box::new_secret().unwrap()))
 }
 
-/// `msg` sealed to a server's join key as `device` would send it, which is what an
-/// invite holder can write and nothing else can.
-fn sealed_to_members(server_id: &str, device: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
-    let key = super::sealed_box::public_of(&join_secret_of(server_id).expect("a harness-created server"));
-    super::join_lane::seal_to_members(&key, server_id, device, msg).expect("seals")
+/// `msg` sealed to a server's current door and invite key as `device` would send it,
+/// which is what an invite holder can write and nothing else can.
+fn sealed_to_members(relay: &MockRelay, server_id: &str, device: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
+    let invite = super::sealed_box::public_of(&join_secret_of(server_id).expect("a harness-created server"));
+    let tip = relay_tip(relay, server_id);
+    super::join_lane::seal_to_members(&tip.door_key().unwrap(), &invite, tip.n, server_id, device, msg).expect("seals")
 }
 
 /// The default `#general` channel id for a server.
@@ -2274,7 +2360,7 @@ fn sync_response(server_id: &str, ops: &[crate::crdt::operations::CrdtOp]) -> su
 
 /// `msg` sealed to the reply key of `joiner`'s pending join, as `from_device` would
 /// answer it: what a member that opened the request can write to the joiner.
-async fn sealed_to_joiner(joiner: &TestNode, server_id: &str, from_device: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
+async fn sealed_to_joiner(relay: &MockRelay, joiner: &TestNode, server_id: &str, from_device: &str, msg: &super::types::HavenMessage) -> Vec<u8> {
     let reply_key = || {
         joiner.store().load_pending_joins().ok()?.into_iter()
             .find(|row| row.server_id == server_id)?
@@ -2284,7 +2370,9 @@ async fn sealed_to_joiner(joiner: &TestNode, server_id: &str, from_device: &str,
     };
     assert!(wait_until(10, async || reply_key().is_some()).await, "the joiner's pending row holds its reply key");
     let key = super::sealed_box::key_from_text(&reply_key().unwrap()).unwrap();
-    super::join_lane::seal_to_joiner(&key, server_id, from_device, &joiner.device_id, msg).expect("seals")
+    let tip = relay_tip(relay, server_id);
+    let door = super::join_lock::test_door_secret(&tip.door).expect("a door this process made");
+    super::join_lane::seal_to_joiner(&key, &door, tip.n, server_id, from_device, &joiner.device_id, msg).expect("seals")
 }
 
 /// Persist a master-signed v1 `SignedDeviceList` (devices = `device_ids`) into the
@@ -18994,15 +19082,16 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
 /// Every `~join` ring frame for `server_id`, parsed, paired with the
 /// relay-stamped sender device. The relay-side truth behind a parked join.
 fn join_ring(relay: &MockRelay, server_id: &str) -> Vec<(String, super::types::HavenMessage)> {
-    let secret = join_secret_of(server_id);
+    let invite = join_secret_of(server_id).expect("a harness-created server");
+    let doors = super::join_lock::test_door_secrets();
     relay
         .topic_frames(server_id, super::types::JOIN_TOPIC)
         .into_iter()
         .filter_map(|(from, data)| {
-            let super::types::HavenMessage::JoinSealed { eph, ct } = serde_json::from_slice(&data).ok()? else {
+            let super::types::HavenMessage::JoinSealed { eph, ct, n, .. } = serde_json::from_slice(&data).ok()? else {
                 return None;
             };
-            super::join_lane::open(secret.as_ref(), None, server_id, &from, "", &eph, &ct).map(|m| (from, m))
+            super::join_lane::open_for_members(&invite, &doors, server_id, &from, n, &eph, &ct).map(|m| (from, m))
         })
         .collect()
 }
@@ -19046,6 +19135,8 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
         parked: false,
         key_package: None,
         reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
     };
     relay.inject(&server_id, &j.device_id, &o.device_id, serde_json::to_vec(&plain).unwrap());
     flush_frames(&relay, &mut o).await;
@@ -19071,7 +19162,7 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
 
     // A live request the relay held back: the box opens, and is judged a stale frame.
     let held_at = super::frame_auth::now_ms() - 10 * 60_000;
-    let held = sealed_to_members(&server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
+    let held = sealed_to_members(&relay, &server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -19080,6 +19171,8 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
         parked: false,
         key_package: None,
         reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
     });
     let j_key = NativeKeypair::from_secret_bytes(&seed_bytes(237));
     relay.inject_raw_direct(
@@ -20047,11 +20140,15 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
         b.pending_joins(),
     );
     assert!(!b.servers().contains(&server_id), "a rejected join builds no server");
+    // A refusal never ends a join (a removed member can fake one): the ask stays open
+    // in the room, and a genuine one simply never turns into an admission.
+    sleep_ms(500).await; // absence proof: the old code left the room in the same handler
     assert!(
-        wait_until(10, async || !relay.room_devices(&server_id).contains(&b.device_id)).await,
-        "a rejected joiner leaves the room, got {:?}",
+        relay.room_devices(&server_id).contains(&b.device_id),
+        "a refused joiner keeps its ask open in the room, got {:?}",
         relay.room_devices(&server_id),
     );
+    assert!(!b.servers().contains(&server_id), "and a genuine refusal still builds no server");
 
     drop(o);
     drop(b);
@@ -20338,7 +20435,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     let forged_master_id = forged_master.peer_id();
 
     let now = super::types::now_ms();
-    let bad = sealed_to_members(&server_id, &tampered_device, &super::types::HavenMessage::ServerJoinRequest {
+    let bad = sealed_to_members(&relay, &server_id, &tampered_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -20347,6 +20444,8 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         parked: true,
         key_package: None,
         reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &tampered_device, bad);
 
@@ -20354,7 +20453,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     // when this one lands we know A's catch-up has run, so the tampered frame's
     // absence from the member list is a decision, not a race.
     let legacy_device = NativeKeypair::from_secret_bytes(&seed_bytes(129)).peer_id();
-    let legacy = sealed_to_members(&server_id, &legacy_device, &super::types::HavenMessage::ServerJoinRequest {
+    let legacy = sealed_to_members(&relay, &server_id, &legacy_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -20363,6 +20462,8 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         parked: true,
         key_package: None,
         reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &legacy_device, legacy);
 
@@ -20770,17 +20871,15 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     })
     .await;
     assert!(asked, "the consent prompt reaches a joiner that was never online with the owner");
-    assert!(
-        wait_until(10, async || b.pending_joins().is_empty()).await,
-        "a question leaves NO row behind, got {:?}",
+    // A question never ends the ask under it (a removed member can send one too):
+    // the user's answer asks again, and until then the row and the room stay.
+    assert!(!discarded, "a question does not discard the tile");
+    assert_eq!(
         b.pending_joins(),
+        vec![(server_id.clone(), "pending".to_string(), String::new())],
+        "the row stays while the user decides",
     );
-    assert!(discarded, "and the tile is told to go");
-    assert!(
-        wait_until(10, async || !relay.room_devices(&server_id).contains(&b.device_id)).await,
-        "no row means not in that room, got {:?}",
-        relay.room_devices(&server_id),
-    );
+    assert!(relay.room_devices(&server_id).contains(&b.device_id), "and so does the room");
 
     // --- The user consents. The owner is back and is STILL re-serving the old
     // parked copy from the ring, so an `nsfw_confirm:` for the OLD ask is
@@ -21060,7 +21159,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
     go_offline(&relay, &a, &server_id).await;
 
     let mut sock = raw_socket(&relay, &b_device);
-    let legacy = sealed_to_members(&server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
+    let legacy = sealed_to_members(&relay, &server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -21069,6 +21168,8 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
         parked: true,
         key_package: None,
         reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
@@ -21377,7 +21478,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
     go_offline(&relay, &a, &server_id).await;
 
     let mut sock = raw_socket(&relay, &b_device);
-    let legacy = sealed_to_members(&server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
+    let legacy = sealed_to_members(&relay, &server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
@@ -21386,6 +21487,8 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
         parked: true,
         key_package: None,
         reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
@@ -22122,7 +22225,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-09-27: the design A frame tests added one spawn stagger and one absence
     // proof, a KeyRequest the relay must never see (2.7 s).
     // 2026-09-28: the C-24 sibling-lane tests added three spawn staggers (4.5 s).
-    const BUDGET_MS: u64 = 647_900;
+    // 2026-09-28: the join lock: a refused joiner that must NOT leave the room, and a
+    // card the owner must never store (1.0 s).
+    const BUDGET_MS: u64 = 648_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -25544,7 +25649,7 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
         vec![sync_response(&server_id, &[founding])],
     ] {
         for f in frames {
-            let sealed = sealed_to_joiner(&j, &server_id, &m.device_id, &f).await;
+            let sealed = sealed_to_joiner(&relay, &j, &server_id, &m.device_id, &f).await;
             relay.inject(&server_id, &m.device_id, &j.device_id, sealed);
         }
         // ABSENCE: nothing to poll for; the frames are handled in well under this.
@@ -25617,7 +25722,7 @@ async fn authz_a_pending_join_takes_its_answer_only_from_its_reply_key() {
     assert!(!joined, "a sync answer over Olm must not complete a pending join");
 
     // The same answer sealed to J's reply key completes it.
-    let sealed = sealed_to_joiner(&j, &server_id, &m.device_id, &sync_response(&server_id, &ops)).await;
+    let sealed = sealed_to_joiner(&relay, &j, &server_id, &m.device_id, &sync_response(&server_id, &ops)).await;
     relay.inject(&server_id, &m.device_id, &j.device_id, sealed);
     assert!(
         wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
@@ -25627,6 +25732,608 @@ async fn authz_a_pending_join_takes_its_answer_only_from_its_reply_key() {
         "the reply-key answer completes it"
     );
     drop((o, m));
+}
+
+// ── The join lock ────────────────────────────────────────────────────────
+
+fn join_cmd(server_id: &str) -> NodeCommand {
+    NodeCommand::JoinServer {
+        server_id: server_id.to_string(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(server_id),
+    }
+}
+
+/// The public half of the reply key `joiner`'s pending row holds for `server_id`.
+fn reply_key_of(joiner: &TestNode, server_id: &str) -> [u8; 32] {
+    let row = joiner.store().load_pending_joins().unwrap().into_iter().find(|r| r.server_id == server_id).expect("a pending row");
+    let reply = super::join_lane::ReplySecret::from_stored(row.reply_secret.as_deref().unwrap()).unwrap();
+    super::sealed_box::key_from_text(&reply.public_text()).unwrap()
+}
+
+fn pending_nonce_of(joiner: &TestNode, server_id: &str) -> i64 {
+    joiner.store().load_pending_joins().unwrap().into_iter().find(|r| r.server_id == server_id).expect("a pending row").requested_at
+}
+
+/// Every copy of `device`'s request in the join ring, as (door number, eph, ct).
+fn ring_copies_of(relay: &MockRelay, server_id: &str, device: &str) -> Vec<(u64, String, String)> {
+    relay
+        .topic_frames(server_id, super::types::JOIN_TOPIC)
+        .into_iter()
+        .filter(|(from, _)| from == device)
+        .filter_map(|(_, data)| match serde_json::from_slice(&data).ok()? {
+            super::types::HavenMessage::JoinSealed { eph, ct, n, .. } => Some((n, eph, ct)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn expect_joined(node: &mut TestNode, server_id: &str, secs: u64) -> bool {
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if sid == server_id)
+    })
+    .await
+}
+
+async fn expect_parked(node: &mut TestNode, server_id: &str) -> bool {
+    wait_event(node, std::time::Duration::from_secs(30), |ev| {
+        matches!(ev, NetworkEvent::ServerJoinParked { server_id: sid } if sid == server_id)
+    })
+    .await
+}
+
+/// A member removed by a mod leaves the lock behind it at once: the door it kept
+/// opens no copy of a later request, and an answer sealed from that door never
+/// counts, not even a genuine admission. The joiner asks again from the newest door,
+/// and the owner's admission completes the join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_a_removed_members_door_neither_reads_nor_answers_a_join() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, k, mut j, server_id) = owner_member_and_joiner(&relay, 241, 242, 243).await;
+    let first = relay_tip(&relay, &server_id);
+    let kept_door = super::join_lock::test_door_secret(&first.door).expect("K held it as a member");
+
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: k.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || {
+            let tip = relay_tip(&relay, &server_id);
+            tip.n > first.n
+                && o.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)
+        })
+        .await,
+        "the kick moves the lock on the relay and in the owner's state",
+    );
+    let tip = relay_tip(&relay, &server_id);
+    let door = super::join_lock::test_door_secret(&tip.door).unwrap();
+
+    // Nobody is there to answer, so J's request parks in the ring.
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner registers the join ring before it goes dark",
+    );
+    go_offline(&relay, &o, &server_id).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "J parks");
+    let invite = join_secret_of(&server_id).unwrap();
+    assert!(
+        wait_until(10, async || !ring_copies_of(&relay, &server_id, &j.device_id).is_empty()).await,
+        "J's copy is in the ring",
+    );
+    let copies = ring_copies_of(&relay, &server_id, &j.device_id);
+    for (n, eph, ct) in &copies {
+        assert_eq!(*n, tip.n, "sealed to the newest door");
+        let with = |d: [u8; 32]| {
+            super::join_lane::open_for_members(&invite, &[zeroize::Zeroizing::new(d)], &server_id, &j.device_id, *n, eph, ct)
+        };
+        assert!(with(kept_door).is_none(), "the removed member's door opens no copy");
+        assert!(with(door).is_some(), "the new door does");
+    }
+
+    // K kept its door, and J's reply key from a copy it read as a member. A genuine
+    // admission and a refusal, sealed from that door, both count for nothing.
+    let reply = reply_key_of(&j, &server_id);
+    let nonce = pending_nonce_of(&j, &server_id);
+    let mut ops = o.store().load_ops_for_server(&server_id, None).unwrap();
+    ops.push(forge_crdt_op(&server_id, &o.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+    }, 1, Some(&o.master_kp)));
+    let from_kept = |msg: &super::types::HavenMessage| {
+        super::join_lane::seal_to_joiner(&reply, &kept_door, first.n, &server_id, &k.device_id, &j.device_id, msg).unwrap()
+    };
+    relay.inject(&server_id, &k.device_id, &j.device_id, from_kept(&sync_response(&server_id, &ops)));
+    relay.inject(&server_id, &k.device_id, &j.device_id, from_kept(&super::types::HavenMessage::ServerJoinRejected {
+        server_id: server_id.clone(), reason: "banned".into(), requested_at: nonce,
+    }));
+    // Nor does claiming the new door's number: the box proves which door sealed it.
+    let claimed = super::join_lane::seal_to_joiner(&reply, &kept_door, tip.n, &server_id, &k.device_id, &j.device_id, &sync_response(&server_id, &ops)).unwrap();
+    relay.inject(&server_id, &k.device_id, &j.device_id, claimed);
+    carry_as(&k, &j, super::types::HavenMessage::TypingIndicator { server_id: String::new(), channel_id: j.master_id.clone() }).await;
+    let (k_master, mut moved) = (k.master_id.clone(), false);
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::ServerJoined { .. } | NetworkEvent::PendingJoinUpdated { .. } => {
+                moved = true;
+                false
+            }
+            NetworkEvent::TypingStarted { peer_id, .. } => *peer_id == k_master,
+            _ => false,
+        })
+        .await,
+        "the barrier arrives"
+    );
+    assert!(!moved, "nothing sealed from the removed member's door touches the join");
+    assert!(!j.servers().contains(&server_id), "no server from it");
+    assert!(
+        wait_until(10, async || ring_copies_of(&relay, &server_id, &j.device_id).len() > copies.len()).await,
+        "an answer from an older door makes J ask again, from the newest one",
+    );
+
+    relay.set_online(&o.device_id, true);
+    assert!(expect_joined(&mut j, &server_id, 40).await, "the owner's admission completes the join");
+    assert!(
+        wait_until(10, async || o.raw_crdt_member_keys(&server_id).contains(&j.master_id)).await,
+        "the owner admitted J's master",
+    );
+    assert!(wait_until(10, async || j.pending_joins().is_empty()).await, "no row stays behind");
+    drop(k);
+}
+
+/// A member who leaves on its own takes the door with it until an owner, admin or mod
+/// is back to move the lock. Its own app forgets the door; a modified one that kept
+/// it can refuse a joiner, and that only puts a reason on the tile: the owner, once
+/// back, moves the lock past the leave and admits the joiner, and the tile goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_moves_after_a_leave_and_a_leavers_refusal_never_ends_the_join() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, l, mut j, server_id) = owner_member_and_joiner(&relay, 244, 245, 246).await;
+    let first = relay_tip(&relay, &server_id);
+    let kept_door = super::join_lock::test_door_secret(&first.door).unwrap();
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner registers the join ring before it goes dark",
+    );
+
+    go_offline(&relay, &o, &server_id).await;
+    l.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || l.store().load_server_state(&server_id).ok().flatten().is_none()).await,
+        "the leaver's own app forgets the server and the door in it",
+    );
+    assert!(
+        l.store().load_ops_for_server(&server_id, None).unwrap_or_default().is_empty(),
+        "and every op that carried a door",
+    );
+    assert_eq!(relay_tip(&relay, &server_id).n, first.n, "nobody who can move the lock is online");
+
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "J parks");
+    let refusal = super::join_lane::seal_to_joiner(
+        &reply_key_of(&j, &server_id), &kept_door, first.n, &server_id, &l.device_id, &j.device_id,
+        &super::types::HavenMessage::ServerJoinRejected {
+            server_id: server_id.clone(), reason: "banned".into(), requested_at: pending_nonce_of(&j, &server_id),
+        },
+    )
+    .unwrap();
+    relay.inject(&server_id, &l.device_id, &j.device_id, refusal);
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::PendingJoinUpdated { server_id: sid, state, reason }
+                if *sid == server_id && state == "rejected" && reason == "banned"
+        ))
+        .await,
+        "a refusal from the door the leaver kept shows on the tile",
+    );
+    assert!(relay.room_devices(&server_id).contains(&j.device_id), "and the ask stays open");
+
+    relay.set_online(&o.device_id, true);
+    assert!(expect_joined(&mut j, &server_id, 40).await, "the owner's admission completes the join the refusal did not end");
+    assert!(
+        wait_until(15, async || relay_tip(&relay, &server_id).n > first.n).await,
+        "the owner, back, moved the lock past the leave",
+    );
+    assert!(wait_until(10, async || j.pending_joins().is_empty()).await, "the tile goes");
+    assert!(
+        wait_until(15, async || j
+            .live_server_state(&server_id)
+            .await
+            .and_then(|s| s.join_lock.newest_door())
+            .is_some_and(|(n, _, _)| n > first.n))
+        .await,
+        "J, now a member, holds the new door",
+    );
+}
+
+/// The one thing a leaver keeping its door can still do before the lock moves is
+/// hand a joiner a stale "you're in". The real admission lands on top of it: the
+/// joiner ends up in the real server, with the leaver gone from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_a_stale_admission_is_overtaken_by_the_real_one() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut m, mut j, server_id) = owner_member_and_joiner(&relay, 247, 248, 249).await;
+    let mut l = spawn_node_with_friends(&relay, 251, 251, &[]).await;
+    l.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut l, &server_id, 15).await, "L joins");
+    assert!(wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&l.master_id))).await);
+    let door_link = relay_tip(&relay, &server_id);
+    let kept_door = super::join_lock::test_door_secret(&door_link.door).unwrap();
+    // What L holds when it leaves: the log up to its leave.
+    let before_leave = o.store().load_ops_for_server(&server_id, None).unwrap();
+
+    go_offline(&relay, &o, &server_id).await;
+    l.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&l.master_id))).await,
+        "M sees L leave",
+    );
+    drain_events(&mut m);
+
+    // M's answer is held on the way, so L's stale one lands first.
+    relay.hold_direct(&m.device_id, &j.device_id);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(wait_until(10, async || !relay.held_kinds(&m.device_id, &j.device_id).is_empty()).await, "M answers");
+    let mut stale = before_leave.clone();
+    stale.push(forge_crdt_op(&server_id, &l.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+    }, 1, Some(&l.master_kp)));
+    let fake = super::join_lane::seal_to_joiner(
+        &reply_key_of(&j, &server_id), &kept_door, door_link.n, &server_id, &l.device_id, &j.device_id,
+        &sync_response(&server_id, &stale),
+    )
+    .unwrap();
+    relay.inject(&server_id, &l.device_id, &j.device_id, fake);
+    assert!(expect_joined(&mut j, &server_id, 15).await, "the stale admission completes the join first");
+    assert!(
+        j.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&l.master_id)),
+        "from a state where the leaver is still in",
+    );
+
+    relay.release_held(&m.device_id, &j.device_id);
+    assert!(
+        wait_until(15, async || j
+            .live_server_state(&server_id)
+            .await
+            .is_some_and(|s| !s.is_member(&l.master_id) && s.is_member(&j.master_id)))
+        .await,
+        "the real admission merges on top: the leaver is gone and J is in",
+    );
+    assert!(m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id)), "M admitted J");
+}
+
+/// Demoting a mod moves the lock at once: the change key it held signs nothing the
+/// relay takes, and no grant of the new one is sealed to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_a_demoted_mod_loses_the_change_key() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, _j, server_id) = owner_member_and_joiner(&relay, 252, 253, 254).await;
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "moderator".into() })
+        .await
+        .unwrap();
+    let open_mine = |state: &ServerState, link: &super::join_lock::LockLink| {
+        state
+            .join_lock
+            .grants_for(&link.change, &m.master_id)
+            .iter()
+            .find_map(|g| super::join_lock::open_grant(&server_id, &link.change, &m.master_kp, g))
+    };
+    assert!(
+        wait_until(15, async || {
+            let tip = relay_tip(&relay, &server_id);
+            m.live_server_state(&server_id).await.is_some_and(|s| open_mine(&s, &tip).is_some())
+        })
+        .await,
+        "a new mod is handed the change key",
+    );
+    let held = relay_tip(&relay, &server_id);
+    let change = open_mine(&m.live_server_state(&server_id).await.unwrap(), &held).unwrap();
+
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "member".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(15, async || relay_tip(&relay, &server_id).n > held.n).await, "the demotion moves the lock");
+    let tip = relay_tip(&relay, &server_id);
+    let own_next = super::join_lock::mint_next(&server_id, &held, &change).unwrap();
+    assert!(!relay.put_lock(&server_id, &o.master_id, &[own_next.link]), "the old change key moves nothing");
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.find(&tip).is_some())).await,
+        "the owner holds the new lock",
+    );
+    let state = o.live_server_state(&server_id).await.unwrap();
+    assert!(state.join_lock.grants_for(&tip.change, &m.master_id).is_empty(), "and never sealed its change key to the demoted mod");
+    assert!(!state.join_lock.grants_for(&tip.change, &o.master_id).is_empty(), "only to the owner");
+}
+
+/// A relay that restarted without its snapshot holds no lock at all: the first member
+/// back puts the chain back, so joining works again with no owner online.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_a_member_puts_the_chain_back_on_a_relay_that_forgot_it() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 203, 230, 231).await;
+    let before = relay.lock_chain(&server_id, &o.master_id);
+    go_offline(&relay, &o, &server_id).await;
+    go_offline(&relay, &m, &server_id).await;
+    relay.forget_locks();
+    assert!(relay.lock_chain(&server_id, &o.master_id).is_empty());
+
+    relay.set_online(&m.device_id, true);
+    assert!(
+        wait_until(15, async || relay.lock_chain(&server_id, &o.master_id) == before).await,
+        "a plain member, back first, puts the same chain back",
+    );
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 20).await, "and a join works with only that member online");
+}
+
+/// A rogue mod that moves the lock and keeps the new keys to itself shuts every
+/// joiner out. The owner, whose grant for that lock never comes, starts the chain over
+/// past it; the fork cannot come back, and joining works again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_the_owner_resets_a_rogue_mods_fork() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, r, mut j, server_id) = owner_member_and_joiner(&relay, 235, 202, 201).await;
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: r.master_id.clone(), new_role: "moderator".into() })
+        .await
+        .unwrap();
+    let granted = async || {
+        let tip = relay_tip(&relay, &server_id);
+        let state = r.live_server_state(&server_id).await?;
+        state.join_lock.grants_for(&tip.change, &r.master_id).iter()
+            .find_map(|g| super::join_lock::open_grant(&server_id, &tip.change, &r.master_kp, g))
+            .map(|c| (tip, c))
+    };
+    assert!(wait_until(15, async || granted().await.is_some()).await, "R is handed the change key");
+    let (tip, change) = granted().await.unwrap();
+    let fork = super::join_lock::mint_next(&server_id, &tip, &change).unwrap();
+    assert!(relay.put_lock(&server_id, &o.master_id, std::slice::from_ref(&fork.link)), "the relay takes R's lock first");
+
+    // The owner reads the relay again (a reconnect) and cannot move what it finds.
+    go_offline(&relay, &o, &server_id).await;
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(30, async || relay.lock_chain(&server_id, &o.master_id).first().is_some_and(|b| b.is_base() && b.n > fork.link.n)).await,
+        "the owner resets the chain past the fork, got {:?}",
+        relay.lock_chain(&server_id, &o.master_id),
+    );
+    let forked_chain = vec![tip.clone(), fork.link.clone()];
+    assert!(!relay.put_lock(&server_id, &o.master_id, &forked_chain), "the fork cannot come back");
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.join_lock.find(&relay_tip(&relay, &server_id)).is_some())).await,
+        "the owner holds the lock it reset to",
+    );
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 20).await, "joining works again");
+    drop(r);
+}
+
+/// Who is asking rides inside the sealed request: the member deciding learns the
+/// joiner's name from it, even for a request it refuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_the_card_rides_inside_the_request() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 206, 206, &[]).await;
+    let mut j = spawn_node_with_friends(&relay, 207, 207, &[]).await;
+    j.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Jo Asking".to_string(),
+            status: "not for strangers".to_string(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: None,
+        })
+        .await
+        .unwrap();
+    assert!(wait_event(&mut j, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::ProfileUpdated { .. })).await);
+    let server_id = create_server_and_wait(&mut o, "Door Policy").await;
+    o.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: j.master_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || o.server_state(&server_id).is_some_and(|s| s.is_banned(&j.master_id))).await);
+
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |ev| matches!(
+            ev, NetworkEvent::PendingJoinUpdated { state, .. } if state == "rejected"
+        ))
+        .await,
+        "the banned joiner is refused",
+    );
+    let card = o.store().load_profile_light(&j.master_id).unwrap();
+    assert_eq!(card.as_ref().map(|p| p.display_name.as_str()), Some("Jo Asking"), "the owner knows who asked, from the request");
+    assert!(
+        card.is_some_and(|p| p.status.is_empty()),
+        "and nothing past the card",
+    );
+
+    // A request carrying someone else's genuine card speaks only for its sender.
+    let other = keys(215);
+    let payload = super::crypto_handler::card_signing_payload(&other.peer_id(), 7, "Not Jo", "");
+    let pk = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, other.public_key_protobuf());
+    let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&other, &pk, &payload) else { panic!("signs") };
+    let foreign = super::types::SignedCard { master: other.peer_id(), display_name: "Not Jo".into(), avatar_hash: String::new(), updated_at: 7, sig, pk };
+    let list = super::crypto_handler::build_signed_device_list(&j.master_kp, 1, vec![j.device_id.clone()], Vec::new());
+    let forged = sealed_to_members(&relay, &server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, requested_at: 5,
+        device_list: Some(list), parked: false, key_package: None, reply_key: fresh_reply_key(),
+        card: Some(foreign), avatar_b64: String::new(),
+    });
+    relay.inject(&server_id, &j.device_id, &o.device_id, forged);
+    sleep_ms(500).await; // absence proof: a card that must never be stored
+    assert!(o.store().load_profile_light(&other.peer_id()).unwrap().is_none(), "another master's card is not stored");
+    let _ = &mut o;
+}
+
+/// A joiner that read the lock before a member was removed reads it again before an
+/// answer counts: the removed member's "you're in", sealed from the door the joiner
+/// once saw as newest, is dropped, and the owner's real answer completes the join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_a_lock_read_before_a_removal_is_read_again_before_an_answer_counts() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, k, mut j, server_id) = owner_member_and_joiner(&relay, 204, 205, 208).await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner registers the join ring",
+    );
+    let first = relay_tip(&relay, &server_id);
+    let kept_door = super::join_lock::test_door_secret(&first.door).unwrap();
+    // What K holds while it is a member: the log it would hand out as "you're in".
+    let before_kick = o.store().load_ops_for_server(&server_id, None).unwrap();
+
+    // J reads the lock and parks while nobody is there.
+    go_offline(&relay, &o, &server_id).await;
+    go_offline(&relay, &k, &server_id).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "J parks");
+
+    // The owner comes back, its answer to J held on the way, and removes K.
+    relay.hold_direct(&o.device_id, &j.device_id);
+    relay.set_online(&o.device_id, true);
+    assert!(wait_until(20, async || !relay.held_kinds(&o.device_id, &j.device_id).is_empty()).await, "the owner answers J");
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: k.master_id.clone() }).await.unwrap();
+    assert!(wait_until(15, async || relay_tip(&relay, &server_id).n > first.n).await, "the kick moves the lock");
+
+    // K, back with the door it kept, hands J a stale admission from that door.
+    relay.set_online(&k.device_id, true);
+    let mut stale = before_kick.clone();
+    stale.push(forge_crdt_op(&server_id, &k.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+    }, 1, Some(&k.master_kp)));
+    let fake = super::join_lane::seal_to_joiner(
+        &reply_key_of(&j, &server_id), &kept_door, first.n, &server_id, &k.device_id, &j.device_id,
+        &sync_response(&server_id, &stale),
+    )
+    .unwrap();
+    relay.inject(&server_id, &k.device_id, &j.device_id, fake);
+    relay.release_held(&o.device_id, &j.device_id);
+
+    let (k_master, mut first_state) = (k.master_id.clone(), None);
+    assert!(expect_joined(&mut j, &server_id, 40).await, "the join completes");
+    if let Some(state) = j.live_server_state(&server_id).await {
+        first_state = Some(state.is_member(&k_master));
+    }
+    assert_eq!(first_state, Some(false), "and never from the removed member's state");
+    assert!(o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id)), "the owner admitted J");
+}
+
+/// A member's honest answer can come from a door that moved before the joiner read
+/// it. The joiner then asks again from the newest door, and a member that already
+/// admitted it serves its state again from the ring, with no one online meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_an_answer_from_a_door_that_moved_is_answered_again() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, x, mut j, server_id) = owner_member_and_joiner(&relay, 209, 210, 211).await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner registers the join ring",
+    );
+    let first = relay_tip(&relay, &server_id);
+
+    // The owner admits J; the answer is held on the way (X's too, which answers the
+    // retried ask and is removed next). Then the lock moves.
+    relay.hold_direct(&o.device_id, &j.device_id);
+    relay.hold_direct(&x.device_id, &j.device_id);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await,
+        "the owner admits J",
+    );
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: x.master_id.clone() }).await.unwrap();
+    assert!(wait_until(15, async || relay_tip(&relay, &server_id).n > first.n).await, "the kick moves the lock");
+    go_offline(&relay, &o, &server_id).await;
+
+    // The answer arrives sealed from the door before: J asks again and parks.
+    relay.release_held(&o.device_id, &j.device_id);
+    assert!(expect_parked(&mut j, &server_id).await, "J asks again and parks");
+    assert!(!j.servers().contains(&server_id), "no server from an answer the lock has moved past");
+
+    // J goes away; the owner comes back, serves J's new ask from the ring and is gone
+    // again before J returns, so only that answer can complete the join.
+    let tip = relay_tip(&relay, &server_id);
+    go_offline(&relay, &j, &server_id).await;
+    relay.set_online(&o.device_id, true);
+    let answered = || {
+        relay.buffered_frames(&j.device_id).iter().any(|body| {
+            matches!(serde_json::from_slice(body), Ok(super::types::HavenMessage::JoinSealed { n, .. }) if n == tip.n)
+        })
+    };
+    assert!(wait_until(20, async || answered()).await, "the owner serves the new ask from the newest door");
+    go_offline(&relay, &o, &server_id).await;
+    relay.set_online(&j.device_id, true);
+    assert!(expect_joined(&mut j, &server_id, 30).await, "that answer completes the join");
+    assert!(wait_until(10, async || j.pending_joins().is_empty()).await, "the tile goes");
+    drop(x);
+}
+
+/// The relay can only withhold a chain: a joiner seals nothing to one its owner did
+/// not sign, even when the relay hands out nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_lock_a_joiner_seals_only_to_a_chain_its_owner_signed() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 212, 212, &[]).await;
+    let mut j = spawn_node_with_friends(&relay, 213, 213, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Signed Doors").await;
+    let impostor = keys(214);
+    let planted = super::join_lock::mint_base(&server_id, 7, &impostor, Some("00")).unwrap();
+    relay.plant_lock(&server_id, &o.master_id, vec![planted.link.clone()]);
+
+    relay.set_recording(&j.device_id, true);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "with no chain it can trust, J waits");
+    let sealed_by_j = relay
+        .recorded_frames(&j.device_id)
+        .iter()
+        .filter(|d| {
+            serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(d))
+                .is_ok_and(|m| matches!(m, super::types::HavenMessage::JoinSealed { .. }))
+        })
+        .count();
+    assert_eq!(sealed_by_j, 0, "and seals nothing to a door the owner never signed");
+    assert!(!j.servers().contains(&server_id));
+    let _ = &mut o;
 }
 
 /// E7: a member re-adding a banned identity, or admitting anyone into a private
@@ -26614,7 +27321,7 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
 
     let o_device = o.device_id.clone();
     let request = |at: i64, nonce: u8| {
-        let body = sealed_to_members(&server_id, &m.device_id, &super::types::HavenMessage::ServerJoinRequest {
+        let body = sealed_to_members(&relay, &server_id, &m.device_id, &super::types::HavenMessage::ServerJoinRequest {
             server_id: server_id.clone(),
             twitch_proof_json: None,
             nsfw_confirmed: false,
@@ -26623,6 +27330,8 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
             parked: false,
             key_package: None,
             reply_key: fresh_reply_key(),
+            card: None,
+            avatar_b64: String::new(),
         });
         super::frame_auth::seal_at(&m_key, &server_id, &o_device, at, [nonce; 16], &body)
     };

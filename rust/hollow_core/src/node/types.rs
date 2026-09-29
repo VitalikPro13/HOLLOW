@@ -758,7 +758,59 @@ pub(crate) struct PendingJoin {
     /// Our reply key for this row, minted once like the KeyPackage: an answer to an
     /// older copy of the request still opens.
     pub(crate) reply_secret: Option<super::join_lane::ReplySecret>,
+    /// The join lock as we last verified it from the relay: the door every copy is
+    /// sealed to, and the oldest door an answer may come from. RAM only; a restart
+    /// asks again.
+    pub(crate) lock: Option<super::join_lock::VerifiedLock>,
+    /// When we last asked the relay for the lock.
+    pub(crate) lock_asked_at: Option<std::time::Instant>,
+    /// When each ask still unanswered was sent, oldest first: the relay answers in
+    /// order, so each reply says which held answers it can judge.
+    pub(crate) lock_asks: std::collections::VecDeque<std::time::Instant>,
+    /// Answers waiting for a read of the lock asked after they arrived.
+    pub(crate) held: Vec<HeldAnswer>,
+    /// The last refusal, shown on the tile. It never ends the join: a real
+    /// admission still completes it (a removed member can fake a refusal).
+    pub(crate) refused: Option<String>,
+    /// A member asked the user something (NSFW consent, a Twitch proof): the answer
+    /// asks again, so this ask no longer parks.
+    pub(crate) asked: bool,
+    /// The lock number we last asked again for, after an answer came from an older
+    /// door: once per lock.
+    pub(crate) reasked_for: Option<u64>,
+    /// Our card and its avatar, carried inside every copy of the request.
+    pub(crate) card: Option<SignedCard>,
+    pub(crate) avatar_b64: String,
 }
+
+/// A sealed answer to our join, kept until the lock it names can be judged.
+#[derive(Debug, Clone)]
+pub(crate) struct HeldAnswer {
+    pub(crate) arrived_at: Instant,
+    pub(crate) from: String,
+    pub(crate) eph: String,
+    pub(crate) ct: String,
+    pub(crate) n: u64,
+    pub(crate) door: String,
+    pub(crate) frame_ts: i64,
+    pub(crate) frame_nonce: [u8; super::frame_auth::NONCE_LEN],
+}
+
+/// Answers held per join at most: more waiting than this is a flood, not members.
+pub(crate) const MAX_HELD_ANSWERS: usize = 16;
+
+/// A join that just completed. A sync answer sealed to its reply key from the door
+/// we verified still merges for a while: the first "you're in" may have come from a
+/// member who left and kept the door, and the real one lands on top of it.
+#[derive(Debug, Clone)]
+pub(crate) struct RecentJoin {
+    pub(crate) reply: super::join_lane::ReplySecret,
+    pub(crate) door: super::join_lock::LockLink,
+    pub(crate) until: Instant,
+}
+
+/// How long a completed join keeps taking its answers.
+pub(crate) const RECENT_JOIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// How often a still-parked join re-deposits its copy into the `~join` ring.
 ///
@@ -1526,6 +1578,13 @@ pub(crate) enum HavenMessage {
         /// the request is sealed to it, so only the joiner reads them.
         #[serde(default)]
         reply_key: String,
+        /// Who is asking: the joiner's signed card (A28), so the member deciding needs
+        /// no Olm session with a stranger to learn a name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card: Option<SignedCard>,
+        /// The card's avatar on the live copy only; the ring copy stays small.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        avatar_b64: String,
     },
 
     #[serde(rename = "join_rejected")]
@@ -1577,6 +1636,13 @@ pub(crate) enum HavenMessage {
     JoinSealed {
         eph: String,
         ct: String,
+        /// The number of the door the box is sealed to or from (`join_lock`).
+        #[serde(default)]
+        n: u64,
+        /// On an answer to a joiner, that door's public half, so the joiner can tell
+        /// an answer from an older door from a box that is not for it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        door: String,
     },
 
     /// Sent to the kicked member so they remove themselves from the server.

@@ -27,6 +27,8 @@ import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/pending_join_provider.dart';
+import 'package:hollow/src/core/services/pending_join_ffi.dart'
+    show discardPendingJoin;
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -1756,7 +1758,12 @@ class EventStreamNotifier extends Notifier<bool> {
             serverName: serverName.isEmpty ? 'This server' : serverName,
             onProceed: () =>
                 crdt_api.joinServer(serverId: serverId, nsfwConfirmed: true),
-          );
+          ).then((joined) {
+            // The ask stays open under the question: declining ends it.
+            if (!joined) {
+              Future.sync(() => discardPendingJoin(serverId)).catchError((_) {});
+            }
+          });
         } else {
           final handled = handleTwitchJoinResult(success: false, error: reason);
           if (!handled) {

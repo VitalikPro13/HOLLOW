@@ -1,6 +1,8 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/services/pending_join_ffi.dart'
+    show discardPendingJoin;
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -37,7 +39,7 @@ void showTwitchJoinDialog(
   required bool requireSub,
   String? failureReason,
 }) {
-  showHollowDialog(
+  showHollowDialog<bool>(
     context: context,
     builder: (_) => _TwitchJoinDialog(
       serverId: serverId,
@@ -48,7 +50,13 @@ void showTwitchJoinDialog(
       requireSub: requireSub,
       failureReason: failureReason,
     ),
-  );
+  ).then((joined) {
+    // The ask stays open under the question; closing it without joining is the
+    // user giving up. A refusal shown here keeps its tile instead.
+    if (joined != true && failureReason == null) {
+      Future.sync(() => discardPendingJoin(serverId)).catchError((_) {});
+    }
+  });
 }
 
 //// The "you cannot join this server" dialog, with the specific reason: a vague
@@ -185,7 +193,7 @@ class _TwitchJoinDialogState extends ConsumerState<_TwitchJoinDialog>
     if (success) {
       setState(() => _step = _JoinStep.success);
       Future.delayed(const Duration(milliseconds: 1500), () {
-        if (mounted) Navigator.of(context).pop();
+        if (mounted) Navigator.of(context).pop(true);
       });
     } else {
       _fail(error ??

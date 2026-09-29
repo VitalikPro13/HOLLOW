@@ -23,4 +23,11 @@ std::string hmac_sha1_base64(const std::string& secret,
 
 std::string hex_encode(const uint8_t* data, size_t len);
 
+// Lowercase hex SHA-256 of `message`.
+std::string sha256_hex(const std::string& message);
+
+// The self-certifying server id an owner peer id and a founding nonce hash to,
+// matching the client's `anchor::derive_server_id`.
+std::string genesis_server_id(const std::string& owner_peer_id, const std::string& nonce);
+
 uint64_t now_unix_secs();

@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include <App.h>
+#include "join_lock.h"
 #include "kill_list.h"
 #include "license.h"
 #include "offline_index.h"
@@ -368,6 +369,8 @@ struct RelayState {
     // holds an opaque blob per target device id and hands it over on that
     // device's next auth; only that device's ack removes it.
     KillList kill_list;
+    // Join lock chains (join_lock.h): public halves only, re-checked by every reader.
+    JoinLocks join_locks;
 
     // Highest device-list version this relay has seen verify for each master
     // (RELAY-6). A revoked device keeps its last master-signed list forever and

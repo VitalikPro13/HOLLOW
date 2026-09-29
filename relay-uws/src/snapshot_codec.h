@@ -16,10 +16,11 @@
 namespace snapshot {
 
 // 2 added the parked destroy signals (`kills`), 3 the device-list version marks
-// that keep a revoked device out of its master's mailbox (`marks`). An older
-// snapshot still decodes, without the newer fields, so a relay coming up on this
-// build keeps the buffers the previous one handed over.
-static constexpr uint32_t VERSION = 3;
+// that keep a revoked device out of its master's mailbox (`marks`), 4 the join
+// lock chains (`locks`). An older snapshot still decodes, without the newer
+// fields, so a relay coming up on this build keeps the buffers the previous one
+// handed over.
+static constexpr uint32_t VERSION = 4;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -84,6 +85,11 @@ struct Mark {
     std::string master;
     uint64_t version = 0;
 };
+// One join lock chain: its record key and the links as the JSON the wire carries.
+struct Lock {
+    std::string key;
+    std::string links_json;
+};
 
 struct Data {
     std::vector<DmQueue> dm;
@@ -93,6 +99,7 @@ struct Data {
     std::vector<PushPref> push_prefs;
     std::vector<Kill> kills;
     std::vector<Mark> marks;  // oldest first, the eviction order
+    std::vector<Lock> locks;  // least recently used first, the eviction order
 
     size_t dm_frames() const {
         size_t n = 0;
@@ -268,6 +275,12 @@ inline std::string encode(const Data& d) {
         w.u64(m.version);
     }
 
+    w.count(d.locks.size());
+    for (const auto& l : d.locks) {
+        w.str(l.key);
+        w.str(l.links_json);
+    }
+
     w.out.append("HRSE", 4);
     return w.out;
 }
@@ -359,6 +372,15 @@ inline bool decode(std::string_view bytes, Data& out) {
             Mark m;
             if (!r.str(m.master) || !r.u64(m.version)) return false;
             d.marks.push_back(std::move(m));
+        }
+    }
+
+    if (version >= 4) {
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            Lock l;
+            if (!r.str(l.key) || !r.str(l.links_json)) return false;
+            d.locks.push_back(std::move(l));
         }
     }
 

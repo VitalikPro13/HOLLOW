@@ -5043,9 +5043,10 @@ mod tests {
         match serde_json::from_str::<HavenMessage>(old_wire).unwrap() {
             HavenMessage::ServerJoinRequest {
                 server_id, twitch_proof_json, nsfw_confirmed,
-                requested_at, device_list, parked, key_package, reply_key,
+                requested_at, device_list, parked, key_package, reply_key, card, avatar_b64,
             } => {
                 assert_eq!(server_id, "abc");
+                assert!(card.is_none() && avatar_b64.is_empty(), "old wire carries no card");
                 assert!(twitch_proof_json.is_none());
                 assert!(nsfw_confirmed);
                 assert_eq!(requested_at, 0, "no nonce = a legacy client");
@@ -5069,6 +5070,8 @@ mod tests {
                 parked: true,
                 key_package: None,
                 reply_key: "rk".to_string(),
+                card: None,
+                avatar_b64: String::new(),
             })
             .unwrap(),
             r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":7,"parked":true,"reply_key":"rk"}"#,
@@ -5086,6 +5089,8 @@ mod tests {
             parked: true,
             key_package: Some("a2V5cGFja2FnZQ".to_string()),
             reply_key: "rk".to_string(),
+            card: None,
+            avatar_b64: String::new(),
         })
         .unwrap();
         assert_eq!(
@@ -5114,6 +5119,8 @@ mod tests {
             parked: true,
             key_package: None,
             reply_key: "rk".to_string(),
+            card: None,
+            avatar_b64: String::new(),
         })
         .unwrap();
         match serde_json::from_str::<HavenMessage>(&wire).unwrap() {

@@ -63,6 +63,14 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         auto it = st.device_list_max_version.find(master);
         if (it != st.device_list_max_version.end()) d.marks.push_back({master, it->second});
     }
+    {
+        std::vector<std::pair<uint64_t, const std::string*>> order;
+        for (const auto& [key, rec] : st.join_locks.records) order.push_back({rec.touched, &key});
+        std::sort(order.begin(), order.end());
+        for (const auto& [touched, key] : order) {
+            d.locks.push_back({*key, join_lock::links_to_json(st.join_locks.records.at(*key).links).dump()});
+        }
+    }
     for (const auto& [peer, servers] : st.push_prefs) {
         snapshot::PushPref p;
         p.peer = peer;
@@ -103,6 +111,10 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
         if (st.device_list_max_version.emplace(m.master, m.version).second) {
             st.device_list_version_fifo.push_back(std::move(m.master));
         }
+    }
+    for (auto& l : d.locks) {
+        const nlohmann::json j = nlohmann::json::parse(l.links_json, nullptr, /*allow_exceptions=*/false);
+        if (auto links = join_lock::links_from_json(j)) st.join_locks.restore(l.key, std::move(*links));
     }
 
     // The eviction index must see every frame in the order the old process

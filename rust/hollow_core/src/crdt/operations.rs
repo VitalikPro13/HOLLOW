@@ -178,6 +178,17 @@ pub enum CrdtPayload {
     JoinKeySet {
         secret: JoinSecret,
     },
+    /// A join lock (`node/join_lock.rs`): its link, the door's secret half for every
+    /// member, and its change key sealed to each owner, admin and mod by master. The
+    /// relay took the link before the op was written. A later op for the same link
+    /// adds grants or the owner's compacting signature.
+    JoinLock {
+        link: crate::node::join_lock::LockLink,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        door: Option<JoinSecret>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        grants: std::collections::BTreeMap<String, String>,
+    },
     /// Server deletion tombstone, owner-authored only (validated at ingest). Marks the
     /// state `deleted` and drains membership, but survives in the op_log so reconnecting
     /// members reconcile through ordinary grow-only sync.

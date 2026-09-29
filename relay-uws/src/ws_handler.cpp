@@ -1222,6 +1222,69 @@ static void handle_kill_deposit(SSLWebSocket* ws, PerSocketData* data, const jso
     // No logging - the targets of a destroy are the social graph of an identity.
 }
 
+// The crypto the join lock rules read (join_lock.h), wired to libsodium.
+static const LockCrypto& lock_crypto() {
+    static const LockCrypto crypto{
+        [](const std::string& key, const std::string& sig, const std::string& msg) { return verify_ed25519(key, sig, msg); },
+        [](const std::string& key) { return derive_peer_id(key); },
+        [](const std::string& owner, const std::string& nonce) { return genesis_server_id(owner, nonce); },
+    };
+    return crypto;
+}
+
+// A (server, owner) pair as a record key: an id of the server shape, and an owner
+// that is a peer id (or none, for an id that names its owner itself).
+static bool lock_key_shape(const std::string& server, const std::string& owner) {
+    return join_lock::is_server_id_shape(server) && (owner.empty() || is_peer_id_shape(owner));
+}
+
+static std::string json_text(const json& j, const char* field) {
+    auto it = j.find(field);
+    return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+// The chains of up to 256 servers, one `lock_chain` each (empty when none). Anyone
+// authenticated may read one: a joiner is not a member yet, and a chain holds
+// nothing but public halves the server's invites already imply.
+static void handle_lock_get(SSLWebSocket* ws, PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest) return;
+    auto locks = j.find("locks");
+    if (locks == j.end() || !locks->is_array()) return;
+    size_t seen = 0;
+    for (const auto& e : *locks) {
+        if (++seen > 256) break;
+        if (!e.is_object()) continue;
+        std::string server = json_text(e, "server");
+        std::string owner = json_text(e, "owner");
+        if (!lock_key_shape(server, owner)) continue;
+        const auto* chain = state.join_locks.get(join_lock::record_key(server, owner));
+        send_json(ws, {{"type", "lock_chain"},
+                       {"server", server},
+                       {"owner", owner},
+                       {"links", join_lock::links_to_json(chain ? *chain : std::vector<LockLink>{})}});
+    }
+}
+
+// Offer a chain, or the next links of one. The relay takes it only by the rules in
+// join_lock.h and answers with the chain it holds either way.
+static void handle_lock_put(SSLWebSocket* ws, PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest || data->is_fetch) return;
+    std::string server = json_text(j, "server");
+    std::string owner = json_text(j, "owner");
+    if (!lock_key_shape(server, owner)) return;
+    auto links_it = j.find("links");
+    if (links_it == j.end()) return;
+    auto links = join_lock::links_from_json(*links_it);
+    if (!links) return;
+    std::vector<LockLink> current;
+    bool accepted = state.join_locks.put(server, owner, *links, lock_crypto(), current);
+    send_json(ws, {{"type", "lock_chain"},
+                   {"server", server},
+                   {"owner", owner},
+                   {"links", join_lock::links_to_json(current)},
+                   {"put", accepted}});
+}
+
 // The only removal a client can ask for, and always its own. `issued_at_ms`
 // names the one signal answered; without it (older clients, and a finished wipe)
 // every signal for the caller goes.
@@ -2314,6 +2377,10 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_kill_deposit(ws, data, j, state);
     } else if (type == "kill_ack") {
         handle_kill_ack(data, j, state);
+    } else if (type == "lock_get") {
+        handle_lock_get(ws, data, j, state);
+    } else if (type == "lock_put") {
+        handle_lock_put(ws, data, j, state);
     } else if (type == "set_push_prefs") {
         handle_set_push_prefs(data, j, state);
     } else if (type == "set_offline_buffer") {
