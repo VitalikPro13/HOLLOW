@@ -250,6 +250,10 @@ Mirrored in Dart at `lib/src/core/providers/server_provider.dart:Permission` and
 
 ---
 
+### JoinLock (2026-09-28)
+
+`CrdtPayload::JoinLock { link, door: Option<JoinSecret>, grants }`: a join lock the relay took (`node/join_lock.rs`): its link, the door's secret for every member, the change key sealed per owner/admin/mod master. Applied into `ServerState.join_lock` (`crdt/lock_state.rs`: links from the newest owner-signed one, doors for the newest 8 numbers, grants), carried by checkpoints. `MemberRemoved`/`MemberBanned` of a member and a demotion from mod+ call `note_removal`; `rotation_due()` = a removal later than the newest door. `JoinKeySet` stays as the static invite key (`key=`).
+
 ## ServerState — Full CRDT State (`server_state.rs`)
 
 The complete replicated state of a Hollow server. Every field is either an add-wins set (HashMap with `or_insert_with`), an AdminLwwReg, or a simple overwrite.

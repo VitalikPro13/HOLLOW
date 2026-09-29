@@ -67,7 +67,7 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalik); being built as design A-D1, see note 2 |
+| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalik); held for 0.12 with HOL-SEC-062 (design A-D1), except the names in a meeting knock, see note 2 |
 | C-25 | A malicious relay can delay or drop traffic, but cannot forge a message, a server change, a device list, a friend accept or a destroy order. | P-01 | WP 23.1 | Believed |
 | C-26 | Apple, Google and UnifiedPush distributors receive only a wake-up and a sender id, never message content. | P-11 | WP 13 | Believed |
 | C-27 | Reading a message with a link preview makes no request from my device to the linked site. | P-12 | WP 23.1 | Believed |
@@ -136,3 +136,10 @@ adds):
    cost bandwidth and battery and still fall to timing analysis on a small
    network, so the claim now promises what the design can keep: the relay reads
    no data, only routing. WP 3.1 follows at close-out.
+   Held for 0.12 (HOL-SEC-062, 2026-09-29). The relay sees routing metadata: which
+   devices join an identity's inbox room, so it can group one person's devices;
+   room names; sizes and timing; a file transfer's id; a share room's root hash;
+   data-channel SDP. It never reads message content, profiles, server state,
+   friend lists or join requests. Still open: a meeting knock carries the
+   knocker's display name and avatar hash, and the lobby frame the host's, in
+   the clear.

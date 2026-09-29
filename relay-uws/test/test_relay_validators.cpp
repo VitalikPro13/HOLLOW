@@ -301,9 +301,21 @@ static void eviction_index_tests() {
     printf("\n");
 }
 
+// Pinned in rust/hollow_core/src/node/nick_claim.rs
+// (nickname_claim_payload_matches_the_relays_pinned_vector).
+static void nickname_claim_tests() {
+    printf("nickname_claim_message\n");
+    check_bool("the claim message matches the client's pinned vector",
+               nickname_claim_message("vitalik_7", "12D3KooWDevice", "12D3KooWMaster", 1790000000000) ==
+                   "hollow-nick1\nvitalik_7\n12D3KooWDevice\n12D3KooWMaster\n1790000000000",
+               true);
+    printf("\n");
+}
+
 int main() {
     printf("relay validators + offline index\n\n");
     peer_id_shape_tests();
+    nickname_claim_tests();
     fair_share_tests();
     backstop_tests();
     eviction_index_tests();

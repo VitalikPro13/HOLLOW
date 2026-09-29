@@ -153,6 +153,10 @@ sleeps.
 
 ### A-D1. What the relay may read (C-24)
 
+A-D1 status: all six phases (1, 2, E, F, D, C) and the join lock are built (sessions 12
+to 16, commits e39ed7cb, c54bcbe9, 73591cbe, daa9917f, 54aef252, 7b3cb37f); finding
+HOL-SEC-062.
+
 Today the relay reads, in plaintext: every CRDT op (server names, channel names incl.
 restricted ones, roles, bans, member lists), full op logs, profiles and signed device
 lists (announced to every room peer, strangers included), our friend list and DM contact
@@ -221,7 +225,55 @@ BUILT (session 13, phases E and F):
   `destroy_friend_announce_flips_verified_and_banner` before the presence change above,
   `peer_fallback_recovers_own_sends_correct_direction` about once in nine runs, and
   possibly the two call tests session 12 noted, not checked). Glare should settle on one
-  session.
+  session. FIXED in session 14 (3eccd2f6, `crypto/olm_manager.rs`, one rule for the node,
+  the push fetch node and the forwarder). The cause was a repeated KeyRequest that the
+  peer answered twice. A PreKey is now matched to its session by session id; under glare
+  the lower device id keeps its session and the higher switches to it; a replaced
+  session is retired, not dropped (decrypt only, at most four per peer, in memory), and a
+  message only a retired session reads switches back to it; a KeyRequest against a fresh
+  (under 10 s) unanswered outbound session gets one PreKey resend on that session instead
+  of a new bundle. Decrypt failures across the full suite went from 462 to none outside
+  the revocation test that expects them.
+
+BUILT (session 14, phase D, profiles; 73591cbe):
+- `ProfileUpdate`, `ProfileRequest`, `ProfileRequestFor`, `ProfileRelay` and a new
+  `ProfileCard` are Carried: announces, pulls and relays ride Olm next to the MLS
+  broadcast to co-members, and a plaintext copy is dropped before any handler.
+- One audience rule, `social::profile_audience`, applied by every announce path: the
+  full profile to our own devices, friends and co-members (`data_channel_peer_allowed`),
+  a card to either side of a pending friend request, nothing to anyone else or to a
+  revoked device. The receive side ignores the profile fields of a sender we would send
+  nothing to (its device list is still ingested). Decided by Vitalik (A28, 2026-09-28):
+  before a request is accepted each side sees only the name and the avatar.
+- The card (`node/profile_card.rs`) is signed by the master under `hollow-card1` over the
+  master id, `updated_at`, name and avatar hash, and must name its sender's own master (the
+  resolver after the carried device list, or the MLS leaf's certified master in a
+  meeting). It is stored only when newer and clears any stored full proof, so a card row
+  is never relayed. A friend request carries it AES-256-GCM-sealed under
+  `dm_room::pair_key` (`hollow-card-seal1`, bound to requester, target and
+  `requested_at`), so the relay reads no name. Meeting participants get each other's card
+  over the meeting's MLS group once admitted, answered once per new participant; a joiner
+  shows its card to the members it asks (moved inside the sealed request by the join
+  lock, session 16).
+- N1, decided by Vitalik (sign every field): `hollow-profile2` signs the peer,
+  `updated_at` and all eleven fields (name, status, about, Twitch name, avatar, banner and
+  asset hashes, board, frame, avatar and banner animations), blobs by hash, and every
+  ingest path requires it; support credentials keep their own signature. Our own profile
+  is signed fresh on every send. A relayer keeps the owner's proof with the signed banner
+  and asset hashes, so a relayed copy verifies whole; banner and asset bytes never ride a
+  relay.
+- A revoked device of ours, which no session reaches any more, gets only
+  `DeviceListTombstone` (relay lane, master-signed), the one frame that makes it wipe.
+- Tests: `c24_a_profile_never_rides_in_the_clear`,
+  `authz_a_full_profile_goes_only_to_someone_we_know` (now through a session),
+  `authz_a_card_or_a_relayed_profile_speaks_only_for_its_owner`,
+  `friend_request_carries_a_sealed_card`, `meeting_participants_see_each_others_card_once_admitted`,
+  `a_joiner_shows_its_card_to_the_members_it_asks`, unit tests in `crypto_handler` and
+  `dm_room`. Eleven rules were put back one at a time and each failed its test. The two
+  card checks without a test got one in session 15
+  (`a_sealed_card_naming_another_master_is_refused`,
+  `a_meeting_card_claiming_another_master_is_not_stored`). The support-credential
+  relay-tamper hooks are gone: the relay can no longer touch a profile.
 
 BUILT (session 15, phase C, the join lane):
 - The server join key. The owner puts an X25519 secret in the CRDT (`JoinKeySet`, Owner
@@ -270,6 +322,16 @@ BUILT (session 15, phase C, the join lane):
   until the owner opens the app once, and invites made meanwhile carry no key. (c) The
   card a joiner shows the members (phase D) still rides Olm, so it opens a session with a
   stranger member; it could ride inside the join box.
+  All three settled (Vitalik, 2026-09-28): (a) answered by the join lock (session 16
+  block below); (b) dropped, owners update to 0.12; (c) yes, the card now rides inside the
+  sealed request.
+- Fixed after the commit (54aef252; predates the join lane): while a join was pending, the
+  joiner also took a sync answer over Olm from anyone it shared a session with, so a member
+  removed from the server could hand it a state from before the removal with an admission
+  of its own. A sync answer for a server we are still joining now counts only from our
+  reply key; members still answer each other's sync over Olm.
+  `authz_a_pending_join_takes_its_answer_only_from_its_reply_key` fails with the rule
+  taken out.
 
 BUILT (session 16, the join lock; replaces the permanent join key for sealing):
 - Two keys, one number. The door key (X25519) is held by every member and opens join
@@ -406,6 +468,55 @@ Pre-0.12 rooms are refused (Vitalik: no migration).
   no confirmation). Fix: TURN hosts must be the relay's domain, the forwarder pinned per
   relay, nickname claims master-signed and a confirmation showing whom a request goes to.
 
+BUILT (session 17, 2026-09-29; HOL-SEC-063..066). Every relay test passes on the VPS,
+and the relay was DEPLOYED the same day (compatible with 0.11.1: a live probe logged in
+with v2 as guest and full, and with v1, and saw a wrong domain and a replayed frame
+refused; the restart kept every buffer). The relay stays compatible with 0.11 until
+release day through three switches in
+ws_handler.cpp, each turned off when 0.12 ships: `ACCEPT_AUTH_V1`,
+`ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.
+- A17 (HOL-SEC-063): auth v2. `auth_hello` gets a 32-byte nonce for that socket; the
+  client signs `hollow-ws-auth2`, the relay's domain (the host it dialled, no port), the
+  nonce, device, time, mode (`full`, `fetch`, `guest`) and the SHA-256 of its license key
+  (`auth_frame.h`, `ws_client::auth_v2_message`, pinned in both). One attempt per
+  challenge. The node, the push fetch node, the forwarder and the web viewer all use it.
+  A fetch socket never takes a slot its full socket holds, keeps its rooms apart
+  (`fetch_rooms`), leaves only its own slots, gets no roster or presence and is never
+  listed; a full socket joining over its own fetch slot is announced.
+- I4 (HOL-SEC-064): an inbox shows only its owners (sockets that proved the
+  master-signed device list on join) to each other; rosters, presence, discovery,
+  `check_peers` co-membership and every fan-out reach owners only, and a mailbox deposit
+  goes to the owners online as well as into the mailbox. A proven socket stays an owner
+  through the client's proof-less re-joins (a harness failure showed the need).
+- I5, I6, A25 (HOL-SEC-065): ring control is signed by the change key of the server's
+  newest join lock on the relay (`ring_auth.h`, `ring_auth.rs`, `hollow-ring1` over room,
+  owner, time, retention, stop and channels; ten minutes of skew). Chosen over an
+  owner-only signature because the relay already verifies that chain back to the owner,
+  and owner-only would leave an admin's toggle and new channels waiting for the owner.
+  The client signs when it holds the key and re-registers when the relay takes a new
+  lock of its own; unsigned requests only keep rings alive. A legacy room's rings bind to
+  the first owner whose lock signs. Byte-fair eviction, a 256 KB ring frame limit, 512
+  rings per room, 2,048 per creating device, the idlest ring making room at the relay-wide
+  cap, and per-frame retention (never retroactive); snapshot codec v5.
+- A18, A26, J5, J7 (HOL-SEC-066): typed license refusals (exact codes), the key never
+  erased, keys stored per relay domain; TURN URIs only on the relay's own host
+  (`turn_uris_on_relay`, in ws_client, so nothing else sees them); a known identity is
+  never taken as the relay's forwarder (swarm) and Dart pins the first one per relay,
+  replaceable after a week unseen; nickname claims signed by the master over nickname,
+  device, master and time (`nick_claim.rs`, `nickname_claim_message`), kept by the relay
+  only when they verify, checked again by the resolver, and a lookup sends nothing: the
+  person confirms "Send a friend request to {nickname}?" with the end of the master's ID.
+- Tests: harness `authz_an_inbox_shows_its_devices_only_to_each_other`,
+  `authz_only_the_servers_authority_changes_its_rings`,
+  `authz_a_nickname_names_only_a_master_that_signed_for_it`,
+  `authz_the_relay_cannot_name_a_known_person_as_its_forwarder`; Rust unit tests in
+  ws_client, ring_auth, nick_claim; C++ test_auth_frame (v2), test_ring_auth,
+  test_ring_evict, test_snapshot_codec (v5), test_relay_validators (nickname vector);
+  Dart forwarder_pin_test and the friends manager dialog tests. Mutation pass: see the
+  finding files.
+- Residuals: see HOL-SEC-065 and HOL-SEC-066 (legacy ring binding, sybil churn of the
+  ring cap, the forwarder pin trusting the first advertisement, nickname enumeration).
+
 ### A-D5. Smaller items
 
 - Recovery pool: its authority is the invite token, but the token is in the room name
@@ -420,6 +531,22 @@ Pre-0.12 rooms are refused (Vitalik: no migration).
 - Channel-file stream completion is keyed by id only (a holder's bytes complete
   another's header); binding it to the header's sender breaks gossip delivery, so A-D2
   is the fix.
+
+BUILT (session 17, 2026-09-29; HOL-SEC-067, HOL-SEC-068, and the HOL-SEC-058 test).
+The light profile announce item was settled by phase D of A-D1 (HOL-SEC-062), and DM
+typing by phase 2.
+- Recovery pool (A24): room = 32 hex of SHA-256 over a tag, the server id and the token;
+  every pool frame rides `RecoverySealed` (AES-256-GCM under an HMAC of the token bound
+  to the server; room and sending device as associated data) on a new `Lane::Recovery`;
+  a 32-byte token. No membership gate.
+- Stamps: `frame_auth::stamp_ceiling` (300 s past the frame's time). Emote rows past it
+  are refused, read markers and friendship stamps clamped.
+- Unreaction: every path goes through `remove_reaction`, which deletes only a reaction
+  added no later than the removal; our own stamps beat any recorded add or removal.
+- Link cards: a live card applies only when its frame's seal time is later than the
+  row's `lp_at` (new column) and its last edit; sync backfill unordered.
+- Share audio: the two gates became `acceptsShareAudioFrom` on CallNotifier and
+  VoiceChannelNotifier, tested by test/share_audio_gate_test.dart.
 
 ## Residuals
 

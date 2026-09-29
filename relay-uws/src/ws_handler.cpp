@@ -1,6 +1,7 @@
 #include "ws_handler.h"
 #include "auth_frame.h"
 #include "ring_evict.h"
+#include "ring_auth.h"
 #include "crypto.h"
 #include "device_list.h"
 #include "validate.h"
@@ -90,6 +91,9 @@ static std::string to_lowercase(std::string_view s) {
     return result;
 }
 
+static bool receives_in_room(const WsRoom& room, const std::string& room_name,
+                             const std::string& receiver);
+
 // "Is `x` in one of the same rooms as `caller`" is the only relationship the
 // relay can verify between two peers, so it is what gates the answers one peer
 // may ask for about another (see check_peers). Answered for a whole query in
@@ -108,8 +112,11 @@ static std::unordered_set<std::string> collect_room_co_members(
     for (const auto& room : it->second) {
         auto rit = state.ws_rooms.find(room);
         if (rit == state.ws_rooms.end()) continue;
+        // An inbox makes only its owners co-members of each other.
+        if (!receives_in_room(rit->second, room, caller)) continue;
         for (const auto& [pid, sock] : rit->second.peers) {
             (void)sock;
+            if (!receives_in_room(rit->second, room, pid)) continue;
             if (budget == 0) return members;
             budget--;
             members.insert(pid);
@@ -164,9 +171,28 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
                          SSLWebSocket* expected_ws,
                          bool suppress_peer_left = false);
 
+// Pre-0.12 clients sign only `hollow-ws-auth:{peer}:{ts}` and cannot ask for a
+// challenge. Turn this off once 0.12 is out: until then a v1 frame captured by
+// another relay still replays here, as it always has for 0.11 clients.
+static constexpr bool ACCEPT_AUTH_V1 = true;
+
+// The one frame an unauthenticated socket may send besides `auth`. The nonce is
+// minted once per socket; asking again gets the same one.
+static void handle_auth_hello(SSLWebSocket* ws, PerSocketData* data) {
+    if (data->auth_nonce.empty()) {
+        data->auth_nonce = random_hex(AUTH_NONCE_HEX_LEN / 2);
+    }
+    send_json(ws, {{"type", "auth_challenge"}, {"nonce", data->auth_nonce}});
+}
+
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
-                         std::string_view message, RelayState& state) {
-    // parse_auth_frame never throws: this frame comes from anyone on the internet.
+                         std::string_view message, RelayState& state,
+                         const Config& config) {
+    // Neither parser throws: these frames come from anyone on the internet.
+    if (is_auth_hello(message)) {
+        handle_auth_hello(ws, data);
+        return;
+    }
     std::optional<AuthFrame> frame = parse_auth_frame(message);
     if (!frame) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
@@ -218,7 +244,30 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
 
-    std::string signed_msg = "hollow-ws-auth:" + peer_id + ":" + std::to_string(timestamp);
+    // v2 binds the frame to this socket's challenge, this relay and every flag the
+    // relay acts on, so a captured frame opens nothing anywhere else: not another
+    // relay, not a second socket here, not an invisible `fetch` socket beside the
+    // live device.
+    std::string signed_msg;
+    if (frame->version == 2) {
+        std::optional<std::string> mode = auth_mode(guest, fetch);
+        bool challenged = !data->auth_nonce.empty() && frame->nonce == data->auth_nonce;
+        if (!mode || !challenged || frame->domain != auth_domain(config.domain)) {
+            send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
+            ws->end(1008, "bad_auth");
+            return;
+        }
+        std::string license_digest = license_key_val.empty() ? std::string() : sha256_hex(license_key_val);
+        signed_msg = auth_v2_message(frame->domain, frame->nonce, peer_id, timestamp, *mode, license_digest);
+    } else if (ACCEPT_AUTH_V1) {
+        signed_msg = "hollow-ws-auth:" + peer_id + ":" + std::to_string(timestamp);
+    } else {
+        send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
+        ws->end(1008, "bad_auth");
+        return;
+    }
+    // One challenge, one attempt.
+    data->auth_nonce.clear();
     if (!verify_ed25519(public_key, signature, signed_msg)) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
         ws->end(1008, "bad_auth");
@@ -448,25 +497,27 @@ static void replay_mailbox_no_delete(SSLWebSocket* ws,
 // verifies for the master, whoever carries it, because only the master can mint
 // one — a third party presenting the current list can therefore raise the bar
 // but never lower it. The marks survive a restart through the snapshot.
-static void maybe_replay_inbox_mailbox(SSLWebSocket* ws, PerSocketData* data,
-                                        const std::string& room,
-                                        const json& proof_json,
-                                        RelayState& state) {
+static bool is_inbox_room(const std::string& room) {
+    return room.rfind(INBOX_ROOM_PREFIX, 0) == 0;
+}
+
+static bool inbox_owner_proved(PerSocketData* data, const std::string& room,
+                               const json& proof_json, RelayState& state) {
     // Guests never own an identity, so they can never own a mailbox.
-    if (data->is_guest) return;
-    if (room.rfind(INBOX_ROOM_PREFIX, 0) != 0) return;
+    if (data->is_guest) return false;
+    if (!is_inbox_room(room)) return false;
 
     SignedDeviceList dl;
-    if (!parse_inbox_proof(proof_json, dl)) return;
-    if (!verify_signed_device_list(dl)) return;                       // a + b
-    if (room != std::string(INBOX_ROOM_PREFIX) + dl.master_peer_id) return;  // d
+    if (!parse_inbox_proof(proof_json, dl)) return false;
+    if (!verify_signed_device_list(dl)) return false;                       // a + b
+    if (room != std::string(INBOX_ROOM_PREFIX) + dl.master_peer_id) return false;  // d
 
     // (e) — before (c), so a current list raises the mark even when the socket
     // carrying it turns out not to be one of its devices. No log line: a
     // rejected replay must look exactly like a plain join.
     auto vit = state.device_list_max_version.find(dl.master_peer_id);
     if (vit != state.device_list_max_version.end()) {
-        if (dl.version < vit->second) return;
+        if (dl.version < vit->second) return false;
         vit->second = dl.version;
     } else {
         if (state.device_list_max_version.size() >= MAX_DEVICE_LIST_VERSIONS &&
@@ -478,9 +529,17 @@ static void maybe_replay_inbox_mailbox(SSLWebSocket* ws, PerSocketData* data,
         state.device_list_version_fifo.push_back(dl.master_peer_id);
     }
 
-    if (!device_list_owns_device(dl, data->peer_id)) return;          // c
+    return device_list_owns_device(dl, data->peer_id);                      // c
+}
 
-    replay_mailbox_no_delete(ws, dl.master_peer_id, room, state);
+// An inbox room shows its owners (the devices that proved they belong to its
+// master) to each other and to nobody else: a stranger with a request pending
+// learns neither which devices a person has nor when they are online, and the
+// owner learns nothing of the other people asking. Only owners receive frames
+// there; a deposit for the master reaches them live (handle_binary_direct_msg).
+static bool receives_in_room(const WsRoom& room, const std::string& room_name,
+                             const std::string& receiver) {
+    return !is_inbox_room(room_name) || room.owners.count(receiver) != 0;
 }
 
 // `inbox_proof` is optional and may be null: a plain JoinRoom carries none, and
@@ -495,18 +554,52 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
 
     auto pit = state.peer_rooms.find(data->peer_id);
     size_t max_rooms = data->is_guest ? MAX_GUEST_ROOMS : MAX_ROOMS_PER_PEER;
-    if (pit != state.peer_rooms.end() && pit->second.size() >= max_rooms) {
+    size_t held_rooms = data->is_fetch ? data->fetch_rooms.size()
+                        : (pit != state.peer_rooms.end() ? pit->second.size() : 0);
+    if (held_rooms >= max_rooms) {
         send_json(ws, {{"type", "error"}, {"error", data->is_guest ? "Guest room limit reached" : "Too many rooms"}});
         return;
     }
 
-    // Collect existing non-guest peer IDs before adding
-    std::vector<std::string> existing_peers;
     auto& ws_room = state.ws_rooms[room];
-    for (auto& [pid, peer_ws] : ws_room.peers) {
-        auto* pd = peer_ws->getUserData();
-        if (!pd->is_guest && !pd->is_fetch) {
-            existing_peers.push_back(pid);
+
+    // A fetch socket is the device's own push isolate: it takes delivery for the
+    // device only while no full socket of it holds the slot (the full node's slot
+    // must survive the isolate's close), and it learns nothing about the room: no
+    // roster, no presence, and nobody learns of it.
+    if (data->is_fetch) {
+        auto held = ws_room.peers.find(data->peer_id);
+        bool full_holds = held != ws_room.peers.end() && held->second != ws &&
+                          !held->second->getUserData()->is_fetch;
+        if (!full_holds) {
+            ws_room.peers[data->peer_id] = ws;
+            data->fetch_rooms.insert(room);
+            replay_buffered_msgs(ws, data->peer_id, room, /*full_node=*/false, state);
+        }
+        if (inbox_proof && inbox_owner_proved(data, room, *inbox_proof, state)) {
+            replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state);
+        }
+        return;
+    }
+
+    const bool inbox = is_inbox_room(room);
+    // A socket that proved it once stays an owner through a plain re-join (the
+    // client refreshes rooms without the proof); a new socket proves again.
+    auto held_slot = ws_room.peers.find(data->peer_id);
+    const bool already_owner = inbox && held_slot != ws_room.peers.end() && held_slot->second == ws &&
+                               ws_room.owners.count(data->peer_id) != 0;
+    const bool owner = inbox && (already_owner ||
+                                 (inbox_proof && inbox_owner_proved(data, room, *inbox_proof, state)));
+
+    // Collect existing non-guest peer IDs before adding. In an inbox room a
+    // non-owner sees nobody and an owner sees only the other owners.
+    std::vector<std::string> existing_peers;
+    if (!inbox || owner) {
+        for (auto& [pid, peer_ws] : ws_room.peers) {
+            auto* pd = peer_ws->getUserData();
+            if (!pd->is_guest && !pd->is_fetch && receives_in_room(ws_room, room, pid)) {
+                existing_peers.push_back(pid);
+            }
         }
     }
 
@@ -518,10 +611,17 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // friend handshake's room churn — loops ~10x in seconds. Suppress the
     // broadcast on a redundant join; the joiner still gets its `members` reply
     // below for stale-membership reconciliation.
-    bool already_present = ws_room.peers.find(data->peer_id) != ws_room.peers.end();
+    // The device's own fetch socket holding the slot is not presence.
+    auto prev = ws_room.peers.find(data->peer_id);
+    bool already_present = prev != ws_room.peers.end() && !prev->second->getUserData()->is_fetch;
 
     // Add peer to room
     ws_room.peers[data->peer_id] = ws;
+    if (owner) {
+        ws_room.owners.insert(data->peer_id);
+    } else {
+        ws_room.owners.erase(data->peer_id);
+    }
 
     // Track room on peer
     state.peer_rooms[data->peer_id].insert(room);
@@ -540,7 +640,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
 
     // Notify existing non-guest peers (skip if joiner is a guest or fetch-mode,
     // or if this is a redundant re-join — the peer was already in the room).
-    if (!data->is_guest && !data->is_fetch && !already_present) {
+    if (!data->is_guest && !data->is_fetch && !already_present && (!inbox || owner)) {
         json join_msg = {
             {"type", "peer_joined"},
             {"room", room},
@@ -548,7 +648,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         };
         std::string join_str = join_msg.dump();
         for (auto& [pid, peer_ws] : ws_room.peers) {
-            if (pid != data->peer_id && !peer_ws->getUserData()->is_guest) {
+            if (pid != data->peer_id && !peer_ws->getUserData()->is_guest &&
+                receives_in_room(ws_room, room, pid)) {
                 send_to_peer(peer_ws, join_str, uWS::OpCode::TEXT);
             }
         }
@@ -574,8 +675,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // ...and, IN ADDITION, the master's mailbox when this join proved it owns
     // one. Device-keyed replay above is unchanged and still deletes on
     // delivery; the mailbox replay is TTL-only.
-    if (inbox_proof) {
-        maybe_replay_inbox_mailbox(ws, data, room, *inbox_proof, state);
+    if (owner) {
+        replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state);
     }
 }
 
@@ -602,9 +703,11 @@ static void leave_room(RelayState& state, const std::string& peer_id,
     }
 
     // Check visibility BEFORE erasing from room
-    bool leaving_peer_invisible = is_invisible_in_room(state, peer_id, room);
+    bool leaving_peer_invisible = is_invisible_in_room(state, peer_id, room) ||
+                                  !receives_in_room(rit->second, room, peer_id);
 
     rit->second.peers.erase(peer_id);
+    rit->second.owners.erase(peer_id);
 
     bool should_notify = !rit->second.peers.empty();
 
@@ -635,8 +738,8 @@ static void leave_room(RelayState& state, const std::string& peer_id,
         std::string leave_str = leave_msg.dump();
         auto rit2 = state.ws_rooms.find(room);
         if (rit2 != state.ws_rooms.end()) {
-            for (auto& [_, peer_ws] : rit2->second.peers) {
-                if (!peer_ws->getUserData()->is_guest) {
+            for (auto& [pid, peer_ws] : rit2->second.peers) {
+                if (!peer_ws->getUserData()->is_guest && receives_in_room(rit2->second, room, pid)) {
                     send_to_peer(peer_ws, leave_str, uWS::OpCode::TEXT);
                 }
             }
@@ -809,6 +912,24 @@ static void drop_front_for_ref(RelayState& state,
     state.buffer_index.released_dm(ref.key, q.front().sender);
     q.pop_front();
     if (q.empty()) state.offline_buffer.erase(it);
+}
+
+// Remove one ring, keeping the byte budget, the eviction index and the per-room
+// and per-creator counts in step. Returns the iterator past it.
+static std::unordered_map<std::string, RelayState::TopicBuffer>::iterator
+erase_topic_buffer(RelayState& state, std::unordered_map<std::string, RelayState::TopicBuffer>::iterator it) {
+    auto& tb = it->second;
+    state.buffer_total_bytes -= std::min(state.buffer_total_bytes, tb.bytes);
+    for (size_t i = 0; i < tb.frames.size(); i++) state.buffer_index.released_topic();
+    auto drop_count = [](std::unordered_map<std::string, size_t>& counts, const std::string& key) {
+        auto c = counts.find(key);
+        if (c == counts.end()) return;
+        if (c->second <= 1) counts.erase(c);
+        else c->second--;
+    };
+    drop_count(state.topic_buffers_per_room, it->first.substr(0, it->first.find('\0')));
+    if (!tb.creator.empty()) drop_count(state.topic_buffers_per_creator, tb.creator);
+    return state.topic_buffers.erase(it);
 }
 
 // Global-budget eviction, oldest first.
@@ -1045,36 +1166,33 @@ void sweep_offline_buffer(RelayState& state) {
             ++it;
         }
     }
-    // Topic ring buffers: retention expiry (front is oldest — FIFO), then drop
-    // registrations no member has refreshed for TOPIC_BUFFER_IDLE_EXPIRE_SECS.
+    // Topic ring buffers: retention expiry, then drop registrations no member has
+    // refreshed for TOPIC_BUFFER_IDLE_EXPIRE_SECS. A frame keeps the shorter of the
+    // ring's retention now and the one it arrived under, so frames can expire out
+    // of order and the whole ring is walked.
     for (auto it = state.topic_buffers.begin(); it != state.topic_buffers.end(); ) {
         auto& tb = it->second;
-        while (!tb.frames.empty()) {
-            auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                now - tb.frames.front().at).count();
-            if (age >= tb.retention_secs) {
-                size_t sz = tb.frames.front().frame.size();
+        for (auto f = tb.frames.begin(); f != tb.frames.end(); ) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - f->at).count();
+            int64_t keep = f->retention_secs > 0 ? std::min(tb.retention_secs, f->retention_secs)
+                                                 : tb.retention_secs;
+            if (age >= keep) {
+                size_t sz = f->frame.size();
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
                 tb.bytes -= std::min(tb.bytes, sz);
-                tb.frames.pop_front();
+                f = tb.frames.erase(f);
                 state.buffer_index.released_topic();
                 evicted++;
             } else {
-                break;
+                ++f;
             }
         }
         // A cleared registration that has finished draining is done — reap it
         // now rather than holding an empty slot until the 7-day idle expiry.
-        if (!tb.accepting && tb.frames.empty()) {
-            it = state.topic_buffers.erase(it);
-            continue;
-        }
         auto idle = std::chrono::duration_cast<std::chrono::seconds>(
             now - tb.last_registered).count();
-        if (idle >= TOPIC_BUFFER_IDLE_EXPIRE_SECS) {
-            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, tb.bytes);
-            for (size_t i = 0; i < tb.frames.size(); i++) state.buffer_index.released_topic();
-            it = state.topic_buffers.erase(it);
+        if ((!tb.accepting && tb.frames.empty()) || idle >= TOPIC_BUFFER_IDLE_EXPIRE_SECS) {
+            it = erase_topic_buffer(state, it);
         } else {
             ++it;
         }
@@ -1363,68 +1481,121 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
     // No logging — reporter/target peer ids are user-identifying.
 }
 
-// Register/refresh per-channel topic ring buffers for a server room. Sent by
-// members of servers whose owner enabled relay catch-up, re-sent on every
-// connect (refresh keeps the registration alive past the idle expiry). Only
-// adds/refreshes — never wholesale-replaces, because members with
-// restricted-channel visibility register different channel subsets.
-// {"type":"set_topic_buffer","room":..,"channels":[..],"retention_secs":N}
-// {"type":"set_topic_buffer","room":..,"clear":true}  — owner turned it off
-static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelayState& state) {
-    if (data->is_guest) return;
-    std::string room = j.value("room", "");
-    if (!is_valid_room_code(room)) return;
-    // Must actually be in the room — random peers can't register or clear.
-    auto rit = state.ws_rooms.find(room);
-    if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
+// Pre-0.12 members register rings unsigned. Turn this off once 0.12 is out: from
+// then on only the server's authority (ring_auth.h) creates, extends or stops a ring,
+// and an unsigned request only keeps existing rings from idling out.
+static constexpr bool ACCEPT_UNSIGNED_RING_CONTROL = true;
 
-    std::string prefix = room;
+// A new ring for `key`, within the per-room and per-creator caps. Past the relay-wide
+// cap the ring idle longest makes room: refusing would let whoever filled the table
+// first keep every new server from getting a ring.
+static RelayState::TopicBuffer* create_topic_buffer(RelayState& state, const std::string& key,
+                                                    const std::string& room, const std::string& creator) {
+    if (state.topic_buffers_per_room[room] >= MAX_TOPIC_BUFFERS_PER_ROOM) return nullptr;
+    if (state.topic_buffers_per_creator[creator] >= MAX_TOPIC_BUFFERS_PER_CREATOR) return nullptr;
+    if (state.topic_buffers.size() >= MAX_TOPIC_BUFFERS_TOTAL) {
+        auto idlest = state.topic_buffers.end();
+        auto last_active = [](const RelayState::TopicBuffer& tb) {
+            return tb.frames.empty() ? tb.last_registered : std::max(tb.last_registered, tb.frames.back().at);
+        };
+        for (auto it = state.topic_buffers.begin(); it != state.topic_buffers.end(); ++it) {
+            if (idlest == state.topic_buffers.end() || last_active(it->second) < last_active(idlest->second)) {
+                idlest = it;
+            }
+        }
+        if (idlest != state.topic_buffers.end()) erase_topic_buffer(state, idlest);
+    }
+    auto& tb = state.topic_buffers[key];
+    tb.creator = creator;
+    state.topic_buffers_per_room[room]++;
+    state.topic_buffers_per_creator[creator]++;
+    return &tb;
+}
+
+// Apply a control the caller is entitled to: stop every ring of the room, or create
+// and set the listed ones. `owner` binds a legacy room's rings to the lock that signed.
+static void apply_ring_control(RelayState& state, const ring_auth::Control& c, const std::string& owner,
+                               const std::string& creator) {
+    std::string prefix = c.room;
     prefix.push_back('\0');
-
-    if (j.value("clear", false)) {
-        // Turning catch-up off STOPS retention; it does not destroy what is
-        // already retained. This used to erase every topic buffer for the room
-        // outright, and `clear` is authorized by room membership alone — the
-        // relay cannot tell a server owner from an ordinary member, so any one
-        // member could wipe the shared catch-up state every other member
-        // depends on and strand late joiners. Now the registration stops
-        // accepting new frames and its retention drops to the floor, so what is
-        // held ages out on the normal sweep (within OFFLINE_RETENTION_MIN_SECS)
-        // rather than vanishing on demand. A genuine owner-off converges just
-        // as surely; a hostile member only shortens a window, never deletes.
+    if (c.clear) {
+        // Turning catch-up off STOPS retention; what is held ages out on the normal
+        // sweep within OFFLINE_RETENTION_MIN_SECS rather than vanishing on demand.
         for (auto& [key, tb] : state.topic_buffers) {
             if (key.rfind(prefix, 0) == 0) {
                 tb.accepting = false;
                 tb.retention_secs = OFFLINE_RETENTION_MIN_SECS;
+                if (tb.owner.empty()) tb.owner = owner;
             }
         }
         return;
     }
-
-    if (!j.contains("channels") || !j["channels"].is_array()) return;
-    int64_t retention = j.value("retention_secs", (int64_t)86400);
-    retention = std::max(OFFLINE_RETENTION_MIN_SECS,
-                         std::min(OFFLINE_RETENTION_MAX_SECS, retention));
+    int64_t retention = std::max(OFFLINE_RETENTION_MIN_SECS, std::min(OFFLINE_RETENTION_MAX_SECS, c.retention_secs));
     auto now = std::chrono::steady_clock::now();
     size_t n = 0;
-    for (const auto& c : j["channels"]) {
-        if (!c.is_string()) continue;
+    for (const auto& cid : c.channels) {
         if (++n > MAX_TOPIC_CHANNELS_PER_CALL) break;
-        const std::string& cid = c.get_ref<const std::string&>();
-        if (cid.empty() || cid.size() > 128) continue;
+        if (!ring_auth::is_channel_shape(cid)) continue;
         std::string key = prefix + cid;
         auto it = state.topic_buffers.find(key);
-        if (it == state.topic_buffers.end()) {
-            if (state.topic_buffers.size() >= MAX_TOPIC_BUFFERS_TOTAL) break;
-            auto& tb = state.topic_buffers[key];
-            tb.retention_secs = retention;
-            tb.last_registered = now;
-            tb.accepting = true;
-        } else {
-            it->second.retention_secs = retention;  // latest registrar wins
-            it->second.last_registered = now;
-            it->second.accepting = true;            // re-arm a cleared buffer
+        RelayState::TopicBuffer* tb = it != state.topic_buffers.end() ? &it->second
+                                                                      : create_topic_buffer(state, key, c.room, creator);
+        if (!tb) continue;
+        // A longer retention applies to frames from now on (TopicFrame::retention_secs).
+        tb->retention_secs = retention;
+        tb->last_registered = now;
+        tb->accepting = true;
+        if (tb->owner.empty()) tb->owner = owner;
+    }
+}
+
+// Register, set or stop a server room's catch-up rings (ring_auth.h), or, unsigned,
+// keep the room's existing rings from idling out.
+// {"type":"set_topic_buffer","room":..,"owner":..,"channels":[..],"retention_secs":N,
+//  "clear":bool,"ts":ms,"sig":..}
+static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest || data->is_fetch) return;
+    ring_auth::Control c;
+    bool is_signed = false;
+    if (!ring_auth::parse(j, c, is_signed)) return;
+    if (!is_valid_room_code(c.room)) return;
+    // Must actually be in the room.
+    auto rit = state.ws_rooms.find(c.room);
+    if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
+    std::string prefix = c.room;
+    prefix.push_back('\0');
+
+    if (is_signed) {
+        if (!join_lock::is_server_id_shape(c.room)) return;
+        const bool genesis = join_lock::is_genesis_id(c.room);
+        if (!genesis && !is_peer_id_shape(c.owner)) return;
+        const auto* chain = state.join_locks.get(join_lock::record_key(c.room, c.owner));
+        const int64_t now_ms = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        if (!ring_auth::authorized(c, chain, now_ms, lock_crypto())) return;
+        const std::string owner = genesis ? std::string() : c.owner;
+        // A legacy room's rings answer to the first owner that signed for them: anyone
+        // can file a lock under a legacy id in its own name.
+        if (!owner.empty()) {
+            for (const auto& [key, tb] : state.topic_buffers) {
+                if (key.rfind(prefix, 0) == 0 && !tb.owner.empty() && tb.owner != owner) return;
+            }
         }
+        apply_ring_control(state, c, owner, data->peer_id);
+        return;
+    }
+
+    if (ACCEPT_UNSIGNED_RING_CONTROL) {
+        apply_ring_control(state, c, std::string(), data->peer_id);
+        return;
+    }
+    auto now = std::chrono::steady_clock::now();
+    size_t n = 0;
+    for (const auto& cid : c.channels) {
+        if (++n > MAX_TOPIC_CHANNELS_PER_CALL) break;
+        auto it = state.topic_buffers.find(prefix + cid);
+        if (it != state.topic_buffers.end() && it->second.accepting) it->second.last_registered = now;
     }
     // No logging — room + channel set is membership metadata.
 }
@@ -1599,7 +1770,7 @@ static void handle_msg(PerSocketData* data, const std::string& room,
     };
     std::string broadcast_str = broadcast.dump();
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id) {
+        if (pid != data->peer_id && receives_in_room(rit->second, room, pid)) {
             send_to_peer(peer_ws, broadcast_str, uWS::OpCode::TEXT);
         }
     }
@@ -1623,6 +1794,7 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     }
 
     auto tit = rit->second.peers.find(target);
+    if (tit != rit->second.peers.end() && !receives_in_room(rit->second, room, target)) return;
     if (tit == rit->second.peers.end()) {
         // Target not in THIS room. Buffer either way (replays on join); only
         // push when fully offline. A connected-but-not-yet-joined target hits a
@@ -1699,6 +1871,7 @@ static void handle_binary_direct(PerSocketData* data,
     if (!is_peer_id_shape(target_str)) return;
     auto tit = rit->second.peers.find(target_str);
     if (tit == rit->second.peers.end()) return;
+    if (!receives_in_room(rit->second, room_str, target_str)) return;
 
     // Build forwarded frame: replace target with sender
     std::string forwarded;
@@ -1744,7 +1917,7 @@ static void handle_binary_msg(PerSocketData* data,
     forwarded.append(payload);
 
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id) {
+        if (pid != data->peer_id && receives_in_room(rit->second, room_str, pid)) {
             send_to_peer(peer_ws, forwarded, uWS::OpCode::BINARY);
         }
     }
@@ -1835,8 +2008,21 @@ static void handle_binary_direct_msg(PerSocketData* data,
         if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
             state.diag.fwd_buffered++;
         }
+        // A deposit for the inbox's own master also reaches its owners online
+        // now: nobody else learns which devices those are, so the depositor
+        // cannot address them itself.
+        if (room_str == std::string(INBOX_ROOM_PREFIX) + target_str) {
+            std::string live = build_direct_frame(room_code, data->peer_id, payload);
+            for (const auto& owner_id : rit->second.owners) {
+                auto oit = rit->second.peers.find(owner_id);
+                if (owner_id != data->peer_id && oit != rit->second.peers.end()) {
+                    send_to_peer(oit->second, live, uWS::OpCode::BINARY);
+                }
+            }
+        }
         return;
     }
+    if (!receives_in_room(rit->second, room_str, target_str)) return;
 
     if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
         state.diag.fwd_delivered++;
@@ -1908,19 +2094,21 @@ static void handle_binary_topic_msg(PerSocketData* data,
         key.push_back('\0');
         key += topic_str;
         auto tit = state.topic_buffers.find(key);
-        if (tit != state.topic_buffers.end() && tit->second.accepting) {
+        if (tit != state.topic_buffers.end() && tit->second.accepting &&
+            forwarded.size() <= MAX_RING_FRAME_BYTES) {
             auto& tb = tit->second;
             uint64_t seq = state.buffer_index.stamp_topic(key);
             tb.frames.push_back({forwarded, data->peer_id,
-                                 std::chrono::steady_clock::now(), seq});
+                                 std::chrono::steady_clock::now(), seq, tb.retention_secs});
             tb.bytes += forwarded.size();
             state.buffer_total_bytes += forwarded.size();
-            // A full ring drops the oldest frame of whoever holds the most. A frame
-            // taken from the middle leaves a stale eviction ref, which the budget
-            // evictor skips by its seq.
+            // A full ring drops the oldest frame of whoever holds the most bytes. A
+            // frame taken from the middle leaves a stale eviction ref, which the
+            // budget evictor skips by its seq.
             while (!tb.frames.empty() &&
                    (tb.frames.size() > MAX_TOPIC_BUFFER_MSGS || tb.bytes > MAX_TOPIC_BUFFER_BYTES)) {
-                auto victim = tb.frames.begin() + ring_victim(tb.frames);
+                auto victim = tb.frames.begin() +
+                              ring_victim(tb.frames, [](const RelayState::TopicFrame& f) { return f.frame.size(); });
                 size_t sz = victim->frame.size();
                 tb.bytes -= std::min(tb.bytes, sz);
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
@@ -1933,6 +2121,7 @@ static void handle_binary_topic_msg(PerSocketData* data,
 
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid == data->peer_id) continue;
+        if (!receives_in_room(rit->second, room_str, pid)) continue;
 
         auto* peer_data = peer_ws->getUserData();
         auto sit = peer_data->subscriptions.find(room_str);
@@ -1957,6 +2146,7 @@ static void erase_nickname_binding(RelayState& state, const std::string& nicknam
     state.peer_to_nickname.erase(peer_id);
     state.nickname_expiry.erase(nickname);
     state.nickname_to_master.erase(nickname);
+    state.nickname_proof.erase(nickname);
 }
 
 // True iff a nickname's current binding is STALE: expired by TTL, or its holder's
@@ -1978,14 +2168,43 @@ static bool nickname_binding_is_stale(RelayState& state, const std::string& nick
     return false;
 }
 
-static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
-                                   const std::string& raw_nick,
-                                   const std::string& raw_master, RelayState& state) {
-    if (data->is_guest) return;
+// Pre-0.12 clients claim a nickname with a self-reported master and no signature.
+// Turn this off once 0.12 is out: from then on a claim counts only when the master
+// it names signed it for the claiming device.
+static constexpr bool ACCEPT_UNSIGNED_NICKNAME_CLAIMS = true;
+static constexpr int64_t NICKNAME_CLAIM_SKEW_MS = 300 * 1000;
 
-    std::string nickname = to_lowercase(raw_nick);
+static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data, const json& j,
+                                   RelayState& state) {
+    if (data->is_guest || data->is_fetch) return;
+
+    std::string nickname = to_lowercase(json_text(j, "nickname"));
+    const std::string raw_master = json_text(j, "master");
     if (!is_valid_nickname(nickname)) {
         send_json(ws, {{"type", "nickname_error"}, {"error", "invalid"}});
+        return;
+    }
+
+    // A signed claim must be the named master's, for this socket's device, now.
+    RelayState::NicknameProof proof;
+    const bool is_signed = j.contains("sig");
+    if (is_signed) {
+        proof.master_key = json_text(j, "master_key");
+        proof.sig = json_text(j, "sig");
+        auto ts = j.find("ts");
+        proof.ts_ms = (ts != j.end() && ts->is_number_integer()) ? ts->get<int64_t>() : 0;
+        const int64_t now_ms = static_cast<int64_t>(now_unix_secs()) * 1000;
+        const int64_t skew = now_ms > proof.ts_ms ? now_ms - proof.ts_ms : proof.ts_ms - now_ms;
+        const bool ok = is_peer_id_shape(raw_master) && derive_peer_id(proof.master_key) == raw_master &&
+                        skew <= NICKNAME_CLAIM_SKEW_MS &&
+                        verify_ed25519(proof.master_key, proof.sig,
+                                       nickname_claim_message(nickname, data->peer_id, raw_master, proof.ts_ms));
+        if (!ok) {
+            send_json(ws, {{"type", "nickname_error"}, {"error", "invalid_claim"}, {"nickname", nickname}});
+            return;
+        }
+    } else if (!ACCEPT_UNSIGNED_NICKNAME_CLAIMS) {
+        send_json(ws, {{"type", "nickname_error"}, {"error", "invalid_claim"}, {"nickname", nickname}});
         return;
     }
 
@@ -2013,6 +2232,7 @@ static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
     if (is_peer_id_shape(raw_master) && raw_master.rfind("12D3KooW", 0) == 0) {
         state.nickname_to_master[nickname] = raw_master;
     }
+    if (is_signed) state.nickname_proof[nickname] = proof;
     send_json(ws, {{"type", "nickname_claimed"}, {"nickname", nickname}});
 }
 
@@ -2039,6 +2259,12 @@ static void handle_resolve_nickname(SSLWebSocket* ws, PerSocketData* /*data*/,
                   {"peer_id", it->second}};
     auto mit = state.nickname_to_master.find(nickname);
     if (mit != state.nickname_to_master.end()) reply["master_id"] = mit->second;
+    auto pit = state.nickname_proof.find(nickname);
+    if (pit != state.nickname_proof.end()) {
+        reply["master_key"] = pit->second.master_key;
+        reply["ts"] = pit->second.ts_ms;
+        reply["sig"] = pit->second.sig;
+    }
     send_json(ws, reply);
 }
 
@@ -2278,7 +2504,11 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
             (pit != j.end() && pit->is_object()) ? &(*pit) : nullptr;
         handle_join(ws, data, j.value("room", ""), state, inbox_proof);
     } else if (type == "leave") {
-        leave_room(state, data->peer_id, j.value("room", ""));
+        // Only this socket's own slot: a fetch socket's leave must not unjoin the
+        // device's full node.
+        std::string room = j.value("room", "");
+        leave_room(state, data->peer_id, room, ws);
+        data->fetch_rooms.erase(room);
     } else if (type == "msg") {
         handle_msg(data, j.value("room", ""), j.value("data", ""), state);
     } else if (type == "direct") {
@@ -2345,10 +2575,17 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
             // only ever discover in rooms they have already joined
             // (`active_room` + their own server ids), so requiring membership
             // costs nothing legitimate.
+            // Guests and fetch sockets are never listed: a push isolate in a DM
+            // room says when that phone was woken.
             if (rit != state.ws_rooms.end() &&
                 rit->second.peers.count(data->peer_id)) {
+                const bool sees = receives_in_room(rit->second, room, data->peer_id);
                 for (const auto& [pid, sock] : rit->second.peers) {
-                    if (pid != data->peer_id) peers.push_back(pid);  // exclude self
+                    const auto* pd = sock->getUserData();
+                    if (sees && pid != data->peer_id && !pd->is_guest && !pd->is_fetch &&
+                        receives_in_room(rit->second, room, pid)) {
+                        peers.push_back(pid);
+                    }
                 }
             }
         }
@@ -2357,7 +2594,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_subscribe(data, j.value("room", ""),
                          j.contains("topics") ? j["topics"] : json::array());
     } else if (type == "claim_nickname") {
-        handle_claim_nickname(ws, data, j.value("nickname", ""), j.value("master", ""), state);
+        handle_claim_nickname(ws, data, j, state);
     } else if (type == "release_nickname") {
         handle_release_nickname(ws, data, state);
     } else if (type == "resolve_nickname") {
@@ -2465,6 +2702,7 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
             state.nickname_expiry.erase(nit->second);
             state.nickname_to_peer.erase(nit->second);
             state.nickname_to_master.erase(nit->second);
+            state.nickname_proof.erase(nit->second);
             state.peer_to_nickname.erase(nit);
         }
 
@@ -2565,7 +2803,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             // the process, and an abnormal exit takes no snapshot.
             if (!data->authenticated) {
                 try {
-                    handle_auth(ws, data, message, state);
+                    handle_auth(ws, data, message, state, config);
                 } catch (const std::exception&) {
                     ws->end(1008, "bad_auth");
                 }
@@ -2669,7 +2907,16 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 us_timer_close(data->auth_timer);
                 data->auth_timer = nullptr;
             }
-            if (data->authenticated && !data->superseded) {
+            if (data->authenticated && data->is_fetch) {
+                // A fetch socket leaves only the slots it still holds, and frees the
+                // peer's license seat only when no full socket of it is connected.
+                for (const auto& room : data->fetch_rooms) {
+                    leave_room(state, data->peer_id, room, ws);
+                }
+                if (!state.peer_sockets.count(data->peer_id)) {
+                    state.license.release_key(data->peer_id);
+                }
+            } else if (data->authenticated && !data->superseded) {
                 // privacy: no connection logging
                 // Pass the closing socket so cleanup only fires if THIS socket
                 // still owns the peer's state — a stale duplicate that was

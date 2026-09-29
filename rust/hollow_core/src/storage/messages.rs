@@ -871,6 +871,9 @@ impl MessageStore {
         // link_preview_json: a JSON LinkPreviewRef, written after the row is inserted.
         migrate(conn, "ALTER TABLE messages ADD COLUMN link_preview_json TEXT;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN link_preview_json TEXT;");
+        // lp_at: when the frame that set the card was sealed; orders cards for one text.
+        migrate(conn, "ALTER TABLE messages ADD COLUMN lp_at INTEGER;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN lp_at INTEGER;");
 
         // order_us, the microsecond send timestamp. The display ORDER BY uses it BEFORE
         // sender_id, so a sender's same-millisecond burst stays grouped and in true send
@@ -1480,9 +1483,10 @@ impl MessageStore {
         link_preview_json: Option<&str>,
         signature: Option<&str>,
         public_key: Option<&str>,
+        sealed_at: Option<i64>,
     ) -> Result<bool, String> {
         self.update_link_preview_and_sig_in(
-            "messages", message_id, link_preview_json, signature, public_key,
+            "messages", message_id, link_preview_json, signature, public_key, sealed_at,
         )
     }
 
@@ -1493,9 +1497,10 @@ impl MessageStore {
         link_preview_json: Option<&str>,
         signature: Option<&str>,
         public_key: Option<&str>,
+        sealed_at: Option<i64>,
     ) -> Result<bool, String> {
         self.update_link_preview_and_sig_in(
-            "channel_messages", message_id, link_preview_json, signature, public_key,
+            "channel_messages", message_id, link_preview_json, signature, public_key, sealed_at,
         )
     }
 
@@ -1506,6 +1511,12 @@ impl MessageStore {
     /// preview changed without its signature following would stop verifying and stop
     /// replicating through signed sync backfill.
     ///
+    /// The re-signature carries the message's own time, so every card for one text
+    /// verifies alike: a card sent live (`sealed_at`, when its frame was sealed) lands
+    /// only if sealed after the card it replaces and after the row's last edit, or a
+    /// replayed older one would put its card back. Signed sync backfill has no such
+    /// time and passes `None`.
+    ///
     /// Deliberately does NOT touch `text`, `edited_at` or `message_edits`: attaching a
     /// late card is not an edit. `table` is a fixed table name, never user input.
     fn update_link_preview_and_sig_in(
@@ -1515,16 +1526,26 @@ impl MessageStore {
         link_preview_json: Option<&str>,
         signature: Option<&str>,
         public_key: Option<&str>,
+        sealed_at: Option<i64>,
     ) -> Result<bool, String> {
-        let rows = self.conn
-            .execute(
+        let rows = match sealed_at {
+            Some(at) => self.conn.execute(
+                &format!(
+                    "UPDATE {table} SET link_preview_json = ?1, signature = ?2, \
+                     public_key = ?3, lp_at = ?5 WHERE message_id = ?4 \
+                     AND ?5 > MAX(COALESCE(lp_at, 0), COALESCE(edited_at, 0))"
+                ),
+                params![link_preview_json, signature, public_key, message_id, at],
+            ),
+            None => self.conn.execute(
                 &format!(
                     "UPDATE {table} SET link_preview_json = ?1, signature = ?2, \
                      public_key = ?3 WHERE message_id = ?4"
                 ),
                 params![link_preview_json, signature, public_key, message_id],
-            )
-            .map_err(|e| format!("Failed to update {table} link preview + sig: {e}"))?;
+            ),
+        }
+        .map_err(|e| format!("Failed to update {table} link preview + sig: {e}"))?;
         Ok(rows > 0)
     }
 
@@ -3635,6 +3656,27 @@ impl MessageStore {
 
     // ── Emoji Reactions (Phase 3.5) ──────────────────────────────
 
+    /// A stamp for our own add or removal of `emoji` on `message_id` that outranks
+    /// every add and removal of it already recorded, whichever device's clock made them.
+    pub fn next_reaction_stamp(&self, message_id: &str, emoji: &str, peer_id: &str) -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let held: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(t) FROM (
+                   SELECT added_at AS t FROM message_reactions WHERE message_id = ?1 AND emoji = ?2 AND peer_id = ?3
+                   UNION ALL
+                   SELECT removed_at FROM reaction_removals WHERE message_id = ?1 AND emoji = ?2 AND peer_id = ?3)",
+                params![message_id, emoji, peer_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(None);
+        held.map_or(now, |t| now.max(t.saturating_add(1)))
+    }
+
     /// Add a reaction, at most 3 distinct emojis per user per message. Returns true only
     /// when a new reaction was inserted.
     pub fn add_reaction(
@@ -3684,7 +3726,8 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Remove a reaction, recording the removal as evidence.
+    /// Remove a reaction, recording the removal as evidence. Returns true only when a
+    /// reaction went.
     pub fn remove_reaction(
         &self,
         message_id: &str,
@@ -3694,11 +3737,14 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
+        // Only a reaction added no later than the removal goes, or a replayed older
+        // removal takes away a re-add (B11). A tie goes to the removal, as in
+        // `add_reaction`, so both orders of delivery agree.
         let rows = self
             .conn
             .execute(
-                "DELETE FROM message_reactions WHERE message_id = ?1 AND emoji = ?2 AND peer_id = ?3",
-                params![message_id, emoji, peer_id],
+                "DELETE FROM message_reactions WHERE message_id = ?1 AND emoji = ?2 AND peer_id = ?3 AND added_at <= ?4",
+                params![message_id, emoji, peer_id, removed_at],
             )
             .map_err(|e| format!("Failed to remove reaction: {e}"))?;
 
@@ -6562,6 +6608,54 @@ mod tests {
         assert!(!has(&reordered), "HOL-SEC-039: an add delivered after its removal landed");
 
         assert!(store.add_reaction("m1", "👍", "bob", 3_000, None, None).unwrap(), "a later re-add counts");
+    }
+
+    /// A29 (B11). A removal deleted the reaction whatever its time, so a replayed
+    /// older one took away a later re-add.
+    #[test]
+    fn authz_an_old_unreaction_never_removes_a_later_re_add() {
+        let store = mem_store();
+        let has = |s: &MessageStore| {
+            s.load_reactions_for_messages(&["m1".to_string()])
+                .unwrap()
+                .get("m1")
+                .is_some_and(|r| !r.is_empty())
+        };
+        assert!(store.add_reaction("m1", "👍", "bob", 1_000, None, None).unwrap());
+        assert!(store.remove_reaction("m1", "👍", "bob", 2_000, None, None).unwrap());
+        assert!(store.add_reaction("m1", "👍", "bob", 3_000, None, None).unwrap());
+        assert!(!store.remove_reaction("m1", "👍", "bob", 2_000, None, None).unwrap());
+        assert!(has(&store), "a replayed older unreaction removed a later re-add");
+        assert!(store.remove_reaction("m1", "👍", "bob", 3_000, None, None).unwrap(), "a tie goes to the removal");
+
+        // Our own next change outranks a row a sibling stamped ahead of our clock.
+        store.add_reaction("m2", "👍", "me", i64::MAX / 2, None, None).unwrap();
+        assert!(store.next_reaction_stamp("m2", "👍", "me") > i64::MAX / 2);
+    }
+
+    /// A29 (B11). A card re-signs its row with the message's own time, so nothing
+    /// ordered two cards for one text and a replayed older card replaced a newer one.
+    #[test]
+    fn authz_an_older_card_never_replaces_a_newer_one() {
+        let store = mem_store();
+        store.insert("peer", "see https://a", false, 1_000, None, None, Some("m1"), None, None, None, None).unwrap();
+        let card = |title: &str| format!(r#"{{"url":"https://a","title":"{title}"}}"#);
+        let title = || store.get_dm_message_sig_row("m1").unwrap().link_preview.map(|c| c.title);
+        let set = |t: &str, at: Option<i64>| store.update_link_preview_and_sig("m1", Some(&card(t)), None, None, at).unwrap();
+
+        assert!(set("A", Some(2_000)));
+        assert!(set("B", Some(3_000)));
+        assert!(!set("A", Some(2_000)), "a replayed older card was applied");
+        assert_eq!(title().as_deref(), Some("B"));
+
+        // A card sealed before the row's last edit belongs to an earlier version of it.
+        assert!(store.edit_dm_message("m1", "see https://a again", 5_000, None, None).unwrap());
+        assert!(!set("C", Some(4_000)), "a card from before the edit was applied");
+        assert!(set("D", Some(6_000)));
+
+        // Signed sync backfill carries no time and lands whatever the row holds.
+        assert!(set("E", None));
+        assert_eq!(title().as_deref(), Some("E"));
     }
 
     #[test]

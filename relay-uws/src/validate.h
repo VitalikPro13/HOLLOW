@@ -1,5 +1,7 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
+#include <string>
 #include <string_view>
 
 // Shape validation for CLIENT-SUPPLIED peer ids.
@@ -39,4 +41,12 @@ inline bool is_peer_id_shape(std::string_view id) {
         if (!is_base58btc_char(c)) return false;
     }
     return true;
+}
+
+// The bytes a nickname claim's MASTER signature covers: the nickname (lowercase),
+// the device holding it and the master it names. Mirrors
+// rust/hollow_core/src/node/nick_claim.rs; test_relay_validators.cpp pins the vector.
+inline std::string nickname_claim_message(const std::string& nickname, const std::string& device,
+                                          const std::string& master, int64_t ts_ms) {
+    return "hollow-nick1\n" + nickname + "\n" + device + "\n" + master + "\n" + std::to_string(ts_ms);
 }

@@ -46,8 +46,9 @@ static snapshot::Data sample() {
     t.accepting = false;
     t.retention_secs = 86400;
     t.registered_age_secs = 5;
-    t.frames.push_back({"f1", "12D3KooWSenderA", 10, 6});
-    t.frames.push_back({"f2", "12D3KooWSenderB", 20, 10});
+    t.frames.push_back({"f1", "12D3KooWSenderA", 10, 6, 3600});
+    t.frames.push_back({"f2", "12D3KooWSenderB", 20, 10, 86400});
+    t.owner = "12D3KooWOwner";
     d.topics.push_back(t);
     snapshot::Topic empty;
     empty.key = std::string("srv:abc\0quiet", 13);
@@ -199,10 +200,12 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
         const auto& x = a.topics[i];
         const auto& y = b.topics[i];
         if (x.key != y.key || x.accepting != y.accepting || x.retention_secs != y.retention_secs ||
-            x.registered_age_secs != y.registered_age_secs || x.frames.size() != y.frames.size()) return false;
+            x.registered_age_secs != y.registered_age_secs || x.frames.size() != y.frames.size() ||
+            x.owner != y.owner) return false;
         for (size_t j = 0; j < x.frames.size(); j++) {
             if (x.frames[j].frame != y.frames[j].frame || x.frames[j].sender != y.frames[j].sender ||
-                x.frames[j].age_secs != y.frames[j].age_secs || x.frames[j].seq != y.frames[j].seq) return false;
+                x.frames[j].age_secs != y.frames[j].age_secs || x.frames[j].seq != y.frames[j].seq ||
+                x.frames[j].retention_secs != y.frames[j].retention_secs) return false;
         }
     }
     if (a.push_tokens.size() != b.push_tokens.size()) return false;
@@ -242,6 +245,22 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
     return true;
 }
 
+// The bytes of the v5 `ring_meta` section this build writes for `d`.
+static size_t ring_meta_bytes(const snapshot::Data& d) {
+    size_t n = 4;
+    for (const auto& t : d.topics) n += 4 + t.owner.size() + 4 + 8 * t.frames.size();
+    return n;
+}
+
+// `d` without what v5 added, as a v4 build held it.
+static snapshot::Data without_ring_meta(snapshot::Data d) {
+    for (auto& t : d.topics) {
+        t.owner.clear();
+        for (auto& f : t.frames) f.retention_secs = 0;
+    }
+    return d;
+}
+
 int main() {
     printf("snapshot codec\n");
 
@@ -265,20 +284,48 @@ int main() {
         check("join lock chains survive, in order", out.locks.size() == 2 &&
                                                    out.locks[0].key == "0123456789abcdef0123456789abcdef|12D3KooWOwner" &&
                                                    out.locks[1].links_json == "[]");
+        check("ring owners and frame retentions survive", out.topics[0].owner == "12D3KooWOwner" &&
+                                                          out.topics[0].frames[0].retention_secs == 3600 &&
+                                                          out.topics[0].frames[1].retention_secs == 86400);
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
     }
 
+    // The relay that binds rings to an owner takes back what a v4 build handed
+    // over: the same bytes, less the ring metadata, under version 4.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        size_t meta = ring_meta_bytes(in);
+        std::string v4 = bytes.substr(0, bytes.size() - 4 - meta) + bytes.substr(bytes.size() - 4);
+        v4[4] = 4;
+        snapshot::Data out;
+        check("a v4 snapshot decodes under this reader", snapshot::decode(v4, out));
+        check("and its rings carry no owner or frame retention", same(without_ring_meta(in), out));
+    }
+
     // The relay that introduces the join locks takes back what a v3 build handed
-    // over: the same bytes, less the lock count, under version 3.
+    // over: the same bytes, less the lock count and the ring metadata, under version 3.
     {
         snapshot::Data in = sample();
         in.locks.clear();
         std::string bytes = snapshot::encode(in);
-        std::string v3 = bytes.substr(0, bytes.size() - 8) + bytes.substr(bytes.size() - 4);
+        size_t meta = ring_meta_bytes(in);
+        std::string v3 = bytes.substr(0, bytes.size() - 8 - meta) + bytes.substr(bytes.size() - 4);
         v3[4] = 3;
         snapshot::Data out;
         check("a v3 snapshot decodes under this reader", snapshot::decode(v3, out));
-        check("and carries no join locks", out.locks.empty() && same(in, out));
+        check("and carries no join locks", out.locks.empty() && same(without_ring_meta(in), out));
+    }
+
+    // A v5 ring_meta that does not match the rings it describes is corruption.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        size_t meta = ring_meta_bytes(in);
+        std::string bad = bytes;
+        bad[bytes.size() - 4 - meta] = 3;  // claims three rings where there are two
+        snapshot::Data out;
+        check("ring metadata for the wrong number of rings is refused", !snapshot::decode(bad, out));
     }
 
     // An empty relay is a valid snapshot too.

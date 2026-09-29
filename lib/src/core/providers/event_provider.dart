@@ -85,7 +85,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart'
-    show handleNicknameLookupFailed;
+    show handleNicknameLookupFailed, handleNicknameResolved;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
 /// Listens to the Rust event stream and dispatches to the right providers.
@@ -332,7 +332,8 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_MediaForwarderInfo(:final peerId, :final online):
         ref
             .read(forwarderInfoProvider.notifier)
-            .setInfo(peerId: peerId, online: online);
+            .setInfo(peerId: peerId, online: online)
+            .catchError((_) {});
 
       case NetworkEvent_PeerExpired(:final peerId):
         ref.read(peersProvider.notifier).removePeer(peerId);
@@ -1001,6 +1002,9 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_NicknameClaimFailed(:final error):
         ref.read(temporaryNicknameProvider.notifier).onClaimFailed(error);
+
+      case NetworkEvent_NicknameResolved(:final nickname, :final masterId):
+        handleNicknameResolved(nickname, masterId);
 
       case NetworkEvent_NicknameResolveFailed(:final nickname, :final error):
         debugPrint('[HOLLOW] Nickname resolve failed: $nickname — $error');

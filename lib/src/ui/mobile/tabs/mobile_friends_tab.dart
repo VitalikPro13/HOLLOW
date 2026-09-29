@@ -621,7 +621,11 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
       _error = null;
     });
     try {
-      await sendFriendRequestTo(ref, input);
+      final sent = await sendFriendRequestTo(context, ref, input);
+      if (!sent) {
+        if (mounted) setState(() => _sending = false);
+        return;
+      }
       if (mounted) {
         Navigator.of(context).pop();
         HollowToast.show(context, 'Friend request sent',

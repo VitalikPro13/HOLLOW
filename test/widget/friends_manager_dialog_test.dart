@@ -20,7 +20,7 @@ import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
 
 class _Api implements RustLibApi {
-  int nicknameSends = 0;
+  int nicknameLookups = 0;
 
   @override
   Future<Uint8List?> crateApiStorageGetAvatar({required String peerId}) async =>
@@ -30,9 +30,9 @@ class _Api implements RustLibApi {
   Future<void> crateApiNetworkLogFromDart({required String message}) async {}
 
   @override
-  Future<void> crateApiNetworkSendFriendRequestByNickname(
+  Future<void> crateApiNetworkResolveNickname(
       {required String nickname}) async {
-    nicknameSends++;
+    nicknameLookups++;
   }
 
   @override
@@ -49,8 +49,13 @@ class _Nickname extends TemporaryNicknameNotifier {
 }
 
 class _Friends extends FriendsNotifier {
+  final List<String> sent = [];
+
   @override
   Map<String, FriendInfo> build() => testFriends;
+
+  @override
+  Future<void> sendRequest(String peerId) async => sent.add(peerId);
 
   void addOutgoing(String peerId) {
     state = {
@@ -110,6 +115,14 @@ Future<ProviderContainer> _open(WidgetTester tester, FriendsManagerTab tab,
   return container;
 }
 
+/// Lets a dialog open or close while a button underneath still spins, which
+/// pumpAndSettle would wait out forever.
+Future<void> _settle(WidgetTester tester) async {
+  for (var i = 0; i < 6; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
 TextField _field(WidgetTester tester, String hint) => tester.widget<TextField>(
     find.byWidgetPredicate(
         (w) => w is TextField && w.decoration?.hintText == hint));
@@ -134,9 +147,11 @@ void main() {
     expect(find.text('That nickname is already taken'), findsOneWidget);
   });
 
-  testWidgets('a nickname send stays busy until the request exists',
+  testWidgets('a nickname is confirmed by whom it names before anything is sent',
       (tester) async {
     final c = await _open(tester, FriendsManagerTab.add);
+    final friends = c.read(friendsProvider.notifier) as _Friends;
+    final lookupsBefore = _api.nicknameLookups;
     await tester.enterText(
         find.byWidgetPredicate((w) =>
             w is TextField &&
@@ -146,9 +161,7 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(_api.nicknameSends, 1);
-    expect(find.textContaining('Looking up'), findsNothing,
-        reason: 'no success message before the outcome is known');
+    expect(_api.nicknameLookups, lookupsBefore + 1);
     expect(
         tester
             .widgetList<HollowButton>(find.byType(HollowButton))
@@ -156,14 +169,68 @@ void main() {
         isTrue,
         reason: 'Send request is busy through the lookup');
 
-    (c.read(friendsProvider.notifier) as _Friends).addOutgoing('juno_master');
-    await tester.pump();
-    await tester.pump();
+    handleNicknameResolved('juno', '12D3KooWjunoMasterXYZ789');
+    await _settle(tester);
+    expect(find.text('Send a friend request to juno?'), findsOneWidget);
+    expect(find.textContaining('ending in XYZ789'), findsOneWidget);
+    expect(friends.sent, isEmpty, reason: 'nothing goes out before the confirm');
+
+    await tester.tap(find.text('Send request').last);
+    await _settle(tester);
+    expect(friends.sent, ['12D3KooWjunoMasterXYZ789'],
+        reason: 'the request goes to the master the claim named');
     expect(find.text('Friend request sent'), findsOneWidget);
     expect(
         _field(tester, 'Paste an ID, or type a nickname').controller!.text, '');
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('cancelling the confirm sends nothing and keeps the nickname',
+      (tester) async {
+    final c = await _open(tester, FriendsManagerTab.add);
+    final friends = c.read(friendsProvider.notifier) as _Friends;
+    await tester.enterText(
+        find.byWidgetPredicate((w) =>
+            w is TextField &&
+            w.decoration?.hintText == 'Paste an ID, or type a nickname'),
+        'juno');
+    await tester.tap(find.text('Send request'));
+    await tester.pump();
+    await tester.pump();
+    handleNicknameResolved('juno', '12D3KooWjunoMasterXYZ789');
+    await _settle(tester);
+    await tester.tap(find.text('Cancel'));
+    await _settle(tester);
+
+    expect(friends.sent, isEmpty);
+    expect(find.text('Friend request sent'), findsNothing);
+    expect(
+        _field(tester, 'Paste an ID, or type a nickname').controller!.text,
+        'juno');
+    expect(
+        tester
+            .widgetList<HollowButton>(find.byType(HollowButton))
+            .any((b) => b.loading),
+        isFalse);
+  });
+
+  testWidgets('a nickname its master never signed for says so at the field',
+      (tester) async {
+    await _open(tester, FriendsManagerTab.add);
+    await tester.enterText(
+        find.byWidgetPredicate((w) =>
+            w is TextField &&
+            w.decoration?.hintText == 'Paste an ID, or type a nickname'),
+        'squat');
+    await tester.tap(find.text('Send request'));
+    await tester.pump();
+    await tester.pump();
+    expect(handleNicknameLookupFailed('squat', 'unverified'), isTrue);
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining("couldn't confirm who holds that nickname"),
+        findsOneWidget);
   });
 
   testWidgets('a nickname nobody holds says so at the field, input kept',

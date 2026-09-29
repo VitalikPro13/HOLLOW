@@ -334,6 +334,9 @@ pub(crate) enum NetworkEvent {
     NicknameReleased,
     NicknameClaimFailed { error: String },
     NicknameResolveFailed { nickname: String, error: String },
+    /// A nickname we looked up belongs to `master_id`, who signed the claim. Nothing
+    /// is sent until the person confirms (`SendFriendRequest`).
+    NicknameResolved { nickname: String, master_id: String },
     // -- Relay connection events --
     RelayDisconnected,
     /// The WS relay connection was (re)established and authenticated. The UI
@@ -960,7 +963,7 @@ pub(crate) enum NodeCommand {
     RemoveDmReaction { peer_id: String, message_id: String, emoji: String },
     // -- Friends --
     SendFriendRequest { peer_id: String },
-    SendFriendRequestByNickname { nickname: String },
+    ResolveNickname { nickname: String },
     AcceptFriendRequest { peer_id: String },
     RejectFriendRequest { peer_id: String },
     RemoveFriend { peer_id: String },
@@ -1315,7 +1318,7 @@ impl NodeCommand {
             Self::RemoveChannelReaction { .. } => "RemoveChannelReaction",
             Self::RemoveDmReaction { .. } => "RemoveDmReaction",
             Self::SendFriendRequest { .. } => "SendFriendRequest",
-            Self::SendFriendRequestByNickname { .. } => "SendFriendRequestByNickname",
+            Self::ResolveNickname { .. } => "ResolveNickname",
             Self::AcceptFriendRequest { .. } => "AcceptFriendRequest",
             Self::RejectFriendRequest { .. } => "RejectFriendRequest",
             Self::RemoveFriend { .. } => "RemoveFriend",
@@ -2773,7 +2776,8 @@ pub(crate) enum HavenMessage {
     },
 
     // -- Recovery pool (Evidence Recovery) --
-    // Plaintext messages (not MLS) — no group exists for a dead server.
+    // No group exists for a dead server: on the wire each rides inside
+    // `RecoverySealed`, under the pool's invite token.
 
     /// Sent when a peer joins a recovery pool room.
     #[serde(rename = "recovery_hello")]
@@ -2816,6 +2820,14 @@ pub(crate) enum HavenMessage {
     /// Initiator stops the pool.
     #[serde(rename = "recovery_stop")]
     RecoveryStop,
+
+    /// A pool message sealed under a key derived from the pool's invite token
+    /// (`recovery_pool::seal_control`), bound to the pool's room and its sender.
+    #[serde(rename = "recovery_sealed")]
+    RecoverySealed {
+        nonce: String,
+        ct: String,
+    },
 
     // -- Hollow Share --
     // Share control lives in HavenMessage, not MessageEnvelope: MessageEnvelope
@@ -3970,6 +3982,7 @@ impl HavenMessage {
             | Self::RecoveryTransferPlan { .. }
             | Self::RecoveryShardReceived { .. }
             | Self::RecoveryStop
+            | Self::RecoverySealed { .. }
             | Self::ShareManifestRequest { .. }
             | Self::ShareHave { .. }
             | Self::ShareChunkRequest { .. }
@@ -4036,6 +4049,11 @@ impl HavenMessage {
             | Self::ShareHave { .. }
             | Self::ShareChunkRequest { .. }
             | Self::ShareChunkResponse { .. } => Lane::Share,
+            Self::RecoveryHello { .. }
+            | Self::RecoveryWelcome { .. }
+            | Self::RecoveryTransferPlan { .. }
+            | Self::RecoveryShardReceived { .. }
+            | Self::RecoveryStop => Lane::Recovery,
             Self::CallInvite { .. }
             | Self::CallAccept { .. }
             | Self::CallReject { .. }
@@ -4099,11 +4117,7 @@ impl HavenMessage {
             | Self::RtcShareIceCandidate { .. }
             | Self::PeerExchange { .. }
             | Self::DeviceListTombstone { .. }
-            | Self::RecoveryHello { .. }
-            | Self::RecoveryWelcome { .. }
-            | Self::RecoveryTransferPlan { .. }
-            | Self::RecoveryShardReceived { .. }
-            | Self::RecoveryStop
+            | Self::RecoverySealed { .. }
             | Self::ShareSealed { .. } => Lane::Relay,
         }
     }
@@ -4123,6 +4137,8 @@ pub(crate) enum Lane {
     /// Only inside [`HavenMessage::JoinSealed`], under a server's join key or a
     /// joiner's reply key.
     Join,
+    /// Only inside [`HavenMessage::RecoverySealed`], under a pool's invite token.
+    Recovery,
 }
 
 impl MessageEnvelope {

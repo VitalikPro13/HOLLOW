@@ -418,9 +418,7 @@ class CallNotifier extends Notifier<CallState> {
         {
           final webrtc = ref.read(webRtcProvider.notifier).service;
           webrtc.onScreenAudioReceived = (fromPeer, data) async {
-            // Only the call's peer, and only for a share we asked to watch: any
-            // other open data channel could otherwise play into this output.
-            if (!_fromCallPeer(fromPeer) || !state.watchingRemoteShare) return;
+            if (!acceptsShareAudioFrom(fromPeer)) return;
             if (_screenAudioRenderer == null) {
               _screenAudioRenderer = ScreenAudioReceiver.forPlatform();
               final ok = await _screenAudioRenderer!.start();
@@ -2410,6 +2408,12 @@ class CallNotifier extends Notifier<CallState> {
     }
     state = const CallState();
   }
+
+  /// Whether share audio arriving from [peerId] may play (HOL-SEC-058): only the
+  /// call's peer, and only for a share we asked to watch, or any open data channel
+  /// could play into this output.
+  bool acceptsShareAudioFrom(String peerId) =>
+      _fromCallPeer(peerId) && state.watchingRemoteShare;
 
   /// Whether [peerId] (device or master) is the same person as the live call's
   /// peer. The stored peer is a master for an outgoing call and may be a device

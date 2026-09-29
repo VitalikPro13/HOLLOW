@@ -76,6 +76,10 @@ static constexpr size_t MAX_TOPIC_BUFFER_MSGS = 200;                    // frame
 static constexpr size_t MAX_TOPIC_BUFFER_BYTES = 1024 * 1024;           // 1 MB per channel
 static constexpr size_t MAX_TOPIC_CHANNELS_PER_CALL = 128;              // defensive cap
 static constexpr size_t MAX_TOPIC_BUFFERS_TOTAL = 65536;                // defensive cap
+// Rings one server room may have, and rings one device may have created. Past the
+// relay-wide cap the ring idle longest goes rather than the new one being refused.
+static constexpr size_t MAX_TOPIC_BUFFERS_PER_ROOM = 512;
+static constexpr size_t MAX_TOPIC_BUFFERS_PER_CREATOR = 2048;
 static constexpr int64_t TOPIC_BUFFER_IDLE_EXPIRE_SECS = 7 * 86400;     // no member re-registered
 // Global budget across ALL buffered frames (DM + topic). Oldest-first
 // eviction when exceeded — organic use never gets near this.
@@ -155,6 +159,13 @@ struct PerSocketData {
     bool is_guest = false;
     std::string ip_key;
     bool is_fetch = false;  // Invisible background fetch mode (FCM wake-up)
+    // The auth v2 challenge this socket was handed; empty until it asks. One per
+    // socket, so a signature over it cannot open a second connection.
+    std::string auth_nonce;
+    // A fetch socket's rooms, kept apart from `RelayState::peer_rooms`: that set
+    // belongs to the device's full socket, whose auth resets it, and a fetch slot
+    // it forgot would outlive the fetch socket.
+    std::unordered_set<std::string> fetch_rooms;
     // Set when a NEWER socket for the same peer_id authenticates and takes over
     // this peer's room/socket state. A superseded ghost must NOT run the shared
     // peer cleanup on close (it would evict the live successor from every room);
@@ -178,6 +189,9 @@ struct PerSocketData {
 
 struct WsRoom {
     std::unordered_map<std::string, SSLWebSocket*> peers;
+    // In an `inbox:{master}` room, the peers that proved on join that they are
+    // devices of that master. Empty in every other room.
+    std::unordered_set<std::string> owners;
 };
 
 struct IpState {
@@ -249,6 +263,14 @@ struct RelayState {
     // Returned on resolve so a stranger's friend request targets inbox:{master}
     // — the claimer's WS-auth peer_id is a DEVICE id whose inbox nobody joins.
     std::unordered_map<std::string, std::string> nickname_to_master;
+    // The master's signature on a nickname claim, handed back on resolve so the
+    // resolver checks it again. RAM only, like the nicknames.
+    struct NicknameProof {
+        std::string master_key;
+        int64_t ts_ms = 0;
+        std::string sig;
+    };
+    std::unordered_map<std::string, NicknameProof> nickname_proof;
 
     // Multi-device link-code registry (RAM only, released on disconnect, 5-min TTL,
     // consumed on resolve). Mirrors the nickname registry. Used by Step 4 device
@@ -309,6 +331,9 @@ struct RelayState {
                              // can't decrypt your own ciphertext)
         std::chrono::steady_clock::time_point at;
         uint64_t seq = 0;    // eviction-index stamp (OfflineIndex)
+        // The ring's retention when this frame arrived: a later, longer retention
+        // never keeps a frame past what was promised when it was sent. 0 = unknown.
+        int64_t retention_secs = 0;
     };
     struct TopicBuffer {
         std::deque<TopicFrame> frames;
@@ -319,8 +344,16 @@ struct RelayState {
         bool accepting = true;
         int64_t retention_secs = 86400;
         std::chrono::steady_clock::time_point last_registered;
+        // A legacy (32-hex) server's rings answer to one owner's join lock: the
+        // first signed control binds them. Empty for a self-certifying id.
+        std::string owner;
+        // The device that created the ring; not persisted, only counted.
+        std::string creator;
     };
     std::unordered_map<std::string, TopicBuffer> topic_buffers;
+    // Rings per server room and per creating device, kept with `topic_buffers`.
+    std::unordered_map<std::string, size_t> topic_buffers_per_room;
+    std::unordered_map<std::string, size_t> topic_buffers_per_creator;
 
     // Total bytes across offline_buffer + topic_buffers frames (global budget).
     size_t buffer_total_bytes = 0;

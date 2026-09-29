@@ -398,10 +398,10 @@ Future<void> removeFriend({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkRemoveFriend(peerId: peerId);
 
 /// Send a friend request to a peer, resolving their temporary nickname first.
-Future<void> sendFriendRequestByNickname({required String nickname}) => RustLib
-    .instance
-    .api
-    .crateApiNetworkSendFriendRequestByNickname(nickname: nickname);
+/// Looks a temporary nickname up; the answer is `NicknameResolved` or
+/// `NicknameResolveFailed`, and nothing is sent to the person it names.
+Future<void> resolveNickname({required String nickname}) =>
+    RustLib.instance.api.crateApiNetworkResolveNickname(nickname: nickname);
 
 /// Claim a temporary nickname on the relay (RAM only, released on disconnect).
 Future<void> claimNickname({required String nickname}) =>
@@ -1939,6 +1939,13 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String nickname,
     required String error,
   }) = NetworkEvent_NicknameResolveFailed;
+
+  /// A nickname we looked up belongs to `master_id`, who signed the claim; nothing
+  /// is sent until the person confirms.
+  const factory NetworkEvent.nicknameResolved({
+    required String nickname,
+    required String masterId,
+  }) = NetworkEvent_NicknameResolved;
   const factory NetworkEvent.relayDisconnected() =
       NetworkEvent_RelayDisconnected;
 

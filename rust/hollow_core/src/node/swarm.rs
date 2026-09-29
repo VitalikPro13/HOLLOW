@@ -2195,18 +2195,23 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    NodeCommand::SendFriendRequestByNickname { nickname } => {
+                    NodeCommand::ResolveNickname { nickname } => {
+                        let nickname = nickname.to_lowercase();
                         pending_nickname_resolve = Some(nickname.clone());
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ResolveNickname { nickname });
                     }
 
                     NodeCommand::ClaimNickname { nickname } => {
-                        // Send our MASTER id alongside: the relay returns it on
-                        // resolve so strangers friend-request `inbox:{master}`
-                        // (the room we listen on) instead of our device id.
+                        // Our MASTER signs the claim for this device: the relay hands
+                        // it back on resolve, so a stranger's request goes to
+                        // `inbox:{master}` and only to a master that claimed it.
+                        let nickname = nickname.to_lowercase();
+                        let now_ms = super::types::now_ms();
+                        let claim = super::nick_claim::sign(&master_keypair, &nickname, &device_peer_id, now_ms);
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ClaimNickname {
                             nickname,
                             master: local_peer_str.to_string(),
+                            claim,
                         });
                     }
 
@@ -2361,7 +2366,7 @@ async fn run_event_loop(
                         let in_room = ws_room_peers.contains_key(&server_id);
                         let fresh_channels: Vec<String> = match server_states.get(&server_id) {
                             Some(state) if in_room && state.relay_catchup_secs() > 0 => {
-                                sync_handler::register_relay_catchup(&ws_cmd_tx, state, &server_id);
+                                sync_handler::register_relay_catchup(&ws_cmd_tx, state, &server_id, &master_keypair);
                                 channel_ids
                                     .iter()
                                     .filter(|cid| {
@@ -3053,7 +3058,7 @@ async fn run_event_loop(
                         vault_ops::handle_join_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
-                            &local_peer_str,
+                            &local_peer_str, &device_peer_id,
                             server_id, token,
                             &db_path, &db_passphrase,
                         ).await;
@@ -3061,7 +3066,7 @@ async fn run_event_loop(
                     NodeCommand::StopRecoveryPool { server_id } => {
                         vault_ops::handle_stop_recovery_pool(
                             &mut recovery_pool_state,
-                            &event_tx, &ws_cmd_tx,
+                            &event_tx, &ws_cmd_tx, &device_peer_id,
                             server_id,
                         ).await;
                     }
@@ -3450,7 +3455,7 @@ async fn run_event_loop(
                                             manifest_ids: our_inv.manifest_ids.clone(),
                                             shard_inventory_json: serde_json::to_string(&our_inv.shards).unwrap_or_default(),
                                         };
-                                        if let Ok(bytes) = serde_json::to_vec(&welcome) {
+                                        if let Some(bytes) = pool.seal(&device_peer_id, &welcome) {
                                             let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendDirect {
                                                 room_code: room.clone(),
                                                 target_peer: peer_id.clone(),
@@ -4076,7 +4081,7 @@ async fn run_event_loop(
                         // Runs even for a room with zero peers: that is exactly the gap it closes.
                         sync_handler::request_channel_catchups(
                             &ws_cmd_tx, &crdt_store, server_states.get(&room), &room,
-                            &local_peer, &mut relay_catchup_done, "connect",
+                            &local_peer, &master_keypair, &mut relay_catchup_done, "connect",
                         ).await;
 
                         // -- The JOIN ring (pending joins, rung 1) --
@@ -4533,6 +4538,11 @@ async fn run_event_loop(
                                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
                                     &event_tx, &local_peer_str, &device_peer_id, &crypto_store, &crdt_store, &server, payload,
                                 );
+                                // Ring control answers to the newest lock: a server's first
+                                // lock is what lets its rings be made at all.
+                                if let Some(state) = server_states.get(&server).filter(|s| s.relay_catchup_secs() > 0) {
+                                    sync_handler::register_relay_catchup(&ws_cmd_tx, state, &server, &master_keypair);
+                                }
                             }
                             let next = server_states
                                 .get(&server)
@@ -4695,32 +4705,21 @@ async fn run_event_loop(
                             let _ = event_tx.send(NetworkEvent::NicknameClaimFailed { error }).await;
                         }
                     }
-                    WsEvent::NicknameResolved { nickname, peer_id, master_id } => {
+                    WsEvent::NicknameResolved { nickname, peer_id, master_id, claim } => {
                         if pending_nickname_resolve.as_deref() == Some(&nickname) {
                             pending_nickname_resolve = None;
-                            // The relay binds a nickname to the claimer's WS-auth DEVICE id but also
-                            // hands back the claimer's self-reported MASTER. Friendships key on the
-                            // master and delivery targets `inbox:{master}`, while a device id has an
-                            // inbox nobody joins, so prefer `master_id` and fall back to the local
-                            // resolver for old relays (a cold resolver returns the identity, and the
-                            // device-list ingest repairs the row).
-                            // SECURITY: `master_id` is self-reported by the claimer, so use it ONLY as
-                            // the friend-request target string, NEVER feed it into `resolver` (resolver
-                            // mappings come only from master-signed device lists).
-                            let target = if !master_id.is_empty() {
-                                master_id
-                            } else {
-                                super::resolver::resolve(&peer_id)
+                            // Only a master that signed the claim for the device holding the
+                            // nickname counts, and even then the person confirms before any
+                            // request goes out. Never fed to `resolver`: that takes only
+                            // master-signed device lists.
+                            let ev = match super::nick_claim::verified_master(&nickname, &peer_id, &master_id, &claim, super::types::now_ms()) {
+                                Some(master_id) => NetworkEvent::NicknameResolved { nickname, master_id },
+                                None => {
+                                    hollow_log!("[HOLLOW-SECURITY] Nickname {nickname} resolved to a claim its master did not sign");
+                                    NetworkEvent::NicknameResolveFailed { nickname, error: "unverified".to_string() }
+                                }
                             };
-                            social::handle_send_friend_request(
-                                &mut olm, &crypto_store,
-                                &event_tx, &ws_cmd_tx, &ws_room_peers,
-                                &mut pending_friend_requests,
-                                &mut pending_friend_removals,
-                                &local_peer_str, &master_keypair, &device_keypair, &device_peer_id,
-                                target,
-                                &db_path, &db_passphrase,
-                            ).await;
+                            let _ = event_tx.send(ev).await;
                         }
                     }
                     // TURN credentials from the authed relay socket feed Dart's
@@ -4735,9 +4734,20 @@ async fn run_event_loop(
                         }).await;
                     }
                     WsEvent::MediaForwarderInfo { peer_id, online } => {
-                        let _ = event_tx.send(NetworkEvent::MediaForwarderInfo {
-                            peer_id, online,
-                        }).await;
+                        // The operator's forwarder is nobody we know: a relay naming a
+                        // person's device would send privacy-bound viewers' media legs,
+                        // and their addresses, to that person. Dart pins the rest per relay.
+                        let known_person = super::resolver::resolve(&peer_id) != peer_id
+                            || super::resolver::is_known_master(&peer_id)
+                            || peer_id == local_peer_str
+                            || peer_id == device_peer_id;
+                        if known_person {
+                            hollow_log!("[HOLLOW-FWD] Relay advertised a known identity as its forwarder, ignored");
+                        } else {
+                            let _ = event_tx.send(NetworkEvent::MediaForwarderInfo {
+                                peer_id, online,
+                            }).await;
+                        }
                     }
                     // -- Multi-device link codes --
                     WsEvent::LinkCodeClaimed { code } => {
@@ -4830,24 +4840,15 @@ async fn run_event_loop(
                                         continue;
                                     }
 
-                                    // ── Recovery pool message interception ──
-                                    // Handle recovery messages directly (plaintext, no Olm/MLS).
-                                    let is_recovery = matches!(msg,
-                                        HavenMessage::RecoveryHello { .. }
-                                        | HavenMessage::RecoveryWelcome { .. }
-                                        | HavenMessage::RecoveryTransferPlan { .. }
-                                        | HavenMessage::RecoveryShardReceived { .. }
-                                        | HavenMessage::RecoveryStop
-                                    );
-                                    if is_recovery {
-                                        // The pool's room is the only place its frames come from:
-                                        // a peer in any other room we share is not in the pool.
-                                        let in_pool_room = recovery_pool_state.as_ref().is_some_and(|p| room == p.room_code());
-                                        if !in_pool_room {
-                                            hollow_log!("[HOLLOW-SECURITY] Dropped a recovery frame from {from} in {room}: not the pool room");
+                                    // The recovery pool rides sealed under its invite token; a
+                                    // plaintext copy falls to the lane check below.
+                                    if let HavenMessage::RecoverySealed { nonce, ct } = &msg {
+                                        let opened = recovery_pool_state.as_ref().and_then(|p| p.open_control(&room, &from, nonce, ct));
+                                        if opened.is_none() {
+                                            hollow_log!("[HOLLOW-SECURITY] Dropped a sealed recovery frame from {from} in {room}: not our pool's room, or its token does not open it");
                                         }
-                                        if let Some(pool) = recovery_pool_state.as_mut().filter(|_| in_pool_room) {
-                                            match msg {
+                                        if let (Some(inner), Some(pool)) = (opened, recovery_pool_state.as_mut()) {
+                                            match inner {
                                                 HavenMessage::RecoveryHello { server_id, manifest_ids, shard_inventory_json } => {
                                                     if server_id == pool.server_id {
                                                         hollow_log!("[RECOVERY-POOL] RecoveryHello from {from} — {} manifests", manifest_ids.len());
@@ -4864,7 +4865,7 @@ async fn run_event_loop(
                                                                 manifest_ids: our_inv.manifest_ids.clone(),
                                                                 shard_inventory_json: serde_json::to_string(&our_inv.shards).unwrap_or_default(),
                                                             };
-                                                            if let Ok(bytes) = serde_json::to_vec(&welcome) {
+                                                            if let Some(bytes) = pool.seal(&device_peer_id, &welcome) {
                                                                 let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendDirect {
                                                                     room_code: pool.room_code(),
                                                                     target_peer: from.clone(),
@@ -4895,7 +4896,7 @@ async fn run_event_loop(
                                                                 hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
                                                                 let plan_json = serde_json::to_string(&plan).unwrap_or_default();
                                                                 let msg = HavenMessage::RecoveryTransferPlan { plan_json };
-                                                                if let Ok(bytes) = serde_json::to_vec(&msg) {
+                                                                if let Some(bytes) = pool.seal(&device_peer_id, &msg) {
                                                                     let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
                                                                         room_code: pool.room_code(),
                                                                         data: bytes,
@@ -4936,7 +4937,7 @@ async fn run_event_loop(
                                                             hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
                                                             let plan_json = serde_json::to_string(&plan).unwrap_or_default();
                                                             let msg = HavenMessage::RecoveryTransferPlan { plan_json };
-                                                            if let Ok(bytes) = serde_json::to_vec(&msg) {
+                                                            if let Some(bytes) = pool.seal(&device_peer_id, &msg) {
                                                                 let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
                                                                     room_code: pool.room_code(),
                                                                     data: bytes,
@@ -5037,7 +5038,7 @@ async fn run_event_loop(
                                                                                 content_id: assignment.content_id.clone(),
                                                                                 shard_index: assignment.shard_index,
                                                                             };
-                                                                            if let Ok(bytes) = serde_json::to_vec(&received_msg) {
+                                                                            if let Some(bytes) = pool.seal(&device_peer_id, &received_msg) {
                                                                                 let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
                                                                                     room_code: pool.room_code(),
                                                                                     data: bytes,
@@ -6788,7 +6789,7 @@ async fn after_welcome_joined(
             relay_catchup_done.retain(|(r, _)| r != server_id);
             sync_handler::request_channel_catchups(
                 ws_cmd_tx, crdt_store_actor, server_states.get(server_id),
-                server_id, local_peer_str, relay_catchup_done,
+                server_id, local_peer_str, master_keypair, relay_catchup_done,
                 "parked join welcome",
             ).await;
         }
@@ -8056,7 +8057,7 @@ async fn handle_incoming_request(
                         event_tx,
                         sid.as_deref().and_then(|s| server_states.get(s)),
                         peer_str, master_peer_str,
-                        mid, lp, ts, sig, pk, sid, cid,
+                        mid, lp, ts, sig, pk, sid, cid, frame_ts_ms,
                         db_path, db_passphrase,
                     ).await;
                 }
@@ -8126,18 +8127,17 @@ async fn handle_incoming_request(
                         &reactor, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref(),
                     ) {
                         // Only the reactor's own reaction goes, so no row check is needed.
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            let _ = store.remove_reaction(
-                                &mid, &emoji, &reactor, ts, sig.as_deref(), pk.as_deref(),
-                            );
+                        let removed = crate::storage::MessageStore::open(db_path, db_passphrase)
+                            .is_ok_and(|store| store.remove_reaction(&mid, &emoji, &reactor, ts, sig.as_deref(), pk.as_deref()) == Ok(true));
+                        if removed {
+                            let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
+                                peer_id: dm_event_convo(peer_str, master_peer_str, &mid, db_path, db_passphrase),
+                                message_id: mid,
+                                emoji,
+                                reactor,
+                                removed_at: ts,
+                            }).await;
                         }
-                        let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
-                            peer_id: dm_event_convo(peer_str, master_peer_str, &mid, db_path, db_passphrase),
-                            message_id: mid,
-                            emoji,
-                            reactor,
-                            removed_at: ts,
-                        }).await;
                     }
                 }
                 // -- File transfer receive handlers --
@@ -10515,7 +10515,7 @@ async fn handle_incoming_request(
                                 let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_link_preview_set(
                                     event_tx, mod_state, &sender_master, &local_peer,
-                                    mid, lp, ts, sig, pk, sid, cid,
+                                    mid, lp, ts, sig, pk, sid, cid, frame_ts_ms,
                                     db_path, db_passphrase,
                                 ).await;
                             }
@@ -12010,9 +12010,12 @@ async fn handle_incoming_request(
                     if held.is_some_and(|s| s != "pending" || entry.status != "accepted") {
                         continue;
                     }
-                    // v1 shares only accepted friends; persist as accepted.
+                    // v1 shares only accepted friends; persist as accepted. The stamp says
+                    // which of the friend's removals are older than the friendship, so it
+                    // never runs ahead of the frame (the friendship itself is real).
+                    let since = entry.requested_at.min(super::frame_auth::stamp_ceiling(frame_ts_ms));
                     if store
-                        .save_friend(&fmaster, "accepted", "", entry.requested_at)
+                        .save_friend(&fmaster, "accepted", "", since)
                         .is_ok()
                     {
                         inserted += 1;
@@ -12065,12 +12068,16 @@ async fn handle_incoming_request(
             let rows: Vec<PersonalEmoteEntry> = incoming.into_iter().take(512).collect();
             let mut applied = 0usize;
             let mut missing: Vec<String> = Vec::new();
+            // A row is its own LWW version: one stamped past the frame would win every
+            // later write, and a clamped one would order differently on each device.
+            let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 for e in &rows {
                     if !crate::crdt::valid_emote_name(&e.name)
                         || !(e.hash.is_empty() || crate::crdt::valid_emote_hash(&e.hash))
                         || e.source.len() > 64
                         || e.added_at < 0
+                        || e.added_at > ceiling
                     {
                         continue;
                     }
@@ -12132,7 +12139,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::ReadMarkers { markers } => {
+        HavenMessage::ReadMarkers { mut markers } => {
             // SECURITY: read state is per identity; a friend must not move our
             // pointers. The store apply and the never-regress rule live behind the
             // FFI (Dart owns the unread state), so this only gates and forwards.
@@ -12141,6 +12148,13 @@ async fn handle_incoming_request(
                 return;
             }
             if markers.is_empty() { return; }
+            // A pointer never regresses, so one past the frame would mark every later
+            // message read. Held to the frame rather than refused: its stamp is the
+            // time of a message someone else wrote, and "read up to now" still holds.
+            let ceiling = super::frame_auth::stamp_ceiling(frame_ts_ms);
+            for marker in &mut markers {
+                marker.ts = marker.ts.min(ceiling);
+            }
             hollow_log!("[HOLLOW-UNREAD] Received {} read marker(s) from sibling {peer_str}", markers.len());
             let _ = event_tx.send(NetworkEvent::ReadMarkersReceived { markers }).await;
         }
@@ -12314,7 +12328,7 @@ async fn handle_incoming_request(
             message_ops::handle_envelope_link_preview_set(
                 &event_tx, server_states.get(&server_id), &sender_master, local_peer_str,
                 mid, lp, ts, sig, pk,
-                Some(server_id), Some(channel_id),
+                Some(server_id), Some(channel_id), frame_ts_ms,
                 &db_path, &db_passphrase,
             ).await;
         }

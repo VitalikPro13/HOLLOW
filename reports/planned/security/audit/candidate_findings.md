@@ -75,32 +75,32 @@ needed from Vitalik: which messages move, and the rollout rule.
 | A6 | Spoof a member's `MlsKeyPackage` and obtain a leaf in any server group, private included | server_mls:S-12 | Critical | FIXED HOL-SEC-041 (bound leaves), replay churn HOL-SEC-054 |
 | A7 | Spoof `MlsEpochProbe` to evict a member's leaves every 10 s | server_mls:S-20 | Medium | FIXED HOL-SEC-044 (no drop) + 053 (sealed) |
 | A8 | Forge `FriendRemove` / `FriendReject` (unfriend) and drive the mutual auto-accept | dm:S-06, dm:S-07 | Medium | FIXED HOL-SEC-053, replay HOL-SEC-054 |
-| A9 | Inject sibling-only plaintext (`FriendListSync`, `PersonalEmoteSync`, `ReadMarkers`, `SiblingServerAnnounce`) as our own device | identity:S9 | High | FIXED HOL-SEC-053 (sealed + own-device echo refused), HOL-SEC-056; encryption of the lane = decision 6 |
-| A10 | Pull the full op log (private servers included) with a plaintext `SyncRequest` | crdt:S15, server_mls:S-04 | Medium | FIXED HOL-SEC-055 (members only); out of plaintext = decision 6 |
+| A9 | Inject sibling-only plaintext (`FriendListSync`, `PersonalEmoteSync`, `ReadMarkers`, `SiblingServerAnnounce`) as our own device | identity:S9 | High | FIXED HOL-SEC-053 (sealed + own-device echo refused), HOL-SEC-056; the lane rides Olm, FIXED HOL-SEC-062 |
+| A10 | Pull the full op log (private servers included) with a plaintext `SyncRequest` | crdt:S15, server_mls:S-04 | Medium | FIXED HOL-SEC-055 (members only); out of plaintext FIXED HOL-SEC-062 (sync requests and answers over Olm, a joiner's answers only in its reply box) |
 | A11 | Forge voice presence, leave and mute/recording state | media:S-06..S-08 | Low | FIXED HOL-SEC-053 (confirmed first) |
 | A12 | Inject an `RtcAnswer` with its own DTLS fingerprint and sit in the data channel | media:S-10 | High | FIXED HOL-SEC-053 (traced: screen-share audio was plaintext to the relay); peer half HOL-SEC-058 |
 | A13 | Forge `PeerDisconnecting` to drop a voice leg or unconnected call | dm:S-22 | Low | FIXED HOL-SEC-053 (no sender existed; variant removed) |
 | A14 | Garbage PreKey/normal frame with a spoofed `from` tears down a working Olm session | dm:S-03, transport:S-16 | Medium | FIXED HOL-SEC-053 (spoofed) + 054 (a replayed genuine frame) |
 | A15 | Swap a waiting-room knocker's KeyPackage so the host admits the relay | server_mls:S-27 | High | FIXED HOL-SEC-017/041; host pinning FIXED HOL-SEC-061 |
 | A16 | Conference lobby/host spoofing (`LobbyInfo`, `Ended`, `Kicked`, `JoinDenied`) | server_mls:S-29..S-32 | Medium | FIXED: relay half HOL-SEC-053, member half HOL-SEC-061 (ids name the host) |
-| A17 | Auth signature has no relay binding or nonce: replay to another relay within 60 s | relay:8 | Medium | CONFIRMED (worse: an unsigned `fetch:true` replay sits invisibly beside the device); decision 6 (A-D4) |
-| A18 | A relay reply containing "license_key" stops the reconnect loop for good | relay:22 | Low | CONFIRMED (also wipes the stored key); decision 6 (A-D4) |
+| A17 | Auth signature has no relay binding or nonce: replay to another relay within 60 s | relay:8 | Medium | FIXED HOL-SEC-063 (auth v2: relay nonce, relay domain and every flag signed; fetch sockets never take a full socket's slot, never listed) |
+| A18 | A relay reply containing "license_key" stops the reconnect loop for good | relay:22 | Low | FIXED HOL-SEC-066 (exact refusal codes only, the key never erased on a relay's word, one key per relay) |
 
 New in session 10 (design A inventories, `design_A_inventory/`), all decision 6:
 
 | ID | What | Evidence | Sev | Status |
 |---|---|---|---|---|
 | A19 | Relay-alone server delete through the owner's own device | server_mls inventory | Critical | FIXED HOL-SEC-053 (= A2) |
-| A20 | A sibling announce reopened a held server to any member's snapshot | server_mls inventory | High | FIXED HOL-SEC-056 (needs a harness test) |
-| A21 | Share audio played from any open data channel | calls inventory | Medium | FIXED HOL-SEC-058 (needs a test) |
+| A20 | A sibling announce reopened a held server to any member's snapshot | server_mls inventory | High | FIXED HOL-SEC-056 (harness test `authz_a_sibling_announce_for_a_held_server_starts_no_join`, session 12) |
+| A21 | Share audio played from any open data channel | calls inventory | Medium | FIXED HOL-SEC-058 (Dart test `share_audio_gate_test.dart`, 2026-09-29) |
 | A22 | Full profile and a third-party profile oracle to anyone | dm inventory | Low | FIXED HOL-SEC-057 |
 | A23 | Push fetch node bare-acked junk and cleared every parked destroy order | relay inventory E.2 | Medium | FIXED HOL-SEC-059 |
-| A24 | Recovery pool authority is its token, which rides the room name the relay sees | files inventory | Medium | OPEN (token-hashed room + token proof) |
-| A25 | One ring frame under 1 MB flushes a ring; one socket fills the 65,536 registrations; retention extends retroactively | relay inventory C.4 | Medium | OPEN (A-D4) |
-| A26 | TURN URIs not checked against the relay domain | relay inventory E.9 | Low | OPEN (A-D4) |
+| A24 | Recovery pool authority is its token, which rides the room name the relay sees | files inventory | Medium | FIXED HOL-SEC-067 (room named by a hash of the token, every pool frame sealed under it, 32-byte token) |
+| A25 | One ring frame under 1 MB flushes a ring; one socket fills the 65,536 registrations; retention extends retroactively | relay inventory C.4 | Medium | FIXED HOL-SEC-065 (byte-fair eviction, no ring frame over 256 KB, per-room and per-device caps, the idlest ring makes room, retention never retroactive) |
+| A26 | TURN URIs not checked against the relay domain | relay inventory E.9 | Low | FIXED HOL-SEC-066 (only TURN URIs on the relay's own host) |
 | A27 | Conference access hash is a replayable bearer | server_mls, relay inventories | Medium | FIXED HOL-SEC-061 (device-bound knock proof, Argon2id code key) |
-| A28 | Light profile and device list announced to every room peer; a friend request's sender gets our profile | dm inventory | Medium (C-24) | OPEN (A-D1/A-D5) |
-| A29 | DM typing has no friend check; sibling-lane stamps unbounded; unreaction and link-card replays | server_mls, dm inventories | Low | OPEN (A-D5) |
+| A28 | Light profile and device list announced to every room peer; a friend request's sender gets our profile | dm inventory | Medium (C-24) | FIXED HOL-SEC-062 (phase D: nothing to strangers, a signed name+avatar card before acceptance) |
+| A29 | DM typing has no friend check; sibling-lane stamps unbounded; unreaction and link-card replays | server_mls, dm inventories | Low | DM typing half FIXED HOL-SEC-062; stamps, unreaction and link-card replays FIXED HOL-SEC-068 |
 | A30 | No file carries a signed content hash (H8 remainder) | files inventory | High | FIXED HOL-SEC-060 (self-certifying file ids; pre-0.12 files = AR-13, accepted) |
 
 ## Class B. Message rows change by message id alone
@@ -236,9 +236,9 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | I1 | Crash the relay before auth with a wrong-typed JSON field (no snapshot: buffers, kill list, push tokens lost) | relay:1 | Critical (availability) | FIXED + DEPLOYED HOL-SEC-028: `parse_auth_frame` never throws, pre-auth frames capped at 16 KiB, auth and binary dispatch wrapped |
 | I2 | Replace or pre-block a parked destroy order with junk and a huge `issued_at_ms`; the target acks the junk | relay:5, identity:S8 | High | FIXED + DEPLOYED HOL-SEC-029: one slot per issuer per target, every slot delivered, future stamps refused, per-signal ack (client half in 0.12) |
 | I3 | Evict every kill-list entry with throwaway identities | relay:6 | Medium | OPEN, residual of HOL-SEC-029: Sybil deposits still evict; the relay cannot judge an order. Design ID-1 |
-| I4 | Room joins are ungated: `inbox:{master}` and DM rooms become presence and friendship oracles | relay:7 | Medium (privacy) | OPEN, decision 6 (A-D4, session 11): no rosters or presence for non-owners of an inbox, fetch sockets never listed, DM room names from a secret |
-| I5 | Anyone with a server id turns ring retention on, extends or clears it | relay:9 | Medium | OPEN, decision 6 (A-D4, session 11): an owner-signed ring opt-in |
-| I6 | Anyone with a server id reads the `~join` ring (plaintext join requests: device list, KeyPackage, Twitch credential) and every channel ring | relay:10 | Medium | OPEN, decision 6 (A-D1, session 11): join requests out of the plaintext ring |
+| I4 | Room joins are ungated: `inbox:{master}` and DM rooms become presence and friendship oracles | relay:7 | Medium (privacy) | DM-room half FIXED HOL-SEC-062; inbox rosters and presence FIXED HOL-SEC-064 (only proven owners see each other); fetch sockets FIXED HOL-SEC-063 |
+| I5 | Anyone with a server id turns ring retention on, extends or clears it | relay:9 | Medium | FIXED HOL-SEC-065 (ring control signed by the change key of the server's newest join lock) |
+| I6 | Anyone with a server id reads the `~join` ring (plaintext join requests: device list, KeyPackage, Twitch credential) and every channel ring | relay:10 | Medium | Join half FIXED HOL-SEC-062 (the `~join` ring holds only sealed boxes); control half FIXED HOL-SEC-065 |
 | I7 | Ring flush with junk 0x07 frames; guests unthrottled on 0x07 | relay:11 | Medium | FIXED + DEPLOYED HOL-SEC-030: fair-share ring eviction (a flooder evicts itself); guests may not send topic frames |
 | I8 | Link-code guess throttle bypassed by two oracles (`claim` answers "taken", joining `link:{CODE}` returns the roster) | relay:4 | Medium | OPEN, folded into HOL-SEC-002 (the link-code redesign) |
 | I9 | Offline-buffer global backstop evicted by throwaway identities | relay:18 | Low | ACCEPTED AR-07 (2026-09-27); revisit with the phase G traffic measurement |
@@ -255,11 +255,11 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | J2 | A non-member room joiner becomes a gossip neighbour and receives plaintext CRDT ops | relay:12, transport:S-14 | Medium | FIXED HOL-SEC-040 (overlay takes CRDT members only) |
 | J3 | Plaintext `VoiceChannelJoin` re-announce goes to any joiner of the server room | relay:13 | Low | FIXED HOL-SEC-040 (only to a member who can see the channel) |
 | J4 | Push payload `server` makes a backgrounded Android node join any room | transport:S-12 | Medium | FIXED HOL-SEC-035 (Dart drops a wake for a server we do not hold; the fetch node and the live-node nudge refuse it) |
-| J5 | Forwarder id from the relay is the only one an "Always relay calls" viewer accepts: the relay can name a member device and expose the viewer's address | media:S-12 | Low | CONFIRMED (read in session 7); decision 6 (A-D4, session 11): the forwarder pinned per relay |
+| J5 | Forwarder id from the relay is the only one an "Always relay calls" viewer accepts: the relay can name a member device and expose the viewer's address | media:S-12 | Low | FIXED HOL-SEC-066 (a known identity is never the relay's forwarder; Dart pins the first one per relay) |
 | J6 | `PeerExchange` from a gossip neighbour inserts arbitrary peer ids | dm:S-23 | Low | FIXED HOL-SEC-040 (members only) |
-| J7 | Nickname `master_id` chosen by the claimer becomes the friend-request target | relay:23 | Low | CONFIRMED (read in session 7; also no confirmation before the request goes out); decision 6 (A-D4, session 11): a master-signed claim and a confirmation |
-| J8 | Channel sync requests ride plaintext by design (MLS-epoch resilience) with per-author watermarks and the gap digest: the relay learns who posts in which channel and when, restricted channels included | sync_handler::channel_sync_request, swarm.rs reconnect fan-out | Medium (privacy, C-24) | CONFIRMED (read in session 5); decision 6 (A-D1, session 11): into Olm |
-| J9 | `ChannelNotificationHint` is plaintext to the whole server room: the relay and anyone with the server id learn that a channel had a post, which member names it mentioned and whether it pinged everyone, restricted channels included; the relay can forge a hint or typing in a member's name | message_ops.rs hint broadcast, swarm.rs hint arm | Medium (privacy, C-18, C-24) | CONFIRMED (read in session 5; relay forgery closed by HOL-SEC-053); decision 6 (A-D1, session 11): into MLS, the subgroup for restricted channels |
+| J7 | Nickname `master_id` chosen by the claimer becomes the friend-request target | relay:23 | Low | FIXED HOL-SEC-066 (master-signed claims checked by relay and resolver; the person confirms before a request goes out) |
+| J8 | Channel sync requests ride plaintext by design (MLS-epoch resilience) with per-author watermarks and the gap digest: the relay learns who posts in which channel and when, restricted channels included | sync_handler::channel_sync_request, swarm.rs reconnect fan-out | Medium (privacy, C-24) | FIXED HOL-SEC-062: channel and DM sync requests ride Olm |
+| J9 | `ChannelNotificationHint` is plaintext to the whole server room: the relay and anyone with the server id learn that a channel had a post, which member names it mentioned and whether it pinged everyone, restricted channels included; the relay can forge a hint or typing in a member's name | message_ops.rs hint broadcast, swarm.rs hint arm | Medium (privacy, C-18, C-24) | FIXED HOL-SEC-062: the hint rides MLS `ChannelHint` over the server group, or the restricted channel's subgroup, with an Olm copy for devices without a leaf (relay forgery closed by HOL-SEC-053) |
 
 ## Class K. Push and background parity
 
@@ -292,7 +292,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| N1 | Plaintext `ProfileUpdate` stores avatar bytes without comparing them to the signed hash; banner, showcase, frame, animation unsigned | identity:S11 | Medium | Avatar half FIXED HOL-SEC-038; relay rewrite of the unsigned fields closed by HOL-SEC-053 (only the owner's devices can send a profile); signing them and moving profiles off plaintext = decision 6 (session 11) |
+| N1 | Plaintext `ProfileUpdate` stores avatar bytes without comparing them to the signed hash; banner, showcase, frame, animation unsigned | identity:S11 | Medium | Avatar half FIXED HOL-SEC-038; relay rewrite of the unsigned fields closed by HOL-SEC-053 (only the owner's devices can send a profile); every field signed (`hollow-profile2`) and profiles off plaintext, FIXED HOL-SEC-062 |
 | N2 | `saved` is true when the SQL guard refused a stale profile, so a replayed old profile still rewrites the member display name | identity:S12 | Low | FIXED HOL-SEC-038 (also stopped a refused profile's avatar clear) |
 | N3 | Profile fields clipped in bytes against character UI limits; a cut breaks the signature (variant of HOL-SEC-011) | swarm.rs ProfileUpdate arm | Low | FIXED HOL-SEC-038 (one limit, 4 bytes per character, refused whole everywhere, editor stops at it) |
 

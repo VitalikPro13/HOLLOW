@@ -291,6 +291,12 @@ pub(crate) fn is_stale(ts_ms: i64, now_ms: i64) -> bool {
     now_ms - ts_ms > LIVE_SKEW_MS
 }
 
+/// The latest stamp an honest sender can have put on a row it sent at `sent_ms`: a
+/// later one would outrank every write that follows it.
+pub(crate) fn stamp_ceiling(sent_ms: i64) -> i64 {
+    sent_ms.saturating_add(LIVE_SKEW_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

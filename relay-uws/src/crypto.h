@@ -26,6 +26,9 @@ std::string hex_encode(const uint8_t* data, size_t len);
 // Lowercase hex SHA-256 of `message`.
 std::string sha256_hex(const std::string& message);
 
+// `bytes` random bytes from libsodium, as lowercase hex.
+std::string random_hex(size_t bytes);
+
 // The self-certifying server id an owner peer id and a founding nonce hash to,
 // matching the client's `anchor::derive_server_id`.
 std::string genesis_server_id(const std::string& owner_peer_id, const std::string& nonce);

@@ -67,6 +67,48 @@ int main() {
     check("a frame past the size cap is refused",
           !accepted(R"({"type":"auth","peer_id":")" + std::string(MAX_AUTH_FRAME_BYTES, 'a') + R"("})"));
 
+    printf("auth v2\n");
+    check("a hello is recognised", is_auth_hello(R"({"type":"auth_hello"})"));
+    check("an auth frame is not a hello", !is_auth_hello(R"({"type":"auth","v":2})"));
+    check("junk is not a hello", !is_auth_hello("not json") && !is_auth_hello(R"({"type":1})"));
+    check("an oversized hello is not a hello",
+          !is_auth_hello(R"({"type":"auth_hello","x":")" + std::string(MAX_AUTH_FRAME_BYTES, 'a') + R"("})"));
+
+    const std::string nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    auto v2 = parse_auth_frame(
+        R"({"type":"auth","v":2,"peer_id":"12D3KooWA","public_key":"k","timestamp":1790000000,)"
+        R"("nonce":")" + nonce + R"(","domain":"relay.example.com","signature":"s","fetch":true})");
+    check("a v2 frame parses", v2 && v2->version == 2 && v2->nonce == nonce &&
+                                   v2->domain == "relay.example.com" && v2->fetch);
+    check("a frame without v is v1", f && f->version == 1);
+    check("an unknown version is refused", !accepted(R"({"type":"auth","v":3})"));
+    check("a string version is refused", !accepted(R"({"type":"auth","v":"2"})"));
+    check("a numeric nonce is refused", !accepted(R"({"type":"auth","v":2,"nonce":5})"));
+    check("a numeric domain is refused", !accepted(R"({"type":"auth","v":2,"domain":5})"));
+
+    check("full, fetch and guest modes", auth_mode(false, false) == std::optional<std::string>("full") &&
+                                         auth_mode(false, true) == std::optional<std::string>("fetch") &&
+                                         auth_mode(true, false) == std::optional<std::string>("guest"));
+    check("guest and fetch at once is no mode", !auth_mode(true, true).has_value());
+
+    check("the domain drops the port and case", auth_domain("Relay.Example.com:8443") == "relay.example.com");
+    check("a bare domain stays", auth_domain("relay.anonlisten.com") == "relay.anonlisten.com");
+    check("an IPv6 literal keeps its brackets", auth_domain("[::1]:443") == "[::1]");
+
+    check("a nonce is 64 lowercase hex", is_auth_nonce_shape(nonce));
+    check("an uppercase nonce is not",
+          !is_auth_nonce_shape("0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"));
+    check("a short nonce is not", !is_auth_nonce_shape("abcd"));
+
+    // Pinned in rust/hollow_core/src/node/ws_client.rs
+    // (auth_v2_message_matches_the_relays_pinned_vector); the digest is SHA-256("L").
+    check("the signed v2 message matches the client's pinned vector",
+          auth_v2_message("relay.example.com", nonce, "12D3KooWPeer", 1790000000, "fetch",
+                          "72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa") ==
+              "hollow-ws-auth2\nrelay.example.com\n" + nonce +
+                  "\n12D3KooWPeer\n1790000000\nfetch\n"
+                  "72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa");
+
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

@@ -1796,9 +1796,9 @@ pub(crate) fn apply_synced_link_preview(
     }
     let Some(lp_json) = preview_column(Some(lp)) else { return false };
     let applied = if is_channel {
-        store.update_channel_link_preview_and_sig(mid, Some(&lp_json), sig, pk)
+        store.update_channel_link_preview_and_sig(mid, Some(&lp_json), sig, pk, None)
     } else {
-        store.update_link_preview_and_sig(mid, Some(&lp_json), sig, pk)
+        store.update_link_preview_and_sig(mid, Some(&lp_json), sig, pk, None)
     };
     matches!(applied, Ok(true))
 }
@@ -1864,7 +1864,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
         );
         let _ = store.update_channel_link_preview_and_sig(
             &message_id, lp_json.as_deref(),
-            signed.sig.as_deref(), signed.pk.as_deref(),
+            signed.sig.as_deref(), signed.pk.as_deref(), Some(super::frame_auth::now_ms()),
         );
         attached = Some(signed);
     }
@@ -1948,7 +1948,7 @@ pub(crate) async fn handle_attach_dm_link_preview(
         );
         let _ = store.update_link_preview_and_sig(
             &message_id, lp_json.as_deref(),
-            signed.sig.as_deref(), signed.pk.as_deref(),
+            signed.sig.as_deref(), signed.pk.as_deref(), Some(super::frame_auth::now_ms()),
         );
         attached = Some(signed);
     }
@@ -2233,22 +2233,19 @@ pub(crate) async fn handle_add_channel_reaction(
     }
 
     let local_peer = local_peer_str.to_string();
-    let reaction_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-
-    {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    let (reaction_ts, sig, pk) = {
+        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+        let reaction_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &local_peer);
+        let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
+        let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
+        if let Some(store) = store {
             let _ = store.add_reaction(
                 &message_id, &emoji, &local_peer, reaction_ts,
                 sig.as_deref(), pk.as_deref(),
             );
         }
-    }
+        (reaction_ts, sig, pk)
+    };
 
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelAddReaction {
@@ -2310,26 +2307,24 @@ pub(crate) async fn handle_add_dm_reaction(
     hollow_log!("[HOLLOW-SWARM] AddDmReaction {emoji} on {message_id} for {peer_id_str}");
 
     let local_peer = local_peer_str.to_string();
-    let reaction_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
     // Multi-device: attribute our own reaction to our MASTER id so it lands under
     // the same identity on our other devices (no-op single-device).
     let reactor_master = super::resolver::resolve(&local_peer);
 
-    {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    let (reaction_ts, sig, pk) = {
+        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+        let reaction_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &reactor_master);
+        let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
+        let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
+        if let Some(store) = store {
             let _ = store.add_reaction(
                 &message_id, &emoji, &reactor_master, reaction_ts,
                 sig.as_deref(), pk.as_deref(),
             );
         }
-    }
+        (reaction_ts, sig, pk)
+    };
 
     let envelope = MessageEnvelope::AddReaction {
         mid: message_id.clone(),
@@ -2358,6 +2353,12 @@ pub(crate) async fn handle_add_dm_reaction(
         reactor: reactor_master,
         added_at: reaction_ts,
     }).await;
+}
+
+/// The signed time of our own reaction change: reactions and removals are ordered
+/// by it, so it outranks the row even when a sibling with a faster clock made it.
+fn reaction_stamp(store: Option<&crate::storage::MessageStore>, mid: &str, emoji: &str, reactor: &str) -> i64 {
+    store.map_or_else(super::frame_auth::now_ms, |s| s.next_reaction_stamp(mid, emoji, reactor))
 }
 
 // ── 9. RemoveChannelReaction ─────────────────────────────────────────
@@ -2393,22 +2394,19 @@ pub(crate) async fn handle_remove_channel_reaction(
     };
 
     let local_peer = local_peer_str.to_string();
-    let remove_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-
-    {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    let (remove_ts, sig, pk) = {
+        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+        let remove_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &local_peer);
+        let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
+        let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
+        if let Some(store) = store {
             let _ = store.remove_reaction(
                 &message_id, &emoji, &local_peer, remove_ts,
                 sig.as_deref(), pk.as_deref(),
             );
         }
-    }
+        (remove_ts, sig, pk)
+    };
 
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelRemoveReaction {
@@ -2470,25 +2468,23 @@ pub(crate) async fn handle_remove_dm_reaction(
     hollow_log!("[HOLLOW-SWARM] RemoveDmReaction {emoji} on {message_id} for {peer_id_str}");
 
     let local_peer = local_peer_str.to_string();
-    let remove_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
     // Multi-device: our own reaction is keyed by our MASTER id (see AddDmReaction).
     let reactor_master = super::resolver::resolve(&local_peer);
 
-    {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    let (remove_ts, sig, pk) = {
+        let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+        let remove_ts = reaction_stamp(store.as_ref(), &message_id, &emoji, &reactor_master);
+        let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
+        let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
+        if let Some(store) = store {
             let _ = store.remove_reaction(
                 &message_id, &emoji, &reactor_master, remove_ts,
                 sig.as_deref(), pk.as_deref(),
             );
         }
-    }
+        (remove_ts, sig, pk)
+    };
 
     let envelope = MessageEnvelope::RemoveReaction {
         mid: message_id.clone(),
@@ -2924,8 +2920,9 @@ pub(crate) async fn handle_envelope_edit_message(
 ///
 /// `peer_str` is the transport sender (a DEVICE id on the DM path); `sid` present
 /// = channel message, absent = DM. The card lands only on the sender's own row in
-/// the place the envelope names. Applying the same card twice is a quiet no-op, so
-/// a duplicated frame or a re-broadcast costs nothing.
+/// the place the envelope names, and only if `sealed_at` (when its frame was sealed)
+/// is later than the card it replaces. Applying the same card twice is a quiet
+/// no-op, so a duplicated frame or a re-broadcast costs nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_link_preview_set(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2939,6 +2936,7 @@ pub(crate) async fn handle_envelope_link_preview_set(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    sealed_at: i64,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -3004,11 +3002,11 @@ pub(crate) async fn handle_envelope_link_preview_set(
     let lp_json = preview_column(lp.as_deref());
     let applied = if is_channel {
         store.update_channel_link_preview_and_sig(
-            &mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(),
+            &mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(), Some(sealed_at),
         )
     } else {
         store.update_link_preview_and_sig(
-            &mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(),
+            &mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(), Some(sealed_at),
         )
     };
     if !matches!(applied, Ok(true)) {
@@ -3282,11 +3280,10 @@ pub(crate) async fn handle_envelope_remove_reaction(
     if reaction_sig_rejected(peer_str, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
     }
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let _ = store.remove_reaction(
-            &mid, &emoji, peer_str, ts,
-            sig.as_deref(), pk.as_deref(),
-        );
+    let removed = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .is_ok_and(|store| store.remove_reaction(&mid, &emoji, peer_str, ts, sig.as_deref(), pk.as_deref()) == Ok(true));
+    if !removed {
+        return;
     }
     let _ = event_tx.send(NetworkEvent::ChannelReactionRemoved {
         server_id: s_id,
@@ -4000,7 +3997,8 @@ mod tests {
         handle_envelope_link_preview_set(
             &tx, None, &k.peer_id(), local, mid.into(), Some(Box::new(evil_card())),
             att.ts, att.sig, att.pk,
-            place.map(|p| p.0.to_string()), place.map(|p| p.1.to_string()), path, pass,
+            place.map(|p| p.0.to_string()), place.map(|p| p.1.to_string()),
+            crate::node::frame_auth::now_ms(), path, pass,
         ).await;
     }
 

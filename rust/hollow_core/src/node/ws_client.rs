@@ -83,7 +83,7 @@ pub enum WsCommand {
     /// Claim a temporary nickname on the relay (RAM only). `master` is our MASTER
     /// identity, handed back on resolve so a stranger's friend request targets
     /// `inbox:{master}`, not our WS-auth DEVICE id whose inbox nobody joins.
-    ClaimNickname { nickname: String, master: String },
+    ClaimNickname { nickname: String, master: String, claim: super::nick_claim::NickClaim },
     /// Release the currently claimed nickname.
     ReleaseNickname,
     /// Resolve a nickname to a peer_id via the relay.
@@ -119,7 +119,15 @@ pub enum WsCommand {
     /// Register/refresh per-channel topic ring buffers for a server room whose
     /// owner enabled relay catch-up (`clear` = owner turned it off). Must be
     /// sent AFTER joining the room; re-sent once per connection by the swarm.
-    SetTopicBuffer { room_code: String, channels: Vec<String>, retention_secs: i64, clear: bool },
+    /// `auth` signs it with the server's newest join-lock change key (`ring_auth`);
+    /// without it the relay only keeps existing rings from idling out.
+    SetTopicBuffer {
+        room_code: String,
+        channels: Vec<String>,
+        retention_secs: i64,
+        clear: bool,
+        auth: Option<super::ring_auth::RingAuth>,
+    },
     /// Ask the relay to replay one channel's buffered ring; the frames arrive as
     /// normal topic messages and ride the standard verify/dedup/merge path.
     /// `max_age_secs` > 0 replays only frames younger than that (the client
@@ -193,9 +201,9 @@ pub enum WsEvent {
     NicknameReleased,
     /// Nickname operation error (claim failed or resolve failed).
     NicknameError { error: String, nickname: String },
-    /// Nickname resolved to a peer_id. `master_id` is the claimer's
-    /// self-reported MASTER identity (empty when the relay predates it).
-    NicknameResolved { nickname: String, peer_id: String, master_id: String },
+    /// Nickname resolved to a peer_id. `master_id` is the claimer's MASTER, and
+    /// `claim` its signature for this nickname and device; unchecked here.
+    NicknameResolved { nickname: String, peer_id: String, master_id: String, claim: super::nick_claim::NickClaim },
     /// Multi-device link code successfully claimed.
     LinkCodeClaimed { code: String },
     /// Multi-device link code released.
@@ -257,10 +265,17 @@ fn is_false(v: &bool) -> bool { !*v }
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum ClientMsg {
+    /// Asks the relay for the challenge the auth signature covers.
+    AuthHello,
     Auth {
+        /// Always 2: the signature covers the relay's challenge, its domain and
+        /// every flag ([`auth_v2_message`]).
+        v: u8,
         peer_id: String,
         public_key: String,
         timestamp: u64,
+        nonce: String,
+        domain: String,
         signature: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         license_key: Option<String>,
@@ -282,6 +297,7 @@ enum ClientMsg {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum ServerMsg {
+    AuthChallenge { nonce: String },
     AuthOk,
     AuthFailed { error: String },
     PeerJoined { room: String, peer_id: String },
@@ -308,7 +324,14 @@ enum ServerMsg {
     NicknameClaimed { nickname: String },
     NicknameReleased,
     NicknameError { error: String, #[serde(default)] nickname: String },
-    NicknameResolved { nickname: String, peer_id: String, #[serde(default)] master_id: String },
+    NicknameResolved {
+        nickname: String,
+        peer_id: String,
+        #[serde(default)] master_id: String,
+        #[serde(default)] master_key: String,
+        #[serde(default)] ts: i64,
+        #[serde(default)] sig: String,
+    },
     LinkCodeClaimed { code: String },
     LinkCodeReleased,
     LinkCodeError { error: String, #[serde(default)] code: String },
@@ -344,6 +367,8 @@ struct WsClientState {
     /// keyed by room. The reconnect replay re-sends every joined room as a plain
     /// `Join`, which on a NEW socket would silently drop the mailbox replay.
     inbox_proofs: Arc<RwLock<std::collections::HashMap<String, super::types::SignedDeviceList>>>,
+    /// The host we dialled; TURN URIs naming any other host are dropped.
+    relay_host: String,
 }
 
 // -- Public API --
@@ -409,6 +434,7 @@ async fn ws_client_loop(
         subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         offline_optin: Arc::new(RwLock::new(None)),
         inbox_proofs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        relay_host: relay_auth_domain(&relay_url).unwrap_or_default(),
     };
 
     let mut backoff_secs = 1u64;
@@ -634,16 +660,22 @@ async fn ws_client_loop(
                 hollow_log!("[HOLLOW-WS] Connection failed: {e}");
                 // A busy key is still OUR key: the holder is usually our own ghost
                 // socket or a sibling device, so keep the backoff going and tell
-                // the UI once per outage; only a refused key stops the loop.
-                if e.contains("license_key_in_use") {
-                    if !license_busy_notified {
-                        license_busy_notified = true;
-                        let _ = event_tx.send(WsEvent::LicenseError { reason: e });
+                // the UI once per outage; only a refused key stops the loop. Only
+                // the relay's exact refusal codes count, never text that merely
+                // mentions a license.
+                match e {
+                    ConnectError::License(LicenseRefusal::InUse) => {
+                        if !license_busy_notified {
+                            license_busy_notified = true;
+                            let _ = event_tx.send(WsEvent::LicenseError { reason: LicenseRefusal::InUse.code().into() });
+                        }
                     }
-                } else if e.contains("license_key") || e.contains("license key") {
-                    hollow_log!("[HOLLOW-WS] License error — not retrying");
-                    let _ = event_tx.send(WsEvent::LicenseError { reason: e });
-                    return;
+                    ConnectError::License(refusal) => {
+                        hollow_log!("[HOLLOW-WS] License refused, not retrying");
+                        let _ = event_tx.send(WsEvent::LicenseError { reason: refusal.code().into() });
+                        return;
+                    }
+                    ConnectError::Other(_) => {}
                 }
             }
         }
@@ -691,6 +723,132 @@ pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// Why a connect attempt failed. A license refusal is only ever one of the relay's
+/// exact codes: a relay's free text can never stop the node or touch the key.
+#[derive(Debug)]
+pub(crate) enum ConnectError {
+    License(LicenseRefusal),
+    Other(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LicenseRefusal {
+    Invalid,
+    InUse,
+    Required,
+}
+
+impl LicenseRefusal {
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "invalid_license_key" => Some(Self::Invalid),
+            "license_key_in_use" => Some(Self::InUse),
+            "license_key_required" => Some(Self::Required),
+            _ => None,
+        }
+    }
+
+    /// The relay's code, which the UI keys its message on.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Invalid => "invalid_license_key",
+            Self::InUse => "license_key_in_use",
+            Self::Required => "license_key_required",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::License(r) => write!(f, "{}", r.code()),
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<String> for ConnectError {
+    fn from(e: String) -> Self {
+        Self::Other(e)
+    }
+}
+
+/// The relay host a v2 auth signature names: the host of the URL we dialled,
+/// lowercase, no port. Matches the relay's `auth_domain(--domain)`.
+pub(crate) fn relay_auth_domain(url: &str) -> Option<String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let request = url.into_client_request().ok()?;
+    let host = request.uri().host()?.to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// The TURN/STUN URIs whose host is the relay's own. A relay could otherwise route
+/// every call's media, Always-relay calls included, through a server of its choosing.
+pub(crate) fn turn_uris_on_relay(uris: Vec<String>, relay_host: &str) -> Vec<String> {
+    uris.into_iter()
+        .filter(|uri| !relay_host.is_empty() && turn_uri_host(uri).is_some_and(|h| h == relay_host))
+        .collect()
+}
+
+/// The lowercase host of a `turn:`, `turns:`, `stun:` or `stuns:` URI.
+fn turn_uri_host(uri: &str) -> Option<String> {
+    let (scheme, rest) = uri.split_once(':')?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "turn" | "turns" | "stun" | "stuns") {
+        return None;
+    }
+    let rest = rest.split('?').next()?;
+    let host = if rest.starts_with('[') {
+        &rest[..=rest.find(']')?]
+    } else {
+        rest.split(':').next()?
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The exact bytes a v2 auth signature covers; pinned against the relay's
+/// `auth_v2_message` (relay-uws/test/test_auth_frame.cpp). `license_digest` is the
+/// lowercase hex SHA-256 of the key, empty without one.
+pub(crate) fn auth_v2_message(
+    domain: &str,
+    nonce: &str,
+    peer_id: &str,
+    timestamp: u64,
+    mode: &str,
+    license_digest: &str,
+) -> String {
+    format!("hollow-ws-auth2\n{domain}\n{nonce}\n{peer_id}\n{timestamp}\n{mode}\n{license_digest}")
+}
+
+fn license_digest(key: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    key.filter(|k| !k.is_empty())
+        .map(|k| hex::encode(Sha256::digest(k.as_bytes())))
+        .unwrap_or_default()
+}
+
+fn is_auth_nonce(nonce: &str) -> bool {
+    nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Reads the relay's next text frame as a [`ServerMsg`], within the auth window.
+async fn read_auth_reply<S>(read: &mut S) -> Result<(ServerMsg, String), ConnectError>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let response = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .map_err(|_| "Auth timeout".to_string())?
+        .ok_or_else(|| "Connection closed before auth response".to_string())?
+        .map_err(|e| format!("Read error: {e}"))?;
+    let Message::Text(text) = response else {
+        return Err("Unexpected auth response".to_string().into());
+    };
+    match serde_json::from_str::<ServerMsg>(&text) {
+        Ok(msg) => Ok((msg, text.to_string())),
+        Err(_) => Err(format!("Auth rejected: {text}").into()),
+    }
+}
+
 pub(crate) async fn connect_and_auth(
     url: &str,
     peer_id: &str,
@@ -698,7 +856,9 @@ pub(crate) async fn connect_and_auth(
     pub_key_b64: &str,
     license_key: Option<&str>,
     fetch: bool,
-) -> Result<WsStream, String> {
+) -> Result<WsStream, ConnectError> {
+    let domain = relay_auth_domain(url).ok_or_else(|| format!("Bad relay URL: {url}"))?;
+
     // With anti-censorship proxy mode on, a local `shoes` REALITY tunnel exposes
     // a SOCKS5 listener; route the whole WSS connection through it so the traffic
     // looks like ordinary HTTPS. Read fresh each call, so a reconnect after the
@@ -715,12 +875,25 @@ pub(crate) async fn connect_and_auth(
 
     let (mut write, mut read) = ws_stream.split();
 
+    let hello = serde_json::to_string(&ClientMsg::AuthHello).map_err(|e| format!("JSON error: {e}"))?;
+    bounded_send(&mut write, Message::Text(hello.into()))
+        .await
+        .map_err(|e| format!("Failed to ask for a challenge: {e}"))?;
+    let nonce = match read_auth_reply(&mut read).await? {
+        (ServerMsg::AuthChallenge { nonce }, _) if is_auth_nonce(&nonce) => nonce,
+        // A relay older than 0.12 answers the hello as a bad auth frame.
+        (ServerMsg::AuthFailed { .. }, _) => {
+            return Err("The relay offers no auth challenge (it needs updating)".to_string().into());
+        }
+        (_, text) => return Err(format!("Auth rejected: {text}").into()),
+    };
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    let sign_payload = format!("hollow-ws-auth:{}:{}", peer_id, timestamp);
+    let mode = if fetch { "fetch" } else { "full" };
+    let sign_payload = auth_v2_message(&domain, &nonce, peer_id, timestamp, mode, &license_digest(license_key));
 
     let keypair = crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(keypair_proto)
         .map_err(|e| format!("Failed to decode keypair: {e}"))?;
@@ -728,11 +901,14 @@ pub(crate) async fn connect_and_auth(
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_bytes);
 
     let auth = ClientMsg::Auth {
+        v: 2,
         peer_id: peer_id.to_string(),
         public_key: pub_key_b64.to_string(),
         timestamp,
+        nonce,
+        domain,
         signature: sig_b64,
-        license_key: license_key.map(|s| s.to_string()),
+        license_key: license_key.filter(|k| !k.is_empty()).map(|s| s.to_string()),
         fetch,
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| format!("JSON error: {e}"))?;
@@ -740,25 +916,13 @@ pub(crate) async fn connect_and_auth(
         .await
         .map_err(|e| format!("Failed to send auth: {e}"))?;
 
-    let response = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .map_err(|_| "Auth timeout".to_string())?
-        .ok_or("Connection closed before auth response")?
-        .map_err(|e| format!("Read error: {e}"))?;
-
-    match response {
-        Message::Text(text) => {
-            match serde_json::from_str::<ServerMsg>(&text) {
-                Ok(ServerMsg::AuthOk) => {
-                    Ok(read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?)
-                }
-                Ok(ServerMsg::AuthFailed { error }) => {
-                    Err(error)
-                }
-                _ => Err(format!("Auth rejected: {text}"))
-            }
-        }
-        _ => Err("Unexpected auth response".to_string()),
+    match read_auth_reply(&mut read).await? {
+        (ServerMsg::AuthOk, _) => Ok(read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?),
+        (ServerMsg::AuthFailed { error }, _) => Err(match LicenseRefusal::from_code(&error) {
+            Some(refusal) => ConnectError::License(refusal),
+            None => ConnectError::Other(error),
+        }),
+        (_, text) => Err(format!("Auth rejected: {text}").into()),
     }
 }
 
@@ -896,8 +1060,15 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::ClaimNickname { nickname, master } => {
-            let msg = serde_json::json!({ "type": "claim_nickname", "nickname": nickname, "master": master });
+        WsCommand::ClaimNickname { nickname, master, claim } => {
+            let msg = serde_json::json!({
+                "type": "claim_nickname",
+                "nickname": nickname,
+                "master": master,
+                "master_key": claim.master_key,
+                "ts": claim.ts_ms,
+                "sig": claim.sig,
+            });
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ClaimNickname send failed: {e}");
                 return false;
@@ -990,21 +1161,20 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear } => {
-            let msg = if *clear {
-                serde_json::json!({
-                    "type": "set_topic_buffer",
-                    "room": room_code,
-                    "clear": true,
-                })
-            } else {
-                serde_json::json!({
-                    "type": "set_topic_buffer",
-                    "room": room_code,
-                    "channels": channels,
-                    "retention_secs": retention_secs,
-                })
-            };
+        WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear, auth } => {
+            // Every field the signature covers goes on the wire as signed.
+            let mut msg = serde_json::json!({
+                "type": "set_topic_buffer",
+                "room": room_code,
+                "channels": channels,
+                "retention_secs": retention_secs,
+                "clear": clear,
+            });
+            if let Some(auth) = auth {
+                msg["owner"] = auth.owner.clone().into();
+                msg["ts"] = auth.ts_ms.into();
+                msg["sig"] = auth.sig.clone().into();
+            }
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] SetTopicBuffer send failed: {e}");
                 return false;
@@ -1286,6 +1456,14 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
                 hollow_log!("[HOLLOW-WS] TURN credentials unavailable: {err}");
                 return;
             }
+            let offered = uris.len();
+            let uris = turn_uris_on_relay(uris, &state.relay_host);
+            if uris.len() < offered {
+                hollow_log!("[HOLLOW-WS] Dropped {} TURN URI(s) naming a host other than the relay", offered - uris.len());
+            }
+            if uris.is_empty() {
+                return;
+            }
             hollow_log!("[HOLLOW-WS] TURN credentials received: {} URI(s), ttl={ttl}s", uris.len());
             WsEvent::TurnCredentials { username, password, ttl, uris }
         }
@@ -1327,9 +1505,10 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             hollow_log!("[HOLLOW-WS] Nickname error: {error} (nickname={nickname})");
             WsEvent::NicknameError { error, nickname }
         }
-        ServerMsg::NicknameResolved { nickname, peer_id, master_id } => {
+        ServerMsg::NicknameResolved { nickname, peer_id, master_id, master_key, ts, sig } => {
             hollow_log!("[HOLLOW-WS] Nickname resolved: {nickname} -> {peer_id} (master: {master_id})");
-            WsEvent::NicknameResolved { nickname, peer_id, master_id }
+            let claim = super::nick_claim::NickClaim { master_key, ts_ms: ts, sig };
+            WsEvent::NicknameResolved { nickname, peer_id, master_id, claim }
         }
         ServerMsg::LinkCodeClaimed { code } => {
             hollow_log!("[HOLLOW-LINK] Link code claimed: {code}");
@@ -1358,7 +1537,7 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             return;
         }
         ServerMsg::LockChain { server, links, put } => WsEvent::LockChain { server, links, put },
-        ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
+        ServerMsg::AuthChallenge { .. } | ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
     };
 
     let _ = event_tx.send(event);
@@ -1372,30 +1551,107 @@ mod tests {
 
     #[test]
     fn test_auth_message_format() {
+        let hello = serde_json::to_string(&ClientMsg::AuthHello).unwrap();
+        assert_eq!(hello, r#"{"type":"auth_hello"}"#);
+
         let msg = ClientMsg::Auth {
+            v: 2,
             peer_id: "12D3KooWTest".into(),
             public_key: "AQID".into(),
             timestamp: 1234567890,
+            nonce: "ab".repeat(32),
+            domain: "relay.example.com".into(),
             signature: "c2lnbmF0dXJl".into(),
             license_key: None,
             fetch: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"auth\""));
+        assert!(json.contains("\"v\":2"));
         assert!(json.contains("\"peer_id\":\"12D3KooWTest\""));
         assert!(json.contains("\"timestamp\":1234567890"));
+        assert!(json.contains("\"domain\":\"relay.example.com\""));
         assert!(!json.contains("\"fetch\""));
+        assert!(!json.contains("license_key"));
 
         let msg_fetch = ClientMsg::Auth {
+            v: 2,
             peer_id: "12D3KooWTest".into(),
             public_key: "AQID".into(),
             timestamp: 1234567890,
+            nonce: "ab".repeat(32),
+            domain: "relay.example.com".into(),
             signature: "c2lnbmF0dXJl".into(),
-            license_key: None,
+            license_key: Some("L".into()),
             fetch: true,
         };
         let json_fetch = serde_json::to_string(&msg_fetch).unwrap();
         assert!(json_fetch.contains("\"fetch\":true"));
+        assert!(json_fetch.contains("\"license_key\":\"L\""));
+    }
+
+    /// The bytes a v2 auth signature covers, pinned against the relay's copy in
+    /// relay-uws/test/test_auth_frame.cpp: the relay's challenge, its domain, the mode
+    /// and the license key are all under the signature.
+    #[test]
+    fn auth_v2_message_matches_the_relays_pinned_vector() {
+        let nonce = "0123456789abcdef".repeat(4);
+        let got = auth_v2_message(
+            "relay.example.com", &nonce, "12D3KooWPeer", 1790000000, "fetch", &license_digest(Some("L")),
+        );
+        assert_eq!(
+            got,
+            "hollow-ws-auth2\nrelay.example.com\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+             12D3KooWPeer\n1790000000\nfetch\n72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"
+        );
+        assert_eq!(license_digest(None), "");
+        assert_eq!(license_digest(Some("")), "", "an empty key is no key, as the relay reads it");
+    }
+
+    #[test]
+    fn auth_domain_is_the_dialled_host_without_port() {
+        assert_eq!(relay_auth_domain("wss://Relay.Example.com:8443/ws").as_deref(), Some("relay.example.com"));
+        assert_eq!(relay_auth_domain("wss://relay.anonlisten.com/ws").as_deref(), Some("relay.anonlisten.com"));
+        assert_eq!(relay_auth_domain("not a url"), None);
+    }
+
+    #[test]
+    fn turn_uris_must_name_the_relay() {
+        let offered = vec![
+            "turn:relay.example.com:3478".to_string(),
+            "turn:RELAY.example.com:3478?transport=tcp".to_string(),
+            "turns:relay.example.com:5349".to_string(),
+            "turn:evil.example.net:3478".to_string(),
+            "turn:relay.example.com.evil.net:3478".to_string(),
+            "http://relay.example.com".to_string(),
+            "turn:".to_string(),
+        ];
+        assert_eq!(
+            turn_uris_on_relay(offered.clone(), "relay.example.com"),
+            vec![
+                "turn:relay.example.com:3478".to_string(),
+                "turn:RELAY.example.com:3478?transport=tcp".to_string(),
+                "turns:relay.example.com:5349".to_string(),
+            ],
+        );
+        assert!(turn_uris_on_relay(offered, "").is_empty(), "no relay host, no TURN");
+        assert_eq!(
+            turn_uris_on_relay(vec!["turn:[::1]:3478".to_string()], "[::1]"),
+            vec!["turn:[::1]:3478".to_string()],
+        );
+    }
+
+    #[test]
+    fn only_the_relays_exact_codes_are_license_refusals() {
+        assert_eq!(LicenseRefusal::from_code("invalid_license_key"), Some(LicenseRefusal::Invalid));
+        assert_eq!(LicenseRefusal::from_code("license_key_in_use"), Some(LicenseRefusal::InUse));
+        assert_eq!(LicenseRefusal::from_code("license_key_required"), Some(LicenseRefusal::Required));
+        assert_eq!(LicenseRefusal::from_code("Authentication failed"), None);
+        assert_eq!(LicenseRefusal::from_code("your license_key is bad"), None);
+        assert_eq!(LicenseRefusal::from_code("license_key"), None);
+        assert!(is_auth_nonce(&"a0".repeat(32)));
+        assert!(!is_auth_nonce(&"A0".repeat(32)));
+        assert!(!is_auth_nonce("abcd"));
     }
 
     #[test]

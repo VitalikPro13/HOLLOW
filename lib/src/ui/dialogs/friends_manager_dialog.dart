@@ -877,8 +877,16 @@ String sentRequestLabel(DateTime at) {
 /// Whether [input] is a peer id rather than a temporary nickname.
 bool isPeerIdInput(String input) => input.startsWith('12D3KooW');
 
-/// Nickname lookups a send is waiting on, by lowercased nickname.
-final Map<String, Completer<void>> _nicknameLookups = {};
+/// Nickname lookups a send is waiting on, by lowercased nickname: each completes
+/// with the master id the nickname names.
+final Map<String, Completer<String>> _nicknameLookups = {};
+
+/// Called by event_provider with the master a looked-up [nickname] names, once
+/// Rust has checked that master signed the claim.
+void handleNicknameResolved(String nickname, String masterId) {
+  final waiter = _nicknameLookups[nickname.toLowerCase()];
+  if (waiter != null && !waiter.isCompleted) waiter.complete(masterId);
+}
 
 /// Called by event_provider when the relay could not resolve [nickname].
 /// True when a send was waiting on it, so the caller shows no second message.
@@ -888,48 +896,51 @@ bool handleNicknameLookupFailed(String nickname, String error) {
     waiter = _nicknameLookups.values.single;
   }
   if (waiter == null || waiter.isCompleted) return false;
-  waiter.completeError(FriendlyException(error == 'not_found'
-      ? 'No one has the nickname $nickname right now. Nicknames reset when '
-          'their owner goes offline.'
-      : "Hollow couldn't look up that nickname. Try again."));
+  waiter.completeError(FriendlyException(switch (error) {
+    'not_found' => 'No one has the nickname $nickname right now. Nicknames '
+        'reset when their owner goes offline.',
+    'unverified' =>
+      "Hollow couldn't confirm who holds that nickname, so nothing was sent.",
+    _ => "Hollow couldn't look up that nickname. Try again.",
+  }));
   return true;
 }
 
-Map<String, int> _outgoing(Map<String, FriendInfo> friends) => {
-      for (final f in friends.values)
-        if (f.status == 'pending' && f.direction == 'outgoing')
-          f.peerId: f.requestedAt,
-    };
-
-/// Sends a friend request to a peer id or a temporary nickname; rethrows so
-/// the caller keeps the input for a retry. A nickname completes only once the
-/// relay has answered and the request exists, so a caller's busy state and
-/// its success message are both true.
-Future<void> sendFriendRequestTo(WidgetRef ref, String input) async {
+/// Sends a friend request to a peer id, or to whoever a temporary nickname names
+/// once the person confirms who that is: a nickname is a rendezvous, and the one
+/// holding it now may not be the one they meant. True when a request went out,
+/// false when they cancelled; rethrows so the caller keeps the input for a retry.
+Future<bool> sendFriendRequestTo(
+    BuildContext context, WidgetRef ref, String input) async {
   if (isPeerIdInput(input)) {
     await ref.read(friendsProvider.notifier).sendRequest(input);
-    return;
+    return true;
   }
   final key = input.toLowerCase();
-  final before = _outgoing(ref.read(friendsProvider));
-  final sent = Completer<void>();
-  _nicknameLookups[key] = sent;
-  final sub = ref.listenManual(friendsProvider, (_, next) {
-    final now = _outgoing(next);
-    final changed = now.entries.any((e) => before[e.key] != e.value);
-    if (changed && !sent.isCompleted) sent.complete();
-  });
+  final lookup = Completer<String>();
+  _nicknameLookups[key] = lookup;
+  final String master;
   try {
-    await network_api.sendFriendRequestByNickname(nickname: input);
-    await sent.future.timeout(
+    await network_api.resolveNickname(nickname: input);
+    master = await lookup.future.timeout(
       const Duration(seconds: 15),
       onTimeout: () => throw const FriendlyException(
           "Hollow didn't hear back about that nickname. Try again."),
     );
   } finally {
-    sub.close();
-    if (identical(_nicknameLookups[key], sent)) _nicknameLookups.remove(key);
+    if (identical(_nicknameLookups[key], lookup)) _nicknameLookups.remove(key);
   }
+  if (!context.mounted) return false;
+  final suffix =
+      master.length > 6 ? master.substring(master.length - 6) : master;
+  return showHollowConfirm(
+    context: context,
+    title: 'Send a friend request to $input?',
+    message: 'Right now this nickname belongs to the ID ending in $suffix. '
+        "Nicknames change hands, so check it's the person you mean.",
+    confirmLabel: 'Send request',
+    onConfirm: () => ref.read(friendsProvider.notifier).sendRequest(master),
+  );
 }
 
 const kAddFriendHint = 'Paste an ID, or type a nickname';
@@ -957,8 +968,9 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
     });
     // Awaited, a nickname until the relay answers, so the button stays busy
     // through the lookup and the input is kept for a retry.
+    final bool sent;
     try {
-      await sendFriendRequestTo(ref, input);
+      sent = await sendFriendRequestTo(context, ref, input);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -971,6 +983,7 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
     }
     if (!mounted) return;
     setState(() => _sending = false);
+    if (!sent) return;
     widget.controller.clear();
     HollowToast.show(context, 'Friend request sent',
         type: HollowToastType.success);

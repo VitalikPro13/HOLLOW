@@ -695,7 +695,7 @@ pub(crate) async fn handle_initiate_recovery_pool(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let room_code = format!("recovery:{}:{}", server_id, token);
+    let room_code = crate::node::recovery_pool::pool_room(&server_id, &token);
     hollow_log!("[RECOVERY-POOL] Initiating pool for server {} — room {}", server_id, room_code);
 
     // Join the WSS relay room for this recovery pool.
@@ -740,12 +740,13 @@ pub(crate) async fn handle_join_recovery_pool(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     local_peer_str: &str,
+    device_peer_id: &str,
     server_id: String,
     token: String,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let room_code = format!("recovery:{}:{}", server_id, token);
+    let room_code = crate::node::recovery_pool::pool_room(&server_id, &token);
     hollow_log!("[RECOVERY-POOL] Joining pool for server {} — room {}", server_id, room_code);
 
     // Join the WSS relay room.
@@ -767,7 +768,7 @@ pub(crate) async fn handle_join_recovery_pool(
         manifest_ids: inventory.manifest_ids.clone(),
         shard_inventory_json: serde_json::to_string(&inventory.shards).unwrap_or_default(),
     };
-    if let Ok(hello_bytes) = serde_json::to_vec(&hello) {
+    if let Some(hello_bytes) = crate::node::recovery_pool::seal_control(&server_id, &token, device_peer_id, &hello) {
         let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
             room_code: room_code.clone(),
             data: hello_bytes,
@@ -798,13 +799,14 @@ pub(crate) async fn handle_stop_recovery_pool(
     recovery_pool_state: &mut Option<crate::node::recovery_pool::RecoveryPoolState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    device_peer_id: &str,
     server_id: String,
 ) {
     hollow_log!("[RECOVERY-POOL] Stopping pool for server {}", server_id);
     if let Some(pool) = recovery_pool_state.take() {
-        let room_code = format!("recovery:{}:{}", pool.server_id, pool.token);
+        let room_code = pool.room_code();
         // Broadcast stop message.
-        if let Ok(stop_bytes) = serde_json::to_vec(&HavenMessage::RecoveryStop) {
+        if let Some(stop_bytes) = pool.seal(device_peer_id, &HavenMessage::RecoveryStop) {
             let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
                 room_code: room_code.clone(),
                 data: stop_bytes,

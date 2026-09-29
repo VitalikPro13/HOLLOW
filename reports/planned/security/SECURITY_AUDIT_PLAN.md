@@ -164,9 +164,67 @@ into possible holes, so this file itself belongs on the security branch.
   **HOL-SEC-058** (share audio from any data channel), **HOL-SEC-059** (the push node
   cleared every parked destroy order). Vitalik's decisions 13-16: everything in class
   A lands in 0.12, C-24 in full, file content commitments, meeting host pinning.
-- **Next:** session 11 closes design A's open decisions (design section 5: all of
-  C-24, the file commitment, meetings, the relay, the smaller items, the web viewer's
-  sealing); then ID-1 with HOL-SEC-002. Older note follows.
+- **Session 11 (2026-09-28): design A items A-D2 and A-D3.** **HOL-SEC-060** (High:
+  any holder of a file could answer for it with other bytes; a file is now named by
+  its content, `node/file_commit.rs`, and every completion path hashes the bytes first;
+  pre-0.12 files keep the old gates, AR-13 accepted) and **HOL-SEC-061** (High: anyone
+  in a meeting's room could run its lobby and admit the knocker; a meeting id now names
+  its host, host frames prove it, and a knock proves the code for its own device only;
+  pre-0.12 rooms are refused). Commits `88eb2fc0`, `c2e8b26b`, local only.
+- **Session 12 (2026-09-28): A-D1 phases 1 and 2** (`e39ed7cb`). `HavenMessage::lane()`
+  says, for every message, whether it may ride a sealed plaintext frame or only one
+  device's Olm session. The own-device lane, the destroy fan-out, CRDT op twins, sync
+  requests, the kick notice, typing, status, the voice twins and the post hint (MLS
+  `ChannelHint`) left plaintext; `c24_*` wiretap tests on the mock relay. Also done: the
+  HOL-SEC-056 harness test and the DM typing friend check. Claim C-24 reworded
+  (Vitalik): routing metadata is the relay's, data never is.
+- **Session 13 (2026-09-28): A-D1 phases E and F** (`c54bcbe9`): DM room names from the
+  X25519 agreement of the two masters; DM sync, file and emote traffic carried; share
+  control sealed under the link key. Found: Olm glare crossed sessions at first contact.
+- **Session 14 (2026-09-28): the Olm glare fix and A-D1 phase D.** Glare settles on one
+  session and a replaced session stays readable (`3eccd2f6`; decrypt failures across the
+  suite went from 462 to none outside the revocation test); a mutual friend request
+  whose accept lands first keeps one stamp (`4dbb504b`). Phase D (`73591cbe`): profiles
+  ride Olm and MLS only, the full profile to own devices, friends and co-members, a
+  signed name and avatar card to pending friends (A28, decided by Vitalik), nothing to
+  strangers; `hollow-profile2` signs every field (N1).
+- **Session 15 (2026-09-28): A-D1 phase C, the join lane** (`daa9917f`; website
+  `a553603`, not deployed): join requests and every answer sealed in boxes (invite
+  `key=`, a reply key per join), the `~join` ring holds only boxes; the two missing card
+  tests. A pending join takes its answer only from its reply key (`54aef252`: a removed
+  member could hand a joiner a stale state over Olm). Vitalik agreed the join lock the
+  same day.
+- **Session 16 (2026-09-28): the join lock** (`7b3cb37f`): a door key every member
+  holds and a change key for the owner, admins and mods, moved on every removal, the
+  chain kept on the relay as a notice board; answers judged against a lock read asked
+  after they arrive; a refusal never ends a join. The relay half (`lock_get`,
+  `lock_put`, snapshot codec v4) DEPLOYED to the official relay on 2026-09-29.
+- **Session 17 (2026-09-29): A-D1 bookkeeping, A-D4, A-D5 and the web viewer.** A-D1
+  closed as **HOL-SEC-062** (Medium). A-D4, the relay: **HOL-SEC-063** (Medium: a
+  captured login replayed as an invisible socket; auth v2 signs a relay nonce, the relay's
+  domain and every flag, and fetch sockets never take a full socket's slot),
+  **HOL-SEC-064** (Medium: an inbox showed strangers a person's devices and presence; only
+  proven owners see each other now), **HOL-SEC-065** (Medium: anyone in a server's room
+  could stretch, stop or flood its rings; control is signed by the join lock's change key,
+  eviction is byte-fair) and **HOL-SEC-066** (Medium: the client acted on a relay-chosen
+  nickname master, TURN host, forwarder and license refusal). A-D5: **HOL-SEC-067**
+  (Medium: the recovery pool's token rode the room name) and **HOL-SEC-068** (Low:
+  future stamps and replays), plus the HOL-SEC-058 Dart test. The web public viewer
+  seals and opens frames and logs in with auth v2 (anonlisten-sites, not committed, not
+  deployed). The CLAUDE.md split: area rules moved to five wiki rule books. Relay
+  DEPLOYED 2026-09-29 (0.11-compatible; a live login probe passed). Full Rust suite
+  1116/1116.
+- **Now (2026-09-29):** design A is built except one item: a meeting knock and the
+  lobby frame still carry display names and avatar hashes in the clear (a C-24 gap
+  HOL-SEC-062 records). Vitalik decided: meeting links get a `key=` secret that seals
+  them, and the web viewer drops items whose signature is missing or invalid, both next
+  session; the A-D4 residuals are discussed later. **Next:** those two, then ID-1 with
+  HOL-SEC-002. **On release day:** the
+  relay (deployed 2026-09-29) must still precede any 0.12 client on self-hosted relays,
+  and once 0.12 is out it goes again with `ACCEPT_AUTH_V1`, `ACCEPT_UNSIGNED_RING_CONTROL` and
+  `ACCEPT_UNSIGNED_NICKNAME_CLAIMS` turned off (ws_handler.cpp); the website join page
+  (`owner=` and `key=`) and the web viewer deploy with 0.12; the pre-push hook comes off
+  only then. Older note follows.
 - **Before session 10:** the two remaining DESIGN sessions, each at xhigh with harness tests:
   class A with J8/J9 (plaintext control messages into Olm/MLS; also I4..I6, A17,
   J5, J7, the unsigned profile fields, a signed content hash for files, the variant

@@ -31,4 +31,9 @@ to each watcher, never relayed, so the sender is always the originator.
 
 ## Test
 
-None automated yet (open for session 11).
+test/share_audio_gate_test.dart (2026-09-29): a DM call plays only from the call's
+peer, from any of its devices, and nothing while we are not watching its share; a
+voice channel plays only from a sharer we watch. The gates are
+`acceptsShareAudioFrom` on CallNotifier and VoiceChannelNotifier; a mutation pass put
+back no gate, a call ignoring its peer, a call ignoring watching, and a voice channel
+accepting anyone, and each failed.

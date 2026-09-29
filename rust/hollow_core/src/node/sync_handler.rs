@@ -706,7 +706,7 @@ pub(crate) async fn handle_create_server(
     // stranger's parked request is dropped rather than buffered. Doing it here makes
     // a server joinable-while-empty from the instant it is created.
     if let Some(state) = server_states.get(&server_id) {
-        register_relay_catchup(ws_cmd_tx, state, &server_id);
+        register_relay_catchup(ws_cmd_tx, state, &server_id, bundle_keypair);
     }
 
     // Auto-pledge default storage (512 MB) for the owner
@@ -758,6 +758,7 @@ pub(crate) fn register_relay_catchup(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     state: &ServerState,
     server_id: &str,
+    master: &crate::identity::native_identity::NativeKeypair,
 ) {
     let secs = state.relay_catchup_secs();
     if secs <= 0 {
@@ -778,11 +779,15 @@ pub(crate) fn register_relay_catchup(
     // all, so a parked join degrades to "pending until co-presence".
     channels.push(super::types::JOIN_TOPIC.to_string());
     hollow_log!("[HOLLOW-TOPIC] Registering relay catch-up rings for {server_id}: {} channel(s) + the join ring, retention {secs}s", channels.len() - 1);
+    // Signed when we hold the lock's change key; unsigned it only keeps the rings
+    // the owner, an admin or a mod made from idling out.
+    let auth = super::lock_keeper::sign_ring_control(server_id, state, master, secs, false, &channels);
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetTopicBuffer {
         room_code: server_id.to_string(),
         channels,
         retention_secs: secs,
         clear: false,
+        auth,
     });
 }
 
@@ -836,12 +841,14 @@ pub(crate) async fn catchup_watermark_ages(
 /// any channel frame that replayed before the leaf formed failed to decrypt. Dedup
 /// is by message_id. `relay_catchup_done` is the per-connection "already pulled"
 /// set, and the caller must clear the room's entries before a re-issue.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn request_channel_catchups(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     crdt_store: &CrdtStore,
     state: Option<&ServerState>,
     room: &str,
     local_peer: &str,
+    master: &crate::identity::native_identity::NativeKeypair,
     relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
     tag: &str,
 ) {
@@ -850,7 +857,7 @@ pub(crate) async fn request_channel_catchups(
     // connection, never by opening a SQLCipher handle per channel here.
     let fresh_channels: Vec<String> = match state {
         Some(state) if state.relay_catchup_secs() > 0 => {
-            register_relay_catchup(ws_cmd_tx, state, room);
+            register_relay_catchup(ws_cmd_tx, state, room, master);
             state
                 .channels
                 .values()
@@ -935,7 +942,7 @@ pub(crate) async fn handle_create_channel(
         // Relay offline catch-up: a new channel must be in the relay's
         // registration or its messages never buffer. The creator is online
         // right now, so their refresh covers everyone.
-        register_relay_catchup(ws_cmd_tx, state, &server_id);
+        register_relay_catchup(ws_cmd_tx, state, &server_id, bundle_keypair);
     } else {
         let _ = event_tx.send(NetworkEvent::Error {
             message: format!("[CRDT] Server {server_id} not found"),
@@ -1091,13 +1098,15 @@ pub(crate) async fn handle_update_server_setting(
     if key == "relay_catchup_secs" {
         if let Some(state) = server_states.get(&server_id) {
             if state.relay_catchup_secs() > 0 {
-                register_relay_catchup(ws_cmd_tx, state, &server_id);
+                register_relay_catchup(ws_cmd_tx, state, &server_id, bundle_keypair);
             } else {
+                let auth = super::lock_keeper::sign_ring_control(&server_id, state, bundle_keypair, 0, true, &[]);
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetTopicBuffer {
                     room_code: server_id.clone(),
                     channels: Vec::new(),
                     retention_secs: 0,
                     clear: true,
+                    auth,
                 });
             }
         }

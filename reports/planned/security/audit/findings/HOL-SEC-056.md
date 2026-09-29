@@ -35,5 +35,6 @@ announcing device holds as its anchor (new `owner` field).
 
 ## Test
 
-Design E's pin test covers the pinned join; no harness test drives a two-device
-announce yet (open for session 11).
+Design E's pin test covers the pinned join, and
+`authz_a_sibling_announce_for_a_held_server_starts_no_join` (node/test_harness.rs,
+session 12) drives a two-device announce for a server already held.

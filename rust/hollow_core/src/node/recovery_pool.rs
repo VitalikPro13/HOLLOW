@@ -6,7 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+
+use super::types::{HavenMessage, Lane};
 
 /// A member's local shard inventory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +61,8 @@ pub struct ManifestMeta {
 /// State of an active recovery pool.
 pub struct RecoveryPoolState {
     pub server_id: String,
-    pub token: String,
+    token: String,
+    room: String,
     pub is_initiator: bool,
     pub local_peer_id: String,
     /// All members in the pool: peer_id → their inventory.
@@ -92,6 +96,7 @@ impl RecoveryPoolState {
         members.insert(local_peer_id.clone(), local_inventory);
 
         Self {
+            room: pool_room(&server_id, &token),
             server_id,
             token,
             is_initiator,
@@ -238,7 +243,31 @@ impl RecoveryPoolState {
 
     /// Get the room code for this pool.
     pub fn room_code(&self) -> String {
-        format!("recovery:{}:{}", self.server_id, self.token)
+        self.room.clone()
+    }
+
+    /// `msg` from our device `sender`, as the pool's lane carries it.
+    pub(crate) fn seal(&self, sender: &str, msg: &HavenMessage) -> Option<Vec<u8>> {
+        seal_control(&self.server_id, &self.token, sender, msg)
+    }
+
+    /// The pool message inside a `RecoverySealed` that `sender` put into `room`. `None`
+    /// unless it came through this pool's room, the token opens it for that sender and
+    /// what it holds is pool traffic.
+    pub(crate) fn open_control(&self, room: &str, sender: &str, nonce: &str, ct: &str) -> Option<HavenMessage> {
+        use aes_gcm::aead::{Aead, Payload};
+        if room != self.room {
+            return None;
+        }
+        let engine = base64::engine::general_purpose::STANDARD;
+        let nonce: [u8; 12] = engine.decode(nonce).ok()?.try_into().ok()?;
+        let ct = engine.decode(ct).ok()?;
+        let aad = control_aad(room, sender);
+        let plain = control_cipher(&self.server_id, &self.token)?
+            .decrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &ct, aad: &aad })
+            .ok()?;
+        let msg: HavenMessage = serde_json::from_slice(&plain).ok()?;
+        (msg.lane() == Lane::Recovery).then_some(msg)
     }
 
     /// Get the member count.
@@ -307,5 +336,103 @@ pub fn build_local_inventory(
     MemberInventory {
         manifest_ids,
         shards,
+    }
+}
+
+// ── The pool lane ────────────────────────────────────────────────────────
+//
+// A pool's authority is its invite token (the server is dead, so no member list or
+// group speaks for it). The relay sees only a hash of the token as the room name, and
+// every frame is sealed under a key derived from it, so a frame that opens proves its
+// sender holds the invite (claim C-24 for what pool members hold).
+
+const ROOM_DOMAIN: &[u8] = b"hollow-recovery-room1";
+const CONTROL_DOMAIN: &[u8] = b"hollow-recovery-ctl1";
+
+fn framed(parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        out.extend_from_slice(part);
+    }
+    out
+}
+
+/// The relay room of the pool for `server_id` opened under `token`.
+pub(crate) fn pool_room(server_id: &str, token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(framed(&[ROOM_DOMAIN, server_id.as_bytes(), token.as_bytes()]));
+    format!("recovery:{}", hex::encode(&digest[..16]))
+}
+
+fn control_cipher(server_id: &str, token: &str) -> Option<aes_gcm::Aes256Gcm> {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(token.as_bytes()).ok()?;
+    mac.update(&framed(&[CONTROL_DOMAIN, server_id.as_bytes()]));
+    let key = zeroize::Zeroizing::new(mac.finalize().into_bytes());
+    <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key.as_slice()).ok()
+}
+
+/// A sealed frame opens only in the pool's room and only as the device that sealed it.
+fn control_aad(room: &str, sender: &str) -> Vec<u8> {
+    framed(&[CONTROL_DOMAIN, room.as_bytes(), sender.as_bytes()])
+}
+
+/// The wire bytes of a pool message from device `sender`, sealed under the pool's token.
+pub(crate) fn seal_control(server_id: &str, token: &str, sender: &str, msg: &HavenMessage) -> Option<Vec<u8>> {
+    debug_assert_eq!(msg.lane(), Lane::Recovery, "only pool traffic rides the pool lane");
+    seal_in(server_id, token, &pool_room(server_id, token), sender, msg)
+}
+
+fn seal_in(server_id: &str, token: &str, room: &str, sender: &str, msg: &HavenMessage) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, Payload};
+    let plain = serde_json::to_vec(msg).ok()?;
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).ok()?;
+    let aad = control_aad(room, sender);
+    let ct = control_cipher(server_id, token)?
+        .encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &aad })
+        .ok()?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    serde_json::to_vec(&HavenMessage::RecoverySealed { nonce: engine.encode(nonce), ct: engine.encode(ct) }).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts(sealed: &[u8]) -> (String, String) {
+        match serde_json::from_slice::<HavenMessage>(sealed).expect("sealed frame parses") {
+            HavenMessage::RecoverySealed { nonce, ct } => (nonce, ct),
+            other => panic!("expected recovery_sealed, got {}", other.wire_kind()),
+        }
+    }
+
+    /// A24: a pool frame opens only under the pool's token, in its room, for the
+    /// device that sealed it, and only as pool traffic.
+    #[test]
+    fn a_pool_frame_opens_only_under_its_token_in_its_room_for_its_sender() {
+        let pool = RecoveryPoolState::new("sid".into(), "tok".into(), true, "me".into(), MemberInventory::empty());
+        let room = pool.room_code();
+        assert!(!room.contains("tok") && room != pool_room("sid", "tok2") && room != pool_room("sid2", "tok"));
+
+        let stop = HavenMessage::RecoveryStop;
+        let (n, c) = parts(&seal_control("sid", "tok", "dev", &stop).unwrap());
+        assert!(matches!(pool.open_control(&room, "dev", &n, &c), Some(HavenMessage::RecoveryStop)));
+        assert!(pool.open_control(&room, "other", &n, &c).is_none(), "it speaks only for its sealer");
+
+        let (n, c) = parts(&seal_control("sid", "tok2", "dev", &stop).unwrap());
+        assert!(pool.open_control(&room, "dev", &n, &c).is_none(), "another token opens nothing");
+        // The relay knows the room, never the token.
+        let (n, c) = parts(&seal_in("sid", "tok2", &room, "dev", &stop).unwrap());
+        assert!(pool.open_control(&room, "dev", &n, &c).is_none(), "the room name alone seals nothing");
+        let (n, c) = parts(&seal_in("sid2", "tok", &room, "dev", &stop).unwrap());
+        assert!(pool.open_control(&room, "dev", &n, &c).is_none(), "the key is the pool's server's");
+
+        let (n, c) = parts(&seal_in("sid", "tok", "recovery:elsewhere", "dev", &stop).unwrap());
+        assert!(pool.open_control("recovery:elsewhere", "dev", &n, &c).is_none(), "only in the pool's own room");
+
+        let (n, c) = parts(&seal_in("sid", "tok", &room, "dev", &HavenMessage::FriendListRequest).unwrap());
+        assert!(pool.open_control(&room, "dev", &n, &c).is_none(), "only pool traffic opens");
     }
 }

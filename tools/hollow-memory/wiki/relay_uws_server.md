@@ -8,6 +8,30 @@ Binary name: `hollow-relay`
 
 ---
 
+## Security model after design A-D4 (2026-09-29, HOL-SEC-063..066)
+
+- **Auth v2** (`auth_frame.h`): `auth_hello` gets a per-socket 32-byte nonce
+  (`auth_challenge`); the auth frame (`v:2`) signs `hollow-ws-auth2`, the relay's domain
+  (`auth_domain(--domain)`: lowercase, no port), the nonce, device, time, mode
+  (`full`/`fetch`/`guest`) and SHA-256 of the license key. One attempt per nonce. v1 is
+  accepted only while `ACCEPT_AUTH_V1` (turned off once 0.12 ships).
+- **Fetch sockets**: rooms in `PerSocketData::fetch_rooms`, never over a full socket's
+  slot, no roster/presence, never in `discover_peers`; `leave` passes the socket as
+  `expected_ws`; close leaves only its own slots.
+- **Inbox rooms**: `WsRoom::owners` = sockets that proved the master-signed device list
+  (`inbox_owner_proved`); `receives_in_room` limits every fan-out, roster, presence,
+  discovery and check_peers co-membership to owners; a deposit for the master also goes
+  live to the owners.
+- **Rings** (`ring_auth.h`, `ring_evict.h`): control signed by the change key of the
+  newest join-lock link (`hollow-ring1`), legacy rooms bound to the first signing owner,
+  unsigned = refresh only once `ACCEPT_UNSIGNED_RING_CONTROL` is off; byte-fair
+  eviction, `MAX_RING_FRAME_BYTES` 256 KB, 512 rings per room, 2,048 per creator, the
+  idlest ring evicted at the global cap, per-frame retention; snapshot codec v5 carries
+  the owner binding and each frame's retention.
+- **Nicknames**: `nickname_proof` holds the master's signature (`nickname_claim_message`
+  in validate.h); resolve returns it; unsigned claims only while
+  `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.
+
 ## config.h — Configuration
 
 ### Config struct
@@ -1113,6 +1137,10 @@ The NSE rewrites the generic banner into the sender's real **name + avatar**. It
 iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iOS-SDK-v12 break (`firebase_core ^3.15.2`, `firebase_messaging ^15.2.10`) keeps the iOS 13 floor. See memory `project_push_notification_implementation.md`, `feedback_ios_xcode26_toolchain.md`.
 
 ---
+
+## Join lock chains (`join_lock.h`, 2026-09-28)
+
+`lock_get {locks:[{server, owner}]}` answers one `lock_chain {server, owner, links}` per entry (empty when none; guests refused). `lock_put {server, owner, links}` offers a chain or next links; the answer is `lock_chain` with the chain held afterwards and `put: true` when the submitted newest lock is now the relay's (guests and fetch sockets refused). Rules in `join_lock::relay_put`, verification via libsodium (`verify_ed25519`, `derive_peer_id`, `genesis_server_id`). Records keyed by server id (40-hex) or server|owner; at most 256 links, 100,000 records, least recently used evicted. Rides the restart snapshot (codec v4, `Lock{key, links_json}`). Test: `test/test_join_lock.cpp` (a signed vector pinned with the Rust test). Deployed 2026-09-29; older clients never send these.
 
 ## Security properties
 

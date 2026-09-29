@@ -185,6 +185,10 @@ HEAD before this work, unrelated to it.
 Fleet cross-check (real app, real relay, zero overlap between the two peers until the very end):
 `scripts/fleet_pending_join.ps1`, see `fleet_probe.md`.
 
+## Join lock helpers (2026-09-28)
+
+MockRelay keeps lock chains (`locks`, rule `relay_lock_put` = the relay's `relay_put`): `lock_chain`, `forget_locks` (relay restart), `put_lock` (a rogue client), `plant_lock` (a hostile relay). `create_server_and_wait` waits for the owner's first lock. `relay_tip`, `sealed_to_members(&relay, ..)` and `sealed_to_joiner(&relay, ..)` seal to the relay's newest door; `join_lock::test_door_secret(s)` (cfg(test)) hands a test any door this process made, which is how a removed member with a kept door is played. Tests `join_lock_*`.
+
 ## Current tests (13)
 
 Albums (Part C, 2026-09-17), sharing helper `send_album_files(node, dir, peer_id, server_id, channel_id, mid_prefix, kinds, caption)` (one `SendFile` per `kinds` entry, `png`/`gif`/other, caption on item 0, fixed `HARNESS_ALBUM` id) and `assert_album_row_verifies` (v3 signature over the stored row):

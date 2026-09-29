@@ -233,6 +233,9 @@ pub enum NetworkEvent {
     NicknameReleased,
     NicknameClaimFailed { error: String },
     NicknameResolveFailed { nickname: String, error: String },
+    /// A nickname we looked up belongs to `master_id`, who signed the claim; nothing
+    /// is sent until the person confirms.
+    NicknameResolved { nickname: String, master_id: String },
     // -- Relay connection events --
     RelayDisconnected,
     /// The WS relay connection was (re)established and authenticated.
@@ -810,6 +813,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::NicknameResolveFailed { nickname, error } => {
             hollow_log!("[HOLLOW] Nickname resolve failed: {nickname} — {error}");
         }
+        node::NetworkEvent::NicknameResolved { nickname, .. } => {
+            hollow_log!("[HOLLOW] Nickname resolved: {nickname}");
+        }
         node::NetworkEvent::RelayDisconnected => {
             hollow_log!("[HOLLOW] Relay disconnected event emitted");
         }
@@ -1037,6 +1043,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::NicknameResolveFailed { nickname, error } => {
             NetworkEvent::NicknameResolveFailed { nickname, error }
+        }
+        node::NetworkEvent::NicknameResolved { nickname, master_id } => {
+            NetworkEvent::NicknameResolved { nickname, master_id }
         }
         node::NetworkEvent::RelayDisconnected => {
             NetworkEvent::RelayDisconnected
@@ -2437,15 +2446,17 @@ pub fn remove_friend(peer_id: String) -> Result<(), String> {
 }
 
 /// Send a friend request to a peer, resolving their temporary nickname first.
+/// Looks a temporary nickname up; the answer is `NicknameResolved` or
+/// `NicknameResolveFailed`, and nothing is sent to the person it names.
 #[frb]
-pub fn send_friend_request_by_nickname(nickname: String) -> Result<(), String> {
+pub fn resolve_nickname(nickname: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
     drop(guard);
 
     let rt = get_runtime();
-    rt.block_on(cmd_tx.send(node::NodeCommand::SendFriendRequestByNickname { nickname }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ResolveNickname { nickname }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

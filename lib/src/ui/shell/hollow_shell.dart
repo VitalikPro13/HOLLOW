@@ -360,8 +360,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       );
       return;
     }
+    // The stored key stays: a relay's refusal is no reason to lose it, and only
+    // the user replaces it below.
     ref.read(nodeProvider.notifier).stop();
-    await ref.read(licenseKeyProvider.notifier).clearKey();
     ref.read(licenseErrorProvider.notifier).state = null;
 
     final friendlyMessage = switch (reason) {

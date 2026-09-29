@@ -219,10 +219,19 @@ Called from `handle_check_pending_join_timeout` (first park) and from the `WsEve
 
 ## handle_join_refused()
 
-`sync_handler.rs:handle_join_refused(pending_server_joins, event_tx, ws_cmd_tx, crdt_store, server_id, reason)`: the ONE place a refusal lands on the joiner, whichever leg carried it, the targeted `ServerJoinRejected`, or a `join_resolved{admitted: false}` frame out of the ring. Always leaves the room: "no row means we are not in that room" is the invariant that makes both a refusal and a discard stick, since it stops the relay replaying a late admission's buffered snapshot at us.
+`sync_handler.rs:handle_join_refused(pending_server_joins, event_tx, crdt_store, server_id, reason)`: the ONE place a refusal lands on the joiner, whichever leg carried it (the targeted `ServerJoinRejected`, or a `join_resolved{admitted: false}` frame out of the ring). **Since the join lock (2026-09-28) a refusal NEVER ends a join**: a removed member or a modified client can fake one, so the row, the room, the ring copy and the timers all stay, and a real admission still completes it (the completion path then emits `PendingJoinUpdated{admitted}` so the tile goes).
 
-- **Interactive reason** (`is_interactive_reason`): deletes the row (`crdt_store.delete_pending_join`), emits `PendingJoinUpdated { state: "discarded" }` FIRST, THEN `TwitchJoinRejected` (the dialog event): tile before dialog, so a UI that only sees one of the two events gets the safer one. The user answers the dialog and their answer re-requests through `handle_join_server`, writing a FRESH row.
-- **Final reason**: row flips to `rejected` (`crdt_store.upsert_pending_join`); `TwitchJoinRejected` fires ONLY `if !pending.parked` (a join still in its live window has the user standing in front of the dialog it triggered; a parked one is answered hours later with nobody watching, so the tile is the only surface and an out-of-nowhere toast would be noise); `PendingJoinUpdated { state: "rejected", reason }` always fires.
+- **Interactive reason** (`is_interactive_reason`, NSFW consent / Twitch proof): `TwitchJoinRejected` fires ONCE per ask (`pending.asked`), and the ask stays open under it but stops parking and re-sending. The user's answer re-asks through `handle_join_server` (fresh nonce); Dart discards the pending join if the user cancels the prompt (`showNsfwConfirmDialog` / `showTwitchJoinDialog` `.then`).
+- **Final reason**: `pending.refused = reason`, row state `rejected` (via `tile_state`); `TwitchJoinRejected` only `if !pending.parked`; `PendingJoinUpdated { state: "rejected", reason }`. A repeat of the same reason is ignored. A refused join still parks (silently, no `ServerJoinParked`) and deposits its ring copy, so a real member can admit it later. Boot restores `rejected` rows as live joins too.
+
+## The join lock, joiner side (2026-09-28)
+
+Design: `design_A_frame_authority.md` "BUILT (session 16, the join lock)"; memory `project_join_lock`.
+- `handle_join_server` builds the `PendingJoin` (card + avatar up to 256 KB ride inside the request) and asks the relay for the lock (`request_join_lock` -> `WsCommand::LockGet`); nothing is sealed until a chain verifies. `handle_join_lock_chain` verifies it back to the owner (40-hex id + founding nonce, or the invite's `owner=`), stores it on `pending.lock`, sends the live copies the first time and deposits a parked copy that waited for it.
+- Every answer to our join is HELD (`hold_join_answer`, which asks for the lock again) and judged only against a read asked after it arrived (`pending.lock_asks` pairs replies with asks): `judge_join_answer` opens it only from the newest door; an older door that genuinely sealed it = `Stale` -> `reask_join` (new nonce, sealed to the newest door, once per lock).
+- `recent_join_of` / `note_completed_join` / `recent_join_answer`: for 5 min after completion, a sync answer sealed to our reply key from the verified door still merges (a real admission overtakes a stale one).
+- `reask_join_locks` (batch tick) re-asks every 15 s while a join has no lock or holds answers; `send_pending_request` asks for the lock when a device appears and nothing could be sealed yet.
+- Member side: answers are sealed from `state.join_lock.newest_door()`; a member's parked ask sealed after its admission (`member_since`) is served again.
 
 ## send_join_rejection()
 

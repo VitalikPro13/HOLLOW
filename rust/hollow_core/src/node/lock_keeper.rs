@@ -324,6 +324,22 @@ impl LockKeeper {
     }
 }
 
+/// Our signature on a ring control (`ring_auth`), when we hold the change key of the
+/// newest lock our state has. The relay checks it against the newest lock it holds;
+/// the two differ only while a move is on its way.
+pub(crate) fn sign_ring_control(
+    server_id: &str,
+    state: &ServerState,
+    master: &NativeKeypair,
+    retention_secs: i64,
+    clear: bool,
+    channels: &[String],
+) -> Option<super::ring_auth::RingAuth> {
+    let tip = state.join_lock.chain().last()?.clone();
+    let change = open_change(server_id, state, &tip, master)?;
+    super::ring_auth::sign(server_id, &lookup_owner(state)?, retention_secs, clear, channels, &tip, &change)
+}
+
 /// The change key of `link` from a grant sealed to us.
 fn open_change(server_id: &str, state: &ServerState, link: &LockLink, master: &NativeKeypair) -> Option<zeroize::Zeroizing<[u8; 32]>> {
     state

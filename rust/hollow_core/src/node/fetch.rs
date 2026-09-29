@@ -90,7 +90,8 @@ pub(crate) async fn run_fetch(
     let ws_stream = ws_client::connect_and_auth(
         &relay_url, peer_id, keypair_proto, pub_key_b64, license_key, true,
     )
-    .await?;
+    .await
+    .map_err(|e| e.to_string())?;
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -341,14 +342,14 @@ fn handle_binary_frame(
             crate::node::frame_auth::Delivery::Room
         };
         match crate::node::frame_auth::open(frame, &from, &room, delivery, crate::node::frame_auth::now_ms()) {
-            Ok(opened) => Some((from, String::from_utf8_lossy(opened.body).to_string())),
+            Ok(opened) => Some((from, String::from_utf8_lossy(opened.body).to_string(), opened.ts_ms)),
             Err(refusal) => {
                 hollow_log!("[HOLLOW-FETCH] Dropped a frame from {from}: {refusal:?}");
                 None
             }
         }
     });
-    if let Some((from, payload)) = payload {
+    if let Some((from, payload, sealed_at)) = payload {
         if server_room.is_some() {
             if let Some(entry) = try_process_channel_msg(
                 &from, &payload, mls, mls_dirty, db_path, db_passphrase, local_master,
@@ -357,7 +358,7 @@ fn handle_binary_frame(
             }
         } else if data[0] == 0x06 {
             if let Some(dm) = try_decrypt_dm(
-                &from, &payload, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
+                &from, &payload, sealed_at, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
             ) {
                 persist_olm_session(olm, crypto_store, &from);
                 messages.push(dm);
@@ -841,6 +842,7 @@ fn insert_channel_row(
 fn try_decrypt_dm(
     from: &str,
     data: &str,
+    sealed_at: i64,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     db_path: &str,
@@ -922,7 +924,7 @@ fn try_decrypt_dm(
                     if sid.is_none() =>
                 {
                     handle_link_preview_set(
-                        &convo, local_master, mid, lp, ts, sig, pk, db_path, db_passphrase,
+                        &convo, local_master, mid, lp, ts, sig, pk, sealed_at, db_path, db_passphrase,
                     )
                 }
                 Ok(MessageEnvelope::FileHeader { inner }) => {
@@ -1166,6 +1168,7 @@ fn handle_link_preview_set(
     ts: i64,
     sig: Option<String>,
     pk: Option<String>,
+    sealed_at: i64,
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
@@ -1194,7 +1197,7 @@ fn handle_link_preview_set(
 
     let lp_json = lp.as_deref().and_then(|c| serde_json::to_string(c).ok());
     let applied = store
-        .update_link_preview_and_sig(&mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref())
+        .update_link_preview_and_sig(&mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(), Some(sealed_at))
         .unwrap_or(false);
     hollow_log!("[HOLLOW-FETCH] link preview mid={mid} applied={applied}");
     None
@@ -1559,7 +1562,8 @@ mod tests {
             };
             let ts = row.edited_at.unwrap_or(row.timestamp);
             let (sig, pk) = sign_message_versioned(k, &pk_b64(k), "dm", &a, &k.peer_id(), ts, &extras, &row.text);
-            handle_link_preview_set(&k.peer_id(), &a, mid.into(), Some(Box::new(card())), ts, sig, pk, &path, &pass);
+            let sealed_at = crate::node::frame_auth::now_ms();
+            handle_link_preview_set(&k.peer_id(), &a, mid.into(), Some(Box::new(card())), ts, sig, pk, sealed_at, &path, &pass);
         };
         attach(&mallory, "b1");
         assert_eq!(open().get_dm_message_sig_row("b1").unwrap().link_preview, None);
@@ -1672,7 +1676,7 @@ mod tests {
         .unwrap();
 
         let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
-        assert!(try_decrypt_dm(&b, &frame, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_some());
+        assert!(try_decrypt_dm(&b, &frame, crate::node::frame_auth::now_ms(), &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_some());
         let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
         assert!(
             store.get_security_alerts().unwrap().iter().any(|al| {

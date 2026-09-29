@@ -17,10 +17,11 @@ namespace snapshot {
 
 // 2 added the parked destroy signals (`kills`), 3 the device-list version marks
 // that keep a revoked device out of its master's mailbox (`marks`), 4 the join
-// lock chains (`locks`). An older snapshot still decodes, without the newer
+// lock chains (`locks`), 5 each ring's owner binding and each ring frame's
+// retention (`ring_meta`). An older snapshot still decodes, without the newer
 // fields, so a relay coming up on this build keeps the buffers the previous one
 // handed over.
-static constexpr uint32_t VERSION = 4;
+static constexpr uint32_t VERSION = 5;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -48,6 +49,7 @@ struct TopicFrame {
     std::string sender;
     uint32_t age_secs = 0;
     uint64_t seq = 0;
+    int64_t retention_secs = 0;  // v5; 0 = unknown
 };
 struct Topic {
     std::string key;
@@ -55,6 +57,7 @@ struct Topic {
     int64_t retention_secs = 0;
     uint32_t registered_age_secs = 0;
     std::vector<TopicFrame> frames;
+    std::string owner;  // v5
 };
 struct PushToken {
     std::string peer;
@@ -281,6 +284,14 @@ inline std::string encode(const Data& d) {
         w.str(l.links_json);
     }
 
+    // ring_meta: one entry per topic above, in the same order.
+    w.count(d.topics.size());
+    for (const auto& t : d.topics) {
+        w.str(t.owner);
+        w.count(t.frames.size());
+        for (const auto& f : t.frames) w.i64(f.retention_secs);
+    }
+
     w.out.append("HRSE", 4);
     return w.out;
 }
@@ -381,6 +392,17 @@ inline bool decode(std::string_view bytes, Data& out) {
             Lock l;
             if (!r.str(l.key) || !r.str(l.links_json)) return false;
             d.locks.push_back(std::move(l));
+        }
+    }
+
+    if (version >= 5) {
+        if (!r.count(n) || n != d.topics.size()) return false;
+        for (auto& t : d.topics) {
+            uint32_t m = 0;
+            if (!r.str(t.owner) || !r.count(m) || m != t.frames.size()) return false;
+            for (auto& f : t.frames) {
+                if (!r.i64(f.retention_secs)) return false;
+            }
         }
     }
 

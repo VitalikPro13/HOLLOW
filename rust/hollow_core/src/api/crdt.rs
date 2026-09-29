@@ -1654,7 +1654,9 @@ pub fn initiate_recovery_pool(server_id: String) -> Result<String, String> {
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
     drop(guard);
 
-    let mut token_bytes = [0u8; 8];
+    // The token is the pool's key and the relay sees a hash of it, so it must not
+    // be guessable offline.
+    let mut token_bytes = [0u8; 32];
     getrandom::fill(&mut token_bytes)
         .map_err(|e| format!("Failed to generate token: {e}"))?;
     let token = hex::encode(token_bytes);

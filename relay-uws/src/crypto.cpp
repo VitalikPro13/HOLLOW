@@ -133,6 +133,12 @@ std::string sha256_hex(const std::string& message) {
     return hex_encode(digest, sizeof(digest));
 }
 
+std::string random_hex(size_t bytes) {
+    std::vector<unsigned char> buf(bytes);
+    randombytes_buf(buf.data(), buf.size());
+    return hex_encode(buf.data(), buf.size());
+}
+
 std::string genesis_server_id(const std::string& owner_peer_id, const std::string& nonce) {
     return sha256_hex("hollow-server1:" + owner_peer_id + ":" + nonce).substr(0, 40);
 }
