@@ -6,6 +6,21 @@ Ad-hoc meetings between people who share no server and no friendship. A host cre
 
 **The virtual-server model:** `conf:{conf_id}` is simultaneously the relay WS room code, the MLS group key, and the `server_id` fed to the untouched voice-channel machinery (channel id always `"main"` = `CONF_CHANNEL`). `server_states` never contains conf ids, so every CRDT-coupled path (sync, member fan-outs, restricted guards) skips naturally. v1 shipped + 2-machine field-tested 2026-07-13.
 
+## The meeting lane (HOL-SEC-072, 2026-09-29)
+
+A meeting link carries a key next to the id: `key=`, 32 random bytes as unpadded URL-safe
+base64 (the shape of a server invite's). Minted with the room (`conference::new_link_key`,
+`conferences.link_key`, kept once set; a keyless room gets one on its next start, so its
+old link stops). The knock, `ConferenceLobbyInfo`, `ConferenceJoinDenied`,
+`ConferenceEnded`, `ConferenceKicked` and the meeting `MlsWelcome` are `Lane::Meeting`:
+they count only inside `HavenMessage::MeetingSealed`, sealed by `seal_meeting` (AES-256-GCM
+under HMAC(link key, "hollow-meeting1" + conf id), AAD = room + sealing device) and opened
+by the swarm's relay-frame opener via `open_meeting`, which also requires the inner
+message to name the room's meeting. Keys: host = `ConferenceHostState.seal`
+(`MeetingSeal { link_key, device }`), joiner = the process-global `MEETING_KEYS` (set by
+`handle_conference_request_join`, cleared on leave, end, kick). A link without a key cannot
+knock (FFI `OLD_LINK`, Dart toast). The relay reads no name, avatar hash, KeyPackage or host.
+
 ## Rust core (`rust/hollow_core/src/node/conference.rs`)
 
 - Helpers: `conf_server_id(id)` → `"conf:{id}"`, `is_conference_sid`, `conf_id_from_sid`, `CONF_CHANNEL = "main"`, `derive_access_hash(conf_id, code)` = sha256("{conf_id}:{code}") hex (admission check, NOT key material).
@@ -65,8 +80,8 @@ Entry icon in the Chats-tab header. 44 px grey header icons ("Join a meeting", "
 
 ## Links & website
 
-- `hollow://conference/<id>` + `https://hollow.anonlisten.com/join#conf=<id>` (FRAGMENT — id never in server logs). `HollowLinkType.conference` in `hollow_link_utils.dart`; `webConferenceInviteLink`; cards in both link-card renderers; DeepLinkService confirm → open tab/push mobile → `requestJoin`. Unit tests in `test/hollow_link_utils_test.dart`.
-- Website `/join` page (`!hollow-website/src/routes/join/+page.svelte`) parses `#conf=` → bounces to the PATH form `hollow://conference/<id>`, copy "Joining a meeting".
+- `hollow://conference/<id>?key=<k>&relay=<r>` + `https://hollow.anonlisten.com/join#conf=<id>&key=<k>` (FRAGMENT — id and key never in server logs); `HollowLink.key` carries it, `webConferenceInviteLink(id, relay:, key:)`, `ConferenceRoom.inviteLink`. `requestJoin(id, linkKey:)`; a retry with an access code reuses `activeLinkKey`. The join dialog takes a link, not a bare id. `HollowLinkType.conference` in `hollow_link_utils.dart`; `webConferenceInviteLink`; cards in both link-card renderers; DeepLinkService confirm → open tab/push mobile → `requestJoin`. Unit tests in `test/hollow_link_utils_test.dart`.
+- Website `/join` page (anonlisten-sites `hollow/src/routes/join/+page.svelte`) parses `#conf=<id>&key=` → bounces to the PATH form `hollow://conference/<id>?key=<k>`, copy "Joining a meeting".
 
 ## Testing
 

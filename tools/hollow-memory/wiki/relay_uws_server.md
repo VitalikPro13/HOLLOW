@@ -23,11 +23,27 @@ Binary name: `hollow-relay`
   discovery and check_peers co-membership to owners; a deposit for the master also goes
   live to the owners.
 - **Rings** (`ring_auth.h`, `ring_evict.h`): control signed by the change key of the
-  newest join-lock link (`hollow-ring1`), legacy rooms bound to the first signing owner,
-  unsigned = refresh only once `ACCEPT_UNSIGNED_RING_CONTROL` is off; byte-fair
-  eviction, `MAX_RING_FRAME_BYTES` 256 KB, 512 rings per room, 2,048 per creator, the
-  idlest ring evicted at the global cap, per-frame retention; snapshot codec v5 carries
-  the owner binding and each frame's retention.
+  newest join-lock link (`hollow-ring1`), legacy rooms' topics carry the owner (below),
+  unsigned = refresh only once `ACCEPT_UNSIGNED_RING_CONTROL` is off; eviction by the
+  address share holding the most bytes, `MAX_RING_FRAME_BYTES` 256 KB, 512 rings per
+  server, the heaviest share's least recently used ring at the global cap, per-frame
+  retention; snapshot codec v6.
+- **Fair shares (HOL-SEC-069/070, session 18)**: every table a stranger can fill charges
+  each entry to the writer's address share (`share_block`: v4 address or v6 /48, hashed
+  by `share_id` = BLAKE2b under `RelayState::share_key`, replaced hourly, never
+  persisted) through `FairShare` (`fair_share.h`); a full table evicts from the share
+  holding the most. Waiting frames: ONE 512 MB budget over DM + ring frames, each weighed
+  with `FRAME_OVERHEAD_BYTES` (1 KB), exact (`OfflineIndex::released(seq)` on every
+  removal); the old per-sender key caps are gone. Rings (65,536), join lock chains (128 MB,
+  `JoinLocks::record_bytes`), destroy orders, device-list marks and push registrations
+  (128 MB, `charge_registrations`) all ride it; per-target slots and a ring's frames evict
+  the heaviest share. Subscriptions: 1,024 rooms / 16,384 topics per socket, past it that
+  room goes unfiltered. Channel-push throttle: 256 servers per target. Snapshot codec v6
+  carries every share.
+- **Legacy ring topics (HOL-SEC-071)**: in a 32-hex room a signed control's channels must
+  be `{owner}.{channel}` for the owner it is signed for (`ring_auth::in_own_topics`); a
+  stop reaches only that owner's topics; `ring_namespace` counts the per-server cap per
+  owner. The first-signer binding is gone.
 - **Nicknames**: `nickname_proof` holds the master's signature (`nickname_claim_message`
   in validate.h); resolve returns it; unsigned claims only while
   `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.

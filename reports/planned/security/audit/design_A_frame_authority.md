@@ -445,6 +445,16 @@ live-only sealed frame. Found while testing: refusing a rogue Welcome spends the
 knocker's KeyPackage, so a refused or unreadable meeting Welcome re-knocks at once.
 Pre-0.12 rooms are refused (Vitalik: no migration).
 
+BUILT (session 18, HOL-SEC-072, Vitalik's decision a): the meeting link carries a key
+(`key=`, 32 bytes, the shape of a server invite's). The knock, lobby info, denial, end,
+kick and the meeting Welcome (whose nonce picks the host out of every master the relay
+knows) are `Lane::Meeting` and count only inside `MeetingSealed`: AES-256-GCM under
+HMAC(link key, "hollow-meeting1" + meeting id), bound to the meeting's room and the
+sealing device, holding a message for that same meeting. The host keeps the key in the
+room row (`conferences.link_key`, kept once set) and its hosting state, a joiner in
+`MEETING_KEYS` while it knocks or sits in the meeting. A keyless link cannot knock; a
+keyless room gets a key on its next start. Wiretap: `c24_a_meeting_shows_the_relay_no_name_and_no_host`.
+
 ### A-D4. The relay (relay-side, deploys before 0.12)
 
 - A17: auth signs only `hollow-ws-auth:{device}:{ts}`; a captured frame replays to
@@ -516,6 +526,13 @@ ws_handler.cpp, each turned off when 0.12 ships: `ACCEPT_AUTH_V1`,
   finding files.
 - Residuals: see HOL-SEC-065 and HOL-SEC-066 (legacy ring binding, sybil churn of the
   ring cap, the forwarder pin trusting the first advertisement, nickname enumeration).
+  Settled in session 18 (2026-09-29, relay DEPLOYED the same day): a legacy server's ring
+  topics carry the owner, so rings filed in someone else's name never meet the real
+  ones (HOL-SEC-071, the first-signer binding is gone); every relay table a stranger can
+  fill evicts from the address share holding the most, hashed under an hourly key
+  (`fair_share.h`, HOL-SEC-070), and the tables that one account could grow without
+  bound (join lock bytes, subscriptions, push registrations, channel-push throttle
+  entries) are bounded (HOL-SEC-069); the forwarder pin is accepted (AR-14).
 
 ### A-D5. Smaller items
 

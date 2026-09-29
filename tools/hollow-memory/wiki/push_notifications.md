@@ -63,6 +63,8 @@ ONLY — E2EE preserved).
 3001 localhost). Receives `POST /push {token, platform, sender}`.
 
 - Data block is always `{type:'wake', sender}` — **no content**.
+- **Logging (2026-09-29):** no token (not even a prefix), no per-push "sent" line;
+  errors carry only platform, status and code. `feedback_relay_no_metadata_logging`.
 - **Android:** `android: {priority:'high'}`.
 - **iOS:** a VISIBLE ALERT push (NOT a pure silent/background push — Apple
   throttles those to ~2-3/hr). Headers: `apns-priority:10`, `apns-push-type:alert`,
@@ -85,7 +87,8 @@ UnifiedPush distributor (ntfy etc.) in Settings > Notifications > Push Delivery.
   TTL 24h, urgency high. SSRF guard: https only, host must resolve to a PUBLIC
   address, checked inside the socket's `lookup` (custom `https.Agent`) AND for IP
   literals in `parseToken` (sockets skip lookup for literals).
-  `UNIFIEDPUSH_ALLOW_PRIVATE=1` opts out. Logs only the endpoint HOST. Firebase is
+  `UNIFIEDPUSH_ALLOW_PRIVATE=1` opts out. Logs nothing from the endpoint (2026-09-29: a
+  self-hosted distributor's host names its owner). Firebase is
   optional (no service account = FCM/APNs answer 503); `firebase-admin` is an
   optionalDependency. Docker: `push` service, `network_mode: service:relay`.
 - **App** `lib/src/core/services/unified_push_service.dart`: source of truth for
