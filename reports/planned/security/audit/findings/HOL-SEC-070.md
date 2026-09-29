@@ -63,6 +63,12 @@ v6); entries from a pre-v6 snapshot each become a share of their own.
 The C++ tests above; the live probe; the 0.11 and 0.12 logins and a real deploy
 restoring every buffer.
 
+Follow-up the same day: an AddressSanitizer run of the relay tests
+(`SANITIZE=1 bash relay-uws/test/run_tests.sh`) caught a use-after-free in the kill
+list's list-wide eviction (it dropped an entry through a reference to the string that
+drop erased), reachable only once the list held 10,000 entries. Fixed by copying the
+target first and redeployed; all 13 suites are clean under ASan and UBSan.
+
 ## Residual
 
 An attacker holding many address blocks (a botnet, many /48s) can still churn the

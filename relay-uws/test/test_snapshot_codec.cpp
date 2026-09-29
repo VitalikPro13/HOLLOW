@@ -29,7 +29,7 @@ static snapshot::Data sample() {
     snapshot::Data d;
     snapshot::DmQueue q;
     q.target = "12D3KooWTargetOne";
-    q.frames.push_back({"dmroom", std::string("\x06\x00binary\x00frame", 14), "12D3KooWSenderA", 120, false, false, 7, 101});
+    q.frames.push_back({"dmroom", std::string("\x06\x00" "binary" "\x00" "frame", 14), "12D3KooWSenderA", 120, false, false, 7, 101});
     q.frames.push_back({"dmroom", "img", "12D3KooWSenderB", 3600, true, false, 9, 102});
     q.frames.push_back({"srv:abc", "chan", "12D3KooWSenderA", 0, false, true, 11, 101});
     d.dm.push_back(q);

@@ -162,7 +162,9 @@ struct KillList {
         while (ledger.size() >= MAX_ENTRIES) {
             auto victim = ledger.victim();
             if (!victim) break;
-            drop(target_of.at(*victim), *victim);
+            // A copy: dropping the entry erases the string `target_of` holds.
+            const std::string victim_target = target_of.at(*victim);
+            drop(victim_target, *victim);
         }
         uint64_t seq = ++next_seq;
         entries[target].push_back(Entry{blob, issued_at_ms, at, issuer, seq, share});

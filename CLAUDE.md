@@ -33,6 +33,7 @@ cargo nextest run --lib
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
 # Relay deploy: scp src/*.cpp *.h -> ~/relay-uws/src/, cmake+make+setcap+restart (`feedback_relay_rules`)
+# Relay tests (on the VPS, before every deploy): bash relay-uws/test/run_tests.sh, then SANITIZE=1 (ASan+UBSan)
 
 # Windows release (build->sign->installer->zip; Certum PIN prompt)
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
