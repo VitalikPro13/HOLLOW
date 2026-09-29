@@ -1,14 +1,13 @@
 // Unit tests for the two relay-side guards that bound attacker-supplied input:
 //
 //   is_peer_id_shape (validate.h)  — what may become a KEY in a relay map.
-//   OfflineIndex     (offline_index.h) — who pays when the offline buffer is
-//                                        full, and how the byte-budget evictor
-//                                        finds the oldest frame in O(1).
+//   OfflineIndex     (offline_index.h) — which frame the byte budget drops when
+//                                        the offline buffer is full: the oldest
+//                                        of the address share holding the most.
 //
 // Both are header-only precisely so they can be tested without standing up a
-// relay. The fair-share section drives a stand-in buffer that mirrors what
-// buffer_offline_msg does with the index (plan -> free -> stamp); it tests the
-// index's DECISIONS, which is where the fairness lives.
+// relay. The index section drives a stand-in buffer that mirrors what
+// buffer_offline_msg and the ring tee do with it (stamp, then evict over budget).
 //
 // Build + run from relay-uws/test (no uWebSockets needed, only libsodium):
 //   g++ -std=c++17 -I../src test_relay_validators.cpp ../src/crypto.cpp \
@@ -108,195 +107,99 @@ static void peer_id_shape_tests() {
 }
 
 // ---------------------------------------------------------------------------
-// OfflineIndex — fair-share key accounting
+// OfflineIndex — the byte budget, by address share
 // ---------------------------------------------------------------------------
 
-// Stand-in for RelayState::offline_buffer: target -> frames, each frame being
-// the sender that deposited it plus its index stamp. Deposit mirrors
-// buffer_offline_msg: ask the index who pays, free that, then stamp and push.
+// Stand-in for the relay's two buffers: queue key -> the seqs it holds. Deposit
+// mirrors buffer_offline_msg and the ring tee: stamp, push, then drop the index's
+// victim while over `budget`.
 struct FakeBuffer {
     OfflineIndex idx;
-    std::map<std::string, std::deque<std::pair<std::string, uint64_t>>> queues;
-    size_t max_targets = 4;
-    size_t max_keys = 100;
+    std::map<std::string, std::deque<uint64_t>> queues;
+    size_t budget;
 
-    void release_oldest_target_of(const std::string& sender) {
-        std::string target = idx.oldest_target(sender);
-        if (target.empty()) return;
-        auto it = queues.find(target);
-        if (it == queues.end()) return;
-        std::deque<std::pair<std::string, uint64_t>> kept;
-        for (auto& f : it->second) {
-            if (f.first == sender) {
-                idx.released_dm(target, sender);
-            } else {
-                kept.push_back(f);
+    explicit FakeBuffer(size_t b) : budget(b) {}
+
+    uint64_t deposit(const std::string& key, bool is_topic, uint64_t share, size_t bytes) {
+        uint64_t seq = idx.stamp(key, is_topic, share, bytes);
+        queues[key].push_back(seq);
+        while (idx.bytes() > budget) {
+            auto victim = idx.victim();
+            if (!victim) break;
+            auto& q = queues[victim->second.key];
+            for (auto it = q.begin(); it != q.end(); ++it) {
+                if (*it == victim->first) {
+                    q.erase(it);
+                    break;
+                }
             }
+            idx.released(victim->first);
         }
-        it->second = std::move(kept);
-        if (it->second.empty()) queues.erase(it);
+        return seq;
     }
 
-    void evict_oldest_key() {
-        size_t start = idx.key_count();
-        for (size_t i = 0; i < 1024 && !idx.order.empty(); i++) {
-            OfflineIndex::EvictRef ref = idx.order.front();
-            idx.order.pop_front();
-            auto it = queues.find(ref.key);
-            if (it == queues.end() || it->second.empty() ||
-                it->second.front().second != ref.seq) {
-                continue;  // stale ref
-            }
-            idx.released_dm(ref.key, it->second.front().first);
-            it->second.pop_front();
-            if (it->second.empty()) queues.erase(it);
-            if (idx.key_count() < start) return;
-        }
-    }
-
-    void deposit(const std::string& target, const std::string& sender) {
-        switch (idx.plan(sender, target, max_targets, max_keys)) {
-            case OfflineIndex::Admit::Ok: break;
-            case OfflineIndex::Admit::FreeOwnOldest: release_oldest_target_of(sender); break;
-            case OfflineIndex::Admit::FreeGlobalOldest: evict_oldest_key(); break;
-        }
-        uint64_t seq = idx.stamp_dm(target, sender);
-        queues[target].push_back({sender, seq});
-    }
-
-    size_t frames_at(const std::string& target) const {
-        auto it = queues.find(target);
-        return it == queues.end() ? 0 : it->second.size();
+    bool holds(const std::string& key, uint64_t seq) const {
+        auto it = queues.find(key);
+        if (it == queues.end()) return false;
+        for (uint64_t s : it->second) if (s == seq) return true;
+        return false;
     }
 };
 
-static void fair_share_tests() {
-    printf("OfflineIndex fair share (per-sender target cap)\n");
+static constexpr size_t W = OfflineIndex::FRAME_OVERHEAD_BYTES;
 
-    FakeBuffer b;
-    b.max_targets = 4;
+static void budget_tests() {
+    printf("OfflineIndex byte budget\n");
 
-    // Three senders. `flood` sprays targets; `solo_a` and `solo_b` each hold a
-    // single conversation, which is what the cap must never cost anything.
-    for (const char* t : {"F1", "F2", "F3", "F4"}) b.deposit(t, "flood");
-    b.deposit("S1", "solo_a");
-    b.deposit("S2", "solo_b");
-    // solo_a also has a message waiting at F1 — the target the flooder is about
-    // to lose. Its message must survive: the flooder loses ITS OWN frames.
-    b.deposit("F1", "solo_a");
+    // A flood into rings of its own, from one address, never pushes out the DMs
+    // real people left for someone offline.
+    {
+        FakeBuffer b(100 * (100 + W));
+        uint64_t dm1 = b.deposit("friend-inbox", false, 1, 100);
+        uint64_t dm2 = b.deposit("other-inbox", false, 2, 100);
+        uint64_t last = 0;
+        for (int i = 0; i < 5000; i++) last = b.deposit("junk-ring-" + std::to_string(i % 40), true, 9, 100);
+        check_bool("the budget holds", b.idx.bytes() <= b.budget, true);
+        check_bool("the first real DM survives the flood", b.holds("friend-inbox", dm1), true);
+        check_bool("the second real DM survives the flood", b.holds("other-inbox", dm2), true);
+        check_bool("the flood keeps its newest frame", b.holds("junk-ring-" + std::to_string(4999 % 40), last), true);
+        uint64_t dm3 = b.deposit("late-inbox", false, 3, 100);
+        check_bool("a real DM after the flood lands", b.holds("late-inbox", dm3), true);
+    }
 
-    check_size("flooder holds 4 targets", b.idx.target_count("flood"), 4);
-    check_size("solo_a holds 2 targets", b.idx.target_count("solo_a"), 2);
-    check_bool("F1 holds two senders' frames", b.frames_at("F1") == 2, true);
+    // A flood of tiny frames weighs its overhead: it cannot hold more frames than
+    // the budget pays for.
+    {
+        FakeBuffer b(10 * W);
+        for (int i = 0; i < 1000; i++) b.deposit("target-" + std::to_string(i), false, 9, 0);
+        check_size("tiny frames are bounded by their overhead", b.idx.live(), 10);
+    }
 
-    // The 5th target is past the flooder's share.
-    check_bool("plan() bills the flooder for its own expansion",
-               b.idx.plan("flood", "F5", b.max_targets, b.max_keys) ==
-                   OfflineIndex::Admit::FreeOwnOldest, true);
-    b.deposit("F5", "flood");
+    // With one share, the budget drops plain oldest first.
+    {
+        FakeBuffer b(3 * (10 + W));
+        uint64_t a = b.deposit("t", false, 1, 10);
+        uint64_t c = b.deposit("t", false, 1, 10);
+        uint64_t d = b.deposit("t", true, 1, 10);
+        uint64_t e = b.deposit("t2", false, 1, 10);
+        check_bool("the oldest frame went", b.holds("t", a), false);
+        check_bool("the rest stayed", b.holds("t", c) && b.holds("t", d) && b.holds("t2", e), true);
+    }
 
-    check_bool("flooder lost its OLDEST target (F1)", b.idx.holds("flood", "F1"), false);
-    check_bool("flooder kept F2", b.idx.holds("flood", "F2"), true);
-    check_bool("flooder kept the new F5", b.idx.holds("flood", "F5"), true);
-    check_size("flooder is back at its cap, not over it",
-               b.idx.target_count("flood"), 4);
-    check_bool("solo_a's frame at F1 survived", b.idx.holds("solo_a", "F1"), true);
-    check_size("F1 now holds only solo_a's frame", b.frames_at("F1"), 1);
-
-    // The single-target senders were never consulted and never charged.
-    check_size("solo_a still holds S1", b.frames_at("S1"), 1);
-    check_size("solo_b still holds S2", b.frames_at("S2"), 1);
-    check_bool("a single-target sender is never billed",
-               b.idx.plan("solo_b", "S2", b.max_targets, b.max_keys) ==
-                   OfflineIndex::Admit::Ok, true);
-
-    // Keep going: each further target costs the flooder its next-oldest.
-    b.deposit("F6", "flood");
-    check_bool("flooder then lost F2", b.idx.holds("flood", "F2"), false);
-    check_size("flooder still capped at 4", b.idx.target_count("flood"), 4);
-    check_size("solo_a untouched after a second eviction", b.frames_at("S1"), 1);
-    check_size("solo_b untouched after a second eviction", b.frames_at("S2"), 1);
-
-    printf("\n");
-}
-
-static void backstop_tests() {
-    printf("OfflineIndex global key backstop\n");
-
-    FakeBuffer b;
-    b.max_targets = 100;  // out of the way: this section is about max_keys
-    b.max_keys = 4;
-
-    b.deposit("A", "big");
-    b.deposit("B", "big");
-    b.deposit("C", "solo_c");
-    b.deposit("D", "solo_d");
-    check_size("four keys, at the cap", b.idx.key_count(), 4);
-
-    // A sender that already holds keys pays for its own expansion.
-    check_bool("plan() bills a multi-target sender at the backstop",
-               b.idx.plan("big", "E", b.max_targets, b.max_keys) ==
-                   OfflineIndex::Admit::FreeOwnOldest, true);
-    b.deposit("E", "big");
-    check_bool("big lost its own oldest (A)", b.idx.holds("big", "A"), false);
-    check_size("solo_c untouched", b.frames_at("C"), 1);
-    check_size("solo_d untouched", b.frames_at("D"), 1);
-    check_size("still four keys", b.idx.key_count(), 4);
-
-    // A sender holding nothing must not lose its one and only deposit, so the
-    // backstop falls back to the globally oldest.
-    check_bool("plan() spares a first-time sender",
-               b.idx.plan("newcomer", "F", b.max_targets, b.max_keys) ==
-                   OfflineIndex::Admit::FreeGlobalOldest, true);
-    b.deposit("F", "newcomer");
-    check_bool("the newcomer's deposit was admitted", b.idx.holds("newcomer", "F"), true);
-    check_bool("the globally oldest key (B) went instead", b.idx.holds("big", "B"), false);
-    check_size("still four keys after the backstop", b.idx.key_count(), 4);
-
-    printf("\n");
-}
-
-static void eviction_index_tests() {
-    printf("OfflineIndex eviction order\n");
-
-    FakeBuffer b;
-    b.max_targets = 100;
-    b.max_keys = 100;
-
-    b.deposit("T1", "s1");   // seq 1
-    b.deposit("T2", "s2");   // seq 2
-    b.deposit("T1", "s1");   // seq 3
-    b.deposit("T3", "s3");   // seq 4
-
-    check_size("one ref per deposit", b.idx.order.size(), 4);
-    check_size("four live frames", b.idx.live, 4);
-    check_bool("refs are in insertion order",
-               b.idx.order[0].seq == 1 && b.idx.order[1].seq == 2 &&
-                   b.idx.order[2].seq == 3 && b.idx.order[3].seq == 4, true);
-
-    // Deliver T2 out of band, the way replay_buffered_msgs does: the frame
-    // leaves the queue and the ref left behind is stale.
-    b.idx.released_dm("T2", "s2");
-    b.queues.erase("T2");
-
-    // Compaction keeps live refs, in order, and drops only the stale one.
-    b.idx.compact([&b](const OfflineIndex::EvictRef& r) {
-        auto it = b.queues.find(r.key);
-        if (it == b.queues.end()) return false;
-        for (const auto& f : it->second) {
-            if (f.second == r.seq) return true;
-        }
-        return false;
-    });
-    check_size("compaction dropped exactly the stale ref", b.idx.order.size(), 3);
-    check_bool("compaction preserved order",
-               b.idx.order[0].seq == 1 && b.idx.order[1].seq == 3 &&
-                   b.idx.order[2].seq == 4, true);
-
-    // Sequence numbers are never reused, so a stale ref can never be mistaken
-    // for a later frame at the same key.
-    uint64_t next = b.idx.stamp_dm("T2", "s2");
-    check_bool("a new stamp is strictly newer than every retired one", next > 4, true);
+    // released() keeps the totals exact, whatever order frames leave in.
+    {
+        OfflineIndex idx;
+        uint64_t a = idx.stamp("x", false, 1, 50);
+        uint64_t c = idx.stamp("y", true, 2, 70);
+        idx.released(a);
+        check_size("one frame left", idx.live(), 1);
+        check_size("its bytes and overhead are the total", idx.bytes(), 70 + W);
+        auto v = idx.victim();
+        check_bool("the victim names where it sits", v && v->first == c && v->second.key == "y" && v->second.is_topic,
+                   true);
+        idx.released(c);
+        check_bool("an empty index has no victim", !idx.victim().has_value() && idx.bytes() == 0, true);
+    }
 
     printf("\n");
 }
@@ -316,9 +219,7 @@ int main() {
     printf("relay validators + offline index\n\n");
     peer_id_shape_tests();
     nickname_claim_tests();
-    fair_share_tests();
-    backstop_tests();
-    eviction_index_tests();
+    budget_tests();
 
     if (failures == 0) {
         printf("PASS\n");

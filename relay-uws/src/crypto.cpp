@@ -143,6 +143,15 @@ std::string genesis_server_id(const std::string& owner_peer_id, const std::strin
     return sha256_hex("hollow-server1:" + owner_peer_id + ":" + nonce).substr(0, 40);
 }
 
+uint64_t share_id(const std::string& key, const std::string& block) {
+    unsigned char out[crypto_generichash_BYTES_MIN];
+    crypto_generichash(out, sizeof(out), reinterpret_cast<const unsigned char*>(block.data()), block.size(),
+                       reinterpret_cast<const unsigned char*>(key.data()), key.size());
+    uint64_t id = 0;
+    for (int i = 0; i < 8; i++) id |= static_cast<uint64_t>(out[i]) << (8 * i);
+    return id;
+}
+
 uint64_t now_unix_secs() {
     auto now = std::chrono::system_clock::now();
     auto epoch = now.time_since_epoch();

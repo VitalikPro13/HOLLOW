@@ -11,6 +11,7 @@
 #include "join_lock.h"
 #include "kill_list.h"
 #include "license.h"
+#include "fair_share.h"
 #include "offline_index.h"
 #include "reports.h"
 
@@ -46,8 +47,8 @@ static constexpr size_t MAX_BUFFERED_CHANNEL_MSGS_PER_PEER = 30;
 
 // Offline-buffer eviction is FAIR-SHARE, not per-sender-capped and not rate
 // limited (see buffer_offline_msg in ws_handler.cpp). When a per-peer cap is hit
-// the relay drops the oldest frame belonging to whichever sender occupies the
-// most slots, so a peer flooding someone else's buffer can only evict itself.
+// the relay drops the oldest frame of whichever address share occupies the most
+// slots, so a peer flooding someone else's buffer can only evict itself.
 // A flat per-sender cap would silently truncate a real conversation, and a
 // per-minute limit would silently drop reconnection bursts — both are the
 // message-loss class of bug the relay refuses to introduce (feedback_relay_rules).
@@ -75,47 +76,32 @@ static constexpr int64_t OFFLINE_RETENTION_MAX_SECS = 7 * 86400;       // 7 days
 static constexpr size_t MAX_TOPIC_BUFFER_MSGS = 200;                    // frames per channel
 static constexpr size_t MAX_TOPIC_BUFFER_BYTES = 1024 * 1024;           // 1 MB per channel
 static constexpr size_t MAX_TOPIC_CHANNELS_PER_CALL = 128;              // defensive cap
-static constexpr size_t MAX_TOPIC_BUFFERS_TOTAL = 65536;                // defensive cap
-// Rings one server room may have, and rings one device may have created. Past the
-// relay-wide cap the ring idle longest goes rather than the new one being refused.
+// Rings on the relay. Past it the address share that created the most loses its
+// least recently used ring (fair_share.h) rather than the new one being refused.
+static constexpr size_t MAX_TOPIC_BUFFERS_TOTAL = 65536;
+// Rings one server may have: per room, and per owner in a legacy (32-hex) room.
 static constexpr size_t MAX_TOPIC_BUFFERS_PER_ROOM = 512;
-static constexpr size_t MAX_TOPIC_BUFFERS_PER_CREATOR = 2048;
 static constexpr int64_t TOPIC_BUFFER_IDLE_EXPIRE_SECS = 7 * 86400;     // no member re-registered
-// Global budget across ALL buffered frames (DM + topic). Oldest-first
-// eviction when exceeded — organic use never gets near this.
+// Global budget across ALL buffered frames (DM + topic), each weighed with its
+// overhead (OfflineIndex::FRAME_OVERHEAD_BYTES). Past it the address share
+// holding the most loses its oldest frame; organic use never gets near this.
 static constexpr size_t MAX_BUFFER_TOTAL_BYTES = 512ull * 1024 * 1024;
 
-// Offline-buffer KEY caps (RELAY-1). The 512 MB budget above bounds the bytes;
-// these bound the number of distinct keys, which nothing bounded before: the
-// buffer is keyed by the target string a 0x04/0x09 frame carries, so one
-// authenticated peer could mint an unbounded number of map entries by naming a
-// fresh "target" per frame. Shape validation (is_peer_id_shape) narrows the key
-// space to real peer ids; these two caps bound it outright.
-//
-// Per SENDER: how many distinct offline targets it may hold deposits for at
-// once. Crossing it never refuses the deposit — it frees that sender's OWN
-// oldest target, so a flooder evicts only itself, exactly like the per-peer
-// fair-share eviction below.
-//
-// CAUTION, this is the one number here that can cost a real message. A channel
-// post fans one 0x09 frame per OFFLINE member, and a sender's targets clear
-// only on delivery or TTL, so they accumulate across every server and DM it
-// touches for up to a day. A member of a few large servers whose offline
-// members total more than this WILL start evicting its own earliest deposits —
-// which are somebody's real messages, not junk. The offline buffer is an
-// availability cache and peer sync remains the correctness floor, so the cost
-// is a slower first delivery rather than a lost message. 4096 sits well above
-// any real member's offline fan-out (a few large servers) while still bounding
-// a flooder to 4096 keys of its own; raise it again before a real member ever
-// reaches it, not after.
-static constexpr size_t MAX_OFFLINE_TARGETS_PER_SENDER = 4096;
-// Global backstop, mirroring MAX_TOPIC_BUFFERS_TOTAL. Reaching this means
-// 65,536 distinct peers have mail waiting at once.
-static constexpr size_t MAX_OFFLINE_BUFFER_KEYS = 65536;
-// How many oldest deposits the backstop may pop looking for a key to free
-// before it admits the new deposit anyway. The cap is a memory backstop, not an
-// invariant worth losing a message over.
-static constexpr size_t MAX_BACKSTOP_EVICTIONS = 1024;
+// What one identity registers outlives its connection (push token, push prefs,
+// the offline opt-in), and identities are free. Past this budget the address share
+// holding the most loses its least recently refreshed identity's registrations,
+// which that app sends again on its next connect.
+static constexpr size_t MAX_REGISTRATION_BYTES = 128ull * 1024 * 1024;
+// An FCM or APNs token, or a UnifiedPush endpoint URL, with room to spare.
+static constexpr size_t MAX_PUSH_TOKEN_BYTES = 4096;
+// Channel-push throttle entries per target, one per server room. Past it the
+// entry pushed longest ago goes: losing one lets that server push once more.
+static constexpr size_t MAX_PUSH_SERVERS_PER_TARGET = 256;
+// Topic subscriptions per socket, in rooms and in topics. A set past either is
+// dropped, which leaves that room unfiltered: more frames, never fewer.
+static constexpr size_t MAX_SUBSCRIPTION_ROOMS = 1024;
+static constexpr size_t MAX_SUBSCRIPTION_TOPICS = 16384;
+
 // Anti-spam: non-mention channel pushes are heavily throttled — the banner has
 // no content until the device fetches, so repeats add nothing. Mentions are
 // urgent and bypass the long window.
@@ -146,8 +132,11 @@ static constexpr size_t MAX_LINK_GUESS_KEYS = 65536;
 static constexpr int LINK_GUESS_EXPIRE_SECS = 900;          // idle entries swept after 15 min
 
 // Per-master high-water mark on inbox-proof device-list versions (RELAY-6).
-// Bounded with FIFO eviction of the oldest-inserted master.
+// Past the cap the address share holding the most marks loses its least recently
+// used one, so marks minted for throwaway masters never push out a real one.
 static constexpr size_t MAX_DEVICE_LIST_VERSIONS = 262144;
+// How long one key hashes address blocks into share ids (fair_share.h).
+static constexpr int SHARE_KEY_LIFETIME_SECS = 3600;
 
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 
@@ -158,6 +147,8 @@ struct PerSocketData {
     std::string license_key;
     bool is_guest = false;
     std::string ip_key;
+    // The address block this socket's writes are charged to (share_block).
+    std::string share_block;
     bool is_fetch = false;  // Invisible background fetch mode (FCM wake-up)
     // The auth v2 challenge this socket was handed; empty until it asks. One per
     // socket, so a signature over it cannot open a second connection.
@@ -179,6 +170,7 @@ struct PerSocketData {
     // Per-room channel subscriptions (room_code -> set of topic strings).
     // Empty set = wildcard (receive all messages for that room).
     std::unordered_map<std::string, std::unordered_set<std::string>> subscriptions;
+    size_t subscription_topics = 0;  // across every room in `subscriptions`
 
     // Link-code guessing, per connection (RELAY-5). Counts FAILED resolves of a
     // 36^6 code that is the passphrase of a full identity backup; a successful
@@ -286,6 +278,9 @@ struct RelayState {
         std::string platform;
     };
     std::unordered_map<std::string, PushToken> push_tokens;
+    // Every identity holding a push token, push prefs or the offline opt-in,
+    // charged to the address share that last registered it.
+    FairShare<std::string> registrations;
     // Debounce: track last push time per peer to avoid flooding
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_push_sent;
     // Rolling hourly wake-up budget per target (RELAY-7). Keys are a subset of
@@ -308,12 +303,12 @@ struct RelayState {
         bool is_image = false;         // inlined-image frame (separate cap)
         bool is_channel = false;       // channel message frame (separate cap)
         uint64_t seq = 0;              // eviction-index stamp (OfflineIndex)
+        uint64_t share = 0;            // the depositor's address share
     };
     std::unordered_map<std::string, std::deque<BufferedMsg>> offline_buffer;
 
-    // Insertion-order index + per-sender key accounting over BOTH buffers
-    // (RELAY-1). Must stay exact: every path that removes a frame calls
-    // released_dm()/released_topic(). See the enumeration in ws_handler.cpp.
+    // Every frame in BOTH buffers by seq, charged to its sender's address share.
+    // Must stay exact: every path that removes a frame calls released(seq).
     OfflineIndex buffer_index;
 
     // Opt-in offline delivery registry (RAM only — re-registered on every
@@ -334,6 +329,7 @@ struct RelayState {
         // The ring's retention when this frame arrived: a later, longer retention
         // never keeps a frame past what was promised when it was sent. 0 = unknown.
         int64_t retention_secs = 0;
+        uint64_t share = 0;  // the sender's address share
     };
     struct TopicBuffer {
         std::deque<TopicFrame> frames;
@@ -344,19 +340,13 @@ struct RelayState {
         bool accepting = true;
         int64_t retention_secs = 86400;
         std::chrono::steady_clock::time_point last_registered;
-        // A legacy (32-hex) server's rings answer to one owner's join lock: the
-        // first signed control binds them. Empty for a self-certifying id.
-        std::string owner;
-        // The device that created the ring; not persisted, only counted.
-        std::string creator;
     };
     std::unordered_map<std::string, TopicBuffer> topic_buffers;
-    // Rings per server room and per creating device, kept with `topic_buffers`.
+    // Every ring charged to the address share that created it, used when a member
+    // registers it or a frame lands in it.
+    FairShare<std::string> ring_ledger;
+    // Rings per server (ring_namespace), kept with `topic_buffers`.
     std::unordered_map<std::string, size_t> topic_buffers_per_room;
-    std::unordered_map<std::string, size_t> topic_buffers_per_creator;
-
-    // Total bytes across offline_buffer + topic_buffers frames (global budget).
-    size_t buffer_total_bytes = 0;
 
     // Channel push prefs (RAM only — replaced wholesale by set_push_prefs,
     // re-sent by the app on every connect). peer_id -> server room -> pref.
@@ -412,7 +402,13 @@ struct RelayState {
     // the restart snapshot, since a revoked device would otherwise read again
     // after every deploy.
     std::unordered_map<std::string, uint64_t> device_list_max_version;
-    std::deque<std::string> device_list_version_fifo;  // FIFO eviction order
+    FairShare<std::string> mark_ledger;
+
+    // The key share ids are hashed under, replaced every hour and never persisted,
+    // so what the relay keeps past a connection names no address once its hour
+    // is over.
+    std::string share_key;
+    std::chrono::steady_clock::time_point share_key_since{};
 
     size_t online_users() const { return peer_sockets.size() - guest_count; }
 };

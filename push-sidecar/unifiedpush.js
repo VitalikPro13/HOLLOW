@@ -99,11 +99,10 @@ function parseToken(token) {
 async function sendUnifiedPush(token, data) {
   const parsed = parseToken(token);
   if (!parsed) return { status: 400, code: 'bad_unifiedpush_token' };
-  // The path is the device's private address on the push server; only the
-  // host is ever logged.
-  const host = parsed.url.host;
+  // Nothing from the endpoint is logged: its path is the device's private address
+  // on the push server, and a self-hosted server's host names its owner.
   try {
-    const r = await webpush.sendNotification(parsed.subscription, JSON.stringify(data), {
+    await webpush.sendNotification(parsed.subscription, JSON.stringify(data), {
       TTL: TTL_SECS,
       urgency: 'high',
       contentEncoding: 'aes128gcm',
@@ -111,19 +110,18 @@ async function sendUnifiedPush(token, data) {
       agent,
       timeout: TIMEOUT_MS,
     });
-    console.log(`[push-sidecar] sent platform=unifiedpush host=${host} status=${r.statusCode}`);
     return { status: 200, code: 'ok' };
   } catch (err) {
     if (err.statusCode === 404 || err.statusCode === 410) {
-      console.error(`[push-sidecar] endpoint gone platform=unifiedpush host=${host} status=${err.statusCode}`);
+      console.error(`[push-sidecar] endpoint gone platform=unifiedpush status=${err.statusCode}`);
       return { status: 410, code: 'token_expired' };
     }
     if (err.code === 'ENDPOINT_NOT_PUBLIC') {
-      console.error(`[push-sidecar] refused platform=unifiedpush host=${host} (non-public address)`);
+      console.error('[push-sidecar] refused platform=unifiedpush (non-public address)');
       return { status: 400, code: 'endpoint_not_public' };
     }
     console.error(
-      `[push-sidecar] UnifiedPush error host=${host} status=${err.statusCode || '-'} msg=${err.message || err}`
+      `[push-sidecar] UnifiedPush error status=${err.statusCode || '-'} code=${err.code || '-'}`
     );
     return { status: 502, code: 'error' };
   }

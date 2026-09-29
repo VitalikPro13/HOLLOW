@@ -173,12 +173,40 @@ static void test_legacy_records() {
     JoinLocks locks;
     std::vector<LockLink> current;
     check("a squatter cannot file under the owner's name",
-          !locks.put(legacy, owner_id, {base_link(legacy, 1, squatter, "", 1, c1)}, crypto, current));
-    check("under its own name it can", locks.put(legacy, squatter_id, {base_link(legacy, 1, squatter, "", 1, c1)}, crypto, current));
+          !locks.put(legacy, owner_id, {base_link(legacy, 1, squatter, "", 1, c1)}, crypto, current, 2));
+    check("under its own name it can", locks.put(legacy, squatter_id, {base_link(legacy, 1, squatter, "", 1, c1)}, crypto, current, 2));
     check("which does not touch the owner's record", locks.get(join_lock::record_key(legacy, owner_id)) == nullptr);
-    check("the owner files its own", locks.put(legacy, owner_id, {base_link(legacy, 1, owner, "", 2, c2)}, crypto, current));
+    check("the owner files its own", locks.put(legacy, owner_id, {base_link(legacy, 1, owner, "", 2, c2)}, crypto, current, 1));
     const auto* held = locks.get(join_lock::record_key(legacy, owner_id));
     check("and reads it back", held && held->size() == 1 && join_lock::verify_chain(legacy, *held, crypto) == owner_id);
+}
+
+// HOL-SEC-069: one account filing chains under ids of its own could hold the relay's
+// whole memory. The table keeps a byte budget, and a flood evicts only its own share.
+static void test_budget() {
+    printf("the table keeps a byte budget and a flood pays for itself\n");
+    Key owner(1), flooder(2), c1(11), c2(12);
+    std::string owner_id = derive_peer_id(owner.text);
+    std::string flooder_id = derive_peer_id(flooder.text);
+    JoinLocks locks;
+    locks.budget = 64 * 1024;
+    std::vector<LockLink> current;
+    std::string real = genesis_server_id(owner_id, "aa");
+    check("a real server files its chain", locks.put(real, owner_id, {base_link(real, 1, owner, "aa", 1, c1)}, crypto, current, 1));
+    size_t filed = 0;
+    for (int i = 0; i < 400; i++) {
+        char hex[33];
+        snprintf(hex, sizeof(hex), "%032x", i);
+        if (locks.put(hex, flooder_id, {base_link(hex, 1, flooder, "", 2, c2)}, crypto, current, 9)) filed++;
+    }
+    check("the flood files, it is never refused", filed == 400);
+    check("the table stays within its budget", locks.bytes() <= locks.budget);
+    check("the flood lost its own oldest records", locks.get(join_lock::record_key("00000000000000000000000000000000", flooder_id)) == nullptr);
+    check("the real server's chain survives", locks.get(real) != nullptr);
+    const auto* newest = locks.get(join_lock::record_key("0000000000000000000000000000018f", flooder_id));
+    check("the flood keeps its newest", newest != nullptr);
+    check("a re-put of the same chain changes nothing",
+          locks.put(real, owner_id, {base_link(real, 1, owner, "aa", 1, c1)}, crypto, current, 9) && locks.ledger.share_of(real) == std::optional<uint64_t>(1));
 }
 
 static void test_shapes() {
@@ -212,6 +240,7 @@ int main() {
     test_pinned_chain();
     test_put_rules();
     test_legacy_records();
+    test_budget();
     test_shapes();
     printf(failures == 0 ? "ALL PASSED\n" : "%d FAILED\n", failures);
     return failures == 0 ? 0 : 1;

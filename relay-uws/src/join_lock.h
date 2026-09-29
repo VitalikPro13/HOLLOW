@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "fair_share.h"
 #include "json.hpp"
 
 // The join lock chains: a notice board, nothing more. Each server's members keep a
@@ -236,37 +237,46 @@ inline nlohmann::json links_to_json(const std::vector<LockLink>& links) {
 
 }  // namespace join_lock
 
-// Every server's chain by record key. A chain is at most MAX_CHAIN links (owners
-// compact it); past MAX_RECORDS the least recently read or written record goes,
-// and its members put it back the next time they connect.
+// Every server's chain by record key, charged to the share of whoever last changed
+// it. Anyone may file a chain (a joiner is not a member, a legacy id takes any
+// owner), so the byte budget is what bounds the table (HOL-SEC-069): past it the
+// share holding the most bytes loses its least recently used record, and a real
+// server's members put a lost chain back the next time they connect.
 struct JoinLocks {
-    static constexpr size_t MAX_RECORDS = 100000;
+    static constexpr size_t MAX_BYTES = 128ull * 1024 * 1024;
 
-    struct Record {
-        std::vector<LockLink> links;
-        uint64_t touched = 0;
-    };
-
-    std::unordered_map<std::string, Record> records;
-    uint64_t clock = 0;
+    size_t budget = MAX_BYTES;
+    std::unordered_map<std::string, std::vector<LockLink>> records;
+    FairShare<std::string> ledger;
 
     size_t size() const { return records.size(); }
+    size_t bytes() const { return ledger.total(); }
+
+    // What one record costs the relay, near enough to bound its RAM.
+    static size_t record_bytes(const std::string& key, const std::vector<LockLink>& links) {
+        size_t n = 256 + key.size();
+        for (const auto& l : links) {
+            n += sizeof(LockLink) + 64 + l.door.size() + l.change.size() + l.sig.size() + l.owner.size() +
+                 l.nonce.size();
+        }
+        return n;
+    }
 
     const std::vector<LockLink>* get(const std::string& key) {
         auto it = records.find(key);
         if (it == records.end()) return nullptr;
-        it->second.touched = ++clock;
-        return &it->second.links;
+        ledger.touch(key);
+        return &it->second;
     }
 
-    // Offer a chain for (server, owner). `owner` keys a legacy id, so an owner-signed
-    // link must name it; a self-certifying id names its owner itself. Returns
-    // whether the submitted newest lock is now the relay's, and fills `current`.
+    // Offer a chain for (server, owner) from `share`. `owner` keys a legacy id, so an
+    // owner-signed link must name it; a self-certifying id names its owner itself.
+    // Returns whether the submitted newest lock is now the relay's, and fills `current`.
     bool put(const std::string& server, const std::string& owner, const std::vector<LockLink>& submitted,
-             const LockCrypto& c, std::vector<LockLink>& current) {
+             const LockCrypto& c, std::vector<LockLink>& current, uint64_t share) {
         std::string key = join_lock::record_key(server, owner);
         auto it = records.find(key);
-        std::vector<LockLink> stored = it == records.end() ? std::vector<LockLink>{} : it->second.links;
+        std::vector<LockLink> stored = it == records.end() ? std::vector<LockLink>{} : it->second;
         current = stored;
         if (submitted.empty()) return false;
         if (submitted[0].is_base() && !join_lock::is_genesis_id(server) &&
@@ -275,30 +285,39 @@ struct JoinLocks {
         }
         auto next = join_lock::relay_put(server, stored, submitted, c);
         if (!next) return false;
-        if (it == records.end() && records.size() >= MAX_RECORDS) evict_oldest();
-        Record& rec = records[key];
-        rec.links = std::move(*next);
-        rec.touched = ++clock;
-        current = rec.links;
+        if (it != records.end() && *next == stored) {
+            ledger.touch(key);
+        } else {
+            size_t weight = record_bytes(key, *next);
+            records[key] = std::move(*next);
+            ledger.put(key, share, weight);
+            enforce_budget();
+        }
+        auto held = records.find(key);
+        if (held == records.end()) {
+            current.clear();
+            return false;
+        }
+        current = held->second;
         return !current.empty() && current.back().same_lock(submitted.back());
     }
 
-    // Restore from a snapshot, oldest first so eviction order survives.
-    void restore(const std::string& key, std::vector<LockLink> links) {
+    // Restore from a snapshot, least recently used first so eviction order survives.
+    void restore(const std::string& key, std::vector<LockLink> links, uint64_t share) {
         if (links.empty() || links.size() > join_lock::MAX_CHAIN) return;
-        if (records.find(key) == records.end() && records.size() >= MAX_RECORDS) evict_oldest();
-        Record& rec = records[key];
-        rec.links = std::move(links);
-        rec.touched = ++clock;
+        size_t weight = record_bytes(key, links);
+        records[key] = std::move(links);
+        ledger.put(key, share, weight);
+        enforce_budget();
     }
 
    private:
-    // Only at the cap, so the scan costs less than keeping an eviction index.
-    void evict_oldest() {
-        auto oldest = records.end();
-        for (auto it = records.begin(); it != records.end(); ++it) {
-            if (oldest == records.end() || it->second.touched < oldest->second.touched) oldest = it;
+    void enforce_budget() {
+        while (ledger.total() > budget) {
+            auto victim = ledger.victim();
+            if (!victim) break;
+            records.erase(*victim);
+            ledger.remove(*victim);
         }
-        if (oldest != records.end()) records.erase(oldest);
     }
 };

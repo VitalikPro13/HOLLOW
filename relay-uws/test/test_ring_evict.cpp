@@ -1,5 +1,5 @@
-// Unit tests for the topic-ring eviction choice (src/ring_evict.h): a sender
-// flooding a channel ring must evict its own frames, never everyone else's.
+// Unit tests for the topic-ring eviction choice (src/ring_evict.h): an address
+// share flooding a channel ring must evict its own frames, never everyone else's.
 //
 // Build + run from relay-uws/test (header-only):
 //   g++ -std=c++17 -I../src test_ring_evict.cpp -o test_ring_evict && ./test_ring_evict
@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <string>
 
 static int failures = 0;
@@ -21,10 +22,12 @@ static void check(const std::string& label, bool ok) {
     }
 }
 
+// Each named sender below stands for its own address share.
 struct Frame {
     std::string sender;
     int id;
     size_t bytes = 1;
+    uint64_t share = std::hash<std::string>{}(sender);
 };
 
 static size_t size_of(const Frame& f) { return f.bytes; }
@@ -93,6 +96,18 @@ int main() {
         push(ring, {"bulky", 3, 100}, 3);
         push(ring, {"quiet", 4, 5}, 3);
         check("the sender holding the most bytes loses its oldest", !has(ring, 3) && has(ring, 1) && has(ring, 4));
+    }
+
+    // Many identities on one address are one share: they flood only themselves.
+    {
+        std::deque<Frame> ring;
+        push(ring, {"member", 1}, 10);
+        for (int i = 0; i < 100; i++) {
+            Frame f{"sybil" + std::to_string(i), 100 + i};
+            f.share = 42;
+            push(ring, f, 10);
+        }
+        check("throwaway identities on one address evict only each other", has(ring, 1) && ring.size() == 10);
     }
 
     check("a quarter megabyte is the ring frame limit", MAX_RING_FRAME_BYTES == 256 * 1024);

@@ -131,6 +131,47 @@ int main() {
               !ring_auth::parse(nlohmann::json::parse(R"({"room":"r","clear":"yes"})"), p, is_signed));
     }
 
+    // A legacy id's topics carry the owner a control is signed for, so a lock filed
+    // under the id in a stranger's own name reaches only rings no member uses.
+    {
+        const std::string owner = "12D3KooWRealOwner";
+        ring_auth::Control legacy = c;
+        legacy.room = "0123456789abcdef0123456789abcdef";
+        legacy.owner = owner;
+        legacy.channels = {owner + ".3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b", owner + ".~join"};
+        legacy.sig = "SIG:CHANGE:" + ring_auth::payload(legacy);
+        check("a legacy control inside its owner's topics counts",
+              ring_auth::authorized(legacy, &chain, now, stub_crypto()));
+
+        ring_auth::Control squatter = legacy;
+        squatter.owner = "12D3KooWSquatter";
+        squatter.sig = "SIG:CHANGE:" + ring_auth::payload(squatter);
+        check("a control naming another owner's topics is refused",
+              !ring_auth::authorized(squatter, &chain, now, stub_crypto()));
+
+        ring_auth::Control plain = legacy;
+        plain.channels = {"3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b"};
+        plain.sig = "SIG:CHANGE:" + ring_auth::payload(plain);
+        check("a legacy control over plain channel ids is refused",
+              !ring_auth::authorized(plain, &chain, now, stub_crypto()));
+
+        ring_auth::Control bare = legacy;
+        bare.channels = {owner + "."};
+        bare.sig = "SIG:CHANGE:" + ring_auth::payload(bare);
+        check("the owner prefix alone is not a topic", !ring_auth::authorized(bare, &chain, now, stub_crypto()));
+
+        check("a self-certifying id's topics are plain channel ids",
+              ring_auth::topic_prefix(c.room, owner).empty() && ring_auth::authorized(c, &chain, now, stub_crypto()));
+
+        const std::string key = legacy.room + std::string(1, '\0') + owner + ".chan";
+        check("a legacy ring counts against its owner",
+              ring_auth::ring_namespace(key) == legacy.room + "|" + owner);
+        check("a plain legacy ring counts against its room",
+              ring_auth::ring_namespace(legacy.room + std::string(1, '\0') + "chan") == legacy.room);
+        check("a self-certifying ring counts against its room",
+              ring_auth::ring_namespace(c.room + std::string(1, '\0') + "x.chan") == c.room);
+    }
+
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

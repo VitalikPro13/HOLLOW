@@ -8,6 +8,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "fair_share.h"
+
 // Destroy signals parked for devices that are NOT connected. The relay is a
 // courier and nothing else: the blob is opaque (a master-signed payload it
 // cannot read), the master, the reason and the plaintext never reach it, and
@@ -18,7 +20,9 @@
 // The relay cannot tell a genuine order from junk, so one issuer never touches
 // another's signal: each issuer holds its own slot per target and the target is
 // handed every slot. Caps EVICT, they never refuse (feedback_relay_rules): past
-// its share the issuer's OWN oldest entry pays, so a flooder only evicts itself.
+// its own cap the issuer's oldest entry pays, and past a target's or the whole
+// list's cap the address share holding the most (fair_share.h) pays, so junk from
+// throwaway issuers never pushes out a real order.
 struct KillList {
     using Clock = std::chrono::steady_clock;
 
@@ -40,16 +44,19 @@ struct KillList {
         Clock::time_point stored_at{};
         std::string issuer;  // depositing DEVICE id
         uint64_t seq = 0;    // deposit order; the oldest is evicted first
+        uint64_t share = 0;  // the depositor's address share
     };
 
     // target device id -> the signals waiting for it, one per issuer
     std::unordered_map<std::string, std::vector<Entry>> entries;
     // issuer -> the targets it currently holds entries for
     std::unordered_map<std::string, std::unordered_set<std::string>> by_issuer;
+    // Every entry by seq, for the list-wide cap.
+    FairShare<uint64_t> ledger;
+    std::unordered_map<uint64_t, std::string> target_of;
     uint64_t next_seq = 0;
-    size_t total = 0;
 
-    size_t size() const { return total; }
+    size_t size() const { return ledger.size(); }
 
     size_t issuer_count(const std::string& issuer) const {
         auto it = by_issuer.find(issuer);
@@ -66,7 +73,7 @@ struct KillList {
     // True when the signal was stored. A blob past the ceiling, a stamp past the
     // clock bound, and a re-deposit by the same issuer that is not strictly newer
     // are the only "no"s a caller can produce.
-    bool deposit(const std::string& target, const std::string& issuer,
+    bool deposit(const std::string& target, const std::string& issuer, uint64_t share,
                  const std::string& blob, int64_t issued_at_ms, Clock::time_point now,
                  int64_t now_wall_ms) {
         if (target.empty() || blob.empty() || blob.size() > MAX_BLOB_BYTES) return false;
@@ -74,16 +81,16 @@ struct KillList {
         if (const Entry* own = slot(target, issuer); own && issued_at_ms <= own->issued_at_ms) {
             return false;
         }
-        insert(target, issuer, blob, issued_at_ms, now);
+        insert(target, issuer, share, blob, issued_at_ms, now);
         return true;
     }
 
     // Restore from a snapshot. Pass entries oldest first so deposit order, and
     // with it eviction order, survives the restart.
-    void restore(const std::string& target, const std::string& issuer,
+    void restore(const std::string& target, const std::string& issuer, uint64_t share,
                  const std::string& blob, int64_t issued_at_ms, Clock::time_point stored_at) {
         if (target.empty() || blob.empty() || blob.size() > MAX_BLOB_BYTES) return;
-        insert(target, issuer, blob, issued_at_ms, stored_at);
+        insert(target, issuer, share, blob, issued_at_ms, stored_at);
     }
 
     // The target's own bare ack: every signal waiting for it. A client that
@@ -91,8 +98,7 @@ struct KillList {
     bool ack(const std::string& target) {
         auto it = entries.find(target);
         if (it == entries.end()) return false;
-        for (const auto& e : it->second) detach(e.issuer, target);
-        total -= it->second.size();
+        for (const auto& e : it->second) forget(e, target);
         entries.erase(it);
         return true;
     }
@@ -108,11 +114,11 @@ struct KillList {
         std::vector<std::string> targets;
         for (const auto& [target, list] : entries) targets.push_back(target);
         for (const auto& target : targets) {
-            size_t before = total;
+            size_t before = size();
             remove_if(target, [&](const Entry& e) {
                 return std::chrono::duration_cast<std::chrono::seconds>(now - e.stored_at).count() >= MAX_AGE_SECS;
             });
-            dropped += before - total;
+            dropped += before - size();
         }
         return dropped;
     }
@@ -135,33 +141,40 @@ struct KillList {
         size_t before = list.size();
         for (auto e = list.begin(); e != list.end();) {
             if (pred(*e)) {
-                detach(e->issuer, target);
+                forget(*e, target);
                 e = list.erase(e);
             } else {
                 ++e;
             }
         }
         size_t removed = before - list.size();
-        total -= removed;
         if (list.empty()) entries.erase(it);
         return removed > 0;
     }
 
-    void insert(const std::string& target, const std::string& issuer,
+    void insert(const std::string& target, const std::string& issuer, uint64_t share,
                 const std::string& blob, int64_t issued_at_ms, Clock::time_point at) {
         remove_if(target, [&](const Entry& e) { return e.issuer == issuer; });
         if (issuer_count(issuer) >= MAX_ENTRIES_PER_ISSUER) evict_oldest_of(issuer);
         if (auto it = entries.find(target); it != entries.end() && it->second.size() >= MAX_ISSUERS_PER_TARGET) {
-            evict_oldest_at(target);
+            evict_heaviest_at(target);
         }
-        if (total >= MAX_ENTRIES) evict_oldest();
-        entries[target].push_back(Entry{blob, issued_at_ms, at, issuer, ++next_seq});
+        while (ledger.size() >= MAX_ENTRIES) {
+            auto victim = ledger.victim();
+            if (!victim) break;
+            drop(target_of.at(*victim), *victim);
+        }
+        uint64_t seq = ++next_seq;
+        entries[target].push_back(Entry{blob, issued_at_ms, at, issuer, seq, share});
         by_issuer[issuer].insert(target);
-        total++;
+        ledger.put(seq, share, 1);
+        target_of.emplace(seq, target);
     }
 
-    void detach(const std::string& issuer, const std::string& target) {
-        auto it = by_issuer.find(issuer);
+    void forget(const Entry& e, const std::string& target) {
+        ledger.remove(e.seq);
+        target_of.erase(e.seq);
+        auto it = by_issuer.find(e.issuer);
         if (it == by_issuer.end()) return;
         it->second.erase(target);
         if (it->second.empty()) by_issuer.erase(it);
@@ -171,28 +184,19 @@ struct KillList {
         remove_if(target, [seq](const Entry& e) { return e.seq == seq; });
     }
 
-    // The scans are bounded by MAX_ENTRIES and run only when a cap is already
-    // reached, which costs less than keeping an eviction index exact.
-    void evict_oldest() {
-        std::string oldest;
-        uint64_t best = UINT64_MAX;
-        for (const auto& [target, list] : entries) {
-            for (const auto& e : list) {
-                if (e.seq < best) {
-                    best = e.seq;
-                    oldest = target;
-                }
-            }
-        }
-        if (!oldest.empty()) drop(oldest, best);
-    }
-
-    void evict_oldest_at(const std::string& target) {
+    // A full target drops the oldest entry of the share holding the most of its
+    // slots; among equals, the oldest entry.
+    void evict_heaviest_at(const std::string& target) {
         auto it = entries.find(target);
         if (it == entries.end() || it->second.empty()) return;
-        auto e = std::min_element(it->second.begin(), it->second.end(),
-                                  [](const Entry& a, const Entry& b) { return a.seq < b.seq; });
-        drop(target, e->seq);
+        std::unordered_map<uint64_t, size_t> held;
+        size_t most = 0;
+        for (const auto& e : it->second) most = std::max(most, ++held[e.share]);
+        const Entry* victim = nullptr;
+        for (const auto& e : it->second) {
+            if (held[e.share] == most && (!victim || e.seq < victim->seq)) victim = &e;
+        }
+        drop(target, victim->seq);
     }
 
     void evict_oldest_of(const std::string& issuer) {

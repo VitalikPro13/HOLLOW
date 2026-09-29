@@ -188,15 +188,15 @@ const server = http.createServer((req, res) => {
         };
       }
 
-      const msgId = await admin.messaging().send(message);
-      console.log(`[push-sidecar] sent platform=${platform || '?'} token=${String(token).slice(0, 12)}… id=${msgId}`);
+      await admin.messaging().send(message);
+      // No logging - a sent push says when someone was sent a message.
       res.writeHead(200);
       res.end('ok');
     } catch (err) {
       const code = err.code || '';
       if (code === 'messaging/registration-token-not-registered' ||
           code === 'messaging/invalid-registration-token') {
-        console.error(`[push-sidecar] token expired platform=${platform || '?'} token=${String(token).slice(0, 12)}…`);
+        console.error(`[push-sidecar] token expired platform=${platform || '?'}`);
         res.writeHead(410);
         res.end('token_expired');
       } else {

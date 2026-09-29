@@ -18,14 +18,18 @@ namespace snapshot {
 // 2 added the parked destroy signals (`kills`), 3 the device-list version marks
 // that keep a revoked device out of its master's mailbox (`marks`), 4 the join
 // lock chains (`locks`), 5 each ring's owner binding and each ring frame's
-// retention (`ring_meta`). An older snapshot still decodes, without the newer
-// fields, so a relay coming up on this build keeps the buffers the previous one
-// handed over.
-static constexpr uint32_t VERSION = 5;
+// retention (`ring_meta`), 6 the address share every entry is charged to
+// (`shares`, fair_share.h) and dropped the owner binding. An older snapshot still
+// decodes, without the newer fields, so a relay coming up on this build keeps the
+// buffers the previous one handed over.
+static constexpr uint32_t VERSION = 6;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
 static constexpr uint32_t MAX_STRING_BYTES = 64u * 1024 * 1024;
+
+// A share of NO_SHARE came from a snapshot older than version 6.
+static constexpr uint64_t NO_SHARE = 0;
 
 struct DmFrame {
     std::string room;
@@ -35,6 +39,7 @@ struct DmFrame {
     bool is_image = false;
     bool is_channel = false;
     uint64_t seq = 0;
+    uint64_t share = NO_SHARE;  // v6
 };
 struct DmQueue {
     std::string target;
@@ -50,6 +55,7 @@ struct TopicFrame {
     uint32_t age_secs = 0;
     uint64_t seq = 0;
     int64_t retention_secs = 0;  // v5; 0 = unknown
+    uint64_t share = NO_SHARE;   // v6
 };
 struct Topic {
     std::string key;
@@ -57,7 +63,7 @@ struct Topic {
     int64_t retention_secs = 0;
     uint32_t registered_age_secs = 0;
     std::vector<TopicFrame> frames;
-    std::string owner;  // v5
+    uint64_t share = NO_SHARE;  // v6
 };
 struct PushToken {
     std::string peer;
@@ -83,15 +89,23 @@ struct Kill {
     std::string blob;
     int64_t issued_at_ms = 0;
     uint32_t age_secs = 0;
+    uint64_t share = NO_SHARE;  // v6
 };
 struct Mark {
     std::string master;
     uint64_t version = 0;
+    uint64_t share = NO_SHARE;  // v6
+};
+// The share an identity's registrations (push token, prefs, opt-in) are charged to.
+struct Registration {
+    std::string peer;
+    uint64_t share = NO_SHARE;
 };
 // One join lock chain: its record key and the links as the JSON the wire carries.
 struct Lock {
     std::string key;
     std::string links_json;
+    uint64_t share = NO_SHARE;  // v6
 };
 
 struct Data {
@@ -101,8 +115,9 @@ struct Data {
     std::vector<PushToken> push_tokens;
     std::vector<PushPref> push_prefs;
     std::vector<Kill> kills;
-    std::vector<Mark> marks;  // oldest first, the eviction order
+    std::vector<Mark> marks;  // least recently used first, the eviction order
     std::vector<Lock> locks;  // least recently used first, the eviction order
+    std::vector<Registration> registrations;  // v6; least recently used first
 
     size_t dm_frames() const {
         size_t n = 0;
@@ -287,9 +302,25 @@ inline std::string encode(const Data& d) {
     // ring_meta: one entry per topic above, in the same order.
     w.count(d.topics.size());
     for (const auto& t : d.topics) {
-        w.str(t.owner);
         w.count(t.frames.size());
         for (const auto& f : t.frames) w.i64(f.retention_secs);
+    }
+
+    // shares: every entry above that is charged to one, in the same order.
+    for (const auto& q : d.dm) {
+        for (const auto& f : q.frames) w.u64(f.share);
+    }
+    for (const auto& t : d.topics) {
+        w.u64(t.share);
+        for (const auto& f : t.frames) w.u64(f.share);
+    }
+    for (const auto& k : d.kills) w.u64(k.share);
+    for (const auto& m : d.marks) w.u64(m.share);
+    for (const auto& l : d.locks) w.u64(l.share);
+    w.count(d.registrations.size());
+    for (const auto& r : d.registrations) {
+        w.str(r.peer);
+        w.u64(r.share);
     }
 
     w.out.append("HRSE", 4);
@@ -399,10 +430,41 @@ inline bool decode(std::string_view bytes, Data& out) {
         if (!r.count(n) || n != d.topics.size()) return false;
         for (auto& t : d.topics) {
             uint32_t m = 0;
-            if (!r.str(t.owner) || !r.count(m) || m != t.frames.size()) return false;
+            std::string owner;
+            if (version == 5 && !r.str(owner)) return false;
+            if (!r.count(m) || m != t.frames.size()) return false;
             for (auto& f : t.frames) {
                 if (!r.i64(f.retention_secs)) return false;
             }
+        }
+    }
+
+    if (version >= 6) {
+        for (auto& q : d.dm) {
+            for (auto& f : q.frames) {
+                if (!r.u64(f.share)) return false;
+            }
+        }
+        for (auto& t : d.topics) {
+            if (!r.u64(t.share)) return false;
+            for (auto& f : t.frames) {
+                if (!r.u64(f.share)) return false;
+            }
+        }
+        for (auto& k : d.kills) {
+            if (!r.u64(k.share)) return false;
+        }
+        for (auto& m : d.marks) {
+            if (!r.u64(m.share)) return false;
+        }
+        for (auto& l : d.locks) {
+            if (!r.u64(l.share)) return false;
+        }
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            Registration g;
+            if (!r.str(g.peer) || !r.u64(g.share)) return false;
+            d.registrations.push_back(std::move(g));
         }
     }
 

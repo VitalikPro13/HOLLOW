@@ -33,4 +33,7 @@ std::string random_hex(size_t bytes);
 // matching the client's `anchor::derive_server_id`.
 std::string genesis_server_id(const std::string& owner_peer_id, const std::string& nonce);
 
+// A fair share's id (fair_share.h): `block` hashed under `key` (BLAKE2b), 8 bytes.
+uint64_t share_id(const std::string& key, const std::string& block);
+
 uint64_t now_unix_secs();

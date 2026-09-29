@@ -15,6 +15,10 @@
 // rings every late joiner and parked join depends on. An unsigned request may only
 // keep existing rings from idling out.
 //
+// A legacy (32-hex) id names no owner, so anyone may file a lock under one in its
+// own name. Its ring topics therefore carry the owner a control is signed for
+// (`topic_prefix`): such a lock reaches only rings of its own that no member uses.
+//
 // Mirrors rust/hollow_core/src/node/ring_auth.rs; test/test_ring_auth.cpp pins the
 // same vector as the Rust test. Header-only; the signature check comes in through
 // LockCrypto so the rules are unit tested with stubs.
@@ -39,8 +43,8 @@ inline bool is_channel_shape(std::string_view c) {
 
 struct Control {
     std::string room;
-    // Keys a legacy (32-hex) server's lock record; empty or ignored for a
-    // self-certifying id, which names its owner itself.
+    // Keys a legacy (32-hex) server's lock record and prefixes its topics; ignored
+    // for a self-certifying id, which names its owner itself.
     std::string owner;
     int64_t ts_ms = 0;
     int64_t retention_secs = 0;
@@ -48,6 +52,32 @@ struct Control {
     std::vector<std::string> channels;
     std::string sig;
 };
+
+// What every ring topic of `room` starts with under `owner`: nothing for a
+// self-certifying id, "{owner}." for a legacy one.
+inline std::string topic_prefix(const std::string& room, const std::string& owner) {
+    return join_lock::is_genesis_id(room) ? std::string() : owner + ".";
+}
+
+// Whether every channel a control names lies in its owner's topics.
+inline bool in_own_topics(const Control& c) {
+    const std::string prefix = topic_prefix(c.room, c.owner);
+    for (const auto& ch : c.channels) {
+        if (ch.size() <= prefix.size() || ch.compare(0, prefix.size(), prefix) != 0) return false;
+    }
+    return true;
+}
+
+// The server a ring (`room\0topic`) counts against for the per-server cap: its
+// room, and in a legacy room the owner its topic names, so rings a stranger files
+// under a legacy id in its own name never use up the real owner's.
+inline std::string ring_namespace(const std::string& key) {
+    size_t nul = key.find('\0');
+    std::string room = key.substr(0, nul);
+    if (nul == std::string::npos || join_lock::is_genesis_id(room)) return room;
+    size_t dot = key.find('.', nul + 1);
+    return dot == std::string::npos ? room : room + "|" + key.substr(nul + 1, dot - nul - 1);
+}
 
 inline std::string payload(const Control& c) {
     std::string p = "hollow-ring1\n" + c.room + "\n" + c.owner + "\n" + std::to_string(c.ts_ms) + "\n" +
@@ -91,8 +121,9 @@ inline bool parse(const nlohmann::json& j, Control& out, bool& signed_out) {
     return true;
 }
 
-// Whether a signed control counts: fresh, well formed, and signed by the change key
-// of the newest link of `chain` (the relay's chain for this server, null if none).
+// Whether a signed control counts: fresh, well formed, inside its owner's topics,
+// and signed by the change key of the newest link of `chain` (the relay's chain for
+// this server, null if none).
 inline bool authorized(const Control& c, const std::vector<LockLink>* chain, int64_t now_ms,
                        const LockCrypto& crypto) {
     if (!chain || chain->empty() || c.sig.empty()) return false;
@@ -102,6 +133,7 @@ inline bool authorized(const Control& c, const std::vector<LockLink>* chain, int
     for (const auto& ch : c.channels) {
         if (!is_channel_shape(ch)) return false;
     }
+    if (!in_own_topics(c)) return false;
     return crypto.verify(chain->back().change, c.sig, payload(c));
 }
 

@@ -9,9 +9,12 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 // periodically from main's timer loop.
 void sweep_offline_buffer(RelayState& state);
 
-// Oldest-first eviction down to MAX_BUFFER_TOTAL_BYTES. Every deposit path
-// runs it; a restored snapshot runs it once in case the budget shrank.
+// Evict down to MAX_BUFFER_TOTAL_BYTES, the heaviest address share first. Every
+// deposit path runs it; a restored snapshot runs it once in case the budget shrank.
 void enforce_buffer_budget(RelayState& state);
+
+// Charge a restored identity's registrations (push token, prefs, opt-in) to `share`.
+void restore_registration(RelayState& state, const std::string& peer, uint64_t share);
 
 // Drop parked destroy signals nobody ever came back for. Called from main's
 // timer loop.

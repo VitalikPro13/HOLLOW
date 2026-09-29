@@ -29,13 +29,13 @@ static snapshot::Data sample() {
     snapshot::Data d;
     snapshot::DmQueue q;
     q.target = "12D3KooWTargetOne";
-    q.frames.push_back({"dmroom", std::string("\x06\x00binary\x00frame", 14), "12D3KooWSenderA", 120, false, false, 7});
-    q.frames.push_back({"dmroom", "img", "12D3KooWSenderB", 3600, true, false, 9});
-    q.frames.push_back({"srv:abc", "chan", "12D3KooWSenderA", 0, false, true, 11});
+    q.frames.push_back({"dmroom", std::string("\x06\x00binary\x00frame", 14), "12D3KooWSenderA", 120, false, false, 7, 101});
+    q.frames.push_back({"dmroom", "img", "12D3KooWSenderB", 3600, true, false, 9, 102});
+    q.frames.push_back({"srv:abc", "chan", "12D3KooWSenderA", 0, false, true, 11, 101});
     d.dm.push_back(q);
     snapshot::DmQueue q2;
     q2.target = "12D3KooWTargetTwo";
-    q2.frames.push_back({"dmroom2", std::string(1000, 'x'), "12D3KooWSenderB", 42, false, false, 8});
+    q2.frames.push_back({"dmroom2", std::string(1000, 'x'), "12D3KooWSenderB", 42, false, false, 8, 1ull << 63});
     d.dm.push_back(q2);
 
     d.optin.push_back({"12D3KooWTargetOne", 259200});
@@ -46,9 +46,9 @@ static snapshot::Data sample() {
     t.accepting = false;
     t.retention_secs = 86400;
     t.registered_age_secs = 5;
-    t.frames.push_back({"f1", "12D3KooWSenderA", 10, 6, 3600});
-    t.frames.push_back({"f2", "12D3KooWSenderB", 20, 10, 86400});
-    t.owner = "12D3KooWOwner";
+    t.frames.push_back({"f1", "12D3KooWSenderA", 10, 6, 3600, 103});
+    t.frames.push_back({"f2", "12D3KooWSenderB", 20, 10, 86400, 104});
+    t.share = 105;
     d.topics.push_back(t);
     snapshot::Topic empty;
     empty.key = std::string("srv:abc\0quiet", 13);
@@ -68,13 +68,15 @@ static snapshot::Data sample() {
     p.servers.push_back(s);
     d.push_prefs.push_back(p);
 
-    d.kills.push_back({"12D3KooWTargetOne", "12D3KooWSenderA", "Y2lwaGVy", 1757000000000, 900});
-    d.kills.push_back({"12D3KooWTargetTwo", "12D3KooWSenderA", std::string(2048, 'k'), 1757000001000, 0});
+    d.kills.push_back({"12D3KooWTargetOne", "12D3KooWSenderA", "Y2lwaGVy", 1757000000000, 900, 106});
+    d.kills.push_back({"12D3KooWTargetTwo", "12D3KooWSenderA", std::string(2048, 'k'), 1757000001000, 0, 107});
 
-    d.marks.push_back({"12D3KooWMasterOne", 7});
-    d.marks.push_back({"12D3KooWMasterTwo", 1ull << 40});
-    d.locks.push_back({"0123456789abcdef0123456789abcdef|12D3KooWOwner", R"([{"n":1,"door":"d","change":"c","sig":"s","owner":"o"}])"});
-    d.locks.push_back({"8ef8bc89d3891dca86ff72c6783e396351aed5ba", "[]"});
+    d.marks.push_back({"12D3KooWMasterOne", 7, 108});
+    d.marks.push_back({"12D3KooWMasterTwo", 1ull << 40, 109});
+    d.locks.push_back({"0123456789abcdef0123456789abcdef|12D3KooWOwner", R"([{"n":1,"door":"d","change":"c","sig":"s","owner":"o"}])", 110});
+    d.locks.push_back({"8ef8bc89d3891dca86ff72c6783e396351aed5ba", "[]", 111});
+    d.registrations.push_back({"12D3KooWTargetOne", 112});
+    d.registrations.push_back({"12D3KooWTargetTwo", 113});
     return d;
 }
 
@@ -188,7 +190,7 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
             const auto& y = b.dm[i].frames[j];
             if (x.room != y.room || x.frame != y.frame || x.sender != y.sender ||
                 x.age_secs != y.age_secs || x.is_image != y.is_image ||
-                x.is_channel != y.is_channel || x.seq != y.seq) return false;
+                x.is_channel != y.is_channel || x.seq != y.seq || x.share != y.share) return false;
         }
     }
     if (a.optin.size() != b.optin.size()) return false;
@@ -201,11 +203,12 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
         const auto& y = b.topics[i];
         if (x.key != y.key || x.accepting != y.accepting || x.retention_secs != y.retention_secs ||
             x.registered_age_secs != y.registered_age_secs || x.frames.size() != y.frames.size() ||
-            x.owner != y.owner) return false;
+            x.share != y.share) return false;
         for (size_t j = 0; j < x.frames.size(); j++) {
             if (x.frames[j].frame != y.frames[j].frame || x.frames[j].sender != y.frames[j].sender ||
                 x.frames[j].age_secs != y.frames[j].age_secs || x.frames[j].seq != y.frames[j].seq ||
-                x.frames[j].retention_secs != y.frames[j].retention_secs) return false;
+                x.frames[j].retention_secs != y.frames[j].retention_secs ||
+                x.frames[j].share != y.frames[j].share) return false;
         }
     }
     if (a.push_tokens.size() != b.push_tokens.size()) return false;
@@ -232,33 +235,82 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
         const auto& x = a.kills[i];
         const auto& y = b.kills[i];
         if (x.target != y.target || x.issuer != y.issuer || x.blob != y.blob ||
-            x.issued_at_ms != y.issued_at_ms || x.age_secs != y.age_secs) return false;
+            x.issued_at_ms != y.issued_at_ms || x.age_secs != y.age_secs || x.share != y.share) return false;
     }
     if (a.marks.size() != b.marks.size()) return false;
     for (size_t i = 0; i < a.marks.size(); i++) {
-        if (a.marks[i].master != b.marks[i].master || a.marks[i].version != b.marks[i].version) return false;
+        if (a.marks[i].master != b.marks[i].master || a.marks[i].version != b.marks[i].version ||
+            a.marks[i].share != b.marks[i].share) return false;
     }
     if (a.locks.size() != b.locks.size()) return false;
     for (size_t i = 0; i < a.locks.size(); i++) {
-        if (a.locks[i].key != b.locks[i].key || a.locks[i].links_json != b.locks[i].links_json) return false;
+        if (a.locks[i].key != b.locks[i].key || a.locks[i].links_json != b.locks[i].links_json ||
+            a.locks[i].share != b.locks[i].share) return false;
+    }
+    if (a.registrations.size() != b.registrations.size()) return false;
+    for (size_t i = 0; i < a.registrations.size(); i++) {
+        if (a.registrations[i].peer != b.registrations[i].peer ||
+            a.registrations[i].share != b.registrations[i].share) return false;
     }
     return true;
 }
 
-// The bytes of the v5 `ring_meta` section this build writes for `d`.
+// The bytes of the `ring_meta` section this build writes for `d`.
 static size_t ring_meta_bytes(const snapshot::Data& d) {
     size_t n = 4;
-    for (const auto& t : d.topics) n += 4 + t.owner.size() + 4 + 8 * t.frames.size();
+    for (const auto& t : d.topics) n += 4 + 8 * t.frames.size();
     return n;
 }
 
-// `d` without what v5 added, as a v4 build held it.
-static snapshot::Data without_ring_meta(snapshot::Data d) {
+// The bytes of the v6 `shares` section.
+static size_t shares_bytes(const snapshot::Data& d) {
+    size_t n = 8 * (d.dm_frames() + d.topics.size() + d.topic_frames() + d.kills.size() + d.marks.size() +
+                    d.locks.size());
+    n += 4;
+    for (const auto& r : d.registrations) n += 4 + r.peer.size() + 8;
+    return n;
+}
+
+// `d` without what v6 added, as a v5 build held it.
+static snapshot::Data without_shares(snapshot::Data d) {
+    for (auto& q : d.dm) {
+        for (auto& f : q.frames) f.share = snapshot::NO_SHARE;
+    }
     for (auto& t : d.topics) {
-        t.owner.clear();
+        t.share = snapshot::NO_SHARE;
+        for (auto& f : t.frames) f.share = snapshot::NO_SHARE;
+    }
+    for (auto& k : d.kills) k.share = snapshot::NO_SHARE;
+    for (auto& m : d.marks) m.share = snapshot::NO_SHARE;
+    for (auto& l : d.locks) l.share = snapshot::NO_SHARE;
+    d.registrations.clear();
+    return d;
+}
+
+// `d` without what v5 and v6 added, as a v4 build held it.
+static snapshot::Data without_ring_meta(snapshot::Data d) {
+    d = without_shares(std::move(d));
+    for (auto& t : d.topics) {
         for (auto& f : t.frames) f.retention_secs = 0;
     }
     return d;
+}
+
+// The snapshot a v5 build writes for `d`: this build's bytes up to the ring
+// metadata, then v5's form of it, which carried each ring's owner binding.
+static std::string as_v5(const snapshot::Data& d, const std::string& owner) {
+    std::string bytes = snapshot::encode(d);
+    snapshot::detail::Writer w;
+    w.out = bytes.substr(0, bytes.size() - 4 - shares_bytes(d) - ring_meta_bytes(d));
+    w.out[4] = 5;
+    w.count(d.topics.size());
+    for (const auto& t : d.topics) {
+        w.str(owner);
+        w.count(t.frames.size());
+        for (const auto& f : t.frames) w.i64(f.retention_secs);
+    }
+    w.out.append("HRSE", 4);
+    return w.out;
 }
 
 int main() {
@@ -284,18 +336,31 @@ int main() {
         check("join lock chains survive, in order", out.locks.size() == 2 &&
                                                    out.locks[0].key == "0123456789abcdef0123456789abcdef|12D3KooWOwner" &&
                                                    out.locks[1].links_json == "[]");
-        check("ring owners and frame retentions survive", out.topics[0].owner == "12D3KooWOwner" &&
-                                                          out.topics[0].frames[0].retention_secs == 3600 &&
-                                                          out.topics[0].frames[1].retention_secs == 86400);
+        check("frame retentions survive", out.topics[0].frames[0].retention_secs == 3600 &&
+                                          out.topics[0].frames[1].retention_secs == 86400);
+        check("every entry keeps its share", out.dm[1].frames[0].share == (1ull << 63) &&
+                                             out.topics[0].share == 105 && out.kills[1].share == 107 &&
+                                             out.marks[1].share == 109 && out.locks[1].share == 111 &&
+                                             out.registrations[1].share == 113);
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
     }
 
-    // The relay that binds rings to an owner takes back what a v4 build handed
-    // over: the same bytes, less the ring metadata, under version 4.
+    // The relay that charges entries to shares takes back what the v5 build
+    // running before it handed over, owner bindings and all, with no shares.
+    {
+        snapshot::Data in = sample();
+        snapshot::Data out;
+        check("a v5 snapshot decodes under this reader", snapshot::decode(as_v5(in, "12D3KooWOwner"), out));
+        check("and carries its retentions but no shares", same(without_shares(in), out));
+        check("a ring without an owner decodes too", snapshot::decode(as_v5(in, ""), out));
+    }
+
+    // What a v4 build handed over: the same bytes, less the ring metadata and the
+    // shares, under version 4.
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in);
         std::string v4 = bytes.substr(0, bytes.size() - 4 - meta) + bytes.substr(bytes.size() - 4);
         v4[4] = 4;
         snapshot::Data out;
@@ -309,7 +374,7 @@ int main() {
         snapshot::Data in = sample();
         in.locks.clear();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in);
         std::string v3 = bytes.substr(0, bytes.size() - 8 - meta) + bytes.substr(bytes.size() - 4);
         v3[4] = 3;
         snapshot::Data out;
@@ -317,11 +382,11 @@ int main() {
         check("and carries no join locks", out.locks.empty() && same(without_ring_meta(in), out));
     }
 
-    // A v5 ring_meta that does not match the rings it describes is corruption.
+    // A ring_meta that does not match the rings it describes is corruption.
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in);
         std::string bad = bytes;
         bad[bytes.size() - 4 - meta] = 3;  // claims three rings where there are two
         snapshot::Data out;
