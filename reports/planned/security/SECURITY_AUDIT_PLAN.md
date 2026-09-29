@@ -214,12 +214,23 @@ into possible holes, so this file itself belongs on the security branch.
   deployed). The CLAUDE.md split: area rules moved to five wiki rule books. Relay
   DEPLOYED 2026-09-29 (0.11-compatible; a live login probe passed). Full Rust suite
   1116/1116.
-- **Now (2026-09-29):** design A is built except one item: a meeting knock and the
-  lobby frame still carry display names and avatar hashes in the clear (a C-24 gap
-  HOL-SEC-062 records). Vitalik decided: meeting links get a `key=` secret that seals
-  them, and the web viewer drops items whose signature is missing or invalid, both next
-  session; the A-D4 residuals are discussed later. **Next:** those two, then ID-1 with
-  HOL-SEC-002. **On release day:** the
+- **Session 18 (2026-09-29): the A-D4 leftovers, meeting keys, the viewer.**
+  **HOL-SEC-069** (High: one account could fill the relay's memory through join lock
+  chains, subscriptions, push registrations and throttle entries), **HOL-SEC-070**
+  (Medium: throwaway identities evicted real entries from every relay table; now every
+  table a stranger can fill evicts the heaviest hashed address share, `fair_share.h`,
+  which closes AR-07 and I3), **HOL-SEC-071** (Low: a legacy server's rings went to the
+  first signer; its ring topics now carry the owner), the forwarder pin accepted as
+  **AR-14**, and **HOL-SEC-072** (Medium: the relay read meeting knocks, lobby frames and
+  the host; meeting links carry `key=` and those frames ride the sealed meeting lane).
+  The web viewer drops unsigned or invalid items. The push sidecar logs no token or
+  endpoint host. Relay DEPLOYED twice the same day. The first AddressSanitizer run of
+  the relay tests caught a use-after-free in the new kill-list eviction (fixed,
+  redeployed): `SANITIZE=1 bash relay-uws/test/run_tests.sh`.
+- **Now (2026-09-29):** design A is fully built. **Next session: relay hardening**
+  (decided 2026-09-29, section 4 "H"): systemd sandboxing of the relay, the push
+  sidecar and the forwarder, and the relay's tests with sanitizers in CI. **Then:** ID-1
+  with HOL-SEC-002. Fuzzing and flood limits wait for phase G. **On release day:** the
   relay (deployed 2026-09-29) must still precede any 0.12 client on self-hosted relays,
   and once 0.12 is out it goes again with `ACCEPT_AUTH_V1`, `ACCEPT_UNSIGNED_RING_CONTROL` and
   `ACCEPT_UNSIGNED_NICKNAME_CLAIMS` turned off (ws_handler.cpp); the website join page
@@ -697,6 +708,26 @@ reproduced by a test count; the finding file names the test, never the steps.
 **Tooling track, in parallel.** Section 2.8 items 1-2 whenever convenient
 (they may go on `main`); item 3 is phase C; items 4-8 alongside phase F.
 
+**H. Relay hardening (next session, decided 2026-09-29).** A memory-safety bug in the
+relay's C++ would be worth the whole box today: `systemd-analyze security hollow-relay`
+rates it 9.2 (UNSAFE), and it runs as `ubuntu`, which has passwordless sudo and can read
+the TLS private key, the TURN secret and the Firebase service account (which can push to
+every Hollow phone). The work:
+- A dedicated system user for the relay, the push sidecar and the forwarder, with no
+  sudo; `CAP_NET_BIND_SERVICE` through `AmbientCapabilities` instead of `setcap` on the
+  binary; the certificate and secrets readable by that user only (group or
+  `LoadCredential=`).
+- systemd sandboxing: `NoNewPrivileges`, `ProtectSystem=strict` with only the reports
+  file writable, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectKernel*`,
+  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `SystemCallFilter=@system-service`,
+  `MemoryDenyWriteExecute`, `LockPersonality`, `RestrictNamespaces`. Verify that the
+  restart snapshot (memfd into the fd store, `sd_notify`) still works under it, measure
+  the new `systemd-analyze security` score, and carry the same into `deploy/`,
+  `docker-compose.yml` and `SELF_HOSTING.md` for self-hosters.
+- Sanitizers in CI: the relay is in no CI job today. Build and run
+  `relay-uws/test/run_tests.sh` plain and with `SANITIZE=1` (ASan and UBSan) on every
+  change to `relay-uws/`; the first local run already caught a use-after-free.
+
 **G. Close-out.** Every finding fixed and retested, or in the accepted-risk
 register. Then, and only then, the relay traffic work (decided 2026-09-27):
 measure genuine traffic first with the fleet and the app (per-connection peaks
@@ -704,7 +735,19 @@ of frames, room joins and distinct targets, anonymous counters only, the way
 the 44k-connection baseline was measured), and only on those numbers decide a
 circuit breaker for clearly inhuman behaviour (close the connection, never drop
 single frames; short escalating IP cooldowns, never week-long bans that hit
-shared carrier addresses). It revisits AR-01, AR-06 and AR-07. Also in G, only
+shared carrier addresses). It revisits AR-01 and AR-06 (AR-07 closed by HOL-SEC-070).
+Vitalik (2026-09-29): "Phase G will handle the whole benchmarking and proper limiting
+of relay to get it better for normal users and bad for some bad actors." The goal is
+that no random account, spammer or small flood can take the relay down or slow real
+users, proven with the fleet. Queued for it so far: the CPU a `lock_put` of a 256-link
+chain costs the single event loop (256 signature checks per upload), attackers holding
+many address blocks against the fair shares, and flood tests (WP4).
+**Relay fuzzing belongs to G** (section 2.8 item 6, decided 2026-09-29): libFuzzer with
+ASan and UBSan on the network-facing parsers first (`parse_auth_frame`, the binary
+opcode parsers pulled out of `ws_handler.cpp` into testable functions, the JSON handlers'
+field readers: `ring_auth::parse`, `join_lock::links_from_json`, the device list), then
+`snapshot_codec.h` (it reads only the relay's own memfd, so it matters less), run in CI
+through ClusterFuzzLite. Also in G, only
 after Vitalik confirms Apple approved it: the iOS push work behind the
 Notification Service Extension filtering entitlement (requested 2026-09-27,
 the K3 residual). Add `com.apple.developer.usernotifications.filtering` to the
