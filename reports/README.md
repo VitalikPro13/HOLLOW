@@ -27,7 +27,7 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/relay-and-sync/UNIFIEDPUSH_PLAN.md` | relay-and-sync | UnifiedPush (ntfy and other distributors) beside Firebase on Android, Web Push sent by the sidecar, self-hosted relays sending pushes with no Google credentials. Issue #75, built and verified on a phone 2026-09-17. |
 | `shipped/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md` | voice-and-media | True fullscreen on every platform, one media viewer for images and video, Telegram-style albums with a signed album id, and subtitles with a cue editor. Designed 2026-09-14, A to C shipped. |
 | `shipped/relay-and-sync/PENDING_JOINS_ASYNC_FRIENDING.md` | relay-and-sync | Requests that outlive both sessions: async friending and parked server joins (2026-08-27 to 29). |
-| `shipped/relay-and-sync/ANTI_CENSORSHIP_TRANSPORT_2026.md` | relay-and-sync | VLESS + REALITY transport decision; desktop shipped 2026-07-05, mobile deferred. |
+| `shipped/relay-and-sync/ANTI_CENSORSHIP_TRANSPORT_2026.md` | relay-and-sync | VLESS + REALITY transport decision; desktop shipped 2026-07-05, REMOVED from the app and the relay 2026-09-30 (it never worked in the field test). |
 | `shipped/security/DEPENDENCY_SECURITY_AUDIT_2026-06.md` | security | Crate and package audit against advisories, June 2026. |
 | `shipped/security/SECURITY_AUDIT_2026_09.md` | security | Internal white-box audit of the app, relay and shop backend at commit e0be717. |
 | `shipped/performance/QA_REPORT.md` | performance | May 2026 five-domain quality audit and the tiered fix list. |

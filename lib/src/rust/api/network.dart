@@ -9,9 +9,9 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `refuse_oversized_message`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`, `ProxyConfig`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
 Future<void> setLicenseKey({String? key}) =>
     RustLib.instance.api.crateApiNetworkSetLicenseKey(key: key);
@@ -44,25 +44,6 @@ Future<void> setAutoDownloadConfig({
 }) => RustLib.instance.api.crateApiNetworkSetAutoDownloadConfig(
   thresholdMb: thresholdMb,
   overridesJson: overridesJson,
-);
-
-/// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE start_node():
-/// it seeds a global that start_node reads to launch the `shoes` tunnel, so a
-/// runtime change needs a node restart. All-empty fields disable the proxy.
-Future<void> setProxyConfig({
-  required bool enabled,
-  required String server,
-  required String uuid,
-  required String publicKey,
-  required String shortId,
-  required String sni,
-}) => RustLib.instance.api.crateApiNetworkSetProxyConfig(
-  enabled: enabled,
-  server: server,
-  uuid: uuid,
-  publicKey: publicKey,
-  shortId: shortId,
-  sni: sni,
 );
 
 /// Start the node with the persistent identity from disk. Returns the local peer ID.

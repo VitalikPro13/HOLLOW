@@ -74,6 +74,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
+[InstallDelete]
+; The anti-censorship tunnel client, removed in 0.12. [Files] never deletes, so
+; an upgrade would otherwise leave the old binary next to the app.
+Type: files; Name: "{app}\shoes.exe"
+
 [Files]
 ; Bundle the signed Release folder (exe, dlls, data/, etc.).
 ; Exclude build/link artifacts and any local debug log that must NOT ship to users.

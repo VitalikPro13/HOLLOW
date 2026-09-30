@@ -32,7 +32,6 @@ pub(crate) mod nick_claim;
 pub(crate) mod olm_lane;
 pub(crate) mod mls_authority;
 pub(crate) mod profile_card;
-pub(crate) mod proxy_tunnel;
 pub(crate) mod recovery_pool;
 pub(crate) mod resolver;
 pub(crate) mod ring_auth;

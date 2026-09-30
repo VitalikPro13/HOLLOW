@@ -62,46 +62,29 @@ pub fn set_embed_proxy_base(base: Option<String>) {
 const USER_AGENT: &str =
     "Mozilla/5.0 (compatible; HollowBot/1.0; +https://anonlisten.com/bot)";
 
-/// One shared HTTP client, keyed on the anti-censorship tunnel's SOCKS address
-/// so it is rebuilt only when that changes. A fresh `reqwest::Client` per
-/// keystroke-triggered fetch throws away the pool and re-does the TLS config.
-#[allow(clippy::type_complexity)]
-static HTTP_CLIENT: OnceLock<Mutex<Option<(Option<String>, reqwest::Client)>>> =
-    OnceLock::new();
+/// One shared HTTP client: a fresh `reqwest::Client` per keystroke-triggered
+/// fetch throws away the pool and re-does the TLS config.
+static HTTP_CLIENT: OnceLock<Mutex<Option<reqwest::Client>>> = OnceLock::new();
 
-/// The client to fetch with, honouring the proxy tunnel when it is up.
-/// `reqwest::Client` is an `Arc` internally, so cloning the cached one is cheap
-/// and every caller shares the same pool.
+/// The client to fetch with. `reqwest::Client` is an `Arc` internally, so
+/// cloning the cached one is cheap and every caller shares the same pool.
 fn http_client() -> Result<reqwest::Client, String> {
-    let proxy = crate::api::network::get_proxy_socks_addr();
-
     let cell = HTTP_CLIENT.get_or_init(|| Mutex::new(None));
     let mut guard = cell
         .lock()
         .map_err(|e| format!("HTTP client lock poisoned: {e}"))?;
-    if let Some((cached_proxy, client)) = guard.as_ref()
-        && *cached_proxy == proxy
-    {
+    if let Some(client) = guard.as_ref() {
         return Ok(client.clone());
     }
 
-    let mut builder = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(3));
-    if let Some(addr) = proxy.as_deref() {
-        // When the tunnel is up, preview fetches ride it too: going direct would
-        // leak to exactly the network the tunnel hides from. `socks5h` keeps DNS
-        // resolution on the far side, so the hostname never hits the local one.
-        let p = reqwest::Proxy::all(format!("socks5h://{addr}"))
-            .map_err(|e| format!("Invalid SOCKS proxy address: {e}"))?;
-        builder = builder.proxy(p);
-    }
-    let client = builder
+        .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-    *guard = Some((proxy, client.clone()));
+    *guard = Some(client.clone());
     Ok(client)
 }
 

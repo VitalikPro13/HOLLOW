@@ -819,14 +819,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     });
 
-    // Anti-censorship proxy: force the (lazy) proxy-config provider to build so
-    // its `_push` seeds the Rust global BEFORE start_node() (line ~903) reads it.
-    // Without this the provider only builds when the Settings dialog is opened,
-    // so the tunnel silently never launches on a normal launch — the node
-    // connects directly (which is exactly what we're trying to avoid). Mirrors
-    // how setRelayUrl is pushed explicitly here rather than relied on lazily.
-    await ref.read(proxyConfigProvider.future);
-
     // LOCAL-FIRST RENDER: everything the conversation and server lists need is
     // a pure SQLCipher read, so it all loads before the network phase and the
     // shell shows real content instead of "connecting" behind a 5s HTTP call.

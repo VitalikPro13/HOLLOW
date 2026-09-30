@@ -35,7 +35,7 @@ flutter_rust_bridge = "=2.11.1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util", "process", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util", "fs"] }
 rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher"] }
 hex = "0.4"
 sha2 = "0.10"
@@ -44,7 +44,7 @@ dirs = "6"
 getrandom = "0.3"
 vodozemac = "0.9"
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 crdts = "7.3"
 openmls = "0.9"
 openmls_rust_crypto = "0.6"
@@ -60,9 +60,6 @@ libwebp-sys2 = { version = "0.1", features = ["0_5", "0_6", "1_2", "demux", "mux
 scraper = "0.26"
 reed-solomon-erasure = "6.0"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
-# SOCKS5 client — routes the relay WSS connection through the local shoes
-# REALITY tunnel when anti-censorship proxy mode is on (Socks5Stream::connect).
-tokio-socks = "0.5"
 futures-util = "0.3"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }

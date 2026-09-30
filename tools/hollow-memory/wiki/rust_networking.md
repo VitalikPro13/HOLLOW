@@ -65,9 +65,7 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
 ### Authentication Flow
 
 `ws_client.rs:connect_and_auth()`:
-1. Establish the WSS connection. Branches on `network::get_proxy_socks_addr()`:
-   - **None (default):** `tokio_tungstenite::connect_async(url)` — direct.
-   - **Some(addr) (anti-censorship proxy on):** `connect_via_socks()` — dial the local `shoes` REALITY tunnel's SOCKS5 listener (`tokio_socks::Socks5Stream::connect(addr, relay_host:port)`, target sent as a domain so DNS resolves proxy-side), then `client_async_tls_with_config(url, tcp, None, None)`. Same `WsStream` type either way, so the rest of the flow is unchanged. Covers BOTH the live swarm and the push-fetch path (both funnel through `connect_and_auth`). See `project_anti_censorship_transport`.
+1. Establish the WSS connection: `tokio_tungstenite::connect_async(url)`, direct (the SOCKS/REALITY branch was removed 2026-09-30). Covers BOTH the live swarm and the push-fetch path (both funnel through `connect_and_auth`).
 2. Build sign payload: `"hollow-ws-auth:{peer_id}:{timestamp}"` where timestamp is Unix epoch seconds
 3. Sign with Ed25519 via `NativeKeypair::from_protobuf_encoding().sign()`
 4. Send `Auth` JSON message with peer_id, public_key (base64), timestamp, signature (base64), optional license_key
@@ -517,9 +515,9 @@ Fetches OpenGraph metadata from URLs typed in the compose box and builds a `Link
 | `HERO_MIN_W` / `HERO_MIN_ASPECT` / `HERO_MAX_ASPECT` | 600 px / 1.3 / 3.0 | An undeclared but unmistakable share hero |
 | `USER_AGENT` | `"Mozilla/5.0 (compatible; HollowBot/1.0; +https://anonlisten.com/bot)"` | Crawler-shaped on purpose — the fx*/vx* embed proxies serve OG tags only to bot UAs, and x.com serves them to us because of this. The `+url` must resolve (page lives at `!website/src/routes/bot/`). |
 
-### Client reuse and the proxy tunnel
+### Client reuse
 
-`http_client()` caches ONE `reqwest::Client` in a `OnceLock<Mutex<Option<(Option<String>, Client)>>>`, keyed on the anti-censorship SOCKS address, rebuilding only when that changes. When `get_proxy_socks_addr()` is set the client routes via `socks5h://` — remote DNS, so the hostname never hits the local resolver. Going direct while the tunnel is up would leak to exactly the network the tunnel hides from.
+`http_client()` caches ONE `reqwest::Client` in a `OnceLock<Mutex<Option<Client>>>` so keystroke-triggered fetches share its pool and TLS config. (Until 2026-09-30 it was keyed on the anti-censorship tunnel's SOCKS address; the tunnel is removed.)
 
 ### Public API
 
