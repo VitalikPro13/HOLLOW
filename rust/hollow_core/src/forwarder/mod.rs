@@ -145,7 +145,8 @@ fn load_or_mint_identity(data_dir: &std::path::Path) -> Result<NativeKeypair, St
 /// storage failure); the signaling loop reconnects forever otherwise.
 pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     crate::identity::set_data_dir(cfg.data_dir.clone())?;
-    crate::log::init();
+    // No log file: hollow_log! still reaches stderr, which the relay box keeps
+    // in its RAM-only journal. A file would put share activity on the disk.
     let data_dir = crate::identity::data_dir()?;
     let keypair = load_or_mint_identity(&data_dir)?;
     let peer_id = keypair.peer_id();
@@ -183,4 +184,17 @@ pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     let (out_tx, out_rx) = mpsc::unbounded_channel::<engine::OutSignal>();
     tokio::spawn(engine::run(cfg.clone(), engine_rx, out_tx));
     signaling::run(cfg, keypair, olm, crypto_store, engine_tx, out_rx).await
+}
+
+#[cfg(test)]
+mod tests {
+    /// The forwarder runs on the relay box, where its lines may live only in the
+    /// RAM journal: `run()` must never open the file log.
+    #[test]
+    fn the_headless_forwarder_opens_no_log_file() {
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
+        let body = src.split("pub async fn run(").nth(1).expect("run() exists");
+        let body = &body[..body.find("\n}\n").expect("end of run()")];
+        assert!(!body.contains(concat!("log::", "init")), "forwarder::run opens hollow_debug.log");
+    }
 }

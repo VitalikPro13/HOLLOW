@@ -2,13 +2,20 @@
 # for SFrame-encrypted screen-share RTP. Never holds keys, never decodes.
 #
 # Install:
+#   sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin hollow-fwd
+#   sudo install -m 0755 hollow-forwarder /usr/local/bin/hollow-forwarder
+#   sudo install -d -m 0750 -g hollow-fwd /etc/hollow-forwarder
+#   sudo install -m 0640 -g hollow-fwd forwarder.toml /etc/hollow-forwarder/
 #   sudo cp hollow-forwarder.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now hollow-forwarder
 #
-# First start prints "[HOLLOW-FWD] forwarder peer_id: 12D3KooW..." to the
-# journal — that id goes into the relay's --forwarder-peer-id flag. Back up
-# /home/ubuntu/forwarder/data/forwarder.key; rotation = DELETE the key (new
-# identity) + update the relay flag, never re-key the same peer_id.
+# forwarder.toml sets data_dir = "/var/lib/hollow-forwarder". First start
+# prints "[HOLLOW-FWD] forwarder peer_id: 12D3KooW..." to the journal; that id
+# goes into the relay's --forwarder-peer-id flag. Back up forwarder.key in the
+# data dir; rotation = DELETE the key (new identity) + update the relay flag,
+# never re-key the same peer_id. The engine also writes hollow_debug.log there:
+# make it a symlink to /dev/null so its activity lines live only in the RAM
+# journal.
 #
 # UDP media ports (default 40000-40199) must be open in ufw / the provider
 # firewall. SIGTERM simply kills the process — viewers recover via the
@@ -16,21 +23,54 @@
 
 [Unit]
 Description=Hollow Media Forwarder (str0m packet relay)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/forwarder
-ExecStart=/home/ubuntu/forwarder/hollow-forwarder --config /home/ubuntu/forwarder/forwarder.toml
-# Optional secrets (HOLLOW_FWD_LICENSE_KEY for license-gated relays); absent on
-# the open public relay. chmod 600 if created.
-EnvironmentFile=-/home/ubuntu/forwarder/forwarder.env
+User=hollow-fwd
+Group=hollow-fwd
+WorkingDirectory=/var/lib/hollow-forwarder
+ExecStart=/usr/local/bin/hollow-forwarder --config /etc/hollow-forwarder/forwarder.toml
+# Optional secrets (HOLLOW_FWD_LICENSE_KEY for license-gated relays), root-only
+# (0600); absent on the open public relay.
+EnvironmentFile=-/etc/hollow-forwarder/forwarder.env
+StateDirectory=hollow-forwarder
+StateDirectoryMode=0700
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
 # No core dumps: a crash must not write in-flight media frames to disk.
 LimitCORE=0
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-relay -/etc/hollow-push -/etc/turnserver.conf
 
 [Install]
 WantedBy=multi-user.target

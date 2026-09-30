@@ -1,23 +1,30 @@
 [Unit]
 Description=Hollow WebSocket Relay (uWebSockets)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/relay
-# --forwarder-peer-id: the media forwarder's identity (printed by
-# hollow-forwarder on first start as "forwarder peer_id"). Startup-load only —
-# update + restart on rotation.
-ExecStart=/home/ubuntu/relay-uws/build/hollow-relay \
+# Its own account without sudo: a memory-safety bug in the relay must not be
+# worth the whole box.
+User=hollow-relay
+Group=hollow-relay
+WorkingDirectory=/var/lib/hollow-relay
+# --forwarder-peer-id is the media forwarder's identity, printed by
+# hollow-forwarder on its first start; update it and restart on rotation.
+ExecStart=/usr/local/bin/hollow-relay \
     --port 443 \
-    --public-ip 141.227.186.209 \
     --domain relay.anonlisten.com \
-    --keys-file /home/ubuntu/relay/keys.json \
-    --cert-file /etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem \
-    --key-file /etc/letsencrypt/live/relay.anonlisten.com/privkey.pem \
-    --forwarder-peer-id your-forwarder-peer-id-here
-Environment=TURN_SECRET=your-turn-secret-here
+    --keys-file /etc/hollow-relay/keys.json \
+    --reports-file /var/lib/hollow-relay/reports.json \
+    --cert-file /etc/hollow-relay/fullchain.pem \
+    --key-file /etc/hollow-relay/privkey.pem \
+    --forwarder-peer-id 12D3KooWHtaftXh76r8hiwx6HzzSkKudx1rkjht1YYAjWSDjfeRH
+# TURN_SECRET and HOLLOW_PUSH_TOKEN, root-only (0600). Never Environment=: any
+# local account can read those through `systemctl show`.
+EnvironmentFile=/etc/hollow-relay/relay.env
+StateDirectory=hollow-relay
+StateDirectoryMode=0700
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -31,6 +38,37 @@ FileDescriptorStoreMax=1
 # No core dumps: a crash would otherwise write every buffered frame, peer id
 # and push token to disk. The box also runs without swap for the same reason.
 LimitCORE=0
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Not ProcSubset=pid: /relay-status reads /proc/meminfo and /proc/net/dev.
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# EPERM, never a kill: an abnormal exit skips the snapshot and loses every buffer.
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-push -/etc/hollow-forwarder -/etc/turnserver.conf
 
 [Install]
 WantedBy=multi-user.target

@@ -1,16 +1,59 @@
+# The official relay's push sender. index.js, unifiedpush.js, package*.json
+# and node_modules live in /opt/hollow-push, owned by root.
+#   /etc/hollow-push/service-account.json  Firebase Admin credential, root 0600
+#   /etc/hollow-push/push.env              PUSH_TOKEN=<the relay's HOLLOW_PUSH_TOKEN>, root 0600
 [Unit]
 Description=Hollow Push Notification Sidecar
-After=network.target hollow-relay.service
+After=network-online.target hollow-relay.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/push-sidecar
-ExecStart=/usr/bin/node index.js
+User=hollow-push
+Group=hollow-push
+WorkingDirectory=/opt/hollow-push
+ExecStart=/usr/bin/node /opt/hollow-push/index.js
+# Without it the lines are tagged "node" and slip past the rsyslog rule that
+# keeps every hollow-* line off the disk.
+SyslogIdentifier=hollow-push
+Environment=PUSH_PORT=3001
+# systemd copies the credential into a private RAM directory only this service
+# can read; the file under /etc stays root-only.
+LoadCredential=service-account.json:/etc/hollow-push/service-account.json
+Environment=FIREBASE_KEY_PATH=%d/service-account.json
+EnvironmentFile=/etc/hollow-push/push.env
 Restart=always
 RestartSec=3
-Environment=PUSH_PORT=3001
-Environment=FIREBASE_KEY_PATH=/home/ubuntu/push-sidecar/service-account.json
+LimitCORE=0
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# No MemoryDenyWriteExecute: V8 compiles JavaScript to machine code at run time.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-relay -/etc/hollow-forwarder -/etc/turnserver.conf
 
 [Install]
 WantedBy=multi-user.target

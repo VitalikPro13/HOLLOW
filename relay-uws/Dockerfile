@@ -19,16 +19,15 @@ RUN mkdir build && cd build \
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 libsodium23 zlib1g ca-certificates libcap2-bin curl \
+    libssl3 libsodium23 zlib1g ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/hollow-relay /usr/local/bin/hollow-relay
 
-# Bind :443 without running as root. The capability rides the binary (the same
-# setcap the systemd deployment uses), so the process drops to an unprivileged
-# account and a relay compromise does not hand over the container.
-RUN setcap cap_net_bind_service=+ep /usr/local/bin/hollow-relay \
-    && groupadd --system --gid 999 hollow \
+# An unprivileged account holding no capability at all: the compose file lets it
+# bind 443 inside the container's own network namespace, so a relay compromise
+# has nothing to use against the container or the host.
+RUN groupadd --system --gid 999 hollow \
     && useradd --system --uid 999 --gid 999 --no-create-home --shell /usr/sbin/nologin hollow
 
 # Docker copies this directory's ownership onto an empty named volume

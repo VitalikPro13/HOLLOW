@@ -70,8 +70,11 @@ run ufw allow 3478/udp
 run ufw allow 5349/tcp
 run ufw allow 5349/udp
 run ufw allow 49152:65535/udp
+# A blocked packet's log line carries its sender's address, and the late
+# packets of a closed relay connection are blocked too.
+run ufw logging off
 run ufw --force enable
-note "firewall: everything denied except 22, 80, 443, TURN on 3478 and 5349, and the TURN media range 49152 to 65535"
+note "firewall: everything denied except 22, 80, 443, TURN on 3478 and 5349, and the TURN media range 49152 to 65535; it logs nothing"
 
 echo "Logging"
 write_file /etc/systemd/journald.conf.d/hollow-privacy.conf <<'EOF'
@@ -83,7 +86,17 @@ MaxRetentionSec=1h
 RuntimeMaxUse=50M
 EOF
 run systemctl restart systemd-journald
-note "logs kept in memory only, one hour, 50 MB"
+if [ -d /etc/rsyslog.d ]; then
+    # rsyslog copies the journal into files under /var/log.
+    write_file /etc/rsyslog.d/00-hollow-privacy.conf <<'EOF'
+# The Hollow services and coturn log to the journal, which lives in RAM for an
+# hour. None of their lines may reach a file on the disk.
+:programname, startswith, "hollow-" stop
+:programname, isequal, "turnserver" stop
+EOF
+    run_ok systemctl restart rsyslog
+fi
+note "logs kept in memory only, one hour, 50 MB; no relay, push or TURN line reaches /var/log"
 
 echo "Crash dumps"
 if [ -f /etc/default/apport ] || systemctl list-unit-files 2>/dev/null | grep -q '^apport'; then
@@ -123,12 +136,20 @@ echo "SSH"
 SSH_USER=${SUDO_USER:-$(id -un)}
 SSH_HOME=$(getent passwd "$SSH_USER" | cut -d: -f6)
 if [ -n "$SSH_HOME" ] && [ -s "$SSH_HOME/.ssh/authorized_keys" ]; then
-    write_file /etc/ssh/sshd_config.d/90-hollow-relay.conf <<'EOF'
+    # Sorted before the cloud images' own drop-ins: sshd keeps the first value.
+    if [ "$SSH_USER" = root ]; then ROOT_LOGIN=prohibit-password; else ROOT_LOGIN=no; fi
+    write_file /etc/ssh/sshd_config.d/10-hollow-relay.conf <<EOF
 PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin $ROOT_LOGIN
+X11Forwarding no
+MaxAuthTries 3
+LoginGraceTime 30
 EOF
+    [ "$DRY" = "1" ] || rm -f /etc/ssh/sshd_config.d/90-hollow-relay.conf
     run_ok systemctl reload ssh
     run_ok systemctl reload sshd
-    note "password logins over SSH turned off for $SSH_USER (key logins only)"
+    note "SSH takes keys only, never a password; root may log in only if that is the account you used"
 else
     echo "  $SSH_USER has no SSH keys, leaving password logins on."
     note "password logins over SSH left ON, because $SSH_USER has no authorized_keys and turning them off would lock you out"

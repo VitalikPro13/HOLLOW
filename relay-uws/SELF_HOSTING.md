@@ -68,8 +68,10 @@ and why:
 
 - Installs and enables a firewall that denies everything inbound except SSH,
   ports 80 and 443, and the TURN ports. A relay needs a handful of ports, so
-  everything else stays shut.
-- Keeps the system journal in memory only, for one hour, capped at 50 MB. The
+  everything else stays shut. The firewall keeps no log, since every line of one
+  would name the address a packet came from.
+- Keeps the system journal in memory only, for one hour, capped at 50 MB, and
+  stops rsyslog from copying relay, push and TURN lines into `/var/log`. The
   relay carries ciphertext and network addresses. Logs that survive a reboot
   undo that.
 - Turns core dumps off. A crash would otherwise write the relay's entire memory,
@@ -81,7 +83,18 @@ and why:
 - Installs fail2ban and unattended security updates.
 - Turns off SSH password logins, but only if your user already has an SSH key
   set up. If you have no key, it says so and leaves passwords on rather than
-  lock you out.
+  lock you out. With a key in place it also keeps root out of SSH, unless root
+  is the account you logged in with.
+
+Once the relay is running, check the whole setup:
+
+```bash
+sudo bash deploy/check-host.sh
+```
+
+It changes nothing. For each relay service it checks the account it runs as,
+who can read its secrets and how tight its sandbox is, then whether anything
+could reach the disk. Every line should say `ok`.
 
 ### Install Docker
 
@@ -126,6 +139,10 @@ The first run builds the relay from source, which takes a few minutes. Then it
 gets the certificate, and only then does the relay start. If the certificate
 fails, the whole thing stops there and tells you why, rather than leaving a
 relay that cannot serve.
+
+The relay, push and coturn containers run as unprivileged users with no Linux
+capabilities and a read-only file system, so a bug in one of them stays inside
+its container.
 
 Check it:
 
@@ -398,11 +415,13 @@ cmake --build build -j"$(nproc)"
 ```
 
 The result is one file, `build/hollow-relay`. It runs as its own system user,
-which owns nothing but its certificate and its report count:
+which can't use sudo and can read nothing but its certificate, its keys file
+and its report count. The push sender gets a user of its own:
 
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin hollow
-sudo install -d -o hollow -g hollow -m 0750 /etc/hollow-relay
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin hollow
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin hollow-push
+sudo install -d -o root -g hollow -m 0750 /etc/hollow-relay
 ```
 
 ### Get the certificate
@@ -435,8 +454,8 @@ copy to the relay every time they renew. Create
 #!/bin/sh
 set -eu
 live=/etc/letsencrypt/live/relay
-install -o hollow -g hollow -m 0644 "$live/fullchain.pem" /etc/hollow-relay/fullchain.pem
-install -o hollow -g hollow -m 0600 "$live/privkey.pem" /etc/hollow-relay/privkey.pem
+install -o root -g hollow -m 0644 "$live/fullchain.pem" /etc/hollow-relay/fullchain.pem
+install -o root -g hollow -m 0640 "$live/privkey.pem" /etc/hollow-relay/privkey.pem
 # coturn reads its certificate once, at start. The relay needs no restart: it
 # picks up the new files within a minute.
 systemctl try-restart hollow-coturn || true
@@ -459,9 +478,26 @@ with `crontab -e`, using your own subdomain and token:
 
 ### Run it as a service
 
-Replace the domain with your relay address. For `TURN_SECRET`, run
-`openssl rand -hex 32` and paste the result, or leave it empty to run without
-TURN.
+The relay's two secrets go in a file only root can read. systemd reads it as
+root when it starts the relay. Never put them in an `Environment=` line, because
+every account on the machine can read those with `systemctl show`. Run
+`openssl rand -hex 32` twice, once for each value:
+
+```bash
+sudo install -m 0600 /dev/null /etc/hollow-relay/relay.env
+sudo nano /etc/hollow-relay/relay.env
+```
+
+```
+TURN_SECRET=the-first-value
+HOLLOW_PUSH_TOKEN=the-second-value
+```
+
+Leave `TURN_SECRET=` empty to run without TURN. `HOLLOW_PUSH_TOKEN` is what the
+push sender below checks, so no other program on the machine can send pushes
+through it.
+
+Then the service. Replace the domain with your relay address:
 
 ```bash
 sudo tee /etc/systemd/system/hollow-relay.service >/dev/null <<'EOF'
@@ -472,6 +508,7 @@ Wants=network-online.target
 
 [Service]
 User=hollow
+Group=hollow
 ExecStart=/opt/HOLLOW/relay-uws/build/hollow-relay \
     --port 443 \
     --domain myrelay.duckdns.org \
@@ -479,15 +516,45 @@ ExecStart=/opt/HOLLOW/relay-uws/build/hollow-relay \
     --reports-file /var/lib/hollow-relay/reports.json \
     --cert-file /etc/hollow-relay/fullchain.pem \
     --key-file /etc/hollow-relay/privkey.pem
-Environment=TURN_SECRET=
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+EnvironmentFile=/etc/hollow-relay/relay.env
 StateDirectory=hollow-relay
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/hollow-relay
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
 NotifyAccess=main
 FileDescriptorStoreMax=1
 LimitCORE=0
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-push
 
 [Install]
 WantedBy=multi-user.target
@@ -497,12 +564,24 @@ sudo systemctl enable --now hollow-relay
 ```
 
 `AmbientCapabilities` lets the relay listen on 443 without running as root.
-Keep the last three lines: `NotifyAccess` and `FileDescriptorStoreMax` carry the
-offline messages across a restart, and `LimitCORE=0` stops a crash from writing
-them to the disk. Check it with the same `curl .../health` as above.
+Keep `NotifyAccess` and `FileDescriptorStoreMax`, which carry the offline
+messages across a restart. `LimitCORE=0` stops a crash from writing them to the
+disk.
+
+The block from `CapabilityBoundingSet` down is the relay's sandbox. The relay
+sees the whole file system read-only apart from its own report directory, and
+never sees `/home`, other programs, the certbot files or the push sender's
+settings. It can't gain privileges, and the kernel refuses it every system call a
+network server has no use for. A bug
+in the relay then stays in the relay. It is the same sandbox the official relay
+runs, and `systemd-analyze security hollow-relay` rates it about 1.4 out of 10,
+where lower is safer.
+
+Check it with the same `curl .../health` as above.
 
 For a members-only relay, put `keys.json` in `/etc/hollow-relay/` instead of
-`keys/`, and make it readable by the `hollow` user.
+`keys/`, owned by root and readable by the `hollow` group
+(`sudo chgrp hollow keys.json && sudo chmod 0640 keys.json`).
 
 ### TURN
 
@@ -514,8 +593,10 @@ sudo systemctl disable --now coturn
 ```
 
 Run it through the repository's start script instead, which uses the exact
-settings of the Docker setup. `TURN_SECRET` must be the same value as in the
-relay's service.
+settings of the Docker setup and reads the same `TURN_SECRET` from the relay's
+secrets file. The script hands the secret to coturn in a file under
+`/run/hollow-coturn`, never on its command line, where any account could read it
+with `ps`.
 
 ```bash
 sudo tee /etc/systemd/system/hollow-coturn.service >/dev/null <<'EOF'
@@ -526,12 +607,43 @@ Wants=network-online.target
 
 [Service]
 User=hollow
-Environment=TURN_SECRET=paste-the-same-secret-here
+Group=hollow
+EnvironmentFile=/etc/hollow-relay/relay.env
 Environment=CERT_DIR=/etc/hollow-relay
+RuntimeDirectory=hollow-coturn
+RuntimeDirectoryMode=0700
 ExecStart=/bin/sh /opt/HOLLOW/relay-uws/deploy/coturn/coturn-start.sh
 Restart=always
 RestartSec=3
 LimitCORE=0
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-push
 
 [Install]
 WantedBy=multi-user.target
@@ -549,23 +661,66 @@ or the machine has an IPv6 you want calls to use, add
 The UnifiedPush sender described in
 [Push notifications on phones](#push-notifications-on-phones) needs Node.js 22.
 Install it from [nodejs.org](https://nodejs.org) or NodeSource, because the
-distribution packages are usually older. Then:
+distribution packages are usually older. Its token file holds the same value as
+`HOLLOW_PUSH_TOKEN` in the relay's secrets file, under the name `PUSH_TOKEN`:
 
 ```bash
 cd /opt/HOLLOW/push-sidecar
 npm install --omit=optional --omit=dev
+sudo install -d -m 0700 /etc/hollow-push
+sudo install -m 0600 /dev/null /etc/hollow-push/push.env
+sudo nano /etc/hollow-push/push.env
+```
+
+```
+PUSH_TOKEN=the-second-value
+```
+
+```bash
 sudo tee /etc/systemd/system/hollow-push.service >/dev/null <<'EOF'
 [Unit]
 Description=Hollow push sender
 After=network-online.target hollow-relay.service
 
 [Service]
-User=hollow
+User=hollow-push
+Group=hollow-push
 WorkingDirectory=/opt/HOLLOW/push-sidecar
-ExecStart=/usr/bin/node index.js
+ExecStart=/usr/bin/node /opt/HOLLOW/push-sidecar/index.js
+SyslogIdentifier=hollow-push
 Environment=PUSH_PORT=3001
+EnvironmentFile=/etc/hollow-push/push.env
 Restart=always
 RestartSec=3
+LimitCORE=0
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+UMask=0077
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-relay
 
 [Install]
 WantedBy=multi-user.target
@@ -575,7 +730,8 @@ sudo systemctl enable --now hollow-push
 ```
 
 The relay reaches it on `127.0.0.1:3001`, so that port stays closed to the
-outside.
+outside. Its sandbox is the relay's, less the line that would stop Node.js from
+compiling JavaScript as it runs.
 
 ### Updating
 
@@ -600,4 +756,5 @@ journalctl -u hollow-relay -e
 ```
 
 A relay that cannot read its certificate stops right away and says so. Check
-that `/etc/hollow-relay/` holds both files and that they belong to `hollow`.
+that `/etc/hollow-relay/` holds both files, owned by root with the group
+`hollow`. `sudo bash deploy/check-host.sh` names anything else that is off.

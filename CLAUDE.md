@@ -32,7 +32,7 @@ cargo nextest run --lib
 # FRB codegen after Rust API changes
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
-# Relay deploy: scp src/*.cpp *.h -> ~/relay-uws/src/, cmake+make+setcap+restart (`feedback_relay_rules`)
+# Relay deploy: scp src/*.cpp *.h -> ~/relay-uws/src/, cmake+make, `sudo install` -> /usr/local/bin, restart; NO setcap (`feedback_relay_rules`)
 # Relay tests (on the VPS, before every deploy): bash relay-uws/test/run_tests.sh, then SANITIZE=1 (ASan+UBSan)
 
 # Windows release (build->sign->installer->zip; Certum PIN prompt)
@@ -70,6 +70,7 @@ All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
 
 ## Relay
 - **Relay:** uWebSockets C++ (`relay-uws/`). NO rate limits/byte quotas, NEVER lower `maxPayloadLength` (64MB). Topics `0x07`, broadcast `0x03`. EVERY binary handler gates on SENDER room membership + validates the peer-id shape (`is_peer_id_shape`); pre-auth frames ONLY via `parse_auth_frame` (a throw into uSockets kills the process); no limits before phase G; per-IP RAM = connection caps only via `ip_limit_key()` (v6 /64, unmap v4-MAPPED first). `feedback_relay_rules`, `project_relay_fairshare_turn_lock`.
+- **CRITICAL: the relay box: every service runs as its OWN account (never `ubuntu`/sudo) in a systemd sandbox; the repo units ARE the box's units; secrets ONLY in root-only `EnvironmentFile`/`LoadCredential` (`Environment=` is readable by every account via `systemctl show`); nothing to disk (rsyslog drops `hollow-*`, `ufw logging off`); a denied syscall = EPERM, never kill (skips the snapshot). After any box change `sudo bash relay-uws/deploy/check-host.sh` prints only ok.** `project_relay_hardening_h`.
 - **CRITICAL: every relay table a stranger can fill is BOUNDED and FAIR (`fair_share.h`):** each entry is charged to the writer's hashed address share (`socket_share`: v4 or v6 /48, hourly key, never persisted); a full table evicts the HEAVIEST share, never by age or identity (identities are free); byte budgets, nothing refuses. A new RAM registry joins it. `project_relay_fair_share`.
 - **CRITICAL: relay offline delivery (availability cache):** anything for OFFLINE channel members MUST ride `0x07` topic frames (`0x03`/directs never enter rings); parked joins = the `~join` ring (park 3 s if the room is EMPTY, else 15 s), holding only sealed join boxes. Catch-up gates stamp ONLY once `ws_room_peers` holds the room; public-channel ops send BOTH 0x03 and the topic. `project_relay_availability_cache`, `project_pending_server_joins`, `feedback_once_per_connection_gate_precondition`.
 - **CRITICAL: relay restart persistence:** buffers/opt-ins/rings/push tokens/join locks ride systemd's fd store as a memfd on SIGTERM (`snapshot.cpp`; NEVER a file or disk; no swap, no apport, `LimitCORE=0`); snapshot BEFORE `app.close()`; any new RAM registry an OFFLINE peer cannot re-send joins `snapshot_codec.h` (bump VERSION). `project_relay_restart_persistence`.

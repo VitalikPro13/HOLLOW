@@ -6,15 +6,11 @@
 #include "device_list.h"
 #include "validate.h"
 #include "turn_uris.h"
+#include "push_queue.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <deque>
-#include <atomic>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -799,11 +795,6 @@ struct PushJob {
 // a flood — drop oldest beyond this (push is best-effort; the DM still delivers).
 constexpr size_t PUSH_QUEUE_MAX = 4096;
 
-std::deque<PushJob> g_push_queue;
-std::mutex g_push_mtx;
-std::condition_variable g_push_cv;
-std::atomic<bool> g_push_worker_started{false};
-
 void deliver_push(const PushJob& job) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
@@ -855,36 +846,13 @@ void deliver_push(const PushJob& job) {
     close(fd);
 }
 
-void push_worker_loop() {
-    for (;;) {
-        PushJob job;
-        {
-            std::unique_lock<std::mutex> lock(g_push_mtx);
-            g_push_cv.wait(lock, [] { return !g_push_queue.empty(); });
-            job = std::move(g_push_queue.front());
-            g_push_queue.pop_front();
-        }
-        deliver_push(job);
-    }
-}
+PushQueue<PushJob> g_push_queue(PUSH_QUEUE_MAX, deliver_push);
 
 } // namespace
 
 // Enqueue a push for the persistent worker (fire-and-forget, off the event loop).
 static void notify_push_sidecar(PushJob job) {
-    // Lazily start the single worker thread on first push.
-    bool expected = false;
-    if (g_push_worker_started.compare_exchange_strong(expected, true)) {
-        std::thread(push_worker_loop).detach();
-    }
-    {
-        std::lock_guard<std::mutex> lock(g_push_mtx);
-        if (g_push_queue.size() >= PUSH_QUEUE_MAX) {
-            g_push_queue.pop_front(); // drop oldest — push is best-effort
-        }
-        g_push_queue.push_back(std::move(job));
-    }
-    g_push_cv.notify_one();
+    g_push_queue.enqueue(std::move(job));
 }
 
 static void notify_push_sidecar(const std::string& token, const std::string& platform,

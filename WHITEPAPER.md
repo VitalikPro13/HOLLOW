@@ -37,7 +37,7 @@ The client is a native application for Windows, macOS, Linux, Android, and iOS (
 15. [Message Signing and Verification](#15-message-signing-and-verification)
 16. [The Rat Files (Cryptographic Evidence)](#16-the-rat-files-cryptographic-evidence)
 17. [Gossip Overlay Network](#17-gossip-overlay-network)
-18. [Anti-Censorship Transport](#18-anti-censorship-transport)
+18. [Censorship Resistance](#18-censorship-resistance)
 19. [Twitch Community Verification](#19-twitch-community-verification-optional)
 20. [Support Credentials for Purchased Art](#20-support-credentials-for-purchased-art)
 21. [Verification and Correctness Assurance](#21-verification-and-correctness-assurance)
@@ -1169,6 +1169,8 @@ The design invariant is **availability, not authority**. The relay buffers only 
 
 **Survival across a relay software update.** A restart of the relay *service* does not empty the buffers. On shutdown the relay serialises the offline queues, the channel rings with their retention state, the recipients' retention registrations, and the push tokens and preferences of §13 into an anonymous memory file, and hands the descriptor to the service manager, which holds it in its own memory across the restart and passes it back to the replacement process. The replacement rebuilds the buffers, releases the descriptor, expires whatever aged out during the gap, and only then accepts connections. No file system is involved at any point; a full stop of the service, a reboot, or a power loss discards everything. Two host properties keep "never on disk" literal rather than nominal: the relay host runs without swap, so buffer memory can never be paged out, and the relay process is forbidden from writing a core dump, so a crash cannot spill its heap. Registrations that only a *connected* client re-sends (nickname claims, link codes, room membership) are deliberately not carried; they belong to sockets that no longer exist.
 
+**Containment on the relay host.** The relay runs under an account of its own that cannot become root, inside a systemd sandbox. It sees the file system read-only apart from its report counter, cannot see home directories or other processes, holds only the capability to listen on port 443, and is refused the system calls a network server never makes; `systemd-analyze security` rates its exposure 1.4 on a scale of 0 to 10, where lower is safer. Its secrets reach it from files only root can read, never through the service manager's environment settings, which every local account can query. The push sender, the media forwarder and the TURN server run the same way, each under its own account, so a memory-safety bug in one of them yields that one service's view of the host, never root and never another service's credentials. The memory-file handoff above works unchanged inside the sandbox. All four services log only to the in-memory journal, and neither the host's system logger nor its firewall writes a line of theirs to disk.
+
 Two tiers exist:
 
 - **Direct messages:** a per-device queue (enabled by default; the recipient controls an on/off toggle and a retention window of 1–7 days, registered per connection). Buffered entries are text and file *metadata* only, never file bytes, plus a small bounded set of inlined image previews. Delivered entries are deleted on replay.
@@ -1459,31 +1461,25 @@ Connected peers share known peer lists for each server via `PeerExchange` messag
 
 ---
 
-## 18. Anti-Censorship Transport
+## 18. Censorship Resistance
 
-### 18.1 Baseline Protection
+Hollow reaches its relay over a WebSocket inside TLS on port 443, the same port and handshake as ordinary HTTPS. It ships no special transport for censored networks.
 
-Hollow's standard transport (WebSocket over TLS on port 443) looks like normal HTTPS traffic to network observers. This is sufficient in most environments.
+### 18.1 What Was Tried
 
-### 18.2 Research and Testing
+Testing in 2026 against Russia's TSPU deep packet inspection covered three approaches:
 
-Extensive testing was conducted against Russia's TSPU deep packet inspection system:
+- **Shadowsocks-2022** (`2022-blake3-aes-256-gcm`) worked on many ISPs, but TSPU recognised its traffic pattern on some and cut connections after about 20 seconds. It was removed.
+- **Plain VPN protocols** (WireGuard, OpenVPN, IKEv2) were blocked outright.
+- **A VLESS + REALITY (XTLS-Vision) tunnel**, which presents the relay connection as an HTTPS session to a well-known website, was built for the desktop client with a matching endpoint on the relay server. On the tester's network TSPU dropped every handshake that borrowed a well-known site's name.
 
-- **Shadowsocks-2022** (`2022-blake3-aes-256-gcm`) was implemented and tested. It works on many ISPs but Russia's TSPU detects the encapsulated traffic pattern on some ISPs, killing connections after ~20 seconds. The implementation was removed from the codebase after testing: it did not reliably defeat the most aggressive DPI configurations.
-- **Plain VPN tunnels** (WireGuard, OpenVPN, IKEv2) are all blocked in Russia.
-- **A commercial VPN** works, confirming the issue is protocol fingerprinting of the *inner* traffic, not IP blocking of the relay.
+The same field test showed that the direct connection to the relay was never blocked. The relay's own TLS on port 443 and the STUN and TURN ports all passed. The tester could not connect because of client bugs in how two people first become friends and open their direct-message room. Once those were fixed, Hollow worked over its standard transport with no tunnel at all.
 
-The refined threat model: TSPU does not block on the outer wrapper or the port, but on the *shape* of the traffic inside the tunnel: a real-time TLS-1.3-over-TCP flow to a foreign-datacenter IP whose volume freezes a connection after roughly 25 packets (~16 KB) in either direction. Plain WSS-on-443 is therefore fingerprintable as-is, and simply changing ports does not help.
+The REALITY tunnel was removed from the client and from the official relay in version 0.12. A disguise the censor spots more easily than the plain connection it hides only adds code and attack surface.
 
-### 18.3 REALITY Camouflage Tunnel
+### 18.2 Limits
 
-Hollow embeds an optional **VLESS + REALITY (XTLS-Vision)** transport that makes the relay connection indistinguishable from an ordinary HTTPS session to a real, popular, unblockable website. REALITY clones a genuine target site's TLS-1.3 ClientHello, so a middlebox inspecting the handshake sees legitimate traffic to that site; XTLS-Vision splits and pads the flow to defeat the packet-count freeze described above. Community measurements place its detection rate below 5% against the most advanced DPI as of early 2026.
-
-**Architecture.** When a user enables the tunnel, the client runs a local proxy (the `shoes` Rust implementation) that performs the REALITY handshake outbound to a server-side REALITY endpoint; the endpoint authenticates the client and forwards the decrypted stream to the relay over loopback. The application layer is unchanged: the node still opens exactly the same relay WebSocket connection, but routes it through the local tunnel when the mode is on. The tunnel is single-destination (it dials one relay, with no routing tables), which keeps its footprint small enough to remain viable inside mobile network-extension memory limits in a future mobile port.
-
-**Cryptographic note.** REALITY does not present the relay's own certificate. It borrows the target website's real certificate at handshake time and issues a temporary trusted certificate only to authenticated clients; to any probe or observer the endpoint indistinguishably resembles the borrowed site.
-
-The desktop implementation is complete; validation against live TSPU conditions is in progress. A residual limitation is that a single, known server IP can in principle be blocked by destination-IP correlation or CIDR whitelisting regardless of how well the inner traffic is disguised; mitigations (CDN-fronting or rotating server IPs) are future work.
+The official relay is one known address, and a censor can block an address outright whatever the traffic looks like. Because the relay is a zero-knowledge pipe, anyone can run one at another address and members can move to it without any protocol change (§12.11). If a measured block of the standard transport appears, the candidates are CDN fronting and rotating relay addresses, chosen against that block rather than in advance.
 
 ---
 
@@ -1629,7 +1625,6 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Mobile app lock | Argon2id + AES-256-GCM (+ OS secure enclave for biometric) | 256-bit | PIN/password/biometric launch lock over the identity-at-rest key |
 | Twitch verification | Ed25519-signed proof | 256-bit | Verifiable community membership proof |
 | Support credential | RSABSSA-SHA384-PSS-Deterministic (RFC 9474) blind signature, Ed25519 chain to a pinned root | RSA-3072 per listing, Ed25519 256-bit | Unlinkable, offline-verifiable proof that an identity bought a piece of art |
-| Anti-censorship | VLESS + REALITY (XTLS-Vision) | n/a | DPI-resistant tunnel; desktop implemented, live-network validation in progress |
 
 ---
 

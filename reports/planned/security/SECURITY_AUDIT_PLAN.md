@@ -227,10 +227,27 @@ into possible holes, so this file itself belongs on the security branch.
   endpoint host. Relay DEPLOYED twice the same day. The first AddressSanitizer run of
   the relay tests caught a use-after-free in the new kill-list eviction (fixed,
   redeployed): `SANITIZE=1 bash relay-uws/test/run_tests.sh`.
-- **Now (2026-09-29):** design A is fully built. **Next session: relay hardening**
-  (decided 2026-09-29, section 4 "H"): systemd sandboxing of the relay, the push
-  sidecar and the forwarder, and the relay's tests with sanitizers in CI. **Then:** ID-1
-  with HOL-SEC-002. Fuzzing and flood limits wait for phase G. **On release day:** the
+- **Session 19 (2026-09-30): relay hardening (section 4 "H"), DONE and deployed.**
+  **HOL-SEC-073** (High: the relay, push sender and forwarder ran as `ubuntu`, which has
+  passwordless sudo, unsandboxed, the relay binary writable by its own account; now own
+  accounts, root-owned binaries, full systemd sandboxes: relay 1.4, push 1.2, forwarder
+  1.1, coturn 1.2, and the restart handoff still restores every buffer), **HOL-SEC-074**
+  (Medium: a renewal hook made the TLS private keys world-readable; the TURN secret and
+  push tokens sat in `Environment=`, readable by any account through `systemctl show`;
+  self-hosted coturn carried its secret on the command line), **HOL-SEC-075** (Medium:
+  push token prefixes, client addresses, share activity and every proxy connection's
+  address on the relay's disk through rsyslog, the firewall log, the forwarder's file log
+  and Xray; stopped and scrubbed). The anti-censorship experiment (Xray, shadowsocks,
+  HAProxy, the app's REALITY tunnel) is removed; SSH takes keys only, as `ubuntu` only.
+  Not a security bug but found the same way: every relay stop after a push hung 90 s
+  until systemd's SIGKILL (glibc blocks destroying a condition variable the detached push
+  worker waits on), so every deploy was a 90 s outage; fixed in `push_queue.h`, restart
+  now 0.6 s. `relay-uws/deploy/check-host.sh` checks all of it and fails on the old unit
+  shape; the relay tests run plain and under ASan/UBSan in CI (job `Relay C++`), every
+  test under a timeout. Docker path hardened too (no capabilities, `no-new-privileges`,
+  read-only roots), proven on the Linux VM.
+- **Now (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood
+  limits wait for phase G. Fuzzing and flood limits wait for phase G. **On release day:** the
   relay (deployed 2026-09-29) must still precede any 0.12 client on self-hosted relays,
   and once 0.12 is out it goes again with `ACCEPT_AUTH_V1`, `ACCEPT_UNSIGNED_RING_CONTROL` and
   `ACCEPT_UNSIGNED_NICKNAME_CLAIMS` turned off (ws_handler.cpp); the website join page
@@ -708,7 +725,7 @@ reproduced by a test count; the finding file names the test, never the steps.
 **Tooling track, in parallel.** Section 2.8 items 1-2 whenever convenient
 (they may go on `main`); item 3 is phase C; items 4-8 alongside phase F.
 
-**H. Relay hardening (next session, decided 2026-09-29).** A memory-safety bug in the
+**H. Relay hardening (decided 2026-09-29, DONE session 19: HOL-SEC-073..075).** A memory-safety bug in the
 relay's C++ would be worth the whole box today: `systemd-analyze security hollow-relay`
 rates it 9.2 (UNSAFE), and it runs as `ubuntu`, which has passwordless sudo and can read
 the TLS private key, the TURN secret and the Firebase service account (which can push to

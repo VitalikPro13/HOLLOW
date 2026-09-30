@@ -20,10 +20,13 @@ run() {
         fail=1
         return
     fi
-    if "$out/$name" > "$out/$name.log" 2>&1; then
+    # A test that hangs fails: a relay that cannot exit is down until SIGKILL.
+    timeout 120 "$out/$name" > "$out/$name.log" 2>&1
+    local rc=$?
+    if [ $rc = 0 ]; then
         echo "pass $name ($(grep -c '  ok' "$out/$name.log") checks)"
     else
-        echo "FAIL $name"
+        if [ $rc = 124 ]; then echo "FAIL $name (hung, killed after 120 s)"; else echo "FAIL $name"; fi
         grep -v '  ok' "$out/$name.log" | head -30
         fail=1
     fi
@@ -35,6 +38,7 @@ run test_fair_share
 run test_join_lock ../src/crypto.cpp $LIBS
 run test_kill_list
 run test_license_pool
+run test_push_queue -pthread
 run test_relay_validators ../src/crypto.cpp $LIBS
 run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
 run test_ring_auth

@@ -8,6 +8,13 @@ if [ -z "${TURN_SECRET:-}" ]; then
     exit 1
 fi
 
+# The secret goes into a file only this process can read. On the command line
+# every local account, a Docker host's included, would see it in ps.
+conf_dir=${RUNTIME_DIRECTORY:-$(mktemp -d)}
+conf="$conf_dir/turnserver.conf"
+(umask 077 && printf 'static-auth-secret=%s\n' "$TURN_SECRET" > "$conf")
+unset TURN_SECRET
+
 # The container mounts the certificate at /certs; a host install points this at
 # its own copy.
 cert_dir=${CERT_DIR:-/certs}
@@ -37,7 +44,6 @@ set -- \
     --tls-listening-port=5349 \
     --realm=hollow \
     --use-auth-secret \
-    --static-auth-secret="$TURN_SECRET" \
     --no-cli \
     --no-multicast-peers \
     --no-tcp-relay \
@@ -60,4 +66,4 @@ if [ -n "${PUBLIC_IPV6:-}" ]; then
 fi
 
 echo "Starting coturn, relaying only to $ip${PUBLIC_IPV6:+ and $PUBLIC_IPV6}."
-exec turnserver "$@"
+exec turnserver -c "$conf" "$@"

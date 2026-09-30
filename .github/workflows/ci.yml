@@ -153,6 +153,36 @@ jobs:
         working-directory: rust/hollow_core
         run: cargo audit
 
+  relay:
+    # The relay's C++ unit suites, plain and under AddressSanitizer + UBSan
+    # (the first sanitized run caught a use-after-free in the kill list), and a
+    # release build of the relay itself. A couple of minutes, so it runs on
+    # every push like the rest of this workflow.
+    name: Relay C++
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends cmake g++ libssl-dev libsodium-dev zlib1g-dev
+
+      - name: Unit tests
+        run: bash relay-uws/test/run_tests.sh
+
+      - name: Unit tests under ASan and UBSan
+        run: SANITIZE=1 bash relay-uws/test/run_tests.sh
+
+      - name: Build the relay
+        run: |
+          cmake -S relay-uws -B relay-uws/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build relay-uws/build -j"$(nproc)"
+
   dart:
     name: Dart Analyze & Test
     runs-on: ubuntu-latest

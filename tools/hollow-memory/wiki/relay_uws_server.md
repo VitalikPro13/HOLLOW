@@ -272,7 +272,9 @@ When `should_shutdown` is true (from SIGINT/SIGTERM), the 1 s shutdown tick, on 
 1. `snapshot_to_fdstore(state)` (see `snapshot.cpp` below).
 2. Closes the three periodic timers and itself.
 3. `app.close()`: the listen socket plus every connection (`us_socket_context_close` on the HTTP and WS contexts). Close handlers run `cleanup_peer` as usual; the snapshot was taken first because they mutate state.
-4. `app.run()` returns, reports are saved, the process exits. Measured 0.7 to 1.8 s.
+4. `app.run()` returns, reports are saved, the process exits. Measured 0.6 to 1.8 s.
+
+Until 2026-09-30 step 4 hung whenever the push worker had started (any push since boot): the detached worker waits on a condition variable, `exit()` runs the static destructors, and glibc blocks forever destroying a condition variable that has a waiter. So every production restart after the first push was again a 90 s outage ending in SIGKILL (the snapshot, written first, survived). `push_queue.h` now never frees the worker's shared state; `test/test_push_queue.cpp` exits with the worker parked and `run_tests.sh` runs every test under `timeout 120`, so a hang fails. The fleet restart test missed it because the fleet has no phones, so nothing ever pushed.
 
 Until 2026-09-07 step 3 closed only the listen socket. The timers (`fallthrough=0`, counted in `num_polls`) and every open socket kept `us_loop_run` alive, so every restart was a 90 s brownout for new connections ending in systemd's SIGKILL (`State 'stop-sigterm' timed out. Killing.`), and `reports.save_if_dirty()` after `run()` never ran.
 
@@ -295,6 +297,40 @@ Everything the relay holds is RAM. A service restart used to empty it: three day
 **Rules:** a new RAM registry an offline peer cannot re-send joins the codec (bump `VERSION`; an old snapshot is then discarded whole, which is intended). Snapshot BEFORE `app.close()`. Log counts, never keys. Memory peak at shutdown ≈ 3x buffered bytes, at restore ≈ 2x; stream-encode from state before a multi-GB budget.
 
 **Proof:** `scripts/fleet_relay_restart.ps1` (two real instances; b closed, a sends a DM and a channel message and closes, relay restarted with nobody connected, b returns alone and sees both). Journal at that restart: `handed to the fd store: 6 DM frames in 2 queues, 4 topic frames in 2 rings, 2 opt-ins` and `restored ... 10 frames live after expiry`.
+
+---
+
+## Hosting: accounts, sandbox, disk (2026-09-30, HOL-SEC-073..075)
+
+Until session 19 the relay, the push sidecar and the forwarder ran as `ubuntu` (passwordless sudo), unsandboxed (9.2 UNSAFE), the relay binary in `~ubuntu/relay-uws/build` writable by the account running it, a certbot hook `chmod 644`-ing every private key, and the TURN secret and push tokens in `Environment=` (any local account reads those with `systemctl show`; a 0600 drop-in hides nothing). Now:
+
+| Service | Account | Program | Settings / secrets | State | Exposure |
+|---|---|---|---|---|---|
+| hollow-relay | `hollow-relay` | `/usr/local/bin/hollow-relay` (root 0755) | `/etc/hollow-relay/` (0750 root:hollow-relay): `keys.json` 0640, `fullchain.pem` 0644, `privkey.pem` 0640, `relay.env` 0600 root (`TURN_SECRET`, `HOLLOW_PUSH_TOKEN`) | `/var/lib/hollow-relay` (reports) | 1.4 |
+| hollow-push | `hollow-push` | `/opt/hollow-push` (root-owned copy of index.js, unifiedpush.js, node_modules) | `/etc/hollow-push/` (0700 root): `service-account.json` (via `LoadCredential=`, `FIREBASE_KEY_PATH=%d/...`), `push.env` (`PUSH_TOKEN`) | none | 1.2 |
+| hollow-forwarder | `hollow-fwd` | `/usr/local/bin/hollow-forwarder` | `/etc/hollow-forwarder/forwarder.toml` 0640 root:hollow-fwd | `/var/lib/hollow-forwarder` (key, db; `hollow_debug.log` -> `/dev/null`) | 1.1 |
+| coturn (distro unit) | `turnserver` (in `ssl-cert`) | `/usr/bin/turnserver` | `/etc/turnserver.conf`, LE keys `0640 root:ssl-cert` | none | 1.2 (drop-in `coturn.service.d/hollow-sandbox.conf` = `deploy/coturn-sandbox.conf`) |
+
+The units in the repo ARE the box's units (`deploy/hollow-relay.service`, `deploy/hollow-forwarder.service`, `push-sidecar/hollow-push.service`, no secrets in them). The relay keeps hot-reloading its certificate from its own copy: the certbot deploy hook is `deploy/renewal-hook.sh` (installed as `/etc/letsencrypt/renewal-hooks/deploy/hollow-relay.sh`), it rewrites the copy with those modes, sets the LE keys `0640 root:ssl-cert` and restarts coturn (which reads its cert only at start). The relay logs `TLS certificate reloaded` within 60 s.
+
+**Deploy (relay):** scp sources to `~/relay-uws/`, build there as `ubuntu`, then `sudo install -m 0755 build/hollow-relay /usr/local/bin/hollow-relay && sudo systemctl restart hollow-relay`. NO `setcap` (the capability is ambient from the unit; a file capability plus the empty bounding set of another unit would refuse to exec). Push: copy the changed JS into `/opt/hollow-push` with `sudo install`, then restart. Forwarder: `sudo install` the binary, restart. After any change on the box: `sudo bash relay-uws/deploy/check-host.sh` must print only `ok`.
+
+**Sandbox rules learned the hard way:**
+- `SystemCallErrorNumber=EPERM`, never the default kill: a SIGSYS is an abnormal exit, which skips the snapshot and loses every buffer.
+- No `ProcSubset=pid` on the relay: `/relay-status` reads `/proc/meminfo` and `/proc/net/dev`.
+- No `MemoryDenyWriteExecute` for Node (V8 JIT). `AF_NETLINK` is needed by anything that resolves names or lists interfaces (Node, the forwarder, coturn).
+- `PrivateUsers=yes` only where no privileged port is bound (a capability inside a user namespace does not reach the host's network namespace).
+- The fd store handoff works unchanged: sd_notify over the read-only `/run`, `memfd_create` in `@system-service`, and a memfd written by the old process (even under another uid) is read by the new one through the passed descriptor. Proven by a canary unit on a local port (push token + DM frame handed and restored) before production.
+- systemd 255 here has no BPF framework, so `SocketBindAllow`/`RestrictNetworkInterfaces` are unavailable.
+- Scripts over SSH: `sudo cmp <(...)` fails (sudo closes the extra fds), and a glob like `/var/lib/x/*` typed as `ubuntu` expands to nothing inside a 0700 directory (the forwarder was down 40 s from exactly that). Wrap both in `sudo sh -c`.
+
+**Disk:** the journal is volatile (1 h), and rsyslog drops `:programname, startswith, "hollow-"` plus `turnserver` (`/etc/rsyslog.d/00-hollow-privacy.conf`); the sidecar needs `SyslogIdentifier=hollow-push` or it logs as `node`. `ufw logging off` (blocked late packets of closed 443 connections carried real client addresses). `kernel.core_pattern=|/bin/false`, no swap. Old leaks were scrubbed on 2026-09-30.
+
+**SSH:** `/etc/ssh/sshd_config.d/10-hollow.conf`: keys only, `AllowUsers ubuntu`, no root, no X11, `MaxAuthTries 3`. Change sshd only with a dead-man revert armed first (`systemd-run --on-active=240` that deletes the drop-in and reloads), prove a fresh login, then stop the timer.
+
+**Removed 2026-09-30:** Xray (8443, closed in ufw), shadowsocks, HAProxy and every file of the July anti-censorship spike, including two stale private-key copies.
+
+**Docker path:** relay container `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, and `net.ipv4.ip_unprivileged_port_start=443` (no `setcap` in the image any more; under `no-new-privileges` a file capability is never granted). coturn needs `cap_add: [NET_BIND_SERVICE]` only because the coturn image marks `turnserver` with that file capability and the kernel refuses to exec it when the bounding set lacks it; `no-new-privileges` still keeps it from being granted (CapEff 0 verified). `coturn-start.sh` writes the TURN secret into a 0600 file in `$RUNTIME_DIRECTORY` or a `mktemp -d` and passes `-c`, never `--static-auth-secret` on the command line (visible in the host's `ps`). Proven on the Linux VM.
 
 ---
 
@@ -353,7 +389,7 @@ The ONE thing the relay persists about peers — deliberately minimal.
 | `keys` | `unordered_set<string>` | hex `BLAKE2b(key = secret, reporter '\0' target '\0' category)` — dedup only, one report per (reporter, target, category) |
 | `secret` | `unsigned char[32]` | Random relay secret in its OWN file `<reports-file>.key` (0600, tmp+fsync+rename, created on first start, never logged); unreadable/unwritable = a key for this run only |
 | `counts` | `unordered_map<string, unordered_map<string, uint64_t>>` | target peer_id → category → count (the operator's view) |
-| `file_path` | `string` | From `--reports-file` (default `reports.json`, resolves to the systemd WorkingDirectory `/home/ubuntu/relay/`) |
+| `file_path` | `string` | From `--reports-file` (default `reports.json`; the official unit passes `/var/lib/hollow-relay/reports.json`, its StateDirectory) |
 | `dirty` | `bool` | Set by `add()`; cleared on successful save |
 
 - **WS command:** `{"type":"report","target":<peer_id>,"category":<cat>}` → `handle_report()` in ws_handler.cpp (beside `handle_set_offline_buffer`). Guest-guarded; `target` non-empty/≤128/≠self; category allow-list: `spam`, `harassment`, `illegal_content`, `impersonation`. Replies `{"type":"report_ack"}` even on dedup (idempotent from the client's view). NO logging — reporter/target ids are user-identifying.
@@ -1039,7 +1075,7 @@ Two traps the first real bring-up found, both fixed:
 
 coturn also gained a `depends_on: certbot-init` gate; without it it started before any certificate existed and could not serve `turns:` on 5349.
 
-`deploy/harden-host.sh` is the production host setup as a script (ufw, volatile journald, no swap, no core dumps, NTP, fail2ban, unattended-upgrades, key-only SSH but ONLY when the invoking user already has an `authorized_keys`). Idempotent, `--print` dry-run.
+`deploy/harden-host.sh` is the production host setup as a script (ufw with logging off, volatile journald plus the rsyslog rule that keeps `hollow-*` and coturn lines off the disk, no swap, no core dumps, NTP, fail2ban, unattended-upgrades, key-only SSH with no root login unless root is the invoking account, but ONLY when the invoking user already has an `authorized_keys`). Idempotent, `--print` dry-run. `deploy/check-host.sh` audits a running host (accounts, secrets, key modes, sandbox scores, disk, SSH) and changes nothing.
 
 The relay binary is SSL-only (`uWS::SSLApp`) — cannot run without TLS certs. No `--no-tls` mode exists. This is intentional: every self-hosted relay is TLS-secured by default.
 
@@ -1096,7 +1132,7 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 - `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, sender, at, is_image, is_channel}>`. **FAIR-SHARE eviction since 2026-08** (issue #46): when a per-peer cap is hit, `drop_oldest_kind` drops the oldest frame belonging to whichever sender currently occupies the MOST slots of that kind — not the globally oldest. With one sender this is byte-for-byte the old behaviour; under contention a flooder can only evict ITSELF. Without it the per-peer caps bounded RAM but not WHO filled it, so one authenticated peer could buffer 100 frames at any peer_id it knew and evict every genuine message waiting there. **Deliberately NOT a flat per-sender cap and NOT rate limited** — the per-peer caps are legitimately reachable by one sender (500 opted-in), and a per-minute limit would silently drop reconnection bursts and large-server `0x09` fan-out. Both are the message-loss class `feedback_relay_rules` forbids. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). **Independent per-peer caps**: baseline `MAX_BUFFERED_MSGS_PER_PEER = 100` (text) and `MAX_BUFFERED_IMAGES_PER_PEER = 1`; **opted-in peers** (message-availability cache, `set_offline_buffer {enabled, retention_secs}` JSON, registry `offline_optin: peer -> retention_secs` clamped 1h..7d, re-sent by ws_client on every reconnect) get `MAX_OPTIN_MSGS_PER_PEER = 500` and `MAX_OPTIN_IMAGES_PER_PEER = 8` with THEIR retention at sweep (images always ≤24h — inlined bytes never ride extended retention). Baseline `OFFLINE_BUFFER_TTL_SECS = 86400` (24h). All buffered bytes count into `buffer_total_bytes` against `MAX_BUFFER_TOTAL_BYTES = 512MB` (oldest-front global eviction, `evict_over_budget`).
 
 **Flow (ws_handler.cpp):**
-1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` enqueues `{token, platform, sender}` for the push worker. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text. **Push delivery uses a SINGLE persistent worker thread + bounded queue (`PUSH_QUEUE_MAX`), NOT a detached thread per push** — `notify_push_sidecar()` lazily starts one worker (`push_worker_loop`) that drains the queue and does the blocking POST to localhost:3001. The POST carries `X-Push-Token` when `HOLLOW_PUSH_TOKEN` is set (sidecar side: `PUSH_TOKEN`, constant-time compare, 401 on mismatch) — the sidecar holds the Firebase Admin credential, so loopback binding limits reachability but not authorization, and any local process could otherwise push to arbitrary device tokens (issue #46). Unset on either side = open, so the two can be deployed independently. Per-push thread spawning previously caused churn during DM/file-sync bursts (each POST is a blocking connect/send/recv with 2s timeouts). Queue overflow drops oldest (push is best-effort; the DM still delivers via the offline buffer).
+1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` enqueues `{token, platform, sender}` for the push worker. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text. **Push delivery uses a SINGLE persistent worker thread + bounded queue (`PUSH_QUEUE_MAX`), NOT a detached thread per push** — `notify_push_sidecar()` enqueues into `PushQueue` (`push_queue.h`), which lazily starts one worker that drains the queue and does the blocking POST to localhost:3001; its shared state is never freed (see Graceful shutdown). The POST carries `X-Push-Token` when `HOLLOW_PUSH_TOKEN` is set (sidecar side: `PUSH_TOKEN`, constant-time compare, 401 on mismatch) — the sidecar holds the Firebase Admin credential, so loopback binding limits reachability but not authorization, and any local process could otherwise push to arbitrary device tokens (issue #46). Unset on either side = open, so the two can be deployed independently. Per-push thread spawning previously caused churn during DM/file-sync bursts (each POST is a blocking connect/send/recv with 2s timeouts). Queue overflow drops oldest (push is best-effort; the DM still delivers via the offline buffer).
 2. The peer's FCM fetch node (or full node) later joins the DM room → `handle_join` calls `replay_buffered_msgs()` → sends ALL buffered frames for that room (text + image, both as 0x06), drops delivered entries.
 3. `sweep_offline_buffer()` (5-min timer in main.cpp) evicts entries older than 24h.
 
