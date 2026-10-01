@@ -859,10 +859,28 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               label: 'Message list scrollbar',
               child: Stack(
                 children: [
+                  Positioned(
+                    top: top,
+                    height: thumbHeight,
+                    // Centred in its track, which is flush against the live
+                    // edge of the gutter, so the thumb lands where every other
+                    // scrollbar in the app draws one.
+                    left: (constraints.maxWidth - 6) / 2,
+                    width: 6,
+                    child: AnimatedContainer(
+                      duration: HollowDurations.fast,
+                      decoration: BoxDecoration(
+                        color: hollow.textSecondary
+                            .withValues(alpha: active ? 0.55 : 0.28),
+                        borderRadius: BorderRadius.circular(HollowRadius.pill),
+                      ),
+                    ),
+                  ),
                   // A real control, not paint, so it can be hit, hovered and
-                  // reached by a screen reader. A drag starting here still
-                  // drags: the track's recognizer beats a child's tap once the
-                  // pointer moves.
+                  // reached by a screen reader. Above the thumb, which would
+                  // otherwise take the click where the two overlap. A drag
+                  // starting here still drags: the track's recognizer beats a
+                  // child's tap once the pointer moves.
                   if (unreadCentre != null)
                     Positioned(
                       top: unreadCentre - kRailUnreadSnap,
@@ -887,23 +905,6 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
                         ),
                       ),
                     ),
-                  Positioned(
-                    top: top,
-                    height: thumbHeight,
-                    // Centred in its track, which is flush against the live
-                    // edge of the gutter, so the thumb lands where every other
-                    // scrollbar in the app draws one.
-                    left: (constraints.maxWidth - 6) / 2,
-                    width: 6,
-                    child: AnimatedContainer(
-                      duration: HollowDurations.fast,
-                      decoration: BoxDecoration(
-                        color: hollow.textSecondary
-                            .withValues(alpha: active ? 0.55 : 0.28),
-                        borderRadius: BorderRadius.circular(HollowRadius.pill),
-                      ),
-                    ),
-                  ),
                 ],
               ),
             ),

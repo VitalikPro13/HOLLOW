@@ -37,7 +37,7 @@
   { "op": "shot", "name": "redeem-09-chat-row" },
   { "op": "dump", "name": "redeem-chat" },
   { "op": "wait_for", "target": "semantics:Supports an artist", "timeout_ms": 5000 },
-  { "op": "tap", "target": "type:_ServerMemberTile", "index": 0 },
+  { "op": "tap", "target": "type:_MemberRow", "index": 0 },
   { "op": "wait", "ms": 1200 },
   { "op": "shot", "name": "redeem-10-profile-card" },
   { "op": "dump", "name": "redeem-card" },

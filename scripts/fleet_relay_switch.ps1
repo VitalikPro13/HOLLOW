@@ -355,16 +355,16 @@ function Get-ServerInvite($peer, $name, $as) {
 # it when the link names a relay this peer is not on.
 function Invoke-InvitePaste($peer, $invite) {
     Step $peer @{ op = 'tap'; target = 'semantics:Create a server'; index = 0 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Invite link or server ID'; timeout_ms = 20000 }
-    Step $peer @{ op = 'tap'; target = 'hint:Invite link or server ID' }
-    Step $peer @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = $invite }
+    Step $peer @{ op = 'wait_for'; target = 'hint:Invite link'; timeout_ms = 20000 }
+    Step $peer @{ op = 'tap'; target = 'hint:Invite link' }
+    Step $peer @{ op = 'enter_text'; target = 'hint:Invite link'; value = $invite }
     Step $peer @{ op = 'tap'; target = 'text:Join'; index = 0 }
 }
 
 function Close-JoinDialog($peer) {
-    if (-not (Test-Target $peer 'hint:Invite link or server ID')) { return }
+    if (-not (Test-Target $peer 'hint:Invite link')) { return }
     Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
-    Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'hint:Invite link or server ID'; timeout_ms = 5000 } | Out-Null
+    Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'hint:Invite link'; timeout_ms = 5000 } | Out-Null
 }
 
 # The composer is TAPPED first: enter_text on an unfocused field reports success
@@ -399,22 +399,22 @@ function Remove-Server($peer, $name) {
 
 function Open-Settings($peer, $category) {
     Step $peer @{ op = 'tap'; target = 'semantics:Settings'; index = 0 }
-    Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 20000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 20000 }
     # SCOPED to the dialog: the Home dashboard has rows of the same name behind
     # it, they come first in tree order, and the unscoped tap lands on a
     # covered one.
-    Step $peer @{ op = 'tap'; target = "type:_UserSettingsContent > text:$category"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:SettingsPlace > text:$category"; index = 0 }
 }
 
 function Close-Settings($peer) {
-    if (-not (Test-Target $peer 'type:_UserSettingsContent')) { return }
+    if (-not (Test-Target $peer 'type:SettingsPlace')) { return }
     Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
-    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 3000 }
+    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 3000 }
     if ($gone.ok) { return }
     # Never a bare semantics:Close: it matches the window title bar first, and
     # that tap ends the process.
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 }
-    Step $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 10000 }
+    Step $peer @{ op = 'tap'; target = 'semantics:Close settings'; index = 0 }
+    Step $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 10000 }
 }
 
 # The remove control is an icon button on the friend row, addressed by its
@@ -424,7 +424,7 @@ function Close-Settings($peer) {
 function Remove-Friendship($peer, $friendName) {
     Close-Settings $peer
     Open-Friends $peer
-    Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Friends'; index = 0 } | Out-Null
+    Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Friends'; index = 0 } | Out-Null
     if (-not (Test-Target $peer 'semantics:Remove friend' 10000)) {
         Add-Note "$peer's Friends tab shows no Remove friend control for $friendName"
         Close-Friends $peer
@@ -715,7 +715,7 @@ try {
 
         # The toggle carries no purpose label of its own (its name is the row's
         # text), so it is reached through the widget that owns it.
-        Step c @{ op = 'tap'; target = 'type:_UserSettingsContent > text:Security'; index = 0 }
+        Step c @{ op = 'tap'; target = 'type:SettingsPlace > text:Security'; index = 0 }
         Step c @{ op = 'wait_for'; target = 'text:Always relay calls'; timeout_ms = 20000 }
         Step c @{ op = 'tap'; target = 'type:AlwaysRelayCallsToggle > type:HollowToggle'; index = 0 }
         Step c @{ op = 'wait'; ms = 1000 }
@@ -730,12 +730,12 @@ try {
             Say 'a and c become friends so there is someone to call'
             Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
             Open-Friends c
-            Step c @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+            Step c @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Add friend'; index = 0 }
             Step c @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = "$($script:FleetVars['PEER_A'])" }
             Step c @{ op = 'tap'; target = 'text:Send request'; index = 0 }
             Open-Friends a
             # The Accept button only exists on the INCOMING tab.
-            Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
+            Step a @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Requests'; index = 0 }
             Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
             Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
             Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 60000 }
@@ -746,7 +746,7 @@ try {
         }
 
         Step c @{ op = 'tap'; target = 'tooltip:probe-a' }
-        Step c @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+        Step c @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
         Step c @{ op = 'tap'; target = 'semantics:Start voice call'; index = 0 }
         Step c @{ op = 'wait_for'; target = 'dialog > text:This relay can''t carry your call'; timeout_ms = 30000 }
         Step c @{ op = 'shot'; name = "relay-$runTag-c-turn-refusal" }

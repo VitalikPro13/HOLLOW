@@ -400,7 +400,7 @@ try {
     Step a @{ op = 'key'; value = 'escape' }
 
     Step b @{ op = 'tap'; target = 'semantics:Create a server' }
-    Step b @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+    Step b @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
     Step b @{ op = 'tap'; target = 'text:Join'; index = 0 }
     Step b @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 120000 }
     Step b @{ op = 'open_server'; name = $server }
@@ -525,9 +525,14 @@ try {
     Step a @{ op = 'right_click'; target = "server:$server" }
     Step a @{ op = 'tap'; target = 'menu > text:Server settings' }
     Step a @{ op = 'tap'; target = 'text:Channels'; index = 0 }
-    Step a @{ op = 'wait_for'; target = 'semantics:Make channel public, currently private'; timeout_ms = 30000 }
-    Step a @{ op = 'tap'; target = 'semantics:Make channel public, currently private' }
-    Step a @{ op = 'wait_for'; target = 'semantics:Make channel private, currently public'; timeout_ms = 30000 }
+    # A channel's settings open under its row; the row's summary names it Public
+    # once the switch lands.
+    Step a @{ op = 'wait_for'; target = 'semantics:general. Open its settings'; timeout_ms = 30000 }
+    Step a @{ op = 'tap'; target = 'semantics:general. Open its settings'; index = 0 }
+    Step a @{ op = 'wait_for'; target = 'semantics:Public'; timeout_ms = 15000 }
+    Step a @{ op = 'tap'; target = 'semantics:Public'; index = 0 }
+    # "Public" is the switch's title, and once more in the row's summary.
+    Step a @{ op = 'wait_for'; target = 'text:Public'; count = 2; timeout_ms = 30000 }
     # Server settings is a full page, not a dialog: one escape leaves the tab
     # and the pane is only back once the server and channel are re-opened.
     Step a @{ op = 'key'; value = 'escape' }

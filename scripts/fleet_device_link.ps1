@@ -517,7 +517,7 @@ function Close-Friends($peer) {
 }
 
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > semantics:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > type:_TabBar > semantics:$tab"; index = 0 }
 }
 
 $script:DmComposer = @{}
@@ -623,11 +623,11 @@ function Open-SettingsDevices($peer) {
         Step $peer @{ op = 'tap'; target = 'semantics:Settings'; index = 0 }
         Step $peer @{ op = 'wait_for'; target = 'text:Appearance'; timeout_ms = 20000 }
         for ($i = 0; $i -lt 6; $i++) {
-            $row = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'text:Linked devices & multi-device tools'; timeout_ms = 1200 }
+            $row = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'text:Devices'; timeout_ms = 1200 }
             if ($row.ok) { break }
             Invoke-SoftStep $peer @{ op = 'scroll'; target = 'text:Appearance'; dy = -600 } | Out-Null
         }
-        Step $peer @{ op = 'tap'; target = 'text:Linked devices & multi-device tools'; index = 0 }
+        Step $peer @{ op = 'tap'; target = 'text:Devices'; index = 0 }
         Step $peer @{ op = 'wait_for'; target = 'text:Link a device'; timeout_ms = 20000 }
         return
     }
@@ -916,8 +916,8 @@ try {
                 Invoke-SoftStep a @{ op = 'look' } | Out-Null
                 # By its own control, scoped: a bare semantics:Close matches the
                 # window title bar first, and that tap ends the process.
-                Invoke-SoftStep a @{ op = 'tap'; target = 'type:ServerSettingsPanel > semantics:Close'; index = 0 } | Out-Null
-                Invoke-SoftStep a @{ op = 'wait_for'; gone = 'type:ServerSettingsPanel'; timeout_ms = 10000 } | Out-Null
+                Invoke-SoftStep a @{ op = 'tap'; target = 'semantics:Close server settings'; index = 0 } | Out-Null
+                Invoke-SoftStep a @{ op = 'wait_for'; gone = 'type:ServerSettingsPlace'; timeout_ms = 10000 } | Out-Null
                 Add-Note "channels-tab screenshot: build\fleet_out\a\live-*-link-$runTag-a-channels-tab.png"
             }
         }
@@ -926,9 +926,9 @@ try {
         Say '2/7 a opens Settings > Devices and shows a link code'
         # Belt and braces: the channels-tab shot above leaves a barriered panel
         # open if its own Close missed, and Settings is unreachable behind it.
-        Invoke-SoftStep a @{ op = 'tap'; target = 'type:ServerSettingsPanel > semantics:Close'; index = 0 } | Out-Null
+        Invoke-SoftStep a @{ op = 'tap'; target = 'semantics:Close server settings'; index = 0 } | Out-Null
         Open-SettingsDevices a
-        $alone = Invoke-SoftStep a @{ op = 'expect_text'; value = 'Only this device is linked to your identity' }
+        $alone = Invoke-SoftStep a @{ op = 'expect_text'; value = 'Only this device is linked' }
         if (-not $alone.ok) { Add-Note 'a was not showing the single-device copy before the link' }
         $code = Get-LinkCode a
         Step a @{ op = 'shot'; name = "link-$runTag-a-code" }
@@ -1086,8 +1086,8 @@ try {
         foreach ($peer in @('a', 'b')) {
             Close-Settings $peer
             Open-SettingsDevices $peer
-            Step $peer @{ op = 'wait_for'; target = 'contains:Devices linked to your identity'; timeout_ms = 90000 }
-            Step $peer @{ op = 'wait_for'; target = 'type:DeviceRowShell'; count = 2; timeout_ms = 60000 }
+            Step $peer @{ op = 'wait_for'; target = 'contains:Every device here reads your messages'; timeout_ms = 90000 }
+            Step $peer @{ op = 'wait_for'; target = 'type:_DeviceRow'; count = 2; timeout_ms = 60000 }
             Step $peer @{ op = 'shot'; name = "link-$runTag-$peer-devices" }
             Close-Settings $peer
         }

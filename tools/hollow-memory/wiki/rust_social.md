@@ -212,7 +212,9 @@ Receive-side staleness check, called by BOTH incoming ProfileUpdate handlers aft
 
 `social.rs:handle_profile_request_for(ws_cmd_tx, ws_room_peers, requester_peer, target_peer_id, db_path, db_passphrase)`
 
-Handles `ProfileRequestFor` — looks up an offline peer's cached profile in local DB and sends it back as `ProfileRelay` (avatar included, no banner). Called when an online peer asks us for a third peer's profile.
+Handles `ProfileRequestFor` — looks up an offline peer's cached profile in local DB and sends it back as `ProfileRelay` (avatar included, no banner). Called when an online peer asks us for a third peer's profile. A relay carries NO roster and needs a stored owner signature, so it never teaches a joiner anyone's devices.
+
+**Co-members who are not friends (session 23).** Each side's first-contact profile exchange (PeerJoined / RoomMembers `is_new` cascade) runs while the join is still pending, when the other is a stranger to `profile_audience`, so no roster crossed and the joiner took the owner's device for a stranger: it refused the owner's channel sync, RTC offers and subgroup KeyPackage request, and on a later promotion forked the restricted channel's MLS subgroup (it could see #staff and never read it). `swarm::after_welcome_joined` now sends a `ProfileRequest` to every device in the server room that our own `device_links` cannot place, once the server-group Welcome lands (everyone online has admitted us by then). Harness `a_joiner_who_is_nobodys_friend_learns_every_members_devices`; found by `fleet/moderation.json`.
 
 ## handle_profile_relay()
 

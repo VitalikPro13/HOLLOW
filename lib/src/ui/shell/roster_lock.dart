@@ -173,23 +173,26 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
                       style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
                     ),
                     const SizedBox(height: HollowSpacing.xl),
-                    Wrap(
-                      alignment: WrapAlignment.center,
-                      spacing: HollowSpacing.sm,
-                      runSpacing: HollowSpacing.sm,
-                      children: [
-                        if (removed)
-                          HollowButton.outline(
-                            danger: true,
-                            onPressed: _erasing ? null : _confirmErase,
-                            loading: _erasing,
-                            child: const Text('Erase now'),
+                    HollowButtonTouchScope(
+                      touch: HollowDialogSurface.isCompact(context),
+                      child: Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: HollowSpacing.sm,
+                        runSpacing: HollowSpacing.sm,
+                        children: [
+                          if (removed)
+                            HollowButton.outline(
+                              danger: true,
+                              onPressed: _erasing ? null : _confirmErase,
+                              loading: _erasing,
+                              child: const Text('Erase now'),
+                            ),
+                          HollowButton.filled(
+                            onPressed: _erasing ? null : (removed ? _usePhrase : _join),
+                            child: const Text('Use recovery phrase'),
                           ),
-                        HollowButton.filled(
-                          onPressed: _erasing ? null : (removed ? _usePhrase : _join),
-                          child: const Text('Use recovery phrase'),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ],
                 ),

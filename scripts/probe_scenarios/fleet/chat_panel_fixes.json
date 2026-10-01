@@ -279,7 +279,7 @@
     {
       "peer": "b",
       "op": "enter_text",
-      "target": "hint:Invite link or server ID",
+      "target": "hint:Invite link",
       "value": "${INVITE}"
     },
     {

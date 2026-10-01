@@ -716,17 +716,17 @@ function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
 }
 
 # Attach, caption and send into the OPEN composer. The composer is tapped
 # first: enter_text on an unfocused field reports success into nothing, which is
 # worst right after a reconnect, when the pane is being rebuilt.
 function Send-DmFile($peer, $path, $caption) {
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
     Step $peer @{ op = 'attach_file'; path = $path }
-    Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-    Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $caption }
+    Step $peer @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+    Step $peer @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = $caption }
     Step $peer @{ op = 'key'; value = 'enter' }
     # Every send waits for its OWN optimistic row before anything else runs.
     Step $peer @{ op = 'wait_for'; target = "text:$caption"; timeout_ms = 60000 }
@@ -746,7 +746,7 @@ function Invoke-FriendHandshake {
     # closed by its OWN control, scoped to the manager: a bare semantics:Close
     # is the window title bar's button and that tap ends the process.
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+    Step b @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Add friend'; index = 0 }
     Step b @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_A}' }
     Step b @{ op = 'wait_for'; target = 'text:${PEER_A}'; timeout_ms = 15000 }
     Step b @{ op = 'tap'; target = 'text:Send request'; index = 0 }
@@ -755,7 +755,7 @@ function Invoke-FriendHandshake {
     # Friends tab is a 30-second timeout that reads exactly like a delivery
     # failure and is not one.
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
 
@@ -842,14 +842,14 @@ function Invoke-SeedPhase {
         Say '1/5 a and b become friends and DM both ways'
         Invoke-FriendHandshake
         Open-Dm a 'probe-b'
-        Step a @{ op = 'tap'; target = 'hint:Type a message...' }
-        Step a @{ op = 'enter_text'; target = 'hint:Type a message...'; value = 'dm from a ${RUN}' }
+        Step a @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+        Step a @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = 'dm from a ${RUN}' }
         Step a @{ op = 'key'; value = 'enter' }
         Step a @{ op = 'wait_for'; target = 'text:dm from a ${RUN}'; timeout_ms = 30000 }
         Step b @{ op = 'wait_for'; target = 'text:dm from a ${RUN}'; timeout_ms = 60000 }
         Open-Dm b 'probe-a'
-        Step b @{ op = 'tap'; target = 'hint:Type a message...' }
-        Step b @{ op = 'enter_text'; target = 'hint:Type a message...'; value = 'dm from b ${RUN}' }
+        Step b @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+        Step b @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = 'dm from b ${RUN}' }
         Step b @{ op = 'key'; value = 'enter' }
         Step b @{ op = 'wait_for'; target = 'text:dm from b ${RUN}'; timeout_ms = 30000 }
         Step a @{ op = 'wait_for'; target = 'text:dm from b ${RUN}'; timeout_ms = 60000 }
@@ -892,7 +892,7 @@ function Invoke-SeedPhase {
         Step a @{ op = 'key'; value = 'escape' }
 
         Step b @{ op = 'tap'; target = 'semantics:Create a server' }
-        Step b @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+        Step b @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
         Step b @{ op = 'tap'; target = 'text:Join'; index = 0 }
         Step b @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 120000 }
         Step b @{ op = 'open_server'; name = $server }
@@ -1248,7 +1248,7 @@ function Invoke-UpgradePhase {
             # barrier then covers everything the next gate wants to tap. The
             # scope matters: a bare semantics:Close is the window title bar's
             # button, and that tap ends the process.
-            Invoke-SoftStep b @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 } | Out-Null
+            Invoke-SoftStep b @{ op = 'tap'; target = 'semantics:Close settings'; index = 0 } | Out-Null
             Step b @{ op = 'wait_for'; gone = 'text:Files & storage'; timeout_ms = 15000 }
         }
 
@@ -1411,7 +1411,7 @@ function Invoke-UpgradePhase {
             Start-PeerProcess 'c'
             Wait-ForConnected c | Out-Null
             Step c @{ op = 'tap'; target = 'semantics:Create a server' }
-            Step c @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+            Step c @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
             Step c @{ op = 'tap'; target = 'text:Join'; index = 0 }
             Step c @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 180000 }
             Step c @{ op = 'open_server'; name = $server }

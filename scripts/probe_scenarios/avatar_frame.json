@@ -41,7 +41,7 @@
   {"op": "dump", "name": "frame-server"},
 
   {"op": "log", "message": "and on the profile card, where it animates"},
-  {"op": "tap", "target": "type:_ServerMemberTile", "soft": true},
+  {"op": "tap", "target": "type:_MemberRow", "soft": true},
   {"op": "wait", "ms": 1000},
   {"op": "shot", "name": "frame-08-profile-card"},
   {"op": "key", "value": "escape"},

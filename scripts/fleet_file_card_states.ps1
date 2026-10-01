@@ -419,17 +419,17 @@ function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
 }
 
 # Attach a file to the OPEN composer, caption it and send. The composer is
 # tapped first: enter_text on an unfocused field reports success into nothing,
 # which is worst right after a reconnect, when the pane is being rebuilt.
 function Send-DmFile($peer, $path, $caption) {
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
     Step $peer @{ op = 'attach_file'; path = $path }
-    Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-    Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $caption }
+    Step $peer @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+    Step $peer @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = $caption }
     Step $peer @{ op = 'key'; value = 'enter' }
     # Every send waits for its OWN optimistic row before anything else runs.
     Step $peer @{ op = 'wait_for'; target = "text:$caption"; timeout_ms = 60000 }
@@ -516,7 +516,7 @@ try {
     # process.
     Say '1/5 a and b become friends and DM both ways'
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+    Step b @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Add friend'; index = 0 }
     Step b @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_A}' }
     Step b @{ op = 'wait_for'; target = 'text:${PEER_A}'; timeout_ms = 15000 }
     Step b @{ op = 'tap'; target = 'text:Send request'; index = 0 }
@@ -525,7 +525,7 @@ try {
     # Friends tab is a 30-second timeout that reads exactly like a delivery
     # failure and is not one.
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
 
@@ -535,8 +535,8 @@ try {
     Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Close'; index = 0 }
     Step a @{ op = 'wait_for'; gone = 'type:_FriendsManager'; timeout_ms = 10000 }
     Open-Dm a 'probe-b'
-    Step a @{ op = 'tap'; target = 'hint:Type a message...' }
-    Step a @{ op = 'enter_text'; target = 'hint:Type a message...'; value = 'dm from a ${RUN}' }
+    Step a @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+    Step a @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = 'dm from a ${RUN}' }
     Step a @{ op = 'key'; value = 'enter' }
     Step a @{ op = 'wait_for'; target = 'text:dm from a ${RUN}'; timeout_ms = 30000 }
     Step b @{ op = 'wait_for'; target = 'text:dm from a ${RUN}'; timeout_ms = 60000 }
@@ -544,8 +544,8 @@ try {
     Step b @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Close'; index = 0 }
     Step b @{ op = 'wait_for'; gone = 'type:_FriendsManager'; timeout_ms = 10000 }
     Open-Dm b 'probe-a'
-    Step b @{ op = 'tap'; target = 'hint:Type a message...' }
-    Step b @{ op = 'enter_text'; target = 'hint:Type a message...'; value = 'dm from b ${RUN}' }
+    Step b @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+    Step b @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = 'dm from b ${RUN}' }
     Step b @{ op = 'key'; value = 'enter' }
     Step b @{ op = 'wait_for'; target = 'text:dm from b ${RUN}'; timeout_ms = 30000 }
     Step a @{ op = 'wait_for'; target = 'text:dm from b ${RUN}'; timeout_ms = 60000 }
@@ -617,7 +617,7 @@ try {
     }
     Step b @{ op = 'tap'; target = 'semantics:Stop waiting for this file'; index = 0 }
     $stopped = Invoke-SoftStep b @{ op = 'wait_for'; gone = "text:$dmOfflineCaption"; timeout_ms = 30000 }
-    Step b @{ op = 'hover'; target = 'hint:Type a message...'; index = 0 }
+    Step b @{ op = 'hover'; target = 'type:ChatComposerRow > type:EditableText'; index = 0 }
     $backToDownload = Invoke-SoftStep b @{ op = 'wait_for'; target = "semantics:Download $nameOne"; timeout_ms = 30000 }
 
     # Ask again by hand. The card has to re-queue and say so, and it is THIS
@@ -726,7 +726,7 @@ try {
     Step a @{ op = 'key'; value = 'escape' }
 
     Step b @{ op = 'tap'; target = 'semantics:Create a server' }
-    Step b @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+    Step b @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
     Step b @{ op = 'tap'; target = 'text:Join'; index = 0 }
     Step b @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 120000 }
     Step b @{ op = 'open_server'; name = $server }

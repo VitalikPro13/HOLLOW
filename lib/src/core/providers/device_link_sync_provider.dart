@@ -175,6 +175,15 @@ String platformName(String platform) => switch (platform) {
       _ => platform,
     };
 
+/// "A Windows device", "An iOS device": the confirm prompt's name for a device
+/// that reported no label of its own.
+String aDeviceOn(String platform) {
+  final name = platformName(platform);
+  if (name.isEmpty) return 'A device';
+  final article = RegExp(r'^[AEIOUaeiou]').hasMatch(name) ? 'An' : 'A';
+  return '$article $name device';
+}
+
 class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   Timer? _waitingTimer;
   bool _disposed = false;

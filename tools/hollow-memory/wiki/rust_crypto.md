@@ -19,6 +19,15 @@ outside `crypto/`:
   BIP-39 seed (salt `hollow-recovery`, info `hollow-recovery-key1`, KAT pinned); never stored.
 - `identity/roster.rs` + `node/roster_book.rs`: the roster, self-verifying statements under
   `hollow-id1-*` tags, folded by every observer (rules: `security_write_gates.md` section 21).
+  Two delivery rules the phones found (session 23): every device of an identity joins
+  `roster_book::own_room` (= `dm_room_code(master, master)`, nameable only with the master
+  key) on connect, because the relay hides an unproven socket in `inbox:{master}` and an
+  identity with no friends or servers otherwise shares NO room with a restored backup, so
+  Approve/Refuse never reached it (harness `a_restored_device_with_no_contacts_hears_its_answer`).
+  And the relay keeps the highest inbox-proof version any device showed (mock relay now
+  models it too), so a device whose roster was behind at connect owned nothing in its own
+  inbox until reconnect: `swarm::reprove_own_inbox` re-sends `JoinInbox` whenever ingest
+  changes our own roster (`a_device_behind_on_its_roster_proves_its_inbox_once_it_catches_up`).
 - `node/link_pake.rs`: the link channel. SPAKE2 (RustCrypto `spake2` 0.4, Ed25519 group,
   identities `hollow-link1:{rendezvous}:joiner|presenter`) on the code's 4-char secret part;
   HKDF-SHA256 with the rendezvous as salt gives a key per direction plus a confirm key; the

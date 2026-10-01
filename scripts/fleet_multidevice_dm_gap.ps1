@@ -318,7 +318,7 @@ function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
 }
 
 # The composer is TAPPED first (enter_text on an unfocused field reports
@@ -326,8 +326,8 @@ function Open-Dm($peer, $friendName) {
 # send is never mistaken for a delivery failure on the other side.
 function Send-Dm($peer, $body) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-        Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $body }
+        Step $peer @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+        Step $peer @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = $body }
         Step $peer @{ op = 'key'; value = 'enter' }
         $landed = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "text:$body"; timeout_ms = 20000 }
         if ($landed.ok) { [void]$script:Thread.Add((Expand-FleetVars $body)); return }
@@ -437,38 +437,39 @@ function Close-Friends($peer) {
 
 function Open-SettingsDevices($peer) {
     Step $peer @{ op = 'tap'; target = 'semantics:Settings'; index = 0 }
-    Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 20000 }
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > text:Devices'; index = 0 }
-    Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent > text:Link a device'; timeout_ms = 20000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 20000 }
+    Step $peer @{ op = 'tap'; target = 'type:SettingsPlace > text:Devices'; index = 0 }
+    Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace > text:Link a device'; timeout_ms = 20000 }
 }
 
 function Close-Settings($peer) {
-    $open = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 1500 }
+    $open = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 1500 }
     if (-not $open.ok) { return }
     Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
-    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 3000 }
+    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 3000 }
     if ($gone.ok) { return }
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 }
-    Step $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 10000 }
+    Step $peer @{ op = 'tap'; target = 'semantics:Close settings'; index = 0 }
+    Step $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 10000 }
 }
 
-# The dialog renders the code spaced out and six dots until it is minted, so
-# the capture is a regex, retried.
+# The dialog renders the code spaced out with a dash after the sixth character
+# (`A B C D E F - G H J K`) and dots until it is minted, so the capture is a
+# regex, retried. The field takes it without the dash.
 function Get-LinkCode($peer) {
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > text:Link a device'; index = 0 }
+    Step $peer @{ op = 'tap'; target = 'type:SettingsPlace > text:Link a device'; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'type:_DeviceLinkContent'; timeout_ms = 20000 }
     for ($attempt = 1; $attempt -le 20; $attempt++) {
         $answer = Invoke-SoftStep $peer @{
             op = 'capture'; target = 'type:_DeviceLinkContent'; as = 'LINKCODE_RAW'
-            regex = '([A-Z2-9](?: [A-Z2-9]){5})'
+            regex = '([A-Z2-9](?: [A-Z2-9]){5} - [A-Z2-9](?: [A-Z2-9]){3})'
         }
         if ($answer.ok) {
-            $code = ($script:FleetVars['LINKCODE_RAW'] -replace '\s', '')
-            if ($code.Length -eq 6) { return $code }
+            $code = ($script:FleetVars['LINKCODE_RAW'] -replace '[\s-]', '')
+            if ($code.Length -eq 10) { return $code }
         }
         Start-Sleep -Milliseconds 700
     }
-    throw "[$peer] never rendered a 6-character link code"
+    throw "[$peer] never rendered a 10-character link code"
 }
 
 # --------------------------------------------------------------------------
@@ -504,12 +505,12 @@ try {
     # ---- L: friends, history, and the link ---------------------------------
     Say 'L: a and c become friends and DM both ways, then b is linked from a'
     Open-Friends a
-    Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Add friend'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Add friend'; index = 0 }
     Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_C}' }
     Step a @{ op = 'wait_for'; target = 'text:${PEER_C}'; timeout_ms = 15000 }
     Step a @{ op = 'tap'; target = 'text:Send request'; index = 0 }
     Open-Friends c
-    Step c @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
+    Step c @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Requests'; index = 0 }
     Step c @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
     Step c @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 90000 }
@@ -538,8 +539,8 @@ try {
     Step b @{ op = 'wait_for'; target = "text:$code"; timeout_ms = 15000 }
     Step b @{ op = 'tap'; target = 'text:Link'; index = 0 }
     Step b @{ op = 'wait_for'; target = 'text:Linking this device'; timeout_ms = 45000 }
-    Step a @{ op = 'wait_for'; target = 'text:Send your data?'; timeout_ms = 60000 }
-    Step a @{ op = 'tap'; target = 'text:Send data'; index = 0 }
+    Step a @{ op = 'wait_for'; target = 'text:Add this device?'; timeout_ms = 60000 }
+    Step a @{ op = 'tap'; target = 'text:Add device'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
     Step b @{ op = 'wait_for'; target = 'text:Linked'; timeout_ms = 120000 }
 

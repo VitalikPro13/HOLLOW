@@ -402,7 +402,7 @@ try {
     # ---- 3. the stranger asks to join, with nobody there to answer ----------
     Say '3/8 b joins with nobody online - THE PARK'
     Step b @{ op = 'tap'; target = 'semantics:Create a server' }
-    Step b @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+    Step b @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
     Step b @{ op = 'tap'; target = 'text:Join'; index = 0 }
     # Soft: the toast is three seconds of reassurance, not the behaviour under
     # test, and a poll can arrive after it has faded.
@@ -469,11 +469,11 @@ try {
     # b's ROW, by key, not by name: b's profile has never met a, so the row may
     # still read as a truncated id (and every peer id starts with the same eight
     # characters, so a truncated one identifies nobody). Each member tile is
-    # keyed `mem-<peerId>`, which names b and only b. The catch-up fires on
+    # keyed `member:<peerId>`, which names b and only b. The catch-up fires on
     # RoomMembers and the coordinator then serves it, so 45s.
-    Step a @{ op = 'wait_for'; target = 'key:mem-${PEER_B}'; timeout_ms = 45000 }
+    Step a @{ op = 'wait_for'; target = 'key:member:${PEER_B}'; timeout_ms = 45000 }
     # And exactly two rows: a ghost or duplicate row would satisfy the line above.
-    Step a @{ op = 'wait_for'; target = 'type:_ServerMemberTile'; count = 2; timeout_ms = 15000 }
+    Step a @{ op = 'wait_for'; target = 'type:_MemberRow'; count = 2; timeout_ms = 15000 }
     Set-Gate 'G5 a returns alone and admits b from the ring (2 rows)' 'PASS'
     $namedB = Invoke-SoftStep a @{ op = 'wait_for'; target = 'text:probe-b'; timeout_ms = 20000 }
     if ($namedB.ok) {

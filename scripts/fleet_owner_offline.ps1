@@ -143,7 +143,7 @@ try {
 
     Say '2/6 member b joins while the owner is up'
     Step b @{ op = 'tap'; target = 'semantics:Create a server' }
-    Step b @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+    Step b @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
     Step b @{ op = 'tap'; target = 'text:Join'; index = 0 }
     Step b @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 90000 }
     Step b @{ op = 'open_server'; name = $server }
@@ -167,7 +167,7 @@ try {
     # ---- 3. A stranger joins with only a plain member there to serve it ----
     Say '4/6 stranger c joins with the owner offline - THE TEST'
     Step c @{ op = 'tap'; target = 'semantics:Create a server' }
-    Step c @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+    Step c @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
     Step c @{ op = 'tap'; target = 'text:Join'; index = 0 }
     Step c @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 120000 }
     Step c @{ op = 'open_server'; name = $server }

@@ -531,12 +531,12 @@ try {
     # --- G1: friends, a server, both directions. ---------------------------
     Say '1/6 friends + server baseline'
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+    Step b @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Add friend'; index = 0 }
     Step b @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_A}' }
     Step b @{ op = 'wait_for'; target = 'text:${PEER_A}'; timeout_ms = 15000 }
     Step b @{ op = 'tap'; target = 'text:Send request'; index = 0 }
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:probe-b'; timeout_ms = 60000 }
@@ -566,7 +566,7 @@ try {
     Step a @{ op = 'key'; value = 'escape' }
 
     Step b @{ op = 'tap'; target = 'semantics:Create a server' }
-    Step b @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+    Step b @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
     Step b @{ op = 'tap'; target = 'text:Join'; index = 0 }
     Step b @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 120000 }
     Step b @{ op = 'open_server'; name = $server }

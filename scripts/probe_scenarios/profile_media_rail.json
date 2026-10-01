@@ -21,7 +21,7 @@
   {"op": "open_server", "name": "${SERVER}"},
   {"op": "wait", "ms": 2000},
   {"op": "shot", "name": "rail-03-server"},
-  {"op": "tap", "target": "type:_ServerMemberTile", "soft": true},
+  {"op": "tap", "target": "type:_MemberRow", "soft": true},
   {"op": "wait", "ms": 1500},
   {"op": "shot", "name": "rail-04-profile-card"},
   {"op": "dump", "name": "rail-profile-card"},

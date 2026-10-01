@@ -649,7 +649,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     final state = ref.watch(deviceLinkSyncProvider);
     final platform = platformName(state.theirPlatform);
     final who = state.theirLabel.isEmpty
-        ? (platform.isEmpty ? 'A device' : 'A $platform device')
+        ? aDeviceOn(state.theirPlatform)
         : (platform.isEmpty ? state.theirLabel : '${state.theirLabel} ($platform)');
     return _phase(
       title: 'Add this device?',

@@ -409,6 +409,21 @@ void main() {
       final visible = _positions.itemPositions.value.map((p) => p.index);
       expect(visible, contains(150));
     });
+
+    testWidgets('stays pressable where the thumb covers it', (tester) async {
+      await _pumpList(tester, itemCount: 40, unreadRevIndex: 10);
+      final mark = find.bySemanticsLabel('Jump to the first unread message');
+      final thumb = find.descendant(
+          of: find.byType(ChatScrollRail),
+          matching: find.byWidgetPredicate((w) => w is Positioned && w.width == 6));
+      final markCentre = tester.getRect(mark).center;
+      expect(tester.getRect(thumb).contains(markCentre), isTrue,
+          reason: 'the case under test: the thumb sits over the mark');
+      final hit = tester.hitTestOnBinding(markCentre);
+      expect(hit.path.any((e) => e.target == tester.renderObject(mark)), isTrue,
+          reason: 'a thumb painted over the mark took the click, and the '
+              'list scrolled to the pointer instead of the first unread');
+    });
   });
 
   testWidgets('the rail is a column beside the list, not an overlay on it',

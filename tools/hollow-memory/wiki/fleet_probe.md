@@ -481,15 +481,47 @@ env `Start-PeerProcess` sets); `fleet_send` then drives it like any peer. A rela
 does itself (link import, Erase now) replays the inbox from line 0: truncate `inbox.jsonl`
 and delete `live-ready` before the new process starts.
 
-**Selectors that drifted with the 09-26 design pass.** The Friends manager's tabs are a
-`HollowTabBar`: `type:_FriendsManager > semantics:<tab>` (fixed in every script). Settings is
-the `SettingsPlace` place, closed by `semantics:Close settings` (fixed in
-`fleet_device_link.ps1`). The join field's hint is `Invite link`; a DM composer's hint is
-`Message <name>` (both fixed in `fleet_device_link.ps1` only). STILL STALE on `hint:Type a
-message...`: `fleet_asset_offline`, `fleet_at_rest`, `fleet_destroy`, `fleet_file_card_states`,
-`fleet_multidevice_dm_gap`, `fleet_relay_switch` and the `home_mobile_before` and
-`mobile_friend_dm` scenarios. `fleet_device_link.ps1`'s G7 to G9 were not rerun after the
-fixes; session 22 drove the link itself by hand.
+**Selectors that drifted with the 09-26 design pass (all fixed session 23).** Address
+widgets, not copy, wherever one exists:
+- composer: `type:ChatComposerRow > type:EditableText` (hints read `Message <name>` /
+  `Message #<channel>` / `Note to self`); join field `hint:Invite link`.
+- Friends manager tabs: `type:_FriendsManager > type:_TabBar > semantics:<tab>`. The ROUTE
+  itself is labelled `Friends`, so an unscoped `semantics:Friends` taps the whole dialog.
+- Settings `type:SettingsPlace` (close `semantics:Close settings`), server settings
+  `type:ServerSettingsPlace` (close `semantics:Close server settings`); member rows
+  `type:_MemberRow` keyed `member:<master>`; device rows `type:_DeviceRow`.
+- link: 10-char code regex `([A-Z2-9](?: [A-Z2-9]){5} - [A-Z2-9](?: [A-Z2-9]){3})`, prompt
+  `Add this device?` / `Add device`; destroy-everywhere also types the fixture phrase.
+- GIFs: `semantics:Emoji, GIFs and stickers` then `semantics:GIFs`; a channel's Public
+  switch: Server settings > Channels > `semantics:<name>. Open its settings` > `semantics:Public`.
+- An edited message is ONE text `body (edited)`: wait with `contains:`, and a reply's quote
+  repeats the original, so `contains:` on it hits the quote first.
+
+## fleet_all.ps1 (session 23)
+
+`powershell -File scripts\fleet_all.ps1 [-SkipBuild] [-Only a,b] [-From x] [-KeepFixtures]`
+builds once, onboards fresh a,b,c (a stable fixture drags an earlier run's mailbox and
+roster along), runs every scenario and journey with its own log in
+`build\fleet_out\all\<name>.log`, and writes `summary.md` (one row per item, failed gates
+under it). After each item it collects every peer log line matching
+`[HOLLOW-SECURITY]|REJECTED|Dropped|Refused|Ignored` stamped after the item began into
+`<name>-refusals.txt`: the honest-traffic check. Windows writes `hollow_debug.log` beside
+the staged exe (`build\fleet\<peer>`), not in the data dir. Opt-in only (`-Only`):
+`fleet_relay_restart` (restarts PRODUCTION), `fleet_relay_switch` (needs a self-hosted
+relay), `fleet_at_rest` (seeds from an older build). Items take `args` (`-Keep`, `-Attach`)
+and `keepUp` so `calls_after_vc` attaches to `calls_after`'s fleet. About 75 minutes for all.
+Gap (session 23): each item rotates the staged `hollow_debug.log`, so after a full run only the
+LAST item's app log survives; copy each peer's log into `all\` per item before relying on it.
+
+**Trap: never link a fleet FIXTURE identity to another device.** Linking Windows `a` to a
+phone left the phone with a newer roster; every later scenario restored the older fixture,
+whose inbox proof the relay now refuses (version mark), so friend requests deposited for
+that identity never reached the Windows copy (`friend_dm` "No requests waiting"). Use
+throwaway copies for cross-platform links, or onboard fresh afterwards.
+
+`fleet/moderation.json` (a, b, c): #staff for moderators and up, promote c, a's post reaches
+c and never b, kick b, rejoin, ban b, refused rejoin, delete. It found the co-member roster
+bug (wiki rust_social).
 
 ## Honest scope
 
@@ -585,6 +617,21 @@ pwsh scripts/fleet.ps1 -Stop
 - `semantics:X` also matches a label that starts with `X,`: a badge turns the tab into
   `Friends, 1 friend request` and must not make it unaddressable.
 - `UI_PROBE_TRACE=1` narrates the three boot awaits.
+
+**Driving the phones by hand (session 23).** Batches go through `fleet_send.ps1` on the
+mini with the JSON shipped as a file (`tr -d '\r' < f | ssh ... "cat > /tmp/x.json"`, then
+`pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/x.json)"`). A peer relaunched on its
+EXISTING data (link import, after a reinstall) is `xcrun simctl launch` after recreating
+`<container>/Documents/probe_out` and the `build/fleet_out/<peer>` symlink (probe.env
+persists); a new build reinstalls with `simctl install` and keeps the data container, but
+`probe.env` names the old container path, so rewrite its two paths. `simctl privacy <udid>
+grant microphone|camera|photos com.anonlisten.hollow` KILLS the running app. The phone chat
+has no `ChatDropZone`, so `attach_file` cannot stage there: `arm_file_pick` then tap
+`semantics:Attach a file` and `text:File`; send is `semantics:Send message`. Never tap a
+picker without arming it first: the native picker opens and only a relaunch clears it.
+Call screen: answer `semantics:Accept`, hang up `semantics:Leave the call` (the captions
+"Accept"/"End" sit outside the buttons). `xcrun simctl io <udid> screenshot` shows what the
+app's own shot cannot (the software keyboard).
 
 **Mobile scenario notes (`mobile_friend_dm.json`):** `Send Friend Request` (not `Send Request`),
 `hint:Type a message...` + `semantics:Send` (Enter does not send), tap the composer before typing,

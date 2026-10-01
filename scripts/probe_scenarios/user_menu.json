@@ -4,7 +4,7 @@
   {"op": "dump", "name": "01-server"},
 
   {"op": "log", "message": "right-click a row in the member panel"},
-  {"op": "right_click", "target": "type:_ServerMemberTile"},
+  {"op": "right_click", "target": "type:_MemberRow"},
   {"op": "shot", "name": "02-member-menu"},
   {"op": "dump", "name": "02-member-menu"},
   {"op": "expect_text", "value": "Profile"},
@@ -17,7 +17,7 @@
   {"op": "expect_no_text", "value": "Copy user ID"},
 
   {"op": "log", "message": "and again, to check the menu reopens after acting"},
-  {"op": "right_click", "target": "type:_ServerMemberTile"},
+  {"op": "right_click", "target": "type:_MemberRow"},
   {"op": "expect_text", "value": "Profile"},
   {"op": "key", "value": "escape"},
   {"op": "wait", "ms": 400},

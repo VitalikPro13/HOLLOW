@@ -8,7 +8,7 @@
     "their badge in the semantics label ('Friends, 1 friend request'), which",
     "the semantics: target now tolerates; a friend row's label is not itself",
     "hit-testable, the row is, which the tap guard now accepts; the composer",
-    "is 'Type a message...' and sends with the Send button, never Enter; and",
+    "is 'Message <name>' and sends with the Send button, never Enter; and",
     "the Chats list only grows a row for a friend once a message exists, so a",
     "opens the DM from Chats only after b has written.",
     "",

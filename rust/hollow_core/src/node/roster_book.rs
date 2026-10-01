@@ -251,6 +251,13 @@ pub(crate) fn own_roster(master: &str, db_path: &str, db_passphrase: &str) -> Op
     own(master, db_path, db_passphrase).map(|(r, _)| r)
 }
 
+/// The room only holders of our master key can name. Every device of the identity
+/// joins it, a waiting or removed one too: an identity with no contacts and no
+/// servers shares no other room with a restored backup, and its answer was lost.
+pub(crate) fn own_room(local_master: &str) -> String {
+    super::dm_room::dm_room_code(local_master, local_master)
+}
+
 /// Apply a change to our own roster, persist it, and return the result. `None` when
 /// the database is unavailable or `change` refuses.
 fn change_own(

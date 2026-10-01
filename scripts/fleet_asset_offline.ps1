@@ -130,7 +130,7 @@ function Stop-Peer($peer) {
 # it: a bare name matches a friend row, a dialog row and a member row alike.
 function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
     # The pane is up before the Olm session behind it necessarily is, and a
     # send into that gap is delivered one way only. There is no widget for
     # "the session is confirmed", so this is a settle rather than a wait.
@@ -151,9 +151,11 @@ function Open-Dm($peer, $friendName) {
 # has nothing to watch arrive (this cost one run). A collision now fails
 # loudly at gate 4's "GIF loading" rather than passing on the wrong evidence.
 function Send-Gif($peer, $caption, $cell = 0) {
-    Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-    Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $caption }
-    Step $peer @{ op = 'tap'; target = 'semantics:Insert GIF'; index = 0 }
+    Step $peer @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+    Step $peer @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = $caption }
+    Step $peer @{ op = 'tap'; target = 'semantics:Emoji, GIFs and stickers'; index = 0 }
+    Step $peer @{ op = 'wait_for'; target = 'semantics:GIFs'; timeout_ms = 15000 }
+    Step $peer @{ op = 'tap'; target = 'semantics:GIFs'; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'type:_GifCell'; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = 'type:_GifCell'; index = $cell }
     # The row FIRST, and only then the dismiss: the pick downloads and
@@ -168,7 +170,7 @@ function Send-Gif($peer, $caption, $cell = 0) {
     # route, so escape does nothing to it. Tapping through the barrier is what
     # closes it, and allowMiss is honest here: the barrier IS what we mean to
     # hit.
-    Step $peer @{ op = 'tap'; target = 'hint:Type a message...'; allowMiss = $true }
+    Step $peer @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText'; allowMiss = $true }
     Step $peer @{ op = 'wait_for'; gone = 'type:_GifCell'; timeout_ms = 20000 }
     # The sender holds the bytes it just fetched, so nothing in its thread may
     # sit at "GIF loading" (a positive wait on "GIF" would pass on an EARLIER
@@ -213,7 +215,7 @@ try {
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
 
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'text:Add friend'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Add friend'; index = 0 }
     # Assert the id really IS in the field before sending: enter_text has
     # reported success into this field while it held only a fragment.
     Step a @{ op = 'enter_text'; target = 'hint:Paste an ID, or type a nickname'; value = '${PEER_B}' }
@@ -226,7 +228,7 @@ try {
     Step a @{ op = 'wait_for'; gone = 'type:HollowDialog'; timeout_ms = 15000 }
 
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
+    Step b @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Requests'; index = 0 }
     Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
     Step b @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step b @{ op = 'key'; value = 'escape' }
@@ -235,12 +237,12 @@ try {
     Step b @{ op = 'wait_for'; target = 'text:probe-a'; timeout_ms = 90000 }
 
     Open-Dm a 'probe-b'
-    Step a @{ op = 'enter_text'; target = 'hint:Type a message...'; value = 'hello from a ${RUN}' }
+    Step a @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = 'hello from a ${RUN}' }
     Step a @{ op = 'key'; value = 'enter' }
     Step a @{ op = 'wait_for'; target = 'text:hello from a ${RUN}'; timeout_ms = 30000 }
     Open-Dm b 'probe-a'
     Step b @{ op = 'wait_for'; target = 'text:hello from a ${RUN}'; timeout_ms = 90000 }
-    Step b @{ op = 'enter_text'; target = 'hint:Type a message...'; value = 'hello from b ${RUN}' }
+    Step b @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = 'hello from b ${RUN}' }
     Step b @{ op = 'key'; value = 'enter' }
     Step b @{ op = 'wait_for'; target = 'text:hello from b ${RUN}'; timeout_ms = 30000 }
     Step a @{ op = 'wait_for'; target = 'text:hello from b ${RUN}'; timeout_ms = 90000 }

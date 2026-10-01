@@ -19,7 +19,7 @@
   {"peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE"},
   {"peer": "a", "op": "key", "value": "escape"},
   {"peer": "b", "op": "tap", "target": "semantics:Create a server"},
-  {"peer": "b", "op": "enter_text", "target": "hint:Invite link or server ID", "value": "${INVITE}"},
+  {"peer": "b", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}"},
   {"peer": "b", "op": "tap", "target": "text:Join", "index": 0},
   {"peer": "b", "op": "wait_for", "target": "server:redesign", "timeout_ms": 90000},
   {"peer": "b", "op": "open_server", "name": "redesign"},

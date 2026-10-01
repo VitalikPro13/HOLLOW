@@ -515,14 +515,14 @@ function Close-Friends($peer) {
 }
 
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > semantics:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > type:_TabBar > semantics:$tab"; index = 0 }
 }
 
 function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:ChatComposerRow > type:EditableText'; timeout_ms = 30000 }
 }
 
 # The composer is TAPPED first: enter_text on an unfocused field reports success
@@ -530,8 +530,8 @@ function Open-Dm($peer, $friendName) {
 # never happened cannot be mistaken for a delivery failure on the other side.
 function Send-Dm($peer, $body) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-        Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $body }
+        Step $peer @{ op = 'tap'; target = 'type:ChatComposerRow > type:EditableText' }
+        Step $peer @{ op = 'enter_text'; target = 'type:ChatComposerRow > type:EditableText'; value = $body }
         Step $peer @{ op = 'key'; value = 'enter' }
         $landed = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "text:$body"; timeout_ms = 20000 }
         if ($landed.ok) { return }
@@ -543,7 +543,7 @@ function Send-Dm($peer, $body) {
 
 function Test-SettingsOpen($peer) {
     $answer = Send-FleetStep $peer ([pscustomobject]@{
-        op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 800
+        op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 800
     }) 60
     return [bool]$answer.ok
 }
@@ -554,9 +554,9 @@ function Test-SettingsOpen($peer) {
 function Open-Settings($peer, $category) {
     if (-not (Test-SettingsOpen $peer)) {
         Step $peer @{ op = 'tap'; target = 'semantics:Settings'; index = 0 }
-        Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 20000 }
+        Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 20000 }
     }
-    Step $peer @{ op = 'tap'; target = "type:_UserSettingsContent > text:$category"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:SettingsPlace > text:$category"; index = 0 }
     Step $peer @{ op = 'wait'; ms = 800 }
 }
 
@@ -565,15 +565,15 @@ function Close-Settings($peer) {
     # Escape first: after a failed gate a sub-screen still covers the Close
     # button, and a tap that cannot reach it used to sink the cleanup.
     Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
-    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 3000 }
+    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 3000 }
     if ($gone.ok) { return }
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 }
-    Step $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 10000 }
+    Step $peer @{ op = 'tap'; target = 'semantics:Close settings'; index = 0 }
+    Step $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 10000 }
 }
 
 function Open-SettingsDevices($peer) {
     Open-Settings $peer 'Devices'
-    Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent > text:Link a device'; timeout_ms = 20000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace > text:Link a device'; timeout_ms = 20000 }
 }
 
 # Opens "Link a device" on the populated side and reads the code off the screen.
@@ -587,31 +587,31 @@ function Get-LinkCode($peer) {
     # wait_for, which sees a built widget a click cannot get to.
     $opened = $false
     for ($i = 0; $i -lt 8 -and -not $opened; $i++) {
-        $tap = Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > text:Link a device'; index = 0 }
+        $tap = Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:SettingsPlace > text:Link a device'; index = 0 }
         if ($tap.ok) {
             $shown = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'type:_DeviceLinkContent'; timeout_ms = 15000 }
             $opened = $shown.ok
         }
         if (-not $opened) {
-            Invoke-SoftStep $peer @{ op = 'scroll'; target = 'type:_UserSettingsContent'; dy = -350 } | Out-Null
+            Invoke-SoftStep $peer @{ op = 'scroll'; target = 'type:SettingsPlace'; dy = -350 } | Out-Null
         }
     }
     if (-not $opened) { throw "[$peer] could not open the Link a device screen" }
     for ($attempt = 1; $attempt -le 20; $attempt++) {
         $answer = Invoke-SoftStep $peer @{
             op = 'capture'; target = 'type:_DeviceLinkContent'; as = 'LINKCODE_RAW'
-            regex = '([A-Z2-9](?: [A-Z2-9]){5})'
+            regex = '([A-Z2-9](?: [A-Z2-9]){5} - [A-Z2-9](?: [A-Z2-9]){3})'
         }
         if ($answer.ok) {
-            $code = ($script:FleetVars['LINKCODE_RAW'] -replace '\s', '')
-            if ($code.Length -eq 6) {
+            $code = ($script:FleetVars['LINKCODE_RAW'] -replace '[\s-]', '')
+            if ($code.Length -eq 10) {
                 Say "$peer is showing link code $code" 'Green'
                 return $code
             }
         }
         Start-Sleep -Milliseconds 700
     }
-    throw "[$peer] never rendered a 6-character link code"
+    throw "[$peer] never rendered a 10-character link code"
 }
 
 # Walks the welcome dialog to the enter-code screen on an EMPTY peer.
@@ -640,8 +640,8 @@ function Invoke-DeviceLink($peer, $masterA) {
     Step $peer @{ op = 'tap'; target = 'text:Link'; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'text:Linking this device'; timeout_ms = 45000 }
 
-    Step a @{ op = 'wait_for'; target = 'text:Send your data?'; timeout_ms = 60000 }
-    Step a @{ op = 'tap'; target = 'text:Send data'; index = 0 }
+    Step a @{ op = 'wait_for'; target = 'text:Add this device?'; timeout_ms = 60000 }
+    Step a @{ op = 'tap'; target = 'text:Add device'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
     Step $peer @{ op = 'wait_for'; target = 'text:Linked'; timeout_ms = 120000 }
     Step $peer @{ op = 'shot'; name = "destroy-$runTag-$peer-linked" }
@@ -700,7 +700,7 @@ function Open-DestroyDialog($peer) {
             $dialog = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'dialog > text:Destroy your data'; timeout_ms = 10000 }
             if ($dialog.ok) { return $true }
         }
-        Invoke-SoftStep $peer @{ op = 'scroll'; target = 'type:_UserSettingsContent'; dy = -400 } | Out-Null
+        Invoke-SoftStep $peer @{ op = 'scroll'; target = 'type:SettingsPlace'; dy = -400 } | Out-Null
     }
     return $false
 }
@@ -793,7 +793,7 @@ try {
     if ($deviceB -eq $deviceA) { throw "b reports a's device id ($deviceA), so it is not a second device" }
     Close-Settings a
     Open-SettingsDevices a
-    Step a @{ op = 'wait_for'; target = 'type:DeviceRowShell'; count = 2; timeout_ms = 90000 }
+    Step a @{ op = 'wait_for'; target = 'type:_DeviceRow'; count = 2; timeout_ms = 90000 }
     Step a @{ op = 'shot'; name = "destroy-$runTag-a-two-devices" }
     Close-Settings a
     Set-Gate 'G1 a and b are LINKED devices of one identity' 'PASS'
@@ -831,7 +831,7 @@ try {
     }
     Close-Settings a
     Open-SettingsDevices a
-    Step a @{ op = 'wait_for'; target = 'type:DeviceRowShell'; count = 3; timeout_ms = 90000 }
+    Step a @{ op = 'wait_for'; target = 'type:_DeviceRow'; count = 3; timeout_ms = 90000 }
     Step a @{ op = 'shot'; name = "destroy-$runTag-a-three-devices" }
     Close-Settings a
     Step d @{ op = 'dump'; name = 'g3_d' }
@@ -871,6 +871,8 @@ try {
     # makes G5 possible.
     Step a @{ op = 'tap'; target = 'dialog > type:HollowToggle'; index = 0 }
     Step a @{ op = 'wait'; ms = 600 }
+    # Destroying every device takes the recovery phrase (design ID-1).
+    Step a @{ op = 'enter_text'; target = 'dialog > hint:The 12 or 24 words, in order'; value = (Get-FixturePhrase a) }
     Step a @{ op = 'tap'; target = 'dialog > hint:DESTROY' }
     Step a @{ op = 'enter_text'; target = 'dialog > hint:DESTROY'; value = 'DESTROY' }
     Step a @{ op = 'wait_for'; target = 'dialog > text:DESTROY'; timeout_ms = 15000 }

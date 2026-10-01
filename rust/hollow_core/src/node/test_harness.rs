@@ -47,6 +47,9 @@ struct RelayInner {
     /// `inbox:{master}` room -> the devices that proved on join that they are that
     /// master's. Only they see each other and receive there, as on the relay.
     inbox_owners: HashMap<String, HashSet<String>>,
+    /// master -> the highest inbox proof version shown for it. A lower one never
+    /// proves ownership again, as on the relay (`device_list_max_version`).
+    inbox_marks: HashMap<String, u64>,
     /// target device_peer_id -> buffered (room, frame-kind, from, data) for
     /// replay when the target next joins that room. Mirrors the relay's
     /// offline buffer (the load-bearing peer-fallback path).
@@ -380,6 +383,12 @@ impl MockRelay {
     pub(crate) fn room_devices(&self, room: &str) -> std::collections::HashSet<String> {
         let inner = self.inner.lock().unwrap();
         inner.rooms.get(room).cloned().unwrap_or_default()
+    }
+
+    /// The devices that proved they own `master`'s inbox.
+    pub(crate) fn inbox_owners(&self, master: &str) -> std::collections::HashSet<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.inbox_owners.get(&format!("inbox:{master}")).cloned().unwrap_or_default()
     }
 
     /// Frames currently buffered for `peer`. The relay buffers a direct frame under
@@ -762,10 +771,20 @@ impl MockRelay {
                 // (`verify_device_list` folds both), THIS authenticated socket is a live
                 // un-revoked member of it, and the room really is that master's inbox. Any
                 // failure is a plain join that shows and replays nothing.
-                let owner_ok = super::crypto_handler::verify_device_list(&proof)
-                    && proof.devices.iter().any(|d| d == from)
-                    && !proof.revoked.iter().any(|r| r == from)
+                let verified = super::crypto_handler::verify_device_list(&proof)
                     && room_code == format!("inbox:{}", proof.master_peer_id);
+                // Any verifying list raises the mark, whoever carries it.
+                let current = verified && {
+                    let mark = inner.inbox_marks.entry(proof.master_peer_id.clone()).or_insert(0);
+                    let fresh = proof.version >= *mark;
+                    if fresh {
+                        *mark = proof.version;
+                    }
+                    fresh
+                };
+                let owner_ok = current
+                    && proof.devices.iter().any(|d| d == from)
+                    && !proof.revoked.iter().any(|r| r == from);
                 inner.join(from, &room_code, owner_ok);
                 if owner_ok {
                     inner.replay_mailbox(from, &proof.master_peer_id);
@@ -29828,6 +29847,224 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
     assert_ne!(super::resolver::resolve(&t2_dev), o_master);
 
     drop((o, f, t, t2));
+}
+
+/// An identity with no friends and no servers shares no room with a restored backup,
+/// so the answer rides the room only its master key can name: an approval while the
+/// device is online, a refusal made while it was away (dropped without a clean leave,
+/// so it is not new on return), and an approval it hears when the approver returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_restored_device_with_no_contacts_hears_its_answer() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 151;
+    const O_DEV: u8 = 152;
+    const T_DEV: u8 = 153;
+    const T2_DEV: u8 = 154;
+    const T3_DEV: u8 = 155;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let t_dev = tag_kp(T_DEV).peer_id();
+    let t2_dev = tag_kp(T2_DEV).peer_id();
+    let t3_dev = tag_kp(T3_DEV).peer_id();
+    let now = super::roster_book::now_ms();
+
+    let mut o = spawn_node_seeded(
+        &relay, O_MASTER, O_DEV, &[], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000)),
+    ).await;
+    let stolen = super::roster_book::load(&o.store(), &o_master).expect("O holds its roster");
+
+    let mut t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[], Some(stolen.clone())).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t_dev)
+        })
+        .await,
+        "the owner's device must be asked about the restored backup",
+    );
+    o.cmd_tx.send(NodeCommand::ApproveDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRestored)).await,
+        "the approved device learns it joined",
+    );
+    assert!(
+        wait_until(20, async || relay.inbox_owners(&o_master).contains(&t_dev)).await,
+        "and owns its inbox from then on, without a reconnect",
+    );
+
+    let mut t2 = spawn_node_seeded(&relay, O_MASTER, T2_DEV, &[], Some(stolen.clone())).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t2_dev)
+        })
+        .await,
+        "the owner's device must be asked about the second backup",
+    );
+    // Without a clean leave, so the owner's device does not take it for new on return.
+    relay.drop_socket_silently(&t2_dev);
+    assert!(
+        wait_until(10, async || !relay.online_devices().contains(&t2_dev)).await,
+        "the second backup goes offline before the answer",
+    );
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone() }).await.unwrap();
+    sleep_ms(1000).await;
+    drain_events(&mut t2);
+    relay.set_online(&t2_dev, true);
+    assert!(
+        wait_event(&mut t2, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
+        "the refused device hears the refusal when it comes back",
+    );
+
+    // Answered while away, and back before the device that answered: the answer
+    // arrives when that device returns and finds it waiting in the room.
+    let mut t3 = spawn_node_seeded(&relay, O_MASTER, T3_DEV, &[], Some(stolen)).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t3_dev)
+        })
+        .await,
+        "the owner's device must be asked about the third backup",
+    );
+    relay.set_online(&t3_dev, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&t3_dev)).await);
+    o.cmd_tx.send(NodeCommand::ApproveDevice { device_peer_id: t3_dev.clone() }).await.unwrap();
+    sleep_ms(1000).await;
+    relay.set_online(&o.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&o.device_id)).await);
+    drain_events(&mut t3);
+    relay.set_online(&t3_dev, true);
+    sleep_ms(1500).await;
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_event(&mut t3, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRestored)).await,
+        "the approved device hears it once the device that approved returns",
+    );
+
+    drop((o, t, t2, t3));
+}
+
+/// Co-members who are not friends meet as strangers: each side's first-contact
+/// profile exchange runs before the join is admitted, so nobody's roster crossed and
+/// the joiner took the owner's device for a stranger (refused its sync, its offers,
+/// its subgroup KeyPackage request, and forked the restricted channel's group).
+/// Once in the server's group, the joiner holds every online member's roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_joiner_who_is_nobodys_friend_learns_every_members_devices() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 171;
+    const O_DEV: u8 = 172;
+    const M_MASTER: u8 = 173;
+    const M_DEV: u8 = 174;
+    const J_MASTER: u8 = 175;
+    const J_DEV: u8 = 176;
+    let (o_master, m_master) = (tag_kp(O_MASTER).peer_id(), tag_kp(M_MASTER).peer_id());
+    let (o_dev, m_dev) = (tag_kp(O_DEV).peer_id(), tag_kp(M_DEV).peer_id());
+    let now = super::roster_book::now_ms();
+
+    let mut o = spawn_node_seeded(&relay, O_MASTER, O_DEV, &[], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000))).await;
+    let mut m = spawn_node_seeded(&relay, M_MASTER, M_DEV, &[], Some(protected_roster(M_MASTER, &[M_DEV], now - 60_000))).await;
+    let mut j = spawn_node_seeded(&relay, J_MASTER, J_DEV, &[], Some(protected_roster(J_MASTER, &[J_DEV], now - 60_000))).await;
+    let server_id = create_server_and_wait(&mut o, "Strangers").await;
+
+    for node in [&mut m, &mut j] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+            .await
+            .unwrap();
+        assert!(
+            wait_event(node, std::time::Duration::from_secs(20), |ev| {
+                matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+            })
+            .await,
+            "{} joins", node.device_id,
+        );
+        let me = node.device_id.clone();
+        assert!(
+            wait_until(20, async || o.mls_members(&server_id).await.contains(&me)).await,
+            "{me} gets its leaf in the server group",
+        );
+    }
+
+    assert!(
+        wait_until(20, async || j.known_devices(&o_master).contains(&o_dev)).await,
+        "the joiner holds the owner's roster, got {:?}", j.known_devices(&o_master),
+    );
+    assert!(
+        wait_until(20, async || j.known_devices(&m_master).contains(&m_dev)).await,
+        "the joiner holds the other member's roster, got {:?}", j.known_devices(&m_master),
+    );
+
+    drop((o, m, j));
+}
+
+/// The relay keeps the newest inbox proof any of our devices has shown it. A device
+/// that connects with a roster that changed while it was away owns nothing there;
+/// once a sibling brings it up to date it proves again, rather than going without
+/// its mailbox until its next reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_device_behind_on_its_roster_proves_its_inbox_once_it_catches_up() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 161;
+    const D1: u8 = 162;
+    const D2: u8 = 163;
+    const D3: u8 = 164;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let d3 = tag_kp(D3).peer_id();
+    let roster = protected_roster(O_MASTER, &[D1, D2, D3], super::roster_book::now_ms() - 60_000);
+
+    let d1 = spawn_node_seeded(&relay, O_MASTER, D1, &[], Some(roster.clone())).await;
+    let d2 = spawn_node_seeded(&relay, O_MASTER, D2, &[], Some(roster)).await;
+    let both = [d1.device_id.clone(), d2.device_id.clone()];
+    assert!(
+        wait_until(20, async || both.iter().all(|d| relay.inbox_owners(&o_master).contains(d))).await,
+        "both devices own the inbox at first",
+    );
+
+    relay.set_online(&d2.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d2.device_id)).await);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d3.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            super::roster_book::own(&o_master, &d1.db_path, &d1.passphrase)
+                .is_some_and(|(_, state)| state.removed.contains_key(&d3))
+        })
+        .await,
+        "the removal lands on the device that made it",
+    );
+    // Its next connect shows the relay the newer roster.
+    relay.set_online(&d1.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d1.device_id)).await);
+    relay.set_online(&d1.device_id, true);
+    assert!(wait_until(20, async || relay.inbox_owners(&o_master).contains(&d1.device_id)).await);
+
+    relay.set_online(&d2.device_id, true);
+    assert!(
+        wait_until(20, async || {
+            super::roster_book::own(&o_master, &d2.db_path, &d2.passphrase)
+                .is_some_and(|(_, state)| state.removed.contains_key(&d3))
+        })
+        .await,
+        "the device that was away learns the removal from its sibling",
+    );
+    assert!(
+        wait_until(20, async || relay.inbox_owners(&o_master).contains(&d2.device_id)).await,
+        "and then owns its inbox again without a reconnect",
+    );
+
+    drop((d1, d2));
 }
 
 /// A stolen MEMBER device removes the owner's device; the owner types the phrase on

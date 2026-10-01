@@ -334,6 +334,24 @@ fn offer_roster(
     }
 }
 
+/// Show the relay the inbox proof our roster makes now. It keeps the newest proof
+/// any of our devices has shown, so a device whose roster was behind when it
+/// connected owns nothing in its inbox (no mailbox, no siblings in view) until then.
+fn reprove_own_inbox(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_peer_str: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if let Some(proof) = super::roster_book::inbox_proof(master_keypair, db_path, db_passphrase) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinInbox {
+            room_code: format!("inbox:{local_peer_str}"),
+            proof,
+        });
+    }
+}
+
 use crate::crdt::hlc::Hlc;
 use crate::crdt::operations::{CrdtPayload};
 use crate::crdt::server_state::ServerState;
@@ -3179,6 +3197,9 @@ async fn run_event_loop(
                                     });
                                 }
                             }
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                room_code: super::roster_book::own_room(&local_peer_str),
+                            });
                             // A device our roster does not admit yet asks, on every
                             // connect: the mailbox and the rooms forget.
                             super::roster_book::announce_pending(
@@ -6714,6 +6735,26 @@ async fn after_welcome_joined(
     // is over whether or not this is the re-add that caused it.
     mls_welcome_grace.remove(group_key);
     hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
+
+    // Co-members met as strangers while this join was pending, so each side's
+    // first-contact profile exchange carried no roster. Everyone online has admitted
+    // us by the time a Welcome lands: ask each device we cannot place for its profile.
+    if channel_id.is_none() && !super::conference::is_conference_sid(server_id) {
+        let devices: Vec<String> = ws_room_peers.get(server_id)
+            .map(|p| p.iter().cloned().collect())
+            .unwrap_or_default();
+        let (tx, me) = (ws_cmd_tx.clone(), local_peer_str.to_string());
+        let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
+        tokio::task::spawn_blocking(move || {
+            let placed: std::collections::HashSet<String> = crate::storage::MessageStore::open(&path, &pass)
+                .and_then(|s| s.get_all_device_links())
+                .map(|links| links.into_iter().map(|(device, _)| device).collect())
+                .unwrap_or_default();
+            for device in devices.iter().filter(|d| !placed.contains(*d) && !super::resolver::same_identity(d, &me)) {
+                super::olm_lane::carry(&tx, device, None, &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
+            }
+        });
+    }
 
     // A parked join is only truly finished HERE: it has held the
     // server since the buffered snapshot landed, but could not
@@ -12646,6 +12687,7 @@ async fn handle_incoming_request(
             // with, our other devices included, so everyone converges now rather than
             // when each next meets the device that changed it.
             if our_devices_grew {
+                reprove_own_inbox(ws_cmd_tx, master_keypair, local_peer_str, db_path, db_passphrase);
                 let peers: Vec<String> = ws_room_peers.values()
                     .flat_map(|p| p.iter().cloned())
                     .collect();
@@ -13306,6 +13348,9 @@ async fn handle_incoming_request(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 Some(roster), db_path, db_passphrase,
             ).await;
+            if outcome.our_devices_grew {
+                reprove_own_inbox(ws_cmd_tx, master_keypair, local_peer_str, db_path, db_passphrase);
+            }
             converge_new_siblings(
                 &outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,
                 local_peer_str, server_states, is_invisible, db_path, db_passphrase,

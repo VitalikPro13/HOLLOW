@@ -42,7 +42,7 @@
   {
    "peer": "b",
    "op": "tap",
-   "target": "type:_FriendsManager > semantics:Add friend",
+   "target": "type:_FriendsManager > type:_TabBar > semantics:Add friend",
    "index": 0
   },
   {
