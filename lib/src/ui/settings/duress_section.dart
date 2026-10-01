@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
@@ -16,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
@@ -79,6 +81,26 @@ bool get _isMobile => Platform.isAndroid || Platform.isIOS;
 
 /// The running-app fact in the words of the device it is read on.
 String get _scopeNote => _isMobile ? _mobileScopeNote : _desktopScopeNote;
+
+/// Once the recovery phrase is the identity's root (design ID-1), only the
+/// phrase orders every device erased, so that scope asks for it.
+const String _phraseNote =
+    'Destroying every device needs your recovery phrase.';
+
+/// What a duress code keeps of the phrase, said where it is typed.
+const String _duressPhraseNote =
+    'Destroying every device needs your recovery phrase. Hollow checks it now, '
+    'and this device keeps a permission signed with it, never the phrase.';
+
+/// Whether this identity's roster has the phrase as its root. A failed read
+/// asks for the phrase anyway: Rust refuses without it when it is needed.
+Future<bool> _phraseIsRoot(WidgetRef ref) async {
+  try {
+    return (await ref.read(rosterStatusProvider.future)).protected;
+  } catch (_) {
+    return true;
+  }
+}
 
 /// One line under a set code saying what it destroys.
 String _setSummary(identity_api.DuressStatus status) => switch (status.scope) {
@@ -174,10 +196,13 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
 
   Future<void> _setCode() async {
     final current = ref.read(duressStatusProvider).valueOrNull;
+    final needsPhrase = widget.wideScopes && await _phraseIsRoot(ref);
+    if (!mounted) return;
     final saved = await showHollowDialog<bool>(
       context: context,
       builder: (ctx) => _DuressCodeDialog(
         wideScopes: widget.wideScopes,
+        needsPhrase: needsPhrase,
         initialScope: widget.wideScopes
             ? (current?.scope ?? kDuressScopeDevice)
             : kDuressScopeDevice,
@@ -188,6 +213,7 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
           duressCode: entry.code,
           scope: entry.scope,
           notifyFriends: entry.notifyFriends,
+          phrase: entry.phrase,
         ),
       ),
     );
@@ -266,13 +292,17 @@ class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
   }
 
   Future<void> _destroy(String initialScope) async {
+    final needsPhrase = await _phraseIsRoot(ref);
+    if (!mounted) return;
     final destroyed = await showHollowDialog<bool>(
       context: context,
       builder: (ctx) => _DestroyDialog(
         initialScope: initialScope,
+        needsPhrase: needsPhrase,
         onDestroy: (choice) => wipe_api.destroyWithScope(
           scope: choice.scope,
           notifyFriends: choice.notifyFriends,
+          phrase: choice.phrase,
         ),
       ),
     );
@@ -296,13 +326,23 @@ class _DuressEntry {
   final String scope;
   final bool notifyFriends;
 
-  const _DuressEntry(this.password, this.code, this.scope, this.notifyFriends);
+  /// The recovery phrase, for the whole-identity scope once it is the root.
+  final String? phrase;
+
+  const _DuressEntry(this.password, this.code, this.scope, this.notifyFriends, this.phrase);
+}
+
+/// A typed phrase as Rust reads it: single spaces, lower case.
+String? _normalPhrase(TextEditingController c) {
+  final words = c.text.trim().toLowerCase().split(RegExp(r'\s+'));
+  return words.length < 12 ? null : words.join(' ');
 }
 
 /// Sets or changes the code. The save runs inside, so a wrong password lands
 /// on its field and nothing typed is lost.
 class _DuressCodeDialog extends StatefulWidget {
   final bool wideScopes;
+  final bool needsPhrase;
   final String initialScope;
   final bool initialNotifyFriends;
   final bool isChange;
@@ -310,6 +350,7 @@ class _DuressCodeDialog extends StatefulWidget {
 
   const _DuressCodeDialog({
     required this.wideScopes,
+    required this.needsPhrase,
     required this.initialScope,
     required this.initialNotifyFriends,
     required this.isChange,
@@ -325,24 +366,30 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
   final _password = TextEditingController();
   final _code = TextEditingController();
   final _repeat = TextEditingController();
+  final _phrase = TextEditingController();
   late String _scope = widget.initialScope;
   late bool _notifyFriends = widget.initialNotifyFriends;
   String? _passwordError;
   String? _codeError;
   String? _repeatError;
+  String? _phraseError;
 
   @override
   void dispose() {
     _password.dispose();
     _code.dispose();
     _repeat.dispose();
+    _phrase.dispose();
     super.dispose();
   }
+
+  bool get _asksPhrase => widget.needsPhrase && _scope == kDuressScopeIdentity;
 
   bool get _filled =>
       _password.text.trim().isNotEmpty &&
       _code.text.trim().isNotEmpty &&
-      _repeat.text.trim().isNotEmpty;
+      _repeat.text.trim().isNotEmpty &&
+      (!_asksPhrase || _phrase.text.trim().isNotEmpty);
 
   Future<void> _submit() async {
     if (actionRunning || !_filled) return;
@@ -357,11 +404,16 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
           'The duress code has to be different from your password.');
       return;
     }
+    final phrase = _asksPhrase ? _normalPhrase(_phrase) : null;
+    if (_asksPhrase && phrase == null) {
+      setState(() => _phraseError = kWrongPhraseText);
+      return;
+    }
     Object? raw;
     final ok = await runDialogAction(() async {
       try {
         await widget
-            .onSave(_DuressEntry(password, code, _scope, _notifyFriends));
+            .onSave(_DuressEntry(password, code, _scope, _notifyFriends, phrase));
       } catch (e) {
         raw = e;
         rethrow;
@@ -384,6 +436,11 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
         _codeError = actionError;
         actionError = null;
       });
+    } else if (error.toString().contains('recovery phrase')) {
+      setState(() {
+        _phraseError = actionError;
+        actionError = null;
+      });
     }
   }
 
@@ -392,6 +449,7 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
       _passwordError = null;
       _codeError = null;
       _repeatError = null;
+      _phraseError = null;
       actionError = null;
     });
   }
@@ -444,7 +502,7 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
             onSubmitted: (_) => _submit(),
           ),
           const SizedBox(height: HollowSpacing.lg),
-          if (widget.wideScopes)
+          if (widget.wideScopes) ...[
             _ScopePicker(
               choices: _duressScopes,
               scope: _scope,
@@ -452,8 +510,17 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
               onScope: (value) => setState(() => _scope = value),
               onNotifyFriends: (value) => setState(() => _notifyFriends = value),
               note: _scopeNote,
-            )
-          else
+            ),
+            if (_asksPhrase) ...[
+              const SizedBox(height: HollowSpacing.lg),
+              _PhraseEntry(
+                controller: _phrase,
+                errorText: _phraseError,
+                onChanged: (_) => _clearErrors(),
+                note: _duressPhraseNote,
+              ),
+            ],
+          ] else
             Text(
               '${_scopeEffect(kDuressScopeDevice)} $_localOnlyNote',
               style: HollowTypography.bodySmall
@@ -479,15 +546,48 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog>
 class _DestroyChoice {
   final String scope;
   final bool notifyFriends;
+  final String? phrase;
 
-  const _DestroyChoice(this.scope, this.notifyFriends);
+  const _DestroyChoice(this.scope, this.notifyFriends, this.phrase);
+}
+
+/// The phrase field the whole-identity scope adds, with what it is for.
+class _PhraseEntry extends StatelessWidget {
+  final TextEditingController controller;
+  final String? errorText;
+  final ValueChanged<String> onChanged;
+  final String note;
+
+  const _PhraseEntry({
+    required this.controller,
+    required this.errorText,
+    required this.onChanged,
+    this.note = _phraseNote,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SettingsFieldLabel(label: 'Recovery phrase'),
+        const SizedBox(height: HollowSpacing.xs),
+        RecoveryPhraseField(controller: controller, errorText: errorText, onChanged: onChanged),
+        const SizedBox(height: HollowSpacing.xs),
+        Text(note, style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary)),
+      ],
+    );
+  }
 }
 
 class _DestroyDialog extends StatefulWidget {
   final String initialScope;
+  final bool needsPhrase;
   final Future<void> Function(_DestroyChoice choice) onDestroy;
 
-  const _DestroyDialog({required this.initialScope, required this.onDestroy});
+  const _DestroyDialog({required this.initialScope, required this.needsPhrase, required this.onDestroy});
 
   @override
   State<_DestroyDialog> createState() => _DestroyDialogState();
@@ -496,18 +596,28 @@ class _DestroyDialog extends StatefulWidget {
 class _DestroyDialogState extends State<_DestroyDialog>
     with HollowDialogAction {
   final _confirm = TextEditingController();
+  final _phrase = TextEditingController();
   late String _scope = widget.initialScope;
   bool _notifyFriends = false;
+  String? _phraseError;
 
   @override
   void dispose() {
     _confirm.dispose();
+    _phrase.dispose();
     super.dispose();
   }
 
+  bool get _asksPhrase => widget.needsPhrase && _scope == kDuressScopeIdentity;
+
   Future<void> _destroy() async {
+    final phrase = _asksPhrase ? _normalPhrase(_phrase) : null;
+    if (_asksPhrase && phrase == null) {
+      setState(() => _phraseError = kWrongPhraseText);
+      return;
+    }
     final ok = await runDialogAction(
-      () => widget.onDestroy(_DestroyChoice(_scope, _notifyFriends)),
+      () => widget.onDestroy(_DestroyChoice(_scope, _notifyFriends, phrase)),
       fallback: "Couldn't destroy the data. Try again.",
     );
     if (ok && mounted) Navigator.of(context).pop(true);
@@ -515,7 +625,8 @@ class _DestroyDialogState extends State<_DestroyDialog>
 
   @override
   Widget build(BuildContext context) {
-    final ready = _confirm.text.trim() == _confirmWord;
+    final ready = _confirm.text.trim() == _confirmWord &&
+        (!_asksPhrase || _phrase.text.trim().isNotEmpty);
 
     return HollowDialog(
       title: 'Destroy your data',
@@ -538,6 +649,17 @@ class _DestroyDialogState extends State<_DestroyDialog>
             onScope: (value) => setState(() => _scope = value),
             onNotifyFriends: (value) => setState(() => _notifyFriends = value),
           ),
+          if (_asksPhrase) ...[
+            const SizedBox(height: HollowSpacing.lg),
+            _PhraseEntry(
+              controller: _phrase,
+              errorText: _phraseError,
+              onChanged: (_) => setState(() {
+                _phraseError = null;
+                actionError = null;
+              }),
+            ),
+          ],
           const SizedBox(height: HollowSpacing.lg),
           const SettingsFieldLabel(label: 'Type $_confirmWord to confirm'),
           const SizedBox(height: HollowSpacing.xs),

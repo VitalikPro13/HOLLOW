@@ -239,7 +239,7 @@ function Close-Friends($peer) {
 # tap lands on something the dialog is covering and fails as "on screen but a
 # click at its centre does not reach it".
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:HollowChip>text:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > semantics:$tab"; index = 0 }
 }
 
 # --------------------------------------------------------------------------

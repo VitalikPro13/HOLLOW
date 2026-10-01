@@ -12,7 +12,7 @@ class _LinkApi implements RustLibApi {
 
   @override
   Future<void> crateApiNetworkResolveLinkCode({required String code,
-      required bool includeVault, required bool includeFiles}) async {
+      required String label, required String platform}) async {
     requests++;
     await pending?.future;
   }
@@ -36,8 +36,7 @@ void main() {
   test('offline link requests fail before reaching Rust', () async {
     final c = container(OverallConnection.offline);
     final before = api.requests;
-    await c.read(deviceLinkSyncProvider.notifier).enterCode('ABC234',
-        includeVault: false, includeFiles: false);
+    await c.read(deviceLinkSyncProvider.notifier).enterCode('ABC234');
     expect(api.requests, before);
     expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.failed);
     expect(c.read(deviceLinkSyncProvider).error, contains('not connected'));
@@ -46,7 +45,7 @@ void main() {
   testWidgets('an unanswered link times out across a transient disconnect', (tester) async {
     final c = container(OverallConnection.connected);
     final notifier = c.read(deviceLinkSyncProvider.notifier);
-    await notifier.enterCode('ABC234', includeVault: false, includeFiles: false);
+    await notifier.enterCode('ABC234');
     notifier.onDisconnected();
     await tester.pump(const Duration(seconds: 59));
     expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.waiting);
@@ -58,7 +57,7 @@ void main() {
   testWidgets('progress cancels the waiting timeout', (tester) async {
     final c = container(OverallConnection.connected);
     final notifier = c.read(deviceLinkSyncProvider.notifier);
-    await notifier.enterCode('ABC234', includeVault: false, includeFiles: false);
+    await notifier.enterCode('ABC234');
     await tester.pump(const Duration(seconds: 40));
     notifier.onLinkProgress(12, 100);
     await tester.pump(const Duration(seconds: 60));
@@ -70,10 +69,10 @@ void main() {
     final notifier = c.read(deviceLinkSyncProvider.notifier);
     final first = Completer<void>();
     api.pending = first;
-    final firstRequest = notifier.enterCode('ABC234', includeVault: false, includeFiles: false);
+    final firstRequest = notifier.enterCode('ABC234');
     notifier.reset();
     api.pending = null;
-    await notifier.enterCode('DEF567', includeVault: false, includeFiles: false);
+    await notifier.enterCode('DEF567');
     first.completeError(StateError('old request failed'));
     await firstRequest;
     expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.waiting);
@@ -84,10 +83,10 @@ void main() {
   testWidgets('reset and retry get a fresh timeout', (tester) async {
     final c = container(OverallConnection.connected);
     final notifier = c.read(deviceLinkSyncProvider.notifier);
-    await notifier.enterCode('ABC234', includeVault: false, includeFiles: false);
+    await notifier.enterCode('ABC234');
     await tester.pump(const Duration(seconds: 40));
     notifier.reset();
-    await notifier.enterCode('DEF567', includeVault: false, includeFiles: false);
+    await notifier.enterCode('DEF567');
     await tester.pump(const Duration(seconds: 30));
     expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.waiting);
     notifier.reset();

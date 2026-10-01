@@ -16,6 +16,12 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   selection = chips. `feedback_hover_state_patterns`.
 - `showHollowDialog` pads by `viewInsets`; NEVER add them inside a builder (double pad).
   `feedback_dialog_keyboard_insets`.
+- A wrapper that comes and goes with a flag (`if (busy) child = PopScope(...)`) REMOUNTS the
+  subtree: scroll resets, `autofocus` refires, an error on a lower field ends up out of view.
+  Keep wrappers unconditional and vary their parameters (`HollowDialog`, fixed 2026-10-01,
+  `hollow_dialog_busy_test`). A dialog that returns from `runDialogAction` WITHOUT popping
+  (a validation miss) clears `actionRunning` itself, or its confirm spins forever.
+  `feedback_dart_patterns`.
 - Context menus = ONE surface, `showHollowMenu`, opened via `ContextMenuTarget`
   (`hollow_menu.dart`, both CI-guarded): a dialog route, NOT an OverlayEntry; anchor via
   `overlayPositionOf`; the builder's ref = `menuRef`; dismiss by route IDENTITY.

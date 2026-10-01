@@ -50,7 +50,22 @@ pub(crate) fn is_known_master(peer_id: &str) -> bool {
     links().read().is_ok_and(|map| map.values().any(|m| m == peer_id))
 }
 
+/// True when we hold `master`'s roster and `device` is not one of its members: a
+/// certificate its master key signed for a device the roster never admitted (design
+/// ID-1). A master we hold no devices for is not judged here, so a group whose rosters
+/// have not arrived yet keeps working on the certificate alone.
+pub(crate) fn disowns(master: &str, device: &str) -> bool {
+    if device == master {
+        return false;
+    }
+    links().read().is_ok_and(|map| {
+        let known = map.iter().any(|(d, m)| m == master && d != master);
+        known && map.get(device).map(String::as_str) != Some(master)
+    })
+}
+
 /// Record a verified (device → master) link. Idempotent.
+#[cfg(test)]
 pub(crate) fn update(device_peer_id: &str, master_peer_id: &str) {
     if let Ok(mut map) = links().write() {
         map.insert(device_peer_id.to_string(), master_peer_id.to_string());
@@ -143,21 +158,21 @@ pub(crate) fn forget(device_peer_id: &str) {
     }
 }
 
-/// Forget many device → master links at once (Step 7 revocation).
-pub(crate) fn forget_many(device_peer_ids: &[String]) {
-    if let Ok(mut map) = links().write() {
-        for d in device_peer_ids {
-            map.remove(d);
-        }
-    }
-}
-
-/// Mark device ids revoked for this process: DMs, typing, key exchange and the
-/// sibling proof refuse them. Persist through `record_revoked_devices` as well.
+/// Mark device ids revoked for this process: DMs, typing and key exchange refuse
+/// them. Persist through `record_revoked_devices` as well.
 pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
     if let Ok(mut set) = revoked().write() {
         for d in device_peer_ids {
             set.insert(d.clone());
+        }
+    }
+}
+
+/// Lift the mark from devices a recovery brought back.
+pub(crate) fn unmark_revoked(device_peer_ids: &[String]) {
+    if let Ok(mut set) = revoked().write() {
+        for d in device_peer_ids {
+            set.remove(d);
         }
     }
 }
@@ -193,9 +208,8 @@ pub(crate) fn clear_for_test() {
     }
 }
 
-/// Clear the in-memory resolver (testing and maintenance aid; pairs with
-/// `MessageStore::clear_all_device_lists`). Devices re-learn on the next
-/// profile exchange.
+/// Clear the in-memory resolver between tests.
+#[cfg(test)]
 pub(crate) fn clear_all() {
     if let Ok(mut map) = links().write() {
         map.clear();
@@ -291,16 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn forget_many_drops_a_revoked_set() {
-        let _g = guarded();
-        update_many("M", ["devA", "devB", "devC"]);
-        forget_many(&["devA".into(), "devC".into()]);
-        assert_eq!(resolve("devA"), "devA");
-        assert_eq!(resolve("devC"), "devC");
-        assert_eq!(devices_for("M"), vec!["devB".to_string()]);
-    }
-
-    #[test]
     fn forget_is_idempotent_for_unknown_id() {
         let _g = guarded();
         update_many("M", ["devA"]);
@@ -318,5 +322,28 @@ mod tests {
         assert!(!is_revoked("devZ"));
         clear_all();
         assert!(!is_revoked("devX"));
+    }
+
+    #[test]
+    fn unmark_lifts_only_the_named_devices() {
+        let _g = guarded();
+        mark_revoked(&["devX".into(), "devY".into()]);
+        unmark_revoked(&["devX".into()]);
+        assert!(!is_revoked("devX"));
+        assert!(is_revoked("devY"));
+    }
+
+    /// A master whose devices we hold disowns every other device claiming it; one we
+    /// hold nothing for is not judged, and a single-device identity is its own device.
+    #[test]
+    fn disowns_judges_only_a_known_master() {
+        let _g = guarded();
+        update_many("M", ["devA"]);
+        assert!(disowns("M", "devStolen"), "a device the roster does not name");
+        assert!(!disowns("M", "devA"));
+        assert!(!disowns("M", "M"), "the bare master is never disowned");
+        assert!(!disowns("Unknown", "devQ"), "nothing held for that master yet");
+        update_many("M2", ["devB"]);
+        assert!(disowns("M", "devB"), "another identity's device is not M's");
     }
 }

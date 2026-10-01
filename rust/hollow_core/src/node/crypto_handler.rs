@@ -777,12 +777,14 @@ pub(crate) fn carried_bundle_sender_device(b: &CarriedBundle) -> Option<String> 
 ///
 /// REJECTS (returns false), never logs-and-continues. Gate order mirrors the live
 /// path: the signature verifies under a key that derives to the device the
-/// payload names; that device is named and un-revoked in the sender's
-/// master-signed list; it is addressed to OUR master; and it is fresh.
+/// payload names; that device is a member of the sender's roster; it is
+/// addressed to OUR master; and it is fresh.
 pub(crate) fn verify_carried_bundle(
     our_master: &str,
-    sender_device_list: &SignedDeviceList,
+    sender_roster: &crate::identity::roster::Roster,
     b: &CarriedBundle,
+    db_path: &str,
+    db_passphrase: &str,
 ) -> bool {
     // 1. Signature, bound to the device its own public key derives to.
     let Some(sender_device) = carried_bundle_sender_device(b) else {
@@ -800,14 +802,9 @@ pub(crate) fn verify_carried_bundle(
         return false;
     }
 
-    // 2. That device must speak for the master the list claims.
-    if !verify_device_list(sender_device_list) {
-        return false;
-    }
-    if sender_device_list.revoked.iter().any(|r| r == &sender_device) {
-        return false;
-    }
-    if !sender_device_list.devices.iter().any(|d| d == &sender_device) {
+    // 2. That device must be a member of the roster it came with, judged against the
+    // roster we already hold for that master.
+    if !super::roster_book::carried_member(sender_roster, &sender_device, db_path, db_passphrase) {
         return false;
     }
 
@@ -878,9 +875,10 @@ pub(crate) fn build_signed_device_list(
     }
 }
 
-/// Verify a received [`SignedDeviceList`]: the master pubkey must derive to the
-/// claimed `master_peer_id`, and the signature must validate over the canonical
-/// payload. Version monotonicity is the DB layer's job, not this one's.
+/// Verify a [`SignedDeviceList`]: the master pubkey must derive to the claimed
+/// `master_peer_id`, and the signature must validate over the canonical payload.
+/// Only the relay reads one now (the inbox proof); this is its check for the mock.
+#[cfg(test)]
 pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
     use base64::engine::general_purpose::STANDARD as B64;
     use crate::identity::native_identity::NativeKeypair;
@@ -908,363 +906,10 @@ pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
         .unwrap_or(false)
 }
 
-/// `true` = this master-signed list actually speaks for the device that
-/// DELIVERED it.
-///
-/// SECURITY (CRYPTO-1): [`verify_device_list`] proves only who SIGNED a list, and
-/// signed lists ride every profile announce in the clear, so anyone who has seen
-/// one can replay it. Without this the receiver binds the DELIVERING device to
-/// that master, handing over the victim's DM fan-out, Olm authorisation and role
-/// checks. The rule: the delivering device is named in the signed `devices` (or
-/// IS the legacy master-as-device) and is not tombstoned.
-pub(crate) fn device_list_binds_sender(list: &SignedDeviceList, sender_peer_id: &str) -> bool {
-    if list.revoked.iter().any(|r| r == sender_peer_id) {
-        return false;
-    }
-    sender_peer_id == list.master_peer_id
-        || list.devices.iter().any(|d| d == sender_peer_id)
-}
+// -- Destruction orders (Part 2, scope (c); design ID-1) --
 
-/// The master a carried list speaks for, read AFTER [`ingest_device_list`]: `None`
-/// unless ingest really bound the delivering device to it. A list names who
-/// signed it; only the binding says the sender is that person, so a revoked
-/// device replaying an older list is refused here rather than taken as its master.
-pub(crate) fn carried_list_master(list: &SignedDeviceList, sender_peer_id: &str) -> Option<String> {
-    let bound = sender_peer_id == list.master_peer_id
-        || super::resolver::resolve(sender_peer_id) == list.master_peer_id;
-    (bound && !super::resolver::is_revoked(sender_peer_id)).then(|| list.master_peer_id.clone())
-}
-
-/// `true` = this list is EXACTLY "the deliverer revoked itself and changed nothing
-/// else", the one shape [`device_list_binds_sender`] must let through.
-///
-/// Destruction scope (b) is the sole producer: a device revoking ITSELF is the only
-/// one that can announce its own revocation. The exception is a MINIMAL DIFF against
-/// what we already store, never "the deliverer is tombstoned somewhere in here":
-/// every device holds the master key, so a revoked device running a modified client
-/// could otherwise sign a newer list that tombstones itself AND drops its
-/// legitimate siblings, and CRYPTO-1's sender rule is the only thing that makes a
-/// revocation final against exactly that attacker.
-///
-/// With NO stored list there is no diff to be minimal against, so the baseline rules
-/// decide and this says no.
-pub(crate) fn is_minimal_self_revocation(
-    list: &SignedDeviceList,
-    sender_peer_id: &str,
-    stored: Option<&SignedDeviceList>,
-) -> bool {
-    let Some(stored) = stored else { return false };
-    if !list.revoked.iter().any(|r| r == sender_peer_id) {
-        return false;
-    }
-    if list.version <= stored.version {
-        return false;
-    }
-    let set = |v: &[String]| -> std::collections::BTreeSet<String> {
-        v.iter().cloned().collect()
-    };
-    let mut want_devices = set(&stored.devices);
-    want_devices.remove(sender_peer_id);
-    let mut want_revoked = set(&stored.revoked);
-    want_revoked.insert(sender_peer_id.to_string());
-    set(&list.devices) == want_devices && set(&list.revoked) == want_revoked
-}
-
-// --- Sibling proof handshake (anti-mis-link) -------------------------------------
-//
-// A peer in our own `inbox:{master}` room used to be trusted directly as our
-// sibling, but the friend-request protocol makes the REQUESTER join the TARGET's
-// inbox, so a STRANGER landed there and was mis-merged as our device (resolver
-// poisoning, friend-list leak, auto snapshot/link). An unproven inbox peer must
-// now sign a fresh nonce with the SHARED MASTER key.
-
-/// Canonical signing payload for the sibling proof. Binds the proof to OUR master
-/// peer_id, the CHALLENGED device id, and a fresh nonce so a captured response can't
-/// be replayed against a different master/device/nonce.
-pub(crate) fn sibling_proof_payload(
-    master_peer_id: &str,
-    device_peer_id: &str,
-    nonce: &str,
-) -> String {
-    format!("hollow-sibling:{master_peer_id}:{device_peer_id}:{nonce}")
-}
-
-/// Sign a sibling proof with the (shared) master key. `device_peer_id` is OUR OWN
-/// device id (the responder's). Returns `(sig_b64, master_pubkey_b64)`.
-pub(crate) fn build_sibling_proof(
-    master: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
-    nonce: &str,
-) -> (String, String) {
-    use base64::engine::general_purpose::STANDARD as B64;
-    let payload = sibling_proof_payload(&master.peer_id(), device_peer_id, nonce);
-    let sig = master.sign(payload.as_bytes());
-    (B64.encode(sig), B64.encode(master.public_key_protobuf()))
-}
-
-/// Verify a sibling proof. `claimed_master_peer_id` is OUR OWN master peer_id (the
-/// challenger): the response's pubkey must derive to it, proving the responder
-/// holds OUR master key. `challenged_device_peer_id` comes from the routing
-/// layer, never a value the responder self-reports.
-pub(crate) fn verify_sibling_proof(
-    claimed_master_peer_id: &str,
-    challenged_device_peer_id: &str,
-    nonce: &str,
-    sig_b64: &str,
-    master_pubkey_b64: &str,
-) -> bool {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use crate::identity::native_identity::NativeKeypair;
-
-    let Ok(pk_bytes) = B64.decode(master_pubkey_b64) else {
-        return false;
-    };
-    // Bind pubkey → OUR claimed master peer_id (a stranger's own-key pubkey derives
-    // to a different peer_id and is rejected here).
-    match NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes) {
-        Some(derived) if derived == claimed_master_peer_id => {}
-        _ => return false,
-    }
-    let Ok(sig_bytes) = B64.decode(sig_b64) else {
-        return false;
-    };
-    let payload =
-        sibling_proof_payload(claimed_master_peer_id, challenged_device_peer_id, nonce);
-    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
-        .unwrap_or(false)
-}
-
-/// Build OUR OWN master-signed device list to attach to outbound profile syncs.
-///
-/// Re-signs the persisted set with the master key, seeding version 1 with this
-/// device on a first run so future reads stay monotonic. `None` only when the DB
-/// is unavailable; callers then send the profile without a list (no crash).
-pub(crate) fn build_local_device_list(
-    master: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> Option<SignedDeviceList> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let master_peer_id = master.peer_id();
-
-    let (devices, revoked, version) = match store.load_device_list(&master_peer_id) {
-        Ok(Some(list)) => {
-            // We can never revoke the device we are running on.
-            let mut revoked = list.revoked.clone();
-            revoked.retain(|r| r != device_peer_id);
-            let mut devs = list.devices.clone();
-            let self_added = !devs.iter().any(|d| d == device_peer_id);
-            if self_added {
-                devs.push(device_peer_id.to_string());
-            }
-            // Strip a stale MASTER-as-device entry once a DISTINCT device key exists: no
-            // socket authenticates as the bare master, so a friend who learns only
-            // `[master]` can never map our real device to it and keys DMs, presence and the
-            // friend row wrong. NEVER when device == master (a genuine sole keystone).
-            let master_stripped = device_peer_id != master_peer_id
-                && devs.iter().any(|d| d == &master_peer_id);
-            if master_stripped {
-                devs.retain(|d| d != &master_peer_id);
-            }
-            // Membership changed → bump version so peers accept the update.
-            if self_added || master_stripped || revoked.len() != list.revoked.len() {
-                (devs, revoked, list.version.saturating_add(1))
-            } else {
-                (devs, revoked, list.version.max(1))
-            }
-        }
-        _ => (vec![device_peer_id.to_string()], Vec::new(), 1),
-    };
-
-    let signed = build_signed_device_list(master, version, devices, revoked);
-
-    // Persist so device_list_version() stays monotonic across restarts.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    if let Ok(json) = serde_json::to_string(&signed) {
-        let _ = store.save_device_list(
-            &signed.master_peer_id, &json, signed.version, &signed.devices, now,
-        );
-    }
-    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
-
-    Some(signed)
-}
-
-/// Revoke one of OUR OWN devices (Step 7): tombstone it in our master-signed
-/// list, bump the version, re-sign, persist, prune the resolver. Returns the
-/// re-signed list, `None` on a guard failure or DB error.
-///
-/// Refuses to revoke the device we are running on or an id that is not ours.
-/// Idempotent for an id already revoked.
-pub(crate) fn revoke_own_device(
-    master: &crate::identity::native_identity::NativeKeypair,
-    local_device_peer_id: &str,
-    target_device: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> Option<SignedDeviceList> {
-    if target_device == local_device_peer_id {
-        hollow_log!("[HOLLOW-REVOKE] Refused to revoke the device we are running on");
-        return None;
-    }
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let master_peer_id = master.peer_id();
-    let (mut devices, mut revoked, version): (Vec<String>, Vec<String>, u64) =
-        match store.load_device_list(&master_peer_id) {
-            Ok(Some(list)) => (list.devices.clone(), list.revoked.clone(), list.version),
-            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
-        };
-    // Ensure THIS device stays present (never tombstoned).
-    if !devices.iter().any(|d| d == local_device_peer_id) {
-        devices.push(local_device_peer_id.to_string());
-    }
-    // The target must be one of OUR devices (in the active set, or a resolver-known
-    // device of our master — covers a live device id not yet folded into the list).
-    let belongs = devices.iter().any(|d| d == target_device)
-        || super::resolver::resolve(target_device) == master_peer_id;
-    if !belongs {
-        hollow_log!("[HOLLOW-REVOKE] Refused to revoke {target_device}: not one of our devices");
-        return None;
-    }
-    if revoked.iter().any(|r| r == target_device) && !devices.iter().any(|d| d == target_device) {
-        // Already revoked and not active — nothing to change. Re-sign current state
-        // so the caller still has a list to re-announce (idempotent).
-        let signed = build_signed_device_list(master, version.max(1), devices, revoked);
-        super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
-        return Some(signed);
-    }
-    devices.retain(|d| d != target_device);
-    if !revoked.iter().any(|r| r == target_device) {
-        revoked.push(target_device.to_string());
-    }
-    let next_version = version.saturating_add(1).max(1);
-    let signed = build_signed_device_list(master, next_version, devices, revoked);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    let json = serde_json::to_string(&signed).ok()?;
-    if let Err(e) = store.save_device_list(
-        &signed.master_peer_id, &json, signed.version, &signed.devices, now,
-    ) {
-        hollow_log!("[HOLLOW-REVOKE] Failed to persist revocation: {e}");
-        return None;
-    }
-    super::resolver::forget(target_device);
-    enforce_revocation(&store, &signed.master_peer_id, std::slice::from_ref(&target_device.to_string()));
-    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
-    hollow_log!(
-        "[HOLLOW-REVOKE] Revoked own device {target_device} → list now {} devices, {} revoked (v{})",
-        signed.devices.len(), signed.revoked.len(), signed.version
-    );
-    Some(signed)
-}
-
-/// Tombstone EVERY one of our devices except the one we are running on, in a
-/// single version bump. This is the propagating teardown behind "Reset Device
-/// List": a blunt local wipe regrows on the next profile exchange, whereas a
-/// tombstone converges at every friend and makes each revoked sibling self-nuke.
-/// Returns the re-signed list plus the ids tombstoned this call; `None` on a DB
-/// error or when we are already the sole device.
-pub(crate) fn revoke_all_other_devices(
-    master: &crate::identity::native_identity::NativeKeypair,
-    local_device_peer_id: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> Option<(SignedDeviceList, Vec<String>)> {
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let master_peer_id = master.peer_id();
-    let (mut devices, mut revoked, version): (Vec<String>, Vec<String>, u64) =
-        match store.load_device_list(&master_peer_id) {
-            Ok(Some(list)) => (list.devices.clone(), list.revoked.clone(), list.version),
-            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
-        };
-    // Fold in resolver-known device ids of ours that are not in the persisted list
-    // yet (live siblings, ghosts from re-link cycles) so they ALL get tombstoned.
-    for d in super::resolver::devices_for(&master_peer_id) {
-        if d != local_device_peer_id && !devices.contains(&d) && !revoked.contains(&d) {
-            devices.push(d);
-        }
-    }
-    let to_revoke: Vec<String> = devices
-        .iter()
-        .filter(|d| d.as_str() != local_device_peer_id)
-        .cloned()
-        .collect();
-    if to_revoke.is_empty() {
-        hollow_log!("[HOLLOW-REVOKE] Reset device list: already the sole device, nothing to revoke");
-        return None;
-    }
-    for d in &to_revoke {
-        if !revoked.iter().any(|r| r == d) {
-            revoked.push(d.clone());
-        }
-    }
-    let devices = vec![local_device_peer_id.to_string()];
-    let next_version = version.saturating_add(1).max(1);
-    let signed = build_signed_device_list(master, next_version, devices, revoked);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    let json = serde_json::to_string(&signed).ok()?;
-    if let Err(e) = store.save_device_list(
-        &signed.master_peer_id, &json, signed.version, &signed.devices, now,
-    ) {
-        hollow_log!("[HOLLOW-REVOKE] Reset device list: failed to persist: {e}");
-        return None;
-    }
-    // Prune every revoked id from the in-memory resolver + guard against phantom
-    // chats from any that are still momentarily alive, then re-seed our survivor.
-    for d in &to_revoke {
-        super::resolver::forget(d);
-    }
-    enforce_revocation(&store, &signed.master_peer_id, &to_revoke);
-    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
-    hollow_log!(
-        "[HOLLOW-REVOKE] Reset device list: revoked {} sibling(s) → sole device (v{})",
-        to_revoke.len(), signed.version
-    );
-    Some((signed, to_revoke))
-}
-
-/// Revoke the device we are RUNNING ON: destruction scope (b).
-///
-/// [`revoke_own_device`] refuses this by design and must keep refusing, because
-/// every other caller of it would otherwise be one typo away from cutting off the
-/// machine in front of the user. Here it IS the point: the tombstone is what makes
-/// siblings and friends stop routing to a device whose data is about to be gone.
-/// Nothing is persisted, because the database is being destroyed moments later.
-pub(crate) fn revoke_self_device(
-    master: &crate::identity::native_identity::NativeKeypair,
-    local_device_peer_id: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> SignedDeviceList {
-    let master_peer_id = master.peer_id();
-    let (mut devices, mut revoked, version): (Vec<String>, Vec<String>, u64) =
-        match crate::storage::MessageStore::open(db_path, db_passphrase)
-            .ok()
-            .and_then(|st| st.load_device_list(&master_peer_id).ok().flatten())
-        {
-            Some(list) => (list.devices.clone(), list.revoked.clone(), list.version),
-            None => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
-        };
-    devices.retain(|d| d != local_device_peer_id);
-    if !revoked.iter().any(|r| r == local_device_peer_id) {
-        revoked.push(local_device_peer_id.to_string());
-    }
-    build_signed_device_list(master, version.saturating_add(1).max(1), devices, revoked)
-}
-
-// -- Destruction orders (Part 2, scope (c)) --
-
-/// Canonical payload for signing a [`DestroyIdentity`].
-/// "hollow-destroy:{master}:{issued_at_ms}:{sorted csv targets}:{notify_friends}".
+/// Canonical payload every signature on a [`DestroyIdentity`] covers.
+/// "hollow-destroy2:{master}:{issued_at_ms}:{sorted csv targets}:{notify_friends}".
 /// `targets` MUST be sorted before calling so the payload is deterministic.
 pub(crate) fn destroy_identity_signing_payload(
     master_peer_id: &str,
@@ -1273,15 +918,21 @@ pub(crate) fn destroy_identity_signing_payload(
     notify_friends: bool,
 ) -> String {
     format!(
-        "hollow-destroy:{master_peer_id}:{issued_at_ms}:{}:{notify_friends}",
+        "hollow-destroy2:{master_peer_id}:{issued_at_ms}:{}:{notify_friends}",
         targets.join(",")
     )
 }
 
-/// Build a master-signed destruction order. `targets` is sorted and deduped here
-/// so the signed payload is canonical; empty = every device of this identity.
+/// The phrase's permission for `device` to order its identity destroyed.
+pub(crate) fn destroy_delegation_payload(master_peer_id: &str, r_pub: &str, device: &str, at_ms: i64) -> String {
+    format!("hollow-id1-destroy-delegate:{master_peer_id}:{r_pub}:{device}:{at_ms}")
+}
+
+/// A destruction order signed by the master and, when the phrase was typed, by the
+/// recovery key. `targets` is sorted and deduped here; empty = every device.
 pub(crate) fn build_destroy_identity(
     master: &crate::identity::native_identity::NativeKeypair,
+    recovery: Option<&crate::identity::native_identity::NativeKeypair>,
     issued_at_ms: i64,
     mut targets: Vec<String>,
     notify_friends: bool,
@@ -1292,20 +943,62 @@ pub(crate) fn build_destroy_identity(
     let master_peer_id = master.peer_id();
     let payload =
         destroy_identity_signing_payload(&master_peer_id, issued_at_ms, &targets, notify_friends);
-    let sig = master.sign(payload.as_bytes());
+    let (r_pub, sig_r) = match recovery {
+        Some(r) => (crate::identity::roster::r_pub_of(r), B64.encode(r.sign(payload.as_bytes()))),
+        None => (String::new(), String::new()),
+    };
     DestroyIdentity {
         master_pubkey_b64: B64.encode(master.public_key_protobuf()),
         master_peer_id,
         issued_at_ms,
         targets,
         notify_friends,
-        sig_b64: B64.encode(sig),
+        sig_b64: B64.encode(master.sign(payload.as_bytes())),
+        r_pub,
+        sig_r,
+        delegation: None,
     }
 }
 
-/// Verify a received destruction order: the pubkey must derive to the claimed
-/// `master_peer_id` and the signature must validate over the canonical payload.
-/// Freshness and targeting are the receiver's rules, not this function's.
+/// The phrase's permission for `device`, without the order signature.
+pub(crate) fn sign_destroy_delegation(
+    master: &crate::identity::native_identity::NativeKeypair,
+    recovery: &crate::identity::native_identity::NativeKeypair,
+    device: &str,
+    at_ms: i64,
+) -> DestroyDelegation {
+    use base64::engine::general_purpose::STANDARD as B64;
+    let r_pub = crate::identity::roster::r_pub_of(recovery);
+    let payload = destroy_delegation_payload(&master.peer_id(), &r_pub, device, at_ms);
+    DestroyDelegation {
+        device: device.to_string(),
+        at_ms,
+        r_pub,
+        sig_r: B64.encode(recovery.sign(payload.as_bytes())),
+        device_sig: String::new(),
+    }
+}
+
+/// An order this device signs under the phrase's permission for it.
+pub(crate) fn build_delegated_destroy(
+    master: &crate::identity::native_identity::NativeKeypair,
+    device: &crate::identity::native_identity::NativeKeypair,
+    mut delegation: DestroyDelegation,
+    issued_at_ms: i64,
+    notify_friends: bool,
+) -> DestroyIdentity {
+    use base64::engine::general_purpose::STANDARD as B64;
+    let mut order = build_destroy_identity(master, None, issued_at_ms, Vec::new(), notify_friends);
+    let payload = destroy_identity_signing_payload(
+        &order.master_peer_id, order.issued_at_ms, &order.targets, order.notify_friends,
+    );
+    delegation.device_sig = B64.encode(device.sign(payload.as_bytes()));
+    order.delegation = Some(delegation);
+    order
+}
+
+/// Whether the master signed this order: it names the identity. Authority is
+/// [`destroy_order_authorised`]'s question.
 pub(crate) fn verify_destroy_identity(order: &DestroyIdentity) -> bool {
     use base64::engine::general_purpose::STANDARD as B64;
     use crate::identity::native_identity::NativeKeypair;
@@ -1320,496 +1013,61 @@ pub(crate) fn verify_destroy_identity(order: &DestroyIdentity) -> bool {
     let Ok(sig_bytes) = B64.decode(&order.sig_b64) else {
         return false;
     };
-    // Sorted copy, so an attacker cannot reorder the targets after signing.
-    let mut targets = order.targets.clone();
-    targets.sort();
-    let payload = destroy_identity_signing_payload(
-        &order.master_peer_id, order.issued_at_ms, &targets, order.notify_friends,
-    );
-    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, destroy_payload_of(order).as_bytes())
         .unwrap_or(false)
 }
 
-/// Refuse `devices` for this process and record them, so the refusal survives a
-/// restart: DMs, typing, key exchange and the sibling proof all drop them.
-fn enforce_revocation(store: &crate::storage::MessageStore, master_peer_id: &str, devices: &[String]) {
-    super::resolver::mark_revoked(devices);
-    if let Err(e) = store.record_revoked_devices(master_peer_id, devices) {
-        hollow_log!("[HOLLOW-REVOKE] Failed to record revoked devices: {e}");
-    }
+fn destroy_payload_of(order: &DestroyIdentity) -> String {
+    // Sorted copy, so an attacker cannot reorder the targets after signing.
+    let mut targets = order.targets.clone();
+    targets.sort();
+    destroy_identity_signing_payload(
+        &order.master_peer_id, order.issued_at_ms, &targets, order.notify_friends,
+    )
 }
 
-/// True when a device that proved it holds our master key is one we revoked. The
-/// key alone never re-admits it: our own list's tombstones and the recorded marks
-/// both refuse it, the list covering revocations older than the marks table.
-pub(crate) fn sibling_proof_refused(
-    local_master_peer_id: &str,
-    sibling_device_peer_id: &str,
-    db_path: &str,
-    db_passphrase: &str,
+fn verify_raw(pubkey: &[u8; 32], payload: &str, sig_b64: &str) -> bool {
+    use base64::engine::general_purpose::STANDARD as B64;
+    let Ok(sig) = B64.decode(sig_b64) else { return false };
+    let Ok(sig) = <[u8; 64]>::try_from(sig.as_slice()) else { return false };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) else { return false };
+    vk.verify_strict(payload.as_bytes(), &ed25519_dalek::Signature::from_bytes(&sig)).is_ok()
+}
+
+fn r_key(r_pub: &str) -> Option<[u8; 32]> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    <[u8; 32]>::try_from(B64.decode(r_pub).ok()?.as_slice()).ok()
+}
+
+/// Whether an order the master signed is backed by the identity's authority: the
+/// phrase itself under `pinned_r`, or a member device holding the phrase's
+/// permission. An identity with no recovery key yet (`pinned_r` empty) has only the
+/// master, whose signature [`verify_destroy_identity`] already checked.
+pub(crate) fn destroy_order_authorised(
+    order: &DestroyIdentity,
+    pinned_r: &str,
+    members: &crate::identity::roster::RosterState,
 ) -> bool {
-    if super::resolver::is_revoked(sibling_device_peer_id) {
+    if pinned_r.is_empty() {
         return true;
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    let Some(rk) = r_key(pinned_r) else { return false };
+    let payload = destroy_payload_of(order);
+    if order.r_pub == pinned_r && verify_raw(&rk, &payload, &order.sig_r) {
         return true;
-    };
-    store
-        .load_device_list(local_master_peer_id)
-        .ok()
-        .flatten()
-        .is_some_and(|list| list.revoked.iter().any(|r| r == sibling_device_peer_id))
-}
-
-/// Union a single sibling device id into OUR OWN master-signed device list.
-///
-/// The inbox-proof path needs this: a freshly imported sibling has no profile
-/// and so never sends a device list, so the normal `ingest_sibling_device_list`
-/// merge never fires for it and our list would stay at one device forever.
-/// Returns `true` if the id was new, so the caller re-announces our profile.
-pub(crate) fn merge_sibling_device_id(
-    master: &crate::identity::native_identity::NativeKeypair,
-    local_device_peer_id: &str,
-    sibling_device_peer_id: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> bool {
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+    }
+    let Some(d) = order.delegation.as_ref() else { return false };
+    let Some(dk) = crate::crypto::safety_number::pubkey_from_peer_id(&d.device) else {
         return false;
     };
-    let master_peer_id = master.peer_id();
-    let (mut devices, revoked, version): (Vec<String>, Vec<String>, u64) =
-        match store.load_device_list(&master_peer_id) {
-            Ok(Some(list)) => (list.devices.clone(), list.revoked.clone(), list.version),
-            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
-        };
-    if !devices.iter().any(|d| d == local_device_peer_id) {
-        devices.push(local_device_peer_id.to_string());
-    }
-    // A revoked sibling id must never be re-admitted by the inbox proof. A
-    // reinstalled phone comes back with a FRESH device id and is not blocked here.
-    if revoked.iter().any(|r| r == sibling_device_peer_id) {
-        super::resolver::seed_self(&master_peer_id, &devices);
-        return false;
-    }
-    if devices.iter().any(|d| d == sibling_device_peer_id) {
-        // Already known — keep the resolver warm, but nothing to re-announce.
-        super::resolver::seed_self(&master_peer_id, &devices);
-        return false;
-    }
-    devices.push(sibling_device_peer_id.to_string());
-    let next_version = version.saturating_add(1).max(1);
-    let signed = build_signed_device_list(master, next_version, devices, revoked);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    if let Ok(json) = serde_json::to_string(&signed) {
-        let _ = store.save_device_list(
-            &signed.master_peer_id, &json, signed.version, &signed.devices, now,
-        );
-    }
-    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
-    hollow_log!(
-        "[HOLLOW-DEVICES] Merged inbox sibling {sibling_device_peer_id} → own device set now {} (v{})",
-        signed.devices.len(), signed.version
-    );
-    true
-}
-
-/// Outcome of ingesting a device list, consumed by the swarm call site.
-/// `our_devices_grew`: a sibling merge added one of OUR OWN ids, so re-announce.
-/// `newly_revoked`: ids tombstoned THIS ingest, so the caller drops each Olm
-/// session and queues the leaf for removal where it is the MLS coordinator.
-#[derive(Default)]
-pub(crate) struct IngestOutcome {
-    pub our_devices_grew: bool,
-    pub newly_revoked: Vec<String>,
-}
-
-/// Ingest a device list received on a peer's profile sync.
-///
-/// Verifies the signature, unions devices, applies revocation tombstones
-/// (max-version-wins) and on a change persists, updates the resolver and emits
-/// `DeviceListUpdated`. A list for our OWN master goes to the sibling-merge
-/// path: we are the authority for our own list, but a sibling may union into it.
-pub(crate) async fn ingest_device_list(
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    local_master_peer_id: &str,
-    local_device_peer_id: &str,
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
-    sender_peer_id: &str,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    list: Option<SignedDeviceList>,
-    db_path: &str,
-    db_passphrase: &str,
-) -> IngestOutcome {
-    let Some(list) = list else { return IngestOutcome::default() };
-    if list.master_peer_id.is_empty() || list.devices.is_empty() {
-        return IngestOutcome::default();
-    }
-    // A list for OUR OWN master came from a sibling (same mnemonic, so validly
-    // signed). Never replace ours, but we MUST learn the sibling's device id, or
-    // the resolver never maps sibling to master and sibling sync cannot work.
-    if list.master_peer_id == local_master_peer_id {
-        let (grew, newly_revoked) = ingest_sibling_device_list(
-            event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
-            sender_peer_id, ws_cmd_tx, list, db_path, db_passphrase,
-        ).await;
-        return IngestOutcome { our_devices_grew: grew, newly_revoked };
-    }
-    if !verify_device_list(&list) {
-        hollow_log!(
-            "[HOLLOW-DEVICES] Rejected device list for {}: bad signature",
-            list.master_peer_id
-        );
-        return IngestOutcome::default();
-    }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return IngestOutcome::default();
-    };
-    let stored_list = store.load_device_list(&list.master_peer_id).ok().flatten();
-    // SECURITY (CRYPTO-1): the signature says who WROTE the list, never who
-    // delivered it. A replay from an unlisted socket used to bind that socket to
-    // the victim's master, handing over its DM fan-out and Olm authorisation.
-    if !device_list_binds_sender(&list, sender_peer_id)
-        && !is_minimal_self_revocation(&list, sender_peer_id, stored_list.as_ref())
-    {
-        hollow_log!(
-            "[HOLLOW-SECURITY] REJECTED device list for {}: delivering device {sender_peer_id} is not in the signed list",
-            list.master_peer_id
-        );
-        return IngestOutcome::default();
-    }
-    let (prev_devices, prev_revoked, prev_version): (Vec<String>, Vec<String>, u64) =
-        match stored_list.as_ref() {
-            Some(cur) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
-            None => (Vec::new(), Vec::new(), 0),
-        };
-    // SECURITY: a master's signature speaks only for its OWN devices. Any identity
-    // can sign a list naming our device, or a third identity's, in `revoked` (which
-    // used to wipe this device) or in `devices` (which rebinds it to them), so both
-    // sets drop every id already bound to another master, ours included. An id
-    // that resolves to itself is free only if it is not another identity's MASTER
-    // (HOL-SEC-006): a master id is never a resolver key, so it looks unbound.
-    let other_masters: std::collections::HashSet<String> = list
-        .devices
-        .iter()
-        .chain(list.revoked.iter())
-        .filter(|id| {
-            **id != list.master_peer_id
-                && (super::resolver::is_known_master(id)
-                    || store.load_device_list(id).ok().flatten().is_some())
-        })
-        .cloned()
-        .collect();
-    let speaks_for = |id: &String| {
-        if id == local_device_peer_id || id == local_master_peer_id {
-            return false;
-        }
-        let bound = super::resolver::resolve(id);
-        bound == list.master_peer_id || (bound == *id && !other_masters.contains(id))
-    };
-    let list_devices: Vec<String> = list.devices.iter().filter(|d| speaks_for(d)).cloned().collect();
-    // TOMBSTONES, max-version-wins: a higher-version list is the latest master
-    // word; a replay (version <= prev) keeps our set, so it can never un-revoke.
-    let new_revoked: Vec<String> = if list.version > prev_version {
-        let mut r: Vec<String> = list.revoked.iter().filter(|d| speaks_for(d)).cloned().collect();
-        r.sort();
-        r.dedup();
-        r
-    } else {
-        prev_revoked.clone()
-    };
-    let is_revoked = |id: &str| new_revoked.iter().any(|r| r == id);
-    // Enforcement (the process-wide revoked mark, dropped sessions and leaves) reaches
-    // only devices this master already held. Any other id stays a tombstone in ITS
-    // list, which still keeps a stale list from adding it back.
-    let enforced: Vec<String> = new_revoked
-        .iter()
-        .filter(|r| {
-            prev_devices.iter().any(|d| d == *r)
-                || super::resolver::resolve(r) == list.master_peer_id
-        })
-        .cloned()
-        .collect();
-    if !enforced.is_empty() {
-        enforce_revocation(&store, &list.master_peer_id, &enforced);
-    }
-    let newly_revoked: Vec<String> = enforced
-        .iter()
-        .filter(|r| !prev_revoked.iter().any(|p| &p == r))
-        .cloned()
-        .collect();
-    // Register the SENDER device to master link. Safe only now: the binding check
-    // above proved the master's own signature NAMES this device. A revoked sender
-    // is skipped, or it could re-register itself with a pre-revocation list.
-    if sender_peer_id != list.master_peer_id
-        && !is_revoked(sender_peer_id)
-        && speaks_for(&sender_peer_id.to_string())
-    {
-        super::resolver::update(sender_peer_id, &list.master_peer_id);
-    }
-
-    // UNION-merge MINUS tombstones, never reject-on-stale: two devices of one
-    // identity each start at version 1, so a `version <= current` guard makes the
-    // SECOND list look like a replay. REMOVAL is the signed `revoked` set.
-    let mut merged: Vec<String> = prev_devices.iter().filter(|d| !is_revoked(d)).cloned().collect();
-    let mut known: std::collections::HashSet<String> = merged.iter().cloned().collect();
-    let mut added = 0u32;
-    for d in &list_devices {
-        if !is_revoked(d) && !known.contains(d) {
-            merged.push(d.clone());
-            known.insert(d.clone());
-            added += 1;
-        }
-    }
-    // NOTHING is folded in beyond the signed set. Delivery proves only that
-    // somebody had a copy of the frame, not membership.
-    let removed_any = prev_devices.iter().any(|d| is_revoked(d));
-    let revoked_changed = new_revoked.len() != prev_revoked.len();
-    let nothing_new = added == 0 && !removed_any && !revoked_changed
-        && list.version <= prev_version;
-    // A destroyed identity comes back from the mnemonic on a device we have never
-    // seen. Any list we already hold is public and replayable, so it proves nothing.
-    if added > 0 {
-        super::destroy::note_identity_reappeared(
-            event_tx, db_path, db_passphrase, &list.master_peer_id,
-        ).await;
-    }
-    if nothing_new {
-        // Redundant on the Rust side, but STILL re-warm the resolver AND emit
-        // DeviceListUpdated: Dart's device-link cache warms ONCE at startup and races
-        // the Rust resolver, so a silent redundant ingest left a friend whose device id
-        // differs from its master showing OFFLINE until a manual list reset.
-        super::resolver::update_many(
-            &list.master_peer_id,
-            merged.iter().map(|s| s.as_str()),
-        );
-        // Re-key any friend row stranded under one of this master's DEVICE ids (a
-        // friend added by temporary nickname lands there). Include the SENDER: a stale
-        // legacy list can advertise only the master-as-device while the friend
-        // transmits from a distinct id, so the sender may not be in `merged`.
-        for dev in merged.iter().map(|s| s.as_str()).chain(std::iter::once(sender_peer_id)) {
-            if let Ok(true) = store.migrate_friend_to_master(dev, &list.master_peer_id) {
-                hollow_log!(
-                    "[HOLLOW-FRIENDS] Re-keyed friend {dev} → master {}", list.master_peer_id
-                );
-            }
-        }
-        let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
-            master_peer_id: list.master_peer_id.clone(),
-        }).await;
-        return IngestOutcome::default();
-    }
-
-    // Persist the union minus tombstones. We are NOT this master, so we cannot
-    // re-sign: store under the higher version with the INCOMING signature and
-    // pubkey. Verification on re-broadcast is sender-side.
-    let version = prev_version.max(list.version).max(1);
-    let stored = SignedDeviceList {
-        master_pubkey_b64: list.master_pubkey_b64.clone(),
-        master_peer_id: list.master_peer_id.clone(),
-        devices: merged.clone(),
-        revoked: new_revoked.clone(),
-        version,
-        sig_b64: list.sig_b64.clone(),
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    let json = match serde_json::to_string(&stored) {
-        Ok(j) => j,
-        Err(_) => return IngestOutcome::default(),
-    };
-    // save_device_list rebuilds the device_links reverse index from `devices`, so a
-    // revoked id (now absent from `merged`) is dropped from device_links for free.
-    if let Err(e) = store.save_device_list(
-        &stored.master_peer_id, &json, stored.version, &stored.devices, now,
-    ) {
-        hollow_log!("[HOLLOW-DEVICES] Failed to save device list: {e}");
-        return IngestOutcome::default();
-    }
-    // Prune the resolver for revoked ids (the map is insert-only, so without this
-    // a revoked device keeps resolving until restart), then warm the survivors.
-    if !enforced.is_empty() {
-        super::resolver::forget_many(&enforced);
-    }
-    super::resolver::update_many(
-        &stored.master_peer_id,
-        stored.devices.iter().map(|s| s.as_str()),
-    );
-    // Re-key friend rows stranded under a DEVICE id of this master, including the
-    // SENDER explicitly (a stale legacy list may advertise only the
-    // master-as-device while the friend transmits from a distinct id). Idempotent.
-    for dev in stored.devices.iter().map(|s| s.as_str()).chain(std::iter::once(sender_peer_id)) {
-        if let Ok(true) = store.migrate_friend_to_master(dev, &stored.master_peer_id) {
-            hollow_log!(
-                "[HOLLOW-FRIENDS] Re-keyed friend {dev} → master {}", stored.master_peer_id
-            );
-        }
-    }
-    hollow_log!(
-        "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices, {} revoked, +{} new)",
-        stored.master_peer_id, stored.version, stored.devices.len(),
-        stored.revoked.len(), added
-    );
-    // SECURITY (Issue 1-C): a device joining someone else's identity is the shape
-    // of "someone linked a device to an account they compromised", so warn. First
-    // contact establishes a baseline instead; the helper enforces that and dedups.
-    super::security_alerts::note_new_devices(
-        event_tx, db_path, db_passphrase, local_master_peer_id,
-        &stored.master_peer_id, &prev_devices, &stored.devices,
-    ).await;
-    let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
-        master_peer_id: stored.master_peer_id,
-    }).await;
-    // A FRIEND's device set changed, so no self re-broadcast. Surface freshly
-    // revoked ids so the caller drops Olm sessions and removes MLS leaves.
-    IngestOutcome { our_devices_grew: false, newly_revoked }
-}
-
-/// Merge a sibling device's list (for our OWN master) into ours.
-///
-/// The sibling holds the same master key, so its list is validly signed by our
-/// master. UNION only, never a removal (removal is revocation), re-signed with a
-/// bumped version so friends converge: a v1-vs-v1 collision otherwise leaves a
-/// friend knowing only ONE of two devices. A brand-new sibling is also handed
-/// our accepted-friend list. Returns `(our_list_changed, newly_revoked)`.
-#[allow(clippy::too_many_arguments)]
-async fn ingest_sibling_device_list(
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    local_master_peer_id: &str,
-    local_device_peer_id: &str,
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
-    sender_peer_id: &str,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    list: SignedDeviceList,
-    db_path: &str,
-    db_passphrase: &str,
-) -> (bool, Vec<String>) {
-    // Only a real sibling holding the mnemonic can sign for our master.
-    if !verify_device_list(&list) {
-        hollow_log!(
-            "[HOLLOW-DEVICES] Rejected sibling device list from {sender_peer_id}: bad signature"
-        );
-        return (false, Vec::new());
-    }
-    // SECURITY (CRYPTO-1): the same binding rule, and it bites hardest here. OUR
-    // OWN list is the one a stranger is most likely to hold, and replaying it back
-    // lands here, which hands the sender our friend list and our DM backfill.
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return (false, Vec::new());
-    };
-    let stored_list = store.load_device_list(local_master_peer_id).ok().flatten();
-    if !device_list_binds_sender(&list, sender_peer_id)
-        && !is_minimal_self_revocation(&list, sender_peer_id, stored_list.as_ref())
-    {
-        hollow_log!(
-            "[HOLLOW-SECURITY] REJECTED device list for {}: delivering device {sender_peer_id} is not in the signed list",
-            list.master_peer_id
-        );
-        return (false, Vec::new());
-    }
-
-    let (mut devices, our_revoked, our_version): (Vec<String>, Vec<String>, u64) =
-        match stored_list.as_ref() {
-            Some(cur) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
-            None => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
-        };
-    if !devices.iter().any(|d| d == local_device_peer_id) {
-        devices.push(local_device_peer_id.to_string());
-    }
-
-    // TOMBSTONES, max-version-wins: a sibling holds the same master key and has
-    // equal authority, so its higher-version revoked set is the latest word.
-    //
-    // SELF-NUKE: check the INCOMING revoked set BEFORE we strip self below. We
-    // never tombstone ourselves in our own list, but we DO obey a sibling's order.
-    if list.version > our_version && list.revoked.iter().any(|r| r == local_device_peer_id) {
-        hollow_log!("[HOLLOW-REVOKE] This device was revoked by a sibling (v{} > v{}) — self-nuking", list.version, our_version);
-        let _ = event_tx.send(NetworkEvent::SelfRevoked).await;
-        return (false, Vec::new());
-    }
-
-    let mut merged_revoked: Vec<String> = if list.version > our_version {
-        list.revoked.clone()
-    } else {
-        our_revoked.clone()
-    };
-    merged_revoked.retain(|r| r != local_device_peer_id);
-    merged_revoked.sort();
-    merged_revoked.dedup();
-    if !merged_revoked.is_empty() {
-        enforce_revocation(&store, local_master_peer_id, &merged_revoked);
-    }
-    let is_revoked = |id: &str| merged_revoked.iter().any(|r| r == id);
-    let newly_revoked: Vec<String> = merged_revoked
-        .iter()
-        .filter(|r| !our_revoked.iter().any(|p| &p == r))
-        .cloned()
-        .collect();
-
-    // Union in the sibling's devices, MINUS tombstones; also drop any of our own
-    // previously-known devices that are now revoked.
-    devices.retain(|d| !is_revoked(d));
-    let before: std::collections::HashSet<String> = devices.iter().cloned().collect();
-    for d in &list.devices {
-        if !is_revoked(d) && !before.contains(d) {
-            devices.push(d.clone());
-        }
-    }
-
-    // Prune the resolver for revoked ids, then learn the surviving union NOW (cheap,
-    // keeps same_identity correct after a restart even when nothing changed).
-    if !merged_revoked.is_empty() {
-        super::resolver::forget_many(&merged_revoked);
-    }
-    super::resolver::update_many(
-        local_master_peer_id,
-        devices.iter().map(|s| s.as_str()),
-    );
-
-    let removed_any = our_revoked.len() != merged_revoked.len();
-    let changed = devices.len() != before.len() || removed_any;
-    if changed {
-        // Re-sign the merged set with a version strictly greater than both ours
-        // and the sibling's, so every observer (and the sibling) accepts it.
-        let next_version = our_version.max(list.version).saturating_add(1);
-        let signed = build_signed_device_list(
-            master_keypair, next_version, devices, merged_revoked.clone(),
-        );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        if let Ok(json) = serde_json::to_string(&signed) {
-            let _ = store.save_device_list(
-                &signed.master_peer_id, &json, signed.version, &signed.devices, now,
-            );
-        }
-        super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
-        hollow_log!(
-            "[HOLLOW-MULTIDEV] Merged sibling {sender_peer_id} → device set now {} ({} revoked, v{})",
-            signed.devices.len(), signed.revoked.len(), signed.version
-        );
-
-        // `changed=true` makes the caller re-broadcast our profile now, so friends
-        // converge while we are online, not only when a sibling later joins.
-        let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
-            master_peer_id: signed.master_peer_id,
-        }).await;
-    }
-
-    // The sibling that JUST contacted us gets our state, not whichever ids look
-    // "new": across wipe+reimport cycles the stored list accumulates dead ids, so a
-    // reconnecting sibling can already be "known" and never get the friends.
-    if sender_peer_id != local_device_peer_id && !is_revoked(sender_peer_id) {
-        share_state_with_sibling(ws_cmd_tx, sender_peer_id, db_path, db_passphrase);
-    }
-
-    (changed, newly_revoked)
+    d.r_pub == pinned_r
+        && members.is_member(&d.device)
+        && verify_raw(
+            &rk,
+            &destroy_delegation_payload(&order.master_peer_id, &d.r_pub, &d.device, d.at_ms),
+            &d.sig_r,
+        )
+        && verify_raw(&dk, &payload, &d.device_sig)
 }
 
 /// Protocol ceiling, in BYTES, of one message body (post, edit, caption, meeting
@@ -3967,45 +3225,6 @@ mod tests {
         super::super::resolver::clear_all();
     }
 
-    /// A legacy keystone wrote `devices = [master]`. Once a DISTINCT device key
-    /// exists, `build_local_device_list` must STRIP the master-as-device entry, or a
-    /// friend who learns only `[master]` can never map our real device to it. A
-    /// genuine sole keystone (device == master) keeps its single entry.
-    #[test]
-    fn local_device_list_strips_master_as_device() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-        let master = test_master();
-        let master_id = master.peer_id();
-        let device_id = "12D3KooWrealDeviceXYZ".to_string();
-
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("m.db").to_str().unwrap().to_string();
-        let pass = "ab".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-
-        {
-            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
-            let stale = build_signed_device_list(&master, 1, vec![master_id.clone()], vec![]);
-            let json = serde_json::to_string(&stale).unwrap();
-            store.save_device_list(&master_id, &json, 1, &stale.devices, 0).unwrap();
-        }
-
-        let signed = build_local_device_list(&master, &device_id, &db, &pass).unwrap();
-        assert!(
-            !signed.devices.contains(&master_id),
-            "master-as-device must be stripped, got {:?}", signed.devices
-        );
-        assert!(
-            signed.devices.contains(&device_id),
-            "the real device id must be published, got {:?}", signed.devices
-        );
-        assert!(signed.version >= 2, "membership changed → version bumped");
-        assert!(verify_device_list(&signed), "re-signed list must verify");
-
-        super::super::resolver::clear_all();
-    }
-
     #[test]
     fn device_list_sign_verify_roundtrip() {
         let master = test_master();
@@ -4017,42 +3236,6 @@ mod tests {
         );
         assert_eq!(list.master_peer_id, master.peer_id());
         assert!(verify_device_list(&list));
-    }
-
-    #[test]
-    fn sibling_proof_sign_verify_roundtrip() {
-        let master = test_master();
-        let our_master = master.peer_id();
-        let challenged_device = "12D3KooWsiblingDevice";
-        let nonce = "deadbeefcafef00d";
-
-        let (sig, pk) = build_sibling_proof(&master, challenged_device, nonce);
-        assert!(
-            verify_sibling_proof(&our_master, challenged_device, nonce, &sig, &pk),
-            "a valid master-signed proof must verify"
-        );
-
-        // A stranger signs with a DIFFERENT master key → pubkey binds to the wrong
-        // master peer_id → rejected.
-        let stranger = {
-            let phrase = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
-            let m: bip39::Mnemonic = phrase.parse().unwrap();
-            crate::identity::native_identity::NativeKeypair::from_mnemonic(&m).unwrap()
-        };
-        let (bad_sig, bad_pk) = build_sibling_proof(&stranger, challenged_device, nonce);
-        assert!(
-            !verify_sibling_proof(&our_master, challenged_device, nonce, &bad_sig, &bad_pk),
-            "a stranger's signature must NOT verify against our master"
-        );
-
-        assert!(
-            !verify_sibling_proof(&our_master, challenged_device, "wrongnonce", &sig, &pk),
-            "wrong nonce must not verify"
-        );
-        assert!(
-            !verify_sibling_proof(&our_master, "12D3KooWotherDevice", nonce, &sig, &pk),
-            "wrong challenged device must not verify"
-        );
     }
 
     #[test]
@@ -4940,7 +4123,7 @@ mod tests {
         let bundle = signed_carried_bundle(
             &device, &device.peer_id(), "master-x", "ik".into(), "otk".into(),
         );
-        let list = build_signed_device_list(&kp(0x7a), 1, vec![device.peer_id()], Vec::new());
+        let list = crate::identity::roster::Roster::legacy_for_test(&kp(0x7a), &[&device]);
         let full = HavenMessage::FriendRequest {
             requested_at: 7,
             carried_bundle: Some(bundle.clone()),
@@ -4984,11 +4167,12 @@ mod tests {
             other => panic!("expected FriendReject, got {other:?}"),
         }
 
-        // A reject WITH a list round-trips it intact: this is the attribution the
+        // A reject WITH a roster round-trips it intact: this is the attribution the
         // requester needs when it has never been online with the decliner.
         let master = kp(0x5c);
-        let device = kp(0x5d).peer_id();
-        let list = build_signed_device_list(&master, 3, vec![device.clone()], Vec::new());
+        let device_kp = kp(0x5d);
+        let device = device_kp.peer_id();
+        let list = crate::identity::roster::Roster::legacy_for_test(&master, &[&device_kp]);
         let carried = HavenMessage::FriendReject {
             requested_at: 42,
             device_list: Some(list.clone()),
@@ -4997,10 +4181,11 @@ mod tests {
         match serde_json::from_str::<HavenMessage>(&wire).unwrap() {
             HavenMessage::FriendReject { requested_at, device_list: Some(got) } => {
                 assert_eq!(requested_at, 42);
-                assert_eq!(got.master_peer_id, master.peer_id());
-                assert_eq!(got.devices, vec![device.clone()]);
-                assert_eq!(got.sig_b64, list.sig_b64);
-                assert!(verify_device_list(&got), "the list must survive the wire verifiable");
+                assert_eq!(got, list);
+                assert!(
+                    got.verified(super::super::types::now_ms()).fold(|_| None, super::super::types::now_ms()).is_member(&device),
+                    "the roster must survive the wire verifiable",
+                );
             }
             other => panic!("expected a listed FriendReject, got {other:?}"),
         }
@@ -5110,8 +4295,9 @@ mod tests {
         // A request WITH a list round-trips it verifiable: this is the
         // attribution a member serving it from the ring depends on.
         let master = kp(0x7a);
-        let device = kp(0x7b).peer_id();
-        let list = build_signed_device_list(&master, 4, vec![device.clone()], Vec::new());
+        let device_kp = kp(0x7b);
+        let device = device_kp.peer_id();
+        let list = crate::identity::roster::Roster::legacy_for_test(&master, &[&device_kp]);
         let wire = serde_json::to_string(&HavenMessage::ServerJoinRequest {
             server_id: "abc".to_string(),
             twitch_proof_json: None,
@@ -5131,9 +4317,11 @@ mod tests {
             } => {
                 assert_eq!(requested_at, 42);
                 assert!(parked);
-                assert_eq!(got.master_peer_id, master.peer_id());
-                assert_eq!(got.devices, vec![device.clone()]);
-                assert!(verify_device_list(&got), "the list must survive the wire verifiable");
+                assert_eq!(got, list);
+                assert!(
+                    got.verified(super::super::types::now_ms()).fold(|_| None, super::super::types::now_ms()).is_member(&device),
+                    "the roster must survive the wire verifiable",
+                );
             }
             other => panic!("expected a listed ServerJoinRequest, got {other:?}"),
         }
@@ -5222,671 +4410,6 @@ mod tests {
         assert!(refused.contains(r#""reason":"banned""#));
     }
 
-    /// Run `ingest_device_list` the way the ProfileUpdate handler does, against a
-    /// throwaway DB this call owns, and hand back the persisted device set. The local
-    /// identity is deliberately a DIFFERENT master, so the friend path is exercised.
-    async fn ingest_list_from(list: &SignedDeviceList, sender_peer_id: &str) -> Vec<String> {
-        let local_master = kp(0x01);
-        let local_master_id = local_master.peer_id();
-        let local_device = kp(0x02).peer_id();
-
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
-        let pass = "cd".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-
-        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-
-        ingest_device_list(
-            &event_tx, &local_master_id, &local_device, &local_master,
-            sender_peer_id, &ws_cmd_tx, Some(list.clone()), &db, &pass,
-        )
-        .await;
-
-        crate::storage::MessageStore::open(&db, &pass)
-            .unwrap()
-            .load_device_list(&list.master_peer_id)
-            .ok()
-            .flatten()
-            .map(|l| l.devices)
-            .unwrap_or_default()
-    }
-
-    /// Ingest [list] as a friend-path ProfileUpdate would, with the local identity
-    /// (master 0x01, device 0x02) and the given resolver links already in place, and
-    /// hand back every event it emitted.
-    async fn ingest_foreign_events(
-        list: &SignedDeviceList,
-        sender_peer_id: &str,
-    ) -> Vec<NetworkEvent> {
-        let local_master = kp(0x01);
-        let local_master_id = local_master.peer_id();
-        let local_device = kp(0x02).peer_id();
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
-        let pass = "cd".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        let (event_tx, mut event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        ingest_device_list(
-            &event_tx, &local_master_id, &local_device, &local_master,
-            sender_peer_id, &ws_cmd_tx, Some(list.clone()), &db, &pass,
-        )
-        .await;
-        drop(event_tx);
-        let mut events = Vec::new();
-        while let Some(e) = event_rx.recv().await {
-            events.push(e);
-        }
-        events
-    }
-
-    /// Only our OWN master can revoke this device. Another identity's validly signed
-    /// list naming our device in `revoked` must not wipe us, must not mark our id or a
-    /// third identity's device revoked, and must not claim either as its own.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let local_master_id = kp(0x01).peer_id();
-        let local_device = kp(0x02).peer_id();
-        let friend_master_id = kp(0x60).peer_id();
-        let friend_device = kp(0x61).peer_id();
-        super::super::resolver::seed_self(&local_master_id, std::slice::from_ref(&local_device));
-        super::super::resolver::update(&friend_device, &friend_master_id);
-
-        let attacker = kp(0x50);
-        let attacker_device = kp(0x51).peer_id();
-        let list = build_signed_device_list(
-            &attacker,
-            1,
-            vec![attacker_device.clone(), friend_device.clone()],
-            vec![local_device.clone(), friend_device.clone()],
-        );
-        assert!(verify_device_list(&list), "the attacker signs its own list validly");
-
-        let events = ingest_foreign_events(&list, &attacker_device).await;
-        assert!(
-            !events.iter().any(|e| matches!(e, NetworkEvent::SelfRevoked)),
-            "another identity's list wiped this device"
-        );
-        assert!(!super::super::resolver::is_revoked(&local_device));
-        assert!(!super::super::resolver::is_revoked(&friend_device));
-        assert_eq!(super::super::resolver::resolve(&friend_device), friend_master_id);
-        assert_eq!(super::super::resolver::resolve(&local_device), local_master_id);
-        assert_eq!(
-            super::super::resolver::resolve(&attacker_device),
-            attacker.peer_id(),
-            "the attacker's own device still binds normally"
-        );
-    }
-
-    /// HOL-SEC-006, the variant HOL-SEC-001's filter missed: a MASTER id is never a
-    /// key in the resolver, so it read as "unbound" and a foreign list could claim
-    /// it. Naming a friend's master took over our friendship with that person and,
-    /// through the resolver, their server membership; naming a legacy contact
-    /// (device == master) in `revoked` silenced them.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn a_foreign_device_list_cannot_claim_a_master_id_or_silence_a_legacy_contact() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let local_master = kp(0x01);
-        let local_master_id = local_master.peer_id();
-        let local_device = kp(0x02).peer_id();
-        super::super::resolver::seed_self(&local_master_id, std::slice::from_ref(&local_device));
-
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
-        let pass = "cd".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-        let ingest = |list: SignedDeviceList, sender: String| {
-            let (event_tx, ws_cmd_tx, _rooms, db, pass) =
-                (event_tx.clone(), ws_cmd_tx.clone(), rooms.clone(), db.clone(), pass.clone());
-            let (local_master_id, local_device, local_master) =
-                (local_master_id.clone(), local_device.clone(), kp(0x01));
-            async move {
-                ingest_device_list(
-                    &event_tx, &local_master_id, &local_device, &local_master,
-                    &sender, &ws_cmd_tx, Some(list), &db, &pass,
-                )
-                .await
-            }
-        };
-
-        // Bob: a multi-device friend. Carol: a legacy contact whose device IS her master.
-        let bob = kp(0x60);
-        let bob_device = kp(0x61).peer_id();
-        let carol = kp(0x70);
-        let carol_id = carol.peer_id();
-        {
-            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
-            store.save_friend(&bob.peer_id(), "accepted", "outgoing", 1).unwrap();
-            store.save_friend(&carol_id, "accepted", "outgoing", 1).unwrap();
-        }
-        ingest(build_signed_device_list(&bob, 1, vec![bob_device.clone()], Vec::new()), bob_device.clone()).await;
-        ingest(build_signed_device_list(&carol, 1, vec![carol_id.clone()], Vec::new()), carol_id.clone()).await;
-        assert_eq!(super::super::resolver::resolve(&bob_device), bob.peer_id());
-
-        let mallory = kp(0x50);
-        let mallory_device = kp(0x51).peer_id();
-        let hostile = build_signed_device_list(
-            &mallory,
-            1,
-            vec![mallory_device.clone(), bob.peer_id()],
-            vec![carol_id.clone()],
-        );
-        let outcome = ingest(hostile, mallory_device.clone()).await;
-
-        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
-        let bob_row = store.get_friend_status(&bob.peer_id()).ok().flatten();
-        let mallory_row = store.get_friend_status(&mallory.peer_id()).ok().flatten();
-        assert_eq!(
-            super::super::resolver::resolve(&bob.peer_id()),
-            bob.peer_id(),
-            "HOL-SEC-006: a foreign list bound Bob's MASTER id to Mallory",
-        );
-        assert_eq!(
-            (bob_row.as_deref(), mallory_row.as_deref()),
-            (Some("accepted"), None),
-            "HOL-SEC-006: Mallory's list moved our friendship with Bob to her",
-        );
-        assert!(
-            !super::super::resolver::is_revoked(&carol_id) && outcome.newly_revoked.is_empty(),
-            "HOL-SEC-006: Mallory's list revoked a legacy contact's device",
-        );
-        assert_eq!(super::super::resolver::resolve(&mallory_device), mallory.peer_id());
-
-        super::super::resolver::clear_all();
-    }
-
-    /// HOL-SEC-032. The resolver forgets a revoked device, so it resolved to itself
-    /// and read as first contact: after a restart nothing remembered the revocation,
-    /// and the device passed key exchange and the sibling proof again.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn authz_a_revoked_device_stays_refused_after_a_restart() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let local_master = kp(0x01);
-        let local_master_id = local_master.peer_id();
-        let local_device = kp(0x02).peer_id();
-        let own_sibling = kp(0x03).peer_id();
-        super::super::resolver::seed_self(
-            &local_master_id, &[local_device.clone(), own_sibling.clone()],
-        );
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("revoked.db").to_str().unwrap().to_string();
-        let pass = "cd".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-
-        let bob = kp(0x60);
-        let bob_kept = kp(0x61).peer_id();
-        let bob_revoked = kp(0x62).peer_id();
-        for list in [
-            build_signed_device_list(&bob, 1, vec![bob_kept.clone(), bob_revoked.clone()], Vec::new()),
-            build_signed_device_list(&bob, 2, vec![bob_kept.clone()], vec![bob_revoked.clone()]),
-        ] {
-            ingest_device_list(
-                &event_tx, &local_master_id, &local_device, &local_master,
-                &bob_kept, &ws_cmd_tx, Some(list), &db, &pass,
-            )
-            .await;
-        }
-        assert!(
-            revoke_own_device(&local_master, &local_device, &own_sibling, &db, &pass).is_some(),
-            "our own sibling is revoked",
-        );
-        assert!(key_exchange_device_unauthorized(&bob_revoked));
-        assert!(key_exchange_device_unauthorized(&own_sibling));
-
-        super::super::resolver::clear_all();
-        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
-        super::super::resolver::warm_from_store(&store);
-        assert!(
-            key_exchange_device_unauthorized(&bob_revoked),
-            "HOL-SEC-032: a friend's revoked device passed key exchange after a restart",
-        );
-        assert!(
-            key_exchange_device_unauthorized(&own_sibling),
-            "HOL-SEC-032: our own revoked sibling passed key exchange after a restart",
-        );
-        assert!(!key_exchange_device_unauthorized(&bob_kept));
-        assert!(sibling_proof_refused(&local_master_id, &own_sibling, &db, &pass));
-        assert!(!sibling_proof_refused(&local_master_id, &local_device, &db, &pass));
-
-        super::super::resolver::clear_all();
-    }
-
-    /// HOL-SEC-033. A join request, friend request or decline carries a device list
-    /// and was attributed to that list's master even when ingest refused to bind
-    /// the sender, which a revoked device replaying an older list gets refused.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn authz_a_carried_list_attributes_only_a_bound_sender() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let bob = kp(0x60);
-        let bob_kept = kp(0x61).peer_id();
-        let bob_revoked = kp(0x62).peer_id();
-        let before = build_signed_device_list(&bob, 1, vec![bob_kept.clone(), bob_revoked.clone()], Vec::new());
-        let after = build_signed_device_list(&bob, 2, vec![bob_kept.clone()], vec![bob_revoked.clone()]);
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("carried.db").to_str().unwrap().to_string();
-        let pass = "cd".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        for (list, sender) in [(&before, &bob_kept), (&after, &bob_kept), (&before, &bob_revoked)] {
-            ingest_device_list(
-                &event_tx, &kp(0x01).peer_id(), &kp(0x02).peer_id(), &kp(0x01),
-                sender, &ws_cmd_tx, Some(list.clone()), &db, &pass,
-            )
-            .await;
-        }
-
-        assert!(
-            device_list_binds_sender(&before, &bob_revoked),
-            "the arms' own pre-check passes the older list",
-        );
-        assert_eq!(
-            carried_list_master(&before, &bob_revoked),
-            None,
-            "HOL-SEC-033: a revoked device replaying an older list was taken as its master",
-        );
-        assert_eq!(carried_list_master(&after, &bob_kept), Some(bob.peer_id()));
-
-        let swarm = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"),
-        )
-        .unwrap()
-        .replace("\r\n", "\n");
-        for (arm, next) in [
-            ("HavenMessage::ServerJoinRequest {", "let resolution_key"),
-            ("HavenMessage::FriendRequest {", "let req_master_early"),
-            ("HavenMessage::FriendReject {", "let Ok(store)"),
-        ] {
-            let start = swarm.find(arm).unwrap_or_else(|| panic!("missing {arm}"));
-            let body = &swarm[start..start + swarm[start..].find(next).unwrap()];
-            assert!(
-                body.contains("carried_list_master(") && body.contains("enforce_device_revocations("),
-                "{arm} attributes a carried list without the binding or drops its revocations",
-            );
-            // L2: the list binds a never-seen device to its master only in ingest, so
-            // the block check must run again after it.
-            if arm == "HavenMessage::FriendRequest {" {
-                let ingest = body.find("ingest_device_list(").unwrap();
-                assert!(
-                    body[ingest..].contains("blocklist::is_blocked(peer_str)"),
-                    "HOL-SEC-036: a blocked identity's never-seen device passes the block check",
-                );
-            }
-        }
-        super::super::resolver::clear_all();
-    }
-
-    /// HOL-SEC-034. Any bound list from an identity reported destroyed cleared the
-    /// banner and raised "identity reappeared", a replayed copy of a list we already
-    /// held included. Only a device we have never seen for it is the mnemonic's return.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn authz_only_a_new_device_means_a_destroyed_identity_returned() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let bob = kp(0x60);
-        let bob_old = kp(0x61).peer_id();
-        let bob_new = kp(0x63).peer_id();
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("reappear.db").to_str().unwrap().to_string();
-        let pass = "cd".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-        let ingest = |list: SignedDeviceList, sender: String| {
-            let (event_tx, ws_cmd_tx, _rooms, db, pass) =
-                (event_tx.clone(), ws_cmd_tx.clone(), rooms.clone(), db.clone(), pass.clone());
-            async move {
-                ingest_device_list(
-                    &event_tx, &kp(0x01).peer_id(), &kp(0x02).peer_id(), &kp(0x01),
-                    &sender, &ws_cmd_tx, Some(list), &db, &pass,
-                )
-                .await
-            }
-        };
-        let old = build_signed_device_list(&bob, 1, vec![bob_old.clone()], Vec::new());
-        ingest(old.clone(), bob_old.clone()).await;
-        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
-        store.save_setting(&format!("identity_destroyed:{}", bob.peer_id()), "7000").unwrap();
-        let reappeared = || {
-            store.get_security_alerts().unwrap().iter().any(|a| {
-                a.kind == super::super::security_alerts::KIND_IDENTITY_REAPPEARED
-                    && a.peer_id == bob.peer_id()
-            })
-        };
-
-        ingest(old.clone(), bob_old.clone()).await;
-        assert_eq!(
-            super::super::destroy::identity_destroyed_at(&store, &bob.peer_id()),
-            Some(7_000),
-            "HOL-SEC-034: a replayed list cleared the destroyed banner",
-        );
-        assert!(!reappeared(), "HOL-SEC-034: a replayed list raised 'identity reappeared'");
-
-        let restored = build_signed_device_list(&bob, 1, vec![bob_new.clone()], Vec::new());
-        ingest(restored, bob_new.clone()).await;
-        assert_eq!(super::super::destroy::identity_destroyed_at(&store, &bob.peer_id()), None);
-        assert!(reappeared(), "a new device after a destroy is the identity coming back");
-        super::super::resolver::clear_all();
-    }
-
-    /// CRYPTO-1. A master-signed device list is public the moment it is announced,
-    /// so holding a genuine one proves nothing about who holds it. Replaying the
-    /// victim's own list from an unlisted socket must persist nothing and bind
-    /// nothing: that binding hands the attacker the victim's DM fan-out.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn ingest_rejects_list_delivered_by_an_unlisted_device() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let victim_master = kp(0x40);
-        let victim_master_id = victim_master.peer_id();
-        let victim_device = kp(0x41).peer_id();
-        let attacker_device = kp(0x42).peer_id();
-
-        let list = build_signed_device_list(
-            &victim_master, 3, vec![victim_device.clone()], Vec::new(),
-        );
-        assert!(verify_device_list(&list), "the replayed list is the victim's real one");
-
-        let stored = ingest_list_from(&list, &attacker_device).await;
-        assert!(
-            stored.is_empty(),
-            "a replay from an unlisted device must persist nothing, got {stored:?}",
-        );
-        assert_ne!(
-            super::super::resolver::resolve(&attacker_device),
-            victim_master_id,
-            "and it must never bind the delivering device to the victim's master",
-        );
-
-        // A device that IS in the list but has been tombstoned is the same answer on
-        // FIRST CONTACT: with nothing stored there is no diff for the self-revocation
-        // exception to be minimal against, so the baseline rule decides.
-        let revoking = build_signed_device_list(
-            &victim_master, 4, vec![victim_device.clone()], vec![attacker_device.clone()],
-        );
-        let stored = ingest_list_from(&revoking, &attacker_device).await;
-        assert!(
-            stored.is_empty(),
-            "a revoked delivering device is refused with no stored list, got {stored:?}",
-        );
-
-        super::super::resolver::clear_all();
-    }
-
-    /// Ingest `incoming` from `sender` against a DB already holding `stored` for the
-    /// same master, and hand back what is persisted afterwards. `own_master` runs the
-    /// sibling path (the list is for the identity we are running as).
-    async fn ingest_over_stored(
-        master: &crate::identity::native_identity::NativeKeypair,
-        stored: &SignedDeviceList,
-        incoming: &SignedDeviceList,
-        sender_peer_id: &str,
-        local_device: &str,
-        own_master: bool,
-    ) -> (Vec<String>, Vec<String>, u64) {
-        let other = kp(0x01);
-        let (local_master_kp, local_master_id) = if own_master {
-            (master.clone(), master.peer_id())
-        } else {
-            (other.clone(), other.peer_id())
-        };
-
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
-        let pass = "ef".repeat(32);
-        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        {
-            let st = crate::storage::MessageStore::open(&db, &pass).unwrap();
-            let json = serde_json::to_string(stored).unwrap();
-            st.save_device_list(
-                &stored.master_peer_id, &json, stored.version, &stored.devices, 0,
-            )
-            .unwrap();
-        }
-
-        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
-        let (ws_cmd_tx, _ws_cmd_rx) =
-            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
-
-        ingest_device_list(
-            &event_tx, &local_master_id, local_device, &local_master_kp,
-            sender_peer_id, &ws_cmd_tx, Some(incoming.clone()), &db, &pass,
-        )
-        .await;
-
-        let st = crate::storage::MessageStore::open(&db, &pass).unwrap();
-        match st.load_device_list(&stored.master_peer_id).ok().flatten() {
-            Some(l) => {
-                let mut d = l.devices.clone();
-                d.sort();
-                let mut r = l.revoked.clone();
-                r.sort();
-                (d, r, l.version)
-            }
-            None => (Vec::new(), Vec::new(), 0),
-        }
-    }
-
-    /// `revoke_self_device` reads the DB; this builds the same list from a stored one,
-    /// so the test asserts against the SHAPE the production path emits.
-    fn minimal_self_revocation_of(
-        master: &crate::identity::native_identity::NativeKeypair,
-        self_device: &str,
-        stored: &SignedDeviceList,
-    ) -> SignedDeviceList {
-        let mut devices = stored.devices.clone();
-        devices.retain(|d| d != self_device);
-        let mut revoked = stored.revoked.clone();
-        revoked.push(self_device.to_string());
-        build_signed_device_list(master, stored.version + 1, devices, revoked)
-    }
-
-    /// Destruction scope (b) needs a device to publish its OWN tombstone, the one
-    /// shape CRYPTO-1's sender rule refuses. The exception is a MINIMAL DIFF and
-    /// nothing else: every device holds the master key, so a revoked one running a
-    /// modified client could otherwise sign a newer list that tombstones itself AND
-    /// drops its legitimate siblings, and that sender rule is the only thing standing
-    /// between it and a device that can never be revoked.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn self_revocation_carve_out_admits_only_the_minimal_diff() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let master = kp(0x50);
-        let rogue = kp(0x51).peer_id();   // the device revoking itself
-        let sibling = kp(0x52).peer_id(); // a legitimate device it must not touch
-        let fresh = kp(0x53).peer_id();   // a device nobody has seen
-
-        let mut seeded = vec![rogue.clone(), sibling.clone()];
-        seeded.sort();
-        let stored = build_signed_device_list(&master, 4, seeded.clone(), Vec::new());
-        let none: [String; 0] = [];
-
-        for own_master in [false, true] {
-            let lane = if own_master { "sibling" } else { "friend" };
-            let local_device = if own_master { sibling.as_str() } else { "12D3KooWLocalDev" };
-
-            // The attacker holds the master key, so every one of these verifies.
-            let sweeping = build_signed_device_list(
-                &master, 5, Vec::new(), vec![rogue.clone(), sibling.clone()],
-            );
-            let got = ingest_over_stored(
-                &master, &stored, &sweeping, &rogue, local_device, own_master,
-            ).await;
-            assert_eq!(
-                got, (seeded.clone(), none.to_vec(), 4),
-                "{lane}: a revoked deliverer must not drop a legitimate sibling",
-            );
-
-            let grabby = build_signed_device_list(
-                &master, 5, vec![sibling.clone(), fresh.clone()], vec![rogue.clone()],
-            );
-            let got = ingest_over_stored(
-                &master, &stored, &grabby, &rogue, local_device, own_master,
-            ).await;
-            assert_eq!(
-                got, (seeded.clone(), none.to_vec(), 4),
-                "{lane}: a revoked deliverer must not smuggle in a new device",
-            );
-
-            let stale = build_signed_device_list(
-                &master, 4, vec![sibling.clone()], vec![rogue.clone()],
-            );
-            let got = ingest_over_stored(
-                &master, &stored, &stale, &rogue, local_device, own_master,
-            ).await;
-            assert_eq!(
-                got, (seeded.clone(), none.to_vec(), 4),
-                "{lane}: the diff must also be NEWER than what we hold",
-            );
-
-            // The exact minimal diff, which is what `revoke_self_device` emits.
-            let minimal = minimal_self_revocation_of(&master, &rogue, &stored);
-            let (devices, revoked, _) = ingest_over_stored(
-                &master, &stored, &minimal, &rogue, local_device, own_master,
-            ).await;
-            assert_eq!(devices, vec![sibling.clone()], "{lane}: the surviving device stays");
-            assert_eq!(revoked, vec![rogue.clone()], "{lane}: and the deliverer is tombstoned");
-        }
-
-        super::super::resolver::clear_all();
-    }
-
-    /// The other half: the honest case still works. A device the master SIGNED for
-    /// is persisted and mapped, which is what presence collapse and DM fan-out read.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn ingest_accepts_list_delivered_by_a_listed_device() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let master = kp(0x43);
-        let master_id = master.peer_id();
-        let device_a = kp(0x44).peer_id();
-        let device_b = kp(0x45).peer_id();
-
-        let list = build_signed_device_list(
-            &master, 2, vec![device_a.clone(), device_b.clone()], Vec::new(),
-        );
-        let stored = ingest_list_from(&list, &device_b).await;
-        assert!(
-            stored.contains(&device_a) && stored.contains(&device_b),
-            "both signed devices must be persisted, got {stored:?}",
-        );
-        assert_eq!(
-            super::super::resolver::resolve(&device_b), master_id,
-            "the delivering device maps to the master that named it",
-        );
-
-        super::super::resolver::clear_all();
-    }
-
-    /// A legacy keystone published `devices = [master]` and transmits AS the
-    /// master, so the master peer id itself is an accepted deliverer. Both shapes are
-    /// covered: the classic one, and a list naming only a separate device.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
-    async fn ingest_accepts_legacy_master_as_delivering_device() {
-        let _lock = super::super::resolver::test_lock();
-        super::super::resolver::clear_all();
-
-        let master = kp(0x46);
-        let master_id = master.peer_id();
-
-        let keystone = build_signed_device_list(
-            &master, 1, vec![master_id.clone()], Vec::new(),
-        );
-        let stored = ingest_list_from(&keystone, &master_id).await;
-        assert!(
-            stored.contains(&master_id),
-            "the keystone shape (devices = [master], sent by the master) must ingest, got {stored:?}",
-        );
-
-        let device = kp(0x47).peer_id();
-        let rotated = build_signed_device_list(&master, 2, vec![device.clone()], Vec::new());
-        let stored = ingest_list_from(&rotated, &master_id).await;
-        assert!(
-            stored.contains(&device),
-            "the master may deliver a list that names only its devices, got {stored:?}",
-        );
-
-        super::super::resolver::clear_all();
-    }
-
-    /// The membership half of the reject's attribution gate, pinned next to the
-    /// signature math it rides on: `verify_device_list` says nothing about which
-    /// device delivered a list, so the FriendReject arm also requires the
-    /// relay-authenticated sender to be listed and un-revoked.
-    #[test]
-    fn carried_list_binds_the_sending_device() {
-        let master = kp(0x6a);
-        let mine = kp(0x6b).peer_id();
-        let stranger = kp(0x6c).peer_id();
-        let revoked_dev = kp(0x6d).peer_id();
-        let list = build_signed_device_list(
-            &master, 2, vec![mine.clone()], vec![revoked_dev.clone()],
-        );
-
-        assert!(verify_device_list(&list), "baseline: the list itself verifies");
-        assert!(list.devices.iter().any(|d| *d == mine), "the listed device is bound");
-        assert!(
-            !list.devices.iter().any(|d| *d == stranger),
-            "a device that is not in the list must not pass the sender check",
-        );
-        assert!(
-            list.revoked.iter().any(|r| *r == revoked_dev),
-            "a revoked device must not pass the sender check either",
-        );
-
-        // The same three statements through the shared predicate every ingest
-        // path now runs, so the call sites and the ingest cannot drift apart.
-        assert!(device_list_binds_sender(&list, &mine));
-        assert!(!device_list_binds_sender(&list, &stranger));
-        assert!(!device_list_binds_sender(&list, &revoked_dev));
-        assert!(
-            device_list_binds_sender(&list, &master.peer_id()),
-            "the legacy master-as-device deliverer is the one addition",
-        );
-
-        // A list signed by a DIFFERENT master cannot be re-labelled: the pubkey to
-        // peer_id binding inside verify_device_list is what stops that replay.
-        let mut stolen = list.clone();
-        stolen.master_peer_id = kp(0x6e).peer_id();
-        assert!(!verify_device_list(&stolen), "master binding must reject a relabelled list");
-    }
-
     /// The carried payload is pure signature math (no clock), so it pins exactly.
     #[test]
     fn carried_bundle_signing_payload_kat() {
@@ -5930,14 +4453,16 @@ mod tests {
         let sender_device_id = sender_device.peer_id();
         let our_master = kp(0x53).peer_id();
 
-        let list = build_signed_device_list(
-            &sender_master, 1, vec![sender_device_id.clone()], Vec::new(),
-        );
+        let list = crate::identity::roster::Roster::legacy_for_test(&sender_master, &[&sender_device]);
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("carried.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
         let good = signed_carried_bundle(
             &sender_device, &sender_device_id, &our_master,
             "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
         );
-        assert!(verify_carried_bundle(&our_master, &list, &good), "a freshly built bundle must verify");
+        assert!(verify_carried_bundle(&our_master, &list, &good, &db, &pass), "a freshly built bundle must verify");
         assert_eq!(
             carried_bundle_sender_device(&good).as_deref(),
             Some(sender_device_id.as_str()),
@@ -5946,18 +4471,18 @@ mod tests {
         // 1. Signature gates: swapped keys, cleared signature, moved timestamp.
         let mut swapped = good.clone();
         swapped.one_time_key = "b3RoZXI".to_string();
-        assert!(!verify_carried_bundle(&our_master, &list, &swapped), "substituted one-time key");
+        assert!(!verify_carried_bundle(&our_master, &list, &swapped, &db, &pass), "substituted one-time key");
         let mut swapped_ik = good.clone();
         swapped_ik.identity_key = "b3RoZXI".to_string();
-        assert!(!verify_carried_bundle(&our_master, &list, &swapped_ik), "substituted identity key");
+        assert!(!verify_carried_bundle(&our_master, &list, &swapped_ik, &db, &pass), "substituted identity key");
         let mut unsigned = good.clone();
         unsigned.sig_b64 = String::new();
-        assert!(!verify_carried_bundle(&our_master, &list, &unsigned), "a missing signature is a REJECT, never a bypass");
+        assert!(!verify_carried_bundle(&our_master, &list, &unsigned, &db, &pass), "a missing signature is a REJECT, never a bypass");
         let mut ts_moved = good.clone();
         ts_moved.ts += 1;
-        assert!(!verify_carried_bundle(&our_master, &list, &ts_moved), "ts is signed");
+        assert!(!verify_carried_bundle(&our_master, &list, &ts_moved, &db, &pass), "ts is signed");
 
-        // 2. The signing device must be in the sender's master-signed list.
+        // 2. The signing device must be a member of the sender's roster.
         let stranger = kp(0x54);
         let stranger_id = stranger.peer_id();
         let stranger_bundle = signed_carried_bundle(
@@ -5965,21 +4490,23 @@ mod tests {
             "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
         );
         assert!(
-            !verify_carried_bundle(&our_master, &list, &stranger_bundle),
-            "a device outside the signed list must be refused even with a valid signature",
+            !verify_carried_bundle(&our_master, &list, &stranger_bundle, &db, &pass),
+            "a device outside the roster must be refused even with a valid signature",
         );
-        let revoked_list = build_signed_device_list(
-            &sender_master, 2, vec![sender_device_id.clone()], vec![sender_device_id.clone()],
-        );
+        let mut revoked_list = list.clone();
+        revoked_list.add_removal(crate::identity::roster::sign_removal(
+            &sender_device, &sender_master.peer_id(), crate::identity::roster::LEGACY_BASE,
+            &sender_device_id, &[],
+        ));
         assert!(
-            !verify_carried_bundle(&our_master, &revoked_list, &good),
+            !verify_carried_bundle(&our_master, &revoked_list, &good, &db, &pass),
             "a REVOKED device must be refused",
         );
         let mut forged_list = list.clone();
-        forged_list.version = 99;
+        forged_list.consents[0].sig = forged_list.legacy[0].sig_m.clone();
         assert!(
-            !verify_carried_bundle(&our_master, &forged_list, &good),
-            "a device list whose own signature does not verify must be refused",
+            !verify_carried_bundle(&our_master, &forged_list, &good, &db, &pass),
+            "a device whose consent does not verify is no member",
         );
 
         // 3. Addressed to US.
@@ -5988,7 +4515,7 @@ mod tests {
             "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
         );
         assert!(
-            !verify_carried_bundle(&our_master, &list, &elsewhere),
+            !verify_carried_bundle(&our_master, &list, &elsewhere, &db, &pass),
             "a bundle addressed at a third party must not verify here",
         );
 
@@ -6010,17 +4537,37 @@ mod tests {
         };
         let now = key_exchange_now();
         assert!(
-            verify_carried_bundle(&our_master, &list, &sign_at(now - 3 * 24 * 3600)),
+            verify_carried_bundle(&our_master, &list, &sign_at(now - 3 * 24 * 3600), &db, &pass),
             "three days old is well inside the carried window",
         );
         assert!(
-            !verify_carried_bundle(&our_master, &list, &sign_at(now - MAX_CARRIED_BUNDLE_AGE_SECS - 60)),
+            !verify_carried_bundle(&our_master, &list, &sign_at(now - MAX_CARRIED_BUNDLE_AGE_SECS - 60), &db, &pass),
             "past the carried window is a REJECT",
         );
         assert!(
-            !verify_carried_bundle(&our_master, &list, &sign_at(now + KEY_EXCHANGE_SKEW_SECS + 60)),
+            !verify_carried_bundle(&our_master, &list, &sign_at(now + KEY_EXCHANGE_SKEW_SECS + 60), &db, &pass),
             "a bundle from the future is a REJECT",
         );
+
+        // 5. Judged against the roster we hold for the sender: once we know its real
+        //    recovery key, a carried roster under a forged one admits nobody.
+        use crate::identity::roster::Roster;
+        let at = super::super::roster_book::now_ms() - 60_000;
+        let real = Roster::genesis(&sender_master, &kp(0x56), &sender_device, at);
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        super::super::roster_book::merge_for_test(&store, &real, &our_master, &kp(0x59).peer_id());
+        drop(store);
+        let thief = kp(0x57);
+        let forged = Roster::genesis(&sender_master, &kp(0x58), &thief, at + 1);
+        let thief_bundle = signed_carried_bundle(
+            &thief, &thief.peer_id(), &our_master,
+            "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
+        );
+        assert!(
+            !verify_carried_bundle(&our_master, &forged, &thief_bundle, &db, &pass),
+            "a carried roster under a forged recovery key admits its thief",
+        );
+        assert!(verify_carried_bundle(&our_master, &real, &good, &db, &pass), "the real roster still admits its device");
     }
 
     /// Every KeyPackage mint in `node/` goes through [`mint_key_package`], so every
@@ -6152,6 +4699,10 @@ mod tests {
         assert!(public.contains("public_frame_accepted(") && public.contains("fetch_post_refused("));
         let mls = between(&fetch, "MessageEnvelope::ChannelMessage { inner } => {", "insert_channel_row(");
         assert!(mls.contains("fetch_post_refused("), "fetch.rs: MLS posts skip the live post gate");
+        // ID-1: a leaf the master certified but its roster does not admit is nobody.
+        assert!(mls.contains("resolver::disowns("), "fetch.rs: MLS posts from a disowned leaf are kept");
+        let live = between(&swarm, "mls_envelope_fits_group(", "match envelope {");
+        assert!(live.contains("resolver::disowns("), "swarm.rs: MLS envelopes from a disowned leaf are read");
     }
 
     /// D1, D7, D10: a KeyPackage is seated only when its leaf is bound to the device

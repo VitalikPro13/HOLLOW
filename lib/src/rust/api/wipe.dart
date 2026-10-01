@@ -7,17 +7,22 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `close_store_singleton`, `destroy_data_root`, `publish_scope`, `run_duress`, `wait_for`, `zero_and_remove`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Signal`
 
 /// Scope (a), and the tail of every other. Leaves the node RUNNING for Dart's step 5.
 Future<void> destroyLocal() => RustLib.instance.api.crateApiWipeDestroyLocal();
 
 /// `scope` is `device` | `device_revoke` | `identity`; its signal never blocks the wipe.
+/// `identity` needs the recovery phrase once the identity has one (design ID-1): it is
+/// checked BEFORE anything is erased, so a wrong phrase costs nothing.
 Future<void> destroyWithScope({
   required String scope,
   required bool notifyFriends,
+  String? phrase,
 }) => RustLib.instance.api.crateApiWipeDestroyWithScope(
   scope: scope,
   notifyFriends: notifyFriends,
+  phrase: phrase,
 );
 
 /// Drives the conversation banner. `None` = we were never told.

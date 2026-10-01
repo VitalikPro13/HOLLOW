@@ -115,7 +115,7 @@ The keypair is derived from a **BIP-39 mnemonic** (24 words, 256 bits of entropy
 4. Use the first 32 bytes as the Ed25519 secret key.
 5. Derive the public key from the secret key.
 
-The mnemonic is shown to the user once at account creation and never transmitted. It is the sole identity recovery mechanism.
+The mnemonic is shown to the user once at account creation, checked by asking for three of its words back, and never stored or transmitted. It is the sole identity recovery mechanism and, since 0.12, the final word on which devices belong to the identity (§3.2).
 
 ### 2.2 Peer ID
 
@@ -157,7 +157,7 @@ Total: 119 bytes. The ciphertext contains the AES-256-GCM encrypted keypair (68-
 
 **Duress code.** A password-protected identity that prompts at launch may carry a second secret, typed at the same prompt, that never unlocks and always destroys. It lives in a sibling slot with the same HKEYV1 layout and its own salt; the slot exists whenever password protection does, holding random bytes under a random key when no duress code is set, and its plaintext has a fixed size, so neither the disk nor the timing of an unlock attempt reveals whether a code is configured. Every typed secret is processed against both slots before any decision is made. The duress code must differ from the password, and a password change that would collide with it is refused. The person typing it sees no error and no confirmation: the data is destroyed and the application returns to its first-launch screen.
 
-**Destruction.** One local routine erases an installation in a fixed order: a resume marker, then the identity key files and the OS keystore slot, then the database that holds every per-file key (§2.4), then the content directories. It never waits on the network; an unreachable device still erases itself, and the marker finishes anything the platform refused to unlink at the next launch. Three scopes build on it. The device alone. The device plus a master-signed self-revocation, so the person's other devices and friends stop routing to it; a device announcing its own revocation is the one list a tombstoned sender may deliver, and it is admitted only as the exact minimal change against the list the receiver already holds (that device moved from the active set to the revoked set, nothing else, at a newer version), which keeps revocation final even against a modified client that still holds the shared master key. And the whole identity: a master-signed destruction order (master, issue time, optional target devices, friend flag) reaches online devices over the sibling lanes and offline devices through the relay, which parks the opaque signed order under each target device id and hands it over as the first frame after that device next authenticates, with no retention limit. The relay is a courier only: it cannot read, forge or retarget an order, and a receiving device verifies the master signature itself, refuses an order issued before it was linked (so a device linked after a destruction is never wiped by a replay) or older than one it has already applied, and acknowledges both a completed wipe and a permanent rejection so the relay stops re-sending. Friends may be told: the conversation is marked destroyed, the contact's verified status is dropped, and a later device list from the same master (a mnemonic recreating the identity, which nothing can prevent) raises a warning that the identity has come back and must be verified again. A duress code entered at a cold launch destroys the local device only, because with the wrong password nothing can be signed; storing signing material in the duress slot was rejected as a device-impersonation key.
+**Destruction.** One local routine erases an installation in a fixed order: a resume marker, then the identity key files and the OS keystore slot, then the database that holds every per-file key (§2.4), then the content directories. It never waits on the network; an unreachable device still erases itself, and the marker finishes anything the platform refused to unlink at the next launch. Three scopes build on it. The device alone. The device plus its own removal: it signs a removal of itself into the person's roster (§3.2), so the person's other devices and friends stop routing to it, and a removal stays final within the roster's base even against a modified client that still holds the shared master key. And the whole identity: a destruction order (master, issue time, optional target devices, friend flag) signed with the recovery key, which only the recovery phrase produces, reaches online devices over the sibling lanes and offline devices through the relay, which parks the opaque signed order under each target device id and hands it over as the first frame after that device next authenticates, with no retention limit. The relay is a courier only: it cannot read, forge or retarget an order, and a receiving device verifies the recovery-key signature itself against the key it pinned for the identity, refuses an order issued before it was linked (so a device linked after a destruction is never wiped by a replay) or older than one it has already applied, and acknowledges both a completed wipe and a permanent rejection so the relay stops re-sending. An identity whose phrase has not been confirmed since 0.12 has no recovery key yet and keeps the earlier master-signed order. Friends may be told: the conversation is marked destroyed, the contact's verified status is dropped, and a later roster from the same master (the phrase recreating the identity, which nothing can prevent) raises a warning that the identity has come back and must be verified again. A duress code entered at a cold launch destroys the local device only, because with the wrong password nothing can be signed. A duress code set from a running node can destroy every device instead: the phrase, typed once when the code is set, signs a permission for that one device to issue the order, and the duress slot keeps the permission, never the phrase or the recovery key. Removing the device voids it.
 
 ### 2.4 Local Storage Encryption
 
@@ -173,9 +173,9 @@ Removing the *persistent* lock is necessary but not sufficient: **opening** the 
 
 Two recovery methods are implemented:
 
-**Mnemonic recovery:** The 24-word BIP-39 phrase deterministically regenerates the identity keypair. Recovery is identity-only: server memberships and message history require re-sync from peers.
+**Phrase recovery:** The 24-word BIP-39 phrase regenerates the identity keypair and the recovery key (§3.2). Typed on a new install, it admits that device at once; typed on an existing device, it can start the identity over with only the devices the person picks. Server memberships and message history re-sync from peers.
 
-**Encrypted backup:** Full account state (identity key + encrypted database + optional vault shards) is exported as a passphrase-protected `.hollow` file. The passphrase is processed through Argon2id (64 MB memory cost, ~500ms per attempt) to derive an AES-256-GCM encryption key. Brute-force resistant by design.
+**Encrypted backup:** Full account state (identity key + encrypted database + optional vault shards) is exported as a passphrase-protected `.hollow` file. The passphrase is processed through Argon2id (64 MB memory cost, ~500ms per attempt) to derive an AES-256-GCM encryption key. Brute-force resistant by design. A backup holds no recovery phrase and no device secrets (no Olm account or sessions, no MLS signing identity), and a device restored from one joins the identity only once another device approves it, the phrase is typed on it, or seven days pass with nobody refusing it (§3.6).
 
 ### 2.6 App Lock (Mobile)
 
@@ -208,38 +208,34 @@ The device key drives identity **only at the transport layer**: relay authentica
 
 The device key shares the same at-rest protection as the master key (§2.3): both files are wrapped by the same session key, and a protection change rewrites both.
 
-### 3.2 The Signed Device List
+### 3.2 The Roster
 
-A person's set of active devices is published as a **master-signed device list**:
+A person's devices are not a list the master key signs. Since 0.12 they are a **roster**: a set of statements, each signed and each verifiable on its own, which every observer folds into the same answer. Holding the master key proves nothing about which devices are the person's.
 
-```
-SignedDeviceList {
-    master_pubkey_b64,   // master Ed25519 public key
-    master_peer_id,      // MUST equal peer_id derived from the pubkey (binds key → identity)
-    devices: [...],      // sorted, deduplicated active device peer IDs
-    revoked: [...],      // sorted, deduplicated revoked device peer IDs (tombstones)
-    version: u64,        // monotonic
-    sig_b64,             // master's Ed25519 signature over the canonical payload
-}
-```
+| Statement | Signed by | Says |
+|---|---|---|
+| Consent | the device itself | this device agrees to belong to this master |
+| Vouch | a current device | this device is one of ours |
+| Pending join | the master | a device restored from a backup asks to join |
+| Removal | a current device | this device is no longer ours, and which of the devices it added stay |
+| Recovery | the recovery key and the master | start over: exactly these devices are ours |
+| Phrase admission | the recovery key and the master | this device joins now |
 
-The canonical signing payload is:
+Every signature covers an ASCII payload with its own `hollow-id1-*` tag and the master ID, so no statement passes as another type.
 
-```
-hollow-devices:{master_peer_id}:{version}:{sorted_device_csv}:{sorted_revoked_csv}
-```
+**The recovery key.** The recovery phrase (§2.1) also derives a second key: R, an Ed25519 key from HKDF-SHA256 over the whole 64-byte BIP-39 seed. The master key is the first half of that seed and does not determine R. No device stores R or the phrase; R exists only while the phrase is typed. The master signs R once to bind it to the identity, and every observer keeps the first R it sees for that identity.
 
-Devices and revocations are sorted and deduplicated before signing, so the payload is deterministic regardless of insertion order. Verification re-derives the payload, confirms that the master peer ID matches the supplied public key, and checks the Ed25519 signature.
+**The fold.** The newest recovery starts a base. Its keep set, plus every phrase admission dated after it, are the roots. The members are the roots, every device a member vouched for in this base, and every pending join this observer first saw at least seven days ago, minus every device a rooted signer removed. Every member must have signed its own consent, so no roster can claim a device that never agreed. Removals are a plain union, so the fold needs no clock and no order.
 
-**Security property.** The device list is a self-authenticating capability: only the holder of the master private key can mint or amend it. A friend stores an incoming list verbatim (the signature travels with it) and never needs to re-verify, so additions and revocations are equally tamper-proof.
+**Replay.** An older roster cannot bring back a removed device: removals are never withdrawn inside a base, and only the phrase starts a new one.
 
-**Monotonic, replay-resistant merge.** The version is monotonic per master and is signed once per version, governing both the active and revoked sets together. A higher version is the latest word: it may both add devices and un-revoke them. A replay (lower-or-equal version) can never shrink the tombstone set, so it can never un-revoke a device. Because each device independently seeds its own list at version 1, receivers **union-merge** active sets (`union(devices) − revoked`, keeping the highest version) rather than rejecting a "stale" sibling list. Adding is monotonic and safe; removal happens only via the signed `revoked` set.
+The roster travels with profile updates, friend requests and server join requests, encrypted like them. A device whose sessions its contacts still refuse (one waiting to join, or one the phrase just brought back) sends its roster in the clear to its own inbox, its friends' DM rooms and its servers' rooms.
 
-The signed list propagates as an attachment on profile sync, so friends converge on a person's full device set as their devices meet in shared rooms.
+Identities from before 0.12 run on a legacy base, where the master key still admits a device, until their owner confirms the phrase once; the app asks at the first 0.12 start.
 
 ### 3.3 Device-to-Master Resolver
 
-Clients maintain a resolver mapping each known device peer ID to its master. Its core invariant is that an **unknown peer ID resolves to itself**. A stranger, a single-device user, or a friend whose device list has not yet arrived is treated as their own identity. Note that this invariant, not an absence of indirection, is what makes single-device use safe: every install mints a distinct device key, so a device peer ID never equals its master even for a sole device, and the device→master path is therefore *always* exercised. Correctness rests entirely on the resolver's self-mapping fallback (and on per-person attribution collapsing to the master), not on any device==master special case. Multi-device behavior beyond that fallback activates only once a signed device list is ingested.
+Clients maintain a resolver mapping each known device peer ID to its master. Its core invariant is that an **unknown peer ID resolves to itself**. A stranger, a single-device user, or a friend whose device list has not yet arrived is treated as their own identity. Note that this invariant, not an absence of indirection, is what makes single-device use safe: every install mints a distinct device key, so a device peer ID never equals its master even for a sole device, and the device→master path is therefore *always* exercised. Correctness rests entirely on the resolver's self-mapping fallback (and on per-person attribution collapsing to the master), not on any device==master special case. Multi-device behavior beyond that fallback activates only once a roster is ingested.
 
 Two rules govern every cross-device interaction:
 
@@ -248,13 +244,15 @@ Two rules govern every cross-device interaction:
 
 ### 3.4 Device Linking and Snapshot Sync
 
-A new, empty device pulls the full identity and database from an online existing device. There is no QR ceremony and no separate key exchange. The mnemonic *is* the pairing channel and the authorization: two installs of one mnemonic are already siblings.
+A new, empty device pulls the full identity and database from an online existing device.
 
-- **Rendezvous:** linking uses a **6-character relay code** over an unambiguous alphabet, held in a RAM-only `code → peer_id` map on the relay with a 5-minute TTL, one-shot. The code is a rendezvous token only; the populated device's on-screen confirmation is the actual authorization before any key material leaves it.
-- **Transfer reuses the encrypted-backup pipeline.** The transfer is *not* a parallel crypto path. The source produces exactly the bytes of an encrypted `.hollow` backup: `[magic][salt:16][nonce:12][AES-256-GCM]` with the key derived from the passphrase via Argon2id, where **the link code (or the shared master peer ID) is the passphrase**. The blob crossing the relay is therefore standard backup ciphertext; the relay carries ciphertext only. A receiver acknowledgement confirms receipt before the source reports success.
-- **Stash-and-reboot import:** the receiver writes the blob to disk and restarts. On next launch, *before* the identity is loaded, it imports the backup, the identical path as a manual "restore from backup." In-place import while the node runs was deliberately rejected: it fought the live SQLCipher connection and a protection-mismatched throwaway identity, producing an unrecoverable load state. The rule is general: never swap identity or database in place while the node runs. Stash, restart, and import in the pre-boot window.
+- **The code.** The existing device shows a ten-character code over an unambiguous alphabet. The relay sees the first six, which bring the two devices together (a RAM-only, one-shot rendezvous with a five-minute lifetime), and never sees the last four.
+- **The channel.** The two devices run SPAKE2, a password-authenticated key exchange, on the four secret characters, bound to the six. A relay that pretends to be one side gets a single guess per code: a wrong guess ends the attempt and burns the code. Everything afterwards is AES-256-GCM under keys derived from the exchange, one per direction.
+- **The approval.** The new device sends the device ID it will run as, with its name and platform. The existing device asks "Add this device?", and approving signs a vouch for exactly that device ID (§3.2). Nothing leaves the existing device before that.
+- **Transfer reuses the encrypted-backup pipeline.** The existing device exports the bytes of a `.hollow` backup under a fresh random key, which travels inside the channel, and streams it through the relay. The relay carries ciphertext whose key it never sees. A receiver acknowledgement confirms receipt before the source reports success.
+- **Stash-and-reboot import:** the receiver writes the blob, the key and its new device key to disk and restarts. On next launch, *before* the identity is loaded, it imports the backup, the identical path as a manual "restore from backup", and installs the device key the vouch names. In-place import while the node runs was deliberately rejected: it fought the live SQLCipher connection and a protection-mismatched throwaway identity, producing an unrecoverable load state. The rule is general: never swap identity or database in place while the node runs. Stash, restart, and import in the pre-boot window.
 
-Because the snapshot copies the source's entire database, including its MLS signing material, a linked sibling **regenerates its own MLS signing identity** on import (§5). Reusing the source's MLS signature key would violate MLS's one-leaf-per-signature-key rule.
+The backup carries no Olm account, no Olm sessions and no MLS signing identity, and the import clears them too, so a linked device starts with its own (§5). Reusing the source's MLS signature key would violate MLS's one-leaf-per-signature-key rule.
 
 ### 3.5 Sibling Synchronization and Backfill
 
@@ -269,13 +267,15 @@ A snapshot is a point-in-time copy; ongoing changes are reconciled continuously:
 - **Deterministic delivery room:** a direct message is always routed into the recipient's *master-derived* DM room, not whichever room the sender happens to observe the recipient's device in at that instant. Two people can be co-present in several rooms at once during connection churn; picking an arbitrary one risks addressing a room the recipient has already left, which the relay would then buffer indefinitely against a room the recipient never re-enters: a silent, one-directional delivery hole. Because every device of the recipient is, by construction, a member of the single master-derived DM room, routing there makes online delivery deterministic while the relay's offline buffer still covers a recipient who is away.
 - **A DM room only its two parties can name:** the room name is a keyed hash of the two master identities, keyed by an X25519 agreement between the two master keys. Every device of either person can compute it; nobody else can, including someone who knows both public identities, so no outsider can find the room, read its roster or watch its members come and go. A small-order key, which would agree on a publicly known value, names no room at all.
 
-### 3.6 Device Revocation
+### 3.6 Removing a Device
 
-Revocation removes a device from a person's identity. It is **manual-only**: any device a person controls can revoke another, since all of a person's devices hold the master key (there is no privileged "primary" device). Revoking adds the target's device ID to the master-signed `revoked` array and bumps the version (§3.2), which is cryptographically binding and replay-resistant.
+Any current device can remove another; there is no primary device. A removal is a statement signed by the remover's own device key (§3.2), never by the master key.
 
-- **Self-teardown:** the new tombstoned list is sent **to the revoked device first**. On ingesting its own ID in the `revoked` set, that device wipes its local data directory and relaunches to a clean welcome screen. The cryptographic cutoff has already occurred for everyone else; this is the revoked device honestly tearing itself down.
-- **Crypto enforcement on observers:** on ingesting a revocation, every other peer **drops and erases its Olm session** to the revoked device, and the MLS coordinator removes that device's single MLS leaf (advancing the epoch). The device's *master* remains a valid member; only that one device's leaf and sessions are torn down.
-- **Liveness, not just session state:** a person's device list accumulates dead "ghost" device IDs across re-link cycles (each re-link mints a fresh device key; the union-merge never prunes, because pruning is what tombstones are for). Targeted fan-out therefore uses **room presence**, not session existence, as the liveness test: a message is fanned only to devices *currently in a room*. A ghost is in no room and is skipped, preventing phantom deliveries and stuck notification counts. Live devices that are merely offline still receive their copy via reconnect backfill (§3.5).
+- **Contacts stop at once:** every observer that folds the removal drops and erases its Olm sessions to the removed device, and the MLS coordinator removes its leaf (advancing the epoch). The person's master stays a member; only that device is cut off.
+- **The removed device locks:** on learning its removal it shows a full-screen lock with the time it will erase itself, three days later, unless the recovery phrase is typed on it. Typing the phrase there starts a new base keeping the devices the person picks, which is also how a person takes the identity back from a stolen device: everything the thief holds or vouched for stops counting.
+- **A restored backup waits:** a `.hollow` backup restored onto a new machine is not a member. It asks to join, the person's devices ask "A device wants to join" (Approve vouches, Refuse removes), and with no answer it joins at each observer seven days after that observer first saw the request. Typing the phrase on it lets it in at once.
+- **Remote destroy:** needs the recovery phrase, or the permission the phrase signed for one device (§2.3).
+- **Liveness, not just session state:** a person's roster accumulates dead "ghost" device IDs across re-link cycles (each re-link mints a fresh device key). Targeted fan-out therefore uses **room presence**, not session existence, as the liveness test: a message is fanned only to devices *currently in a room*. A ghost is in no room and is skipped, preventing phantom deliveries and stuck notification counts. Live devices that are merely offline still receive their copy via reconnect backfill (§3.5).
 
 ---
 
@@ -1638,8 +1638,8 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Relay compromise | Zero-knowledge design. A fully compromised relay learns only peer IDs and room membership (both in memory, not logged to disk). |
 | Push-provider metadata harvesting | Empty wake-up pushes (`{wake, sender}` only). Apple/Google never receive message text, size, or content; all content is fetched from Hollow's relay and decrypted on-device. |
 | Link-preview IP harvesting | Previews are fetched once, by the sender, and travel inside the encrypted message. A recipient's device makes no request to the previewed site to render the card, so posting a link into a large room reveals nothing about who read it. Without this, a link in a busy channel would enumerate its readers to whoever controls the URL. Playing an embedded video is the sole exception and requires an explicit tap, on a target the signature already covers. |
-| Device-list tampering | The device list is signed by the master key and versioned; only the master can add or revoke a device, and replays cannot un-revoke. |
-| Stolen/lost device | Manual device revocation: a signed tombstone removes the device's MLS leaf and Olm sessions everywhere and causes the revoked device to wipe itself. |
+| Device-list tampering | A person's devices are a roster of statements, each signed by a device or by the recovery key (§3.2). The master key alone admits no device, every device signs its own consent, and an older roster cannot bring back a removed device. |
+| Stolen/lost device | Remove it from any other device: contacts drop its sessions and MLS leaf at once, and it locks and erases itself after three days. A stolen device cannot keep the identity: the recovery phrase, typed on any device, starts over with only the devices you pick. A backup file restored elsewhere waits until one of your devices approves it. |
 | Voice/video eavesdropping | SFrame E2EE. Media is encrypted per-frame. TURN servers see only ciphertext. |
 | File content interception | AES-256-GCM per file. Relay and TURN see only encrypted bytes. |
 | Man-in-the-middle on key exchange | Authenticated Olm key exchange + Ed25519 identity binding. |
@@ -1654,7 +1654,7 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Privilege escalation | Permission checks on all state-changing operations. CRDT author ≠ self-reported field; it is verified against the actual sender. |
 | Identity file theft | HKEYV1 at-rest protection. Identity file encrypted via DPAPI/Keychain (machine-bound) or Argon2id + AES-256-GCM (password). Stolen files are useless without the original machine or password. |
 | Data folder browsed, copied or stolen | Content files are per-file AES-256-GCM ciphertext whose keys live in the SQLCipher database, so a copied folder yields nothing without the identity; uninstalling or wiping leaves only dead ciphertext. Not a defence for a running, unlocked session or for the "no protection" identity mode, where the identity file is plaintext. |
-| Coercion at the unlock prompt | A duress code destroys the local data (and, from a running node, the whole identity) while showing nothing; both secrets cost the same to check. A forged or replayed destruction order fails the master signature, the link-time rule, or the applied-order rule; a malicious relay can only delay delivery. |
+| Coercion at the unlock prompt | A duress code destroys the local data (and, from a running node, the whole identity) while showing nothing; both secrets cost the same to check. A forged or replayed destruction order fails the recovery-key signature, the link-time rule, or the applied-order rule; a malicious relay can only delay delivery. |
 
 ### 23.2 What Hollow Does Not Currently Defend Against
 
@@ -1662,7 +1662,8 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 - **Local device compromise:** if an attacker has access to an unlocked device with the decrypted database open, they can read everything. This is true of any E2EE system. Identity at-rest protection (§2.3) mitigates offline attacks: the identity file is encrypted via DPAPI/Keychain (machine-bound) or a user password (Argon2id), so a stolen identity file is useless without the original machine or password. However, a live session with the wrapping key in memory remains vulnerable.
 - **Relay availability attacks:** a malicious relay can selectively drop or delay messages. The current single-relay architecture has no failover. Multi-relay support is designed but not yet deployed.
 - **Quantum computing:** all key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the beta.
-- **Trust-on-first-use (TOFU):** peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust.
+- **Trust-on-first-use (TOFU):** peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust. The recovery key is trusted on first sight too: someone who first meets an identity after a thief with its master key published a forged one keeps the forged one, while everyone who already knew the identity keeps the real one.
+- **Someone who has your recovery phrase** is you to Hollow: they can recover the identity and remove your devices. Hollow never stores the phrase; keep your copy offline.
 
 ### 23.3 Relay Operator Trust Assumptions
 

@@ -13,6 +13,19 @@ Re-exports three types from submodules:
 
 All three are `pub(crate)` — internal to the Rust crate, not exposed via FFI.
 
+Identity authority and device linking (design ID-1, 0.12, committed in session 22) live
+outside `crypto/`:
+- `identity/recovery.rs`: the recovery key R = Ed25519 from HKDF-SHA256 of the whole 64-byte
+  BIP-39 seed (salt `hollow-recovery`, info `hollow-recovery-key1`, KAT pinned); never stored.
+- `identity/roster.rs` + `node/roster_book.rs`: the roster, self-verifying statements under
+  `hollow-id1-*` tags, folded by every observer (rules: `security_write_gates.md` section 21).
+- `node/link_pake.rs`: the link channel. SPAKE2 (RustCrypto `spake2` 0.4, Ed25519 group,
+  identities `hollow-link1:{rendezvous}:joiner|presenter`) on the code's 4-char secret part;
+  HKDF-SHA256 with the rendezvous as salt gives a key per direction plus a confirm key; the
+  presenter's HMAC over both messages is checked with `verify_slice` (constant time); sealed
+  messages are AES-256-GCM, nonce first, AAD `hollow-link1:{rendezvous}:{to-presenter|to-joiner}`.
+  Each binding is tested alone, since under mutation one layer hides another's absence.
+
 ---
 
 ## crypto_handler.rs — Signing, Encryption Dispatch, MLS Coordinator

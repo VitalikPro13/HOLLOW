@@ -525,7 +525,7 @@ try {
     # Friends tab is a 30-second timeout that reads exactly like a delivery
     # failure and is not one.
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
 

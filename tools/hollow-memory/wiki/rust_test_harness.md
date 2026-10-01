@@ -189,6 +189,40 @@ Fleet cross-check (real app, real relay, zero overlap between the two peers unti
 
 MockRelay keeps lock chains (`locks`, rule `relay_lock_put` = the relay's `relay_put`): `lock_chain`, `forget_locks` (relay restart), `put_lock` (a rogue client), `plant_lock` (a hostile relay). `create_server_and_wait` waits for the owner's first lock. `relay_tip`, `sealed_to_members(&relay, ..)` and `sealed_to_joiner(&relay, ..)` seal to the relay's newest door; `join_lock::test_door_secret(s)` (cfg(test)) hands a test any door this process made, which is how a removed member with a kept door is played. Tests `join_lock_*`.
 
+## ID-1 roster and link helpers (2026-10-01)
+
+`spawn_node_seeded(relay, master_tag, device_tag, friends, Option<Roster>)` merges a roster
+into the node's own before start (`spawn_node_full`'s device tags become a legacy roster and
+call it). `tag_kp`, `recovery_kp(master_tag)` (any key the master binds stands in for the
+phrase), `protected_roster(master_tag, device_tags, at_ms)` (a recovery keeping those devices),
+`legacy_roster`, `EIGHT_DAYS_MS` with `MessageStore::set_roster_seen` (cfg(test)) to pass seven
+days on an observer's clock. A "stolen backup" is a node seeded with the owner's stored roster
+(`roster_book::load(&owner.store(), ..)`) under a new device tag. The resolver is shared, so
+wait on it (in memory) for the shared view and check each node's own roster with
+`known_devices`/`revoked_devices` (they fold its DB). MockRelay models link codes (claim,
+one-shot resolve, release, `taken`/`not_found`); a hostile relay is a `raw_socket` whose key is
+`register_key`ed, reading frames from the wiretap and answering with `inject_direct`.
+`spawn_presenter_in_data_root` puts a presenter's identity and DB in `HOLLOW_DATA_DIR`, where an
+export reads them. Tests `authz_*` of ID-1 and `link_*`; the mutation script for these rules is
+the untracked `tmp_id1_mutate.py` (repo root).
+
+## Waits that a duplicate or an earlier frame can satisfy (session 22, 2026-10-01)
+
+Three load-only flakes in one session had one shape: the wait matched SOME event or frame,
+not the one the step made. Receive events always emit (duplicates included, a public op
+rides two transports), start-up re-announces profiles and rosters, and a kick sends other
+members its removal op. So:
+- Wait on the RESULT in the store (`wait_until` on the row: the profile's status, the
+  member set), never "any `ProfileUpdated`" plus a sleep (12 tests still do; fix one when it
+  flakes, as `animated_profile_media_hash_replicates_and_bytes_pull_on_demand` was). Same for
+  sync: a join-time catch-up can backfill before the test asks, so poll the rows
+  (`authz_backfill_refuses_a_post_by_someone_never_a_member`), never "a sync with new rows".
+- A replay check names the replayed value (the card A event), not "any update".
+- To re-inject what the relay held, hand over EVERY held frame to that peer in order, after a
+  barrier: a round trip through the sender's loop (`live_server_state`) and its recorded frame
+  count holding still (`authz_a_kick_from_before_a_rejoin_is_ignored`). Picking "the last
+  encrypted frame" picks whatever landed last.
+
 ## Current tests (13)
 
 Albums (Part C, 2026-09-17), sharing helper `send_album_files(node, dir, peer_id, server_id, channel_id, mid_prefix, kinds, caption)` (one `SendFile` per `kinds` entry, `png`/`gif`/other, caption on item 0, fixed `HARNESS_ALBUM` id) and `assert_album_row_verifies` (v3 signature over the stored row):

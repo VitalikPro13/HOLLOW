@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `snapshot_has_identity`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `scrubbed_db_copy`, `snapshot_has_identity`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
 /// Open the encrypted message database, once at app start after the identity loads.
 Future<void> openMessageStore() =>
@@ -363,14 +363,6 @@ Future<List<String>> getMissingImageFileIdsForServer({
 }) => RustLib.instance.api.crateApiStorageGetMissingImageFileIdsForServer(
   serverId: serverId,
 );
-
-/// Save the recovery mnemonic to the database (called once on first identity generation).
-Future<void> saveMnemonic({required String mnemonic}) =>
-    RustLib.instance.api.crateApiStorageSaveMnemonic(mnemonic: mnemonic);
-
-/// Retrieve the stored recovery mnemonic.
-Future<String?> getMnemonic() =>
-    RustLib.instance.api.crateApiStorageGetMnemonic();
 
 /// Check if an identity key file exists on disk.
 Future<bool> hasIdentity() => RustLib.instance.api.crateApiStorageHasIdentity();

@@ -1125,11 +1125,21 @@ impl MessageStore {
 
         // Devices whose revocation we ENFORCED (their master held them). A revoked id
         // resolves to itself once forgotten, so without this row it looks like a
-        // stranger after a restart and passes key exchange and the sibling proof.
+        // stranger after a restart and passes key exchange.
         ddl(conn, "revoked_devices table",
             "CREATE TABLE IF NOT EXISTS revoked_devices (
                 device_peer_id TEXT PRIMARY KEY,
                 master_peer_id TEXT NOT NULL
+            )")?;
+
+        // When THIS node first saw a device's pending join: the clock its seven days run
+        // on (design ID-1). Local by nature; never synced.
+        ddl(conn, "roster_seen table",
+            "CREATE TABLE IF NOT EXISTS roster_seen (
+                master_peer_id TEXT NOT NULL,
+                device_peer_id TEXT NOT NULL,
+                first_seen_ms  INTEGER NOT NULL,
+                PRIMARY KEY (master_peer_id, device_peer_id)
             )")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
@@ -2764,6 +2774,25 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Remove everything that belongs to one device or to nobody's disk from a copy of
+    /// the database leaving this device (a backup, a link snapshot): the Olm account and
+    /// sessions, the MLS identity and groups, and a 0.11 stored recovery phrase. Deleted
+    /// pages are zeroed and the file rebuilt, so no free page still holds them.
+    pub fn scrub_device_secrets(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "PRAGMA secure_delete = ON;
+                 DELETE FROM olm_account;
+                 DELETE FROM olm_sessions;
+                 DELETE FROM mls_identity;
+                 DELETE FROM app_settings WHERE key = 'recovery_mnemonic';",
+            )
+            .map_err(|e| format!("Failed to scrub device secrets: {e}"))?;
+        self.conn
+            .execute_batch("VACUUM;")
+            .map_err(|e| format!("Failed to rebuild the scrubbed database: {e}"))
+    }
+
     /// Delete the persisted MLS identity, used when a linked sibling detects it
     /// inherited the source device's identity and must mint a distinct one.
     pub fn clear_mls_identity(&self) -> Result<(), String> {
@@ -2797,26 +2826,8 @@ impl MessageStore {
 
     // ── Multi-device signed device lists (Phase 6) ──
 
-    /// Current stored device-list version for a master, 0 if none. Callers enforce a
-    /// monotonic version (replay protection) with it BEFORE accepting an incoming list.
-    pub fn device_list_version(&self, master_peer_id: &str) -> Result<u64, String> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT version FROM device_lists WHERE master_peer_id = ?1")
-            .map_err(|e| format!("Failed to prepare device_list_version: {e}"))?;
-        let mut rows = stmt
-            .query_map([master_peer_id], |row| row.get::<_, i64>(0))
-            .map_err(|e| format!("Failed to query device_list_version: {e}"))?;
-        match rows.next() {
-            Some(Ok(v)) => Ok(v.max(0) as u64),
-            _ => Ok(0),
-        }
-    }
-
-    /// Persist a verified device list: upsert the master row and rebuild its
-    /// `device_links` entries. The caller MUST have cryptographically verified the list
-    /// AND confirmed `version` strictly increases. Stale links from a lower-version list
-    /// are removed, so a revoked device no longer resolves to this master.
+    /// Persist a master's roster and point its `device_links` at `devices`, its
+    /// members, so a device that stopped being one no longer resolves to the master.
     pub fn save_device_list(
         &self,
         master_peer_id: &str,
@@ -2857,12 +2868,7 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Load the persisted `SignedDeviceList` for a master. `Ok(None)` when no row exists
-    /// or the stored JSON fails to deserialize, which is treated as absent, not an error.
-    pub fn load_device_list(
-        &self,
-        master_peer_id: &str,
-    ) -> Result<Option<crate::node::SignedDeviceList>, String> {
+    fn device_list_json(&self, master_peer_id: &str) -> Result<Option<serde_json::Value>, String> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT json FROM device_lists WHERE master_peer_id = ?1")
@@ -2874,6 +2880,78 @@ impl MessageStore {
             Some(Ok(json)) => Ok(serde_json::from_str(&json).ok()),
             _ => Ok(None),
         }
+    }
+
+    /// The 0.11 master-signed list stored for a master, read once to migrate it. `None`
+    /// once a roster has replaced it.
+    pub fn load_device_list(
+        &self,
+        master_peer_id: &str,
+    ) -> Result<Option<crate::node::SignedDeviceList>, String> {
+        Ok(self
+            .device_list_json(master_peer_id)?
+            .filter(|v| v.get("master_peer_id").is_some())
+            .and_then(|v| serde_json::from_value(v).ok()))
+    }
+
+    /// The roster stored for a master, unverified. `None` for no row or a 0.11 row.
+    pub fn load_roster(
+        &self,
+        master_peer_id: &str,
+    ) -> Result<Option<crate::identity::roster::Roster>, String> {
+        Ok(self
+            .device_list_json(master_peer_id)?
+            .filter(|v| v.get("master").is_some())
+            .and_then(|v| serde_json::from_value(v).ok()))
+    }
+
+    /// Record when this node first saw `device`'s pending join; the first stamp stays.
+    pub fn stamp_roster_seen(&self, master_peer_id: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO roster_seen (master_peer_id, device_peer_id, first_seen_ms)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![master_peer_id, device_peer_id, at_ms],
+            )
+            .map_err(|e| format!("Failed to stamp roster_seen: {e}"))?;
+        Ok(())
+    }
+
+    /// Every first-sight stamp for one master's pending joins.
+    pub fn load_roster_seen(&self, master_peer_id: &str) -> Result<std::collections::HashMap<String, i64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT device_peer_id, first_seen_ms FROM roster_seen WHERE master_peer_id = ?1")
+            .map_err(|e| format!("Failed to prepare roster_seen: {e}"))?;
+        let rows = stmt
+            .query_map([master_peer_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to query roster_seen: {e}"))?;
+        Ok(collect_rows(rows, "roster_seen")?.into_iter().collect())
+    }
+
+    /// Back-date a first-sight stamp. Tests only: seven days do not pass in a test.
+    #[cfg(test)]
+    pub fn set_roster_seen(&self, master_peer_id: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO roster_seen (master_peer_id, device_peer_id, first_seen_ms)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![master_peer_id, device_peer_id, at_ms],
+            )
+            .map_err(|e| format!("Failed to set roster_seen: {e}"))?;
+        Ok(())
+    }
+
+    /// The devices linked to `master_peer_id`: its members as last saved.
+    pub fn device_links_for(&self, master_peer_id: &str) -> Result<std::collections::BTreeSet<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT device_peer_id FROM device_links WHERE master_peer_id = ?1")
+            .map_err(|e| format!("Failed to prepare device_links_for: {e}"))?;
+        let rows = stmt
+            .query_map([master_peer_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query device_links_for: {e}"))?;
+        Ok(collect_rows(rows, "device_link")?.into_iter().collect())
     }
 
     /// Load all (device_peer_id → master_peer_id) links for resolver warmup.
@@ -2890,8 +2968,19 @@ impl MessageStore {
         collect_rows(rows, "device_link")
     }
 
-    /// Record devices whose revocation this node enforced. Never removed: a
-    /// relinked device comes back under a fresh id.
+    /// Forget the revocation of devices a recovery signed with the phrase brought back:
+    /// only the phrase can do that.
+    pub fn clear_revoked_devices(&self, devices: &[String]) -> Result<(), String> {
+        for dev in devices {
+            self.conn
+                .execute("DELETE FROM revoked_devices WHERE device_peer_id = ?1", [dev])
+                .map_err(|e| format!("Failed to clear revoked device: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Record devices whose revocation this node enforced. Removed only when a
+    /// recovery brings the device back.
     pub fn record_revoked_devices(&self, master_peer_id: &str, devices: &[String]) -> Result<(), String> {
         for dev in devices {
             self.conn
@@ -2915,19 +3004,6 @@ impl MessageStore {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query revoked_devices: {e}"))?;
         collect_rows(rows, "revoked_device")
-    }
-
-    /// Wipe ALL persisted device lists and links. A testing aid: union-merge never
-    /// removes a device id, so repeated wipe-and-reimport cycles accumulate ghosts in
-    /// our own published list. Production cleanup of one device is revocation.
-    pub fn clear_all_device_lists(&self) -> Result<(), String> {
-        self.conn
-            .execute("DELETE FROM device_links", [])
-            .map_err(|e| format!("Failed to clear device_links: {e}"))?;
-        self.conn
-            .execute("DELETE FROM device_lists", [])
-            .map_err(|e| format!("Failed to clear device_lists: {e}"))?;
-        Ok(())
     }
 
     // ── Device labels (Step 8 Devices panel — local-only, unsigned) ──
@@ -4999,6 +5075,13 @@ impl MessageStore {
                 params![key, value],
             )
             .map_err(|e| format!("Failed to save setting: {e}"))?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, key: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])
+            .map_err(|e| format!("Failed to delete setting: {e}"))?;
         Ok(())
     }
 

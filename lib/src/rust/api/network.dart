@@ -405,35 +405,28 @@ Future<void> releaseNickname() =>
 /// (Populated device) Claim a 6-char link code on the relay and join its rendezvous
 /// room, so an empty sibling can pull your data by entering it. The code is
 /// generated client-side and displayed with a 5-minute countdown.
-Future<void> claimLinkCode({required String code}) =>
-    RustLib.instance.api.crateApiNetworkClaimLinkCode(code: code);
+Future<void> claimLinkCode({
+  required String rendezvous,
+  required String secret,
+}) => RustLib.instance.api.crateApiNetworkClaimLinkCode(
+  rendezvous: rendezvous,
+  secret: secret,
+);
 
 /// (Populated device) Release the currently claimed link code + leave its room.
 Future<void> releaseLinkCode() =>
     RustLib.instance.api.crateApiNetworkReleaseLinkCode();
 
-/// (Empty device) Resolve a link code shown on the populated device, then request
-/// its full snapshot. `include_vault`/`include_files` control snapshot scope.
+/// (Empty device) Link to the device that shows `code` (ten characters, dashes and
+/// case ignored). `label` and `platform` are shown on its confirm prompt.
 Future<void> resolveLinkCode({
   required String code,
-  required bool includeVault,
-  required bool includeFiles,
+  required String label,
+  required String platform,
 }) => RustLib.instance.api.crateApiNetworkResolveLinkCode(
   code: code,
-  includeVault: includeVault,
-  includeFiles: includeFiles,
-);
-
-/// (Empty device, mnemonic path) Request a full snapshot directly from a known
-/// sibling device (no code; used when the sibling is already in a shared room).
-Future<void> requestLinkSnapshot({
-  required String targetPeer,
-  required bool includeVault,
-  required bool includeFiles,
-}) => RustLib.instance.api.crateApiNetworkRequestLinkSnapshot(
-  targetPeer: targetPeer,
-  includeVault: includeVault,
-  includeFiles: includeFiles,
+  label: label,
+  platform: platform,
 );
 
 /// (Populated device) Accept an inbound link request and push the snapshot to the
@@ -1813,8 +1806,21 @@ sealed class NetworkEvent with _$NetworkEvent {
     required PlatformInt64 createdAt,
   }) = NetworkEvent_SecurityAlert;
 
-  /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
-  const factory NetworkEvent.selfRevoked() = NetworkEvent_SelfRevoked;
+  /// A current device removed THIS one (design ID-1). Dart locks the app and erases
+  /// it at `wipe_at_ms` unless the recovery phrase is typed.
+  const factory NetworkEvent.deviceRemoved({
+    required String by,
+    required PlatformInt64 wipeAtMs,
+  }) = NetworkEvent_DeviceRemoved;
+
+  /// A recovery kept this device after all: the lock lifts.
+  const factory NetworkEvent.deviceRestored() = NetworkEvent_DeviceRestored;
+
+  /// A device asked to join our identity with nobody vouching (a restored backup):
+  /// Dart asks whether to approve it. It joins in seven days unless refused.
+  const factory NetworkEvent.pendingDeviceAsking({
+    required String devicePeerId,
+  }) = NetworkEvent_PendingDeviceAsking;
 
   /// A verified destruction order for THIS identity arrived. Dart runs the wipe
   /// and relaunches; `scope` is `device` | `device_revoke` | `identity`.
@@ -2033,6 +2039,8 @@ sealed class NetworkEvent with _$NetworkEvent {
     required int theirMsgCount,
     required int theirFriendCount,
     required bool theirHasProfile,
+    required String label,
+    required String platform,
   }) = NetworkEvent_SiblingLinkAvailable;
   const factory NetworkEvent.linkProgress({
     required String linkId,

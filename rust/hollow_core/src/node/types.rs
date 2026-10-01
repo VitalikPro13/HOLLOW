@@ -41,15 +41,11 @@ pub(crate) struct DiscoveredPeer {
     pub addresses: Vec<String>,
 }
 
-/// A master-signed list of the device peer_ids belonging to one identity.
-///
-/// `peer_id_from_pubkey_protobuf(master_pubkey_b64)` MUST equal `master_peer_id`:
-/// that is what binds the key to the identity. `revoked` is a tombstone set, and
-/// a revoked id can never re-enter `devices` (`ingest_device_list`); only a
-/// higher-`version` signed list may drop it again. `version` is monotonic per
-/// master, so a replayed older list can neither un-revoke nor re-add. `devices`
-/// and `revoked` are sorted so the signed payload is canonical, and `sig_b64` is
-/// the master's signature over `device_list_signing_payload`.
+/// A master-signed list of device peer_ids: the relay's inbox proof (the current
+/// roster members, until ID-1R) and the 0.11 rows read once at the upgrade. Never
+/// authority over which devices are an identity's; that is the roster
+/// (`identity::roster`). The pubkey must derive to `master_peer_id`; `sig_b64` is the
+/// master's signature over `device_list_signing_payload`.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SignedDeviceList {
     #[serde(default)]
@@ -66,13 +62,15 @@ pub(crate) struct SignedDeviceList {
     pub sig_b64: String,
 }
 
-/// A master-signed order to destroy an identity's local data.
+/// An order to destroy an identity's local data (design ID-1).
 ///
 /// Self-authenticating on purpose: it travels the sibling lane, a friend's DM lane
-/// and the relay's kill list, and none of those is trusted. The signature is the
-/// MASTER's over `destroy_identity_signing_payload`, and the pubkey must derive to
-/// `master_peer_id`, exactly like [`SignedDeviceList`]. `targets` empty = every
-/// device of the identity.
+/// and the relay's kill list, and none of those is trusted. The master signs it to
+/// name the identity; the AUTHORITY is the recovery phrase: `sig_r` under the pinned
+/// recovery key, or a device-signed order carrying a phrase-signed permission for that
+/// device (`delegation`, the duress scope). An identity whose phrase was never typed on
+/// 0.12 has no recovery key, and the master signature alone speaks for it.
+/// `targets` empty = every device of the identity.
 ///
 /// `issued_at_ms` is the signer's clock and is NEVER trusted as time: receivers
 /// only compare it against their own link stamp and the last destroy they applied,
@@ -91,6 +89,31 @@ pub(crate) struct DestroyIdentity {
     pub notify_friends: bool,
     #[serde(default)]
     pub sig_b64: String,
+    /// Base64 recovery public key and its signature over the same payload.
+    #[serde(default)]
+    pub r_pub: String,
+    #[serde(default)]
+    pub sig_r: String,
+    /// A device that holds a phrase-signed permission, and its signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DestroyDelegation>,
+}
+
+/// The phrase lets `device` order its identity destroyed (the duress scope).
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct DestroyDelegation {
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub at_ms: i64,
+    #[serde(default)]
+    pub r_pub: String,
+    /// The recovery key's signature over the permission.
+    #[serde(default)]
+    pub sig_r: String,
+    /// The device's signature over the order.
+    #[serde(default)]
+    pub device_sig: String,
 }
 
 /// An Olm prekey bundle carried inside a friend request, so the handshake needs
@@ -279,10 +302,15 @@ pub(crate) enum NetworkEvent {
     /// `security_alerts::KIND_*` constant. Emitted once per distinct fact, so a
     /// dismissed warning stays dismissed across reconnects.
     SecurityAlert { peer_id: String, kind: String, detail: String, created_at: i64 },
-    /// THIS device appears in the identity's signed `revoked` set. Dart self-nukes
-    /// (`stash_pending_wipe()` + relaunch); the cryptographic cutoff already
-    /// happened everywhere else.
-    SelfRevoked,
+    /// A current device removed THIS one from the identity. Everyone else stopped
+    /// counting it at once; Dart locks the app and erases it at `wipe_at_ms` unless
+    /// the recovery phrase is typed.
+    DeviceRemoved { by: String, wipe_at_ms: i64 },
+    /// A recovery kept this device after all: the lock lifts.
+    DeviceRestored,
+    /// A device asked to join our identity with nobody vouching (a restored backup).
+    /// It joins in seven days unless one of our devices refuses.
+    PendingDeviceAsking { device_peer_id: String },
     /// A verified `DestroyIdentity` for OUR OWN master arrived (sibling lane, DM
     /// lane or the relay's kill list). Dart runs the wipe and relaunches; `scope`
     /// is `device` | `device_revoke` | `identity`.
@@ -415,13 +443,16 @@ pub(crate) enum NetworkEvent {
     /// (Populated/empty) A link-code claim or resolve failed (taken / invalid /
     /// not_found / expired).
     LinkCodeError { error: String, code: String },
-    /// A populated sibling is offering, or an empty one requesting, a full DB
-    /// snapshot. `peer_id` is the sibling DEVICE id; the counts drive direction.
+    /// A device that typed our link code asks to be linked. `peer_id` is the device
+    /// it connects as today; `label` and `platform` are what it says it is, shown on
+    /// the confirm prompt.
     SiblingLinkAvailable {
         peer_id: String,
         their_msg_count: u32,
         their_friend_count: u32,
         their_has_profile: bool,
+        label: String,
+        platform: String,
     },
     /// Real-time progress of an inbound link snapshot transfer (drives the bar).
     LinkProgress {
@@ -745,7 +776,7 @@ pub(crate) struct PendingJoin {
     /// Our OWN master-signed device list, carried on every copy of the request. A
     /// member that has never been online with us holds no device-to-master link, so
     /// `resolve()` alone would add our raw DEVICE id as the member key.
-    pub(crate) device_list: Option<SignedDeviceList>,
+    pub(crate) device_list: Option<crate::identity::roster::Roster>,
     /// Base64 of our serialised MLS KeyPackage, minted ONCE per row and reused for
     /// every re-send: we hold its private half until a Welcome consumes it, and
     /// OpenMLS accepts a re-add of the same package once the old leaf is gone. It
@@ -974,39 +1005,44 @@ pub(crate) enum NodeCommand {
     ClaimNickname { nickname: String },
     ReleaseNickname,
     // -- Multi-device linking --
-    /// (Populated device) Claim a 6-char link code on the relay so an empty
-    /// sibling can find this device by code. Reply arrives as `LinkCodeClaimed`.
-    ClaimLinkCode { code: String },
+    /// (Populated device) Claim the rendezvous part of a link code on the relay and
+    /// hold its secret part for the handshake. Reply arrives as `LinkCodeClaimed`.
+    ClaimLinkCode { rendezvous: String, secret: String },
     /// (Populated device) Release the claimed link code.
     ReleaseLinkCode,
-    /// (Empty device) Resolve a link code to the populated device, then send it a
-    /// snapshot request. Reply path: `LinkCodeResolved` → `LinkSnapshotRequest`.
-    ResolveLinkCode { code: String, include_vault: bool, include_files: bool },
-    /// (Empty device, mnemonic path) Ask an already-known sibling device for a
-    /// full snapshot directly (no code; used when the device list is already known).
-    RequestLinkSnapshot { target_peer: String, include_vault: bool, include_files: bool },
+    /// (Empty device) Resolve the code's rendezvous part, then run the handshake with
+    /// the device that shows it. `label` and `platform` go on its confirm prompt.
+    ResolveLinkCode { code: String, label: String, platform: String },
     /// (Populated device) Accept an inbound link request and push the snapshot.
     AcceptLinkPush { target_peer: String, include_vault: bool, include_files: bool },
     /// (Populated device) Decline an inbound link request.
     DeclineLinkPush { target_peer: String },
-    /// Revoke one of OUR OWN devices: bumps our master-signed list with the device
-    /// tombstoned, drops our Olm session to it, and removes its MLS leaf from
-    /// shared servers where we coordinate. Manual-only.
+    /// This device removes one of our devices, or refuses a pending join: its Olm
+    /// session is dropped and its MLS leaves go where we coordinate. Manual-only.
     RevokeDevice { device_peer_id: String },
-    /// Full sibling teardown: tombstone EVERY device but the one we run on in a
-    /// single version bump, propagate to friends, and nuke each revoked sibling. A
-    /// local wipe alone regrows, because the device-list merge is grow-only.
+    /// This device removes every other device and pending join.
     ResetDeviceLists,
-    /// Destruction scope (b): publish a master-signed list with THIS device
-    /// tombstoned, so siblings and friends drop it. `reply` fires once the list has
-    /// been handed to the socket; the caller wipes regardless when it times out.
+    /// This device vouches for a device asking to join (a restored backup).
+    ApproveDevice { device_peer_id: String },
+    /// Our roster changed outside the loop (the phrase signed a recovery or an
+    /// admission through the FFI, which never hands the recovery key to the node):
+    /// enforce the removals and announce it.
+    RosterChanged { newly_revoked: Vec<String> },
+    /// Destruction scope (b): this device removes itself, so siblings and friends drop
+    /// it. `reply` fires once the roster has been handed to the socket; the caller
+    /// wipes regardless when it times out.
     PublishSelfRevocation { reply: tokio::sync::oneshot::Sender<bool> },
-    /// Destruction scope (c): sign a [`DestroyIdentity`] with the node's in-memory
-    /// master key and push it to online siblings, the relay's kill list (for the
-    /// offline ones) and, when asked, our friends. `reply` carries the number of
-    /// sibling devices it reached.
+    /// Destruction scope (c): push an order the phrase already signed to online
+    /// siblings, the relay's kill list (for the offline ones) and, when it says so,
+    /// our friends. `reply` carries the number of sibling devices it reached.
     PublishDestroyIdentity {
-        targets: Vec<String>,
+        order: Box<DestroyIdentity>,
+        reply: tokio::sync::oneshot::Sender<u32>,
+    },
+    /// The duress scope: sign an order with this device's key under the phrase's
+    /// permission for it, then publish it like [`Self::PublishDestroyIdentity`].
+    PublishDelegatedDestroy {
+        delegation: DestroyDelegation,
         notify_friends: bool,
         reply: tokio::sync::oneshot::Sender<u32>,
     },
@@ -1328,13 +1364,15 @@ impl NodeCommand {
             Self::ClaimLinkCode { .. } => "ClaimLinkCode",
             Self::ReleaseLinkCode => "ReleaseLinkCode",
             Self::ResolveLinkCode { .. } => "ResolveLinkCode",
-            Self::RequestLinkSnapshot { .. } => "RequestLinkSnapshot",
             Self::AcceptLinkPush { .. } => "AcceptLinkPush",
             Self::DeclineLinkPush { .. } => "DeclineLinkPush",
             Self::RevokeDevice { .. } => "RevokeDevice",
             Self::ResetDeviceLists => "ResetDeviceLists",
             Self::PublishSelfRevocation { .. } => "PublishSelfRevocation",
             Self::PublishDestroyIdentity { .. } => "PublishDestroyIdentity",
+            Self::PublishDelegatedDestroy { .. } => "PublishDelegatedDestroy",
+            Self::ApproveDevice { .. } => "ApproveDevice",
+            Self::RosterChanged { .. } => "RosterChanged",
             Self::UnregisterPushToken => "UnregisterPushToken",
             Self::KillAck => "KillAck",
             Self::DepositKillSignal { .. } => "DepositKillSignal",
@@ -1563,7 +1601,7 @@ pub(crate) enum HavenMessage {
         /// the device id straight back and the member entry would be device-keyed.
         /// Absent = a pre-parked client; the receiver falls back to the resolver.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
         /// True ONLY on the copy deposited into the room's `~join` ring. It is read out
         /// of a TTL buffer, possibly days later, by a member that was not there when it
         /// was written, so it is held to stricter rules than the live unicast copy: no
@@ -1901,7 +1939,7 @@ pub(crate) enum HavenMessage {
         /// Multi-device: the sender's master-signed device list (Phase 6).
         /// `None` from older clients → sender is treated as single-device.
         #[serde(default)]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
         /// Hex SHA-256 of the sender's current avatar/banner blob; empty = no blob.
         /// Re-announces are LIGHT (empty b64 = "no change") and carry only the hashes,
         /// so a stale receiver pulls once instead of every reconnect re-shipping blobs.
@@ -1980,7 +2018,7 @@ pub(crate) enum HavenMessage {
         /// carried bundle's device really speaks for that master WITHOUT having
         /// ingested a ProfileUpdate first (a stranger, by definition, has not).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
         /// The sender's name and avatar, sealed to the target (A28): a stranger's
         /// incoming request shows who is asking, and the relay carrying it cannot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1998,7 +2036,7 @@ pub(crate) enum HavenMessage {
         /// The accepter's own master-signed device list, so the requester can tell
         /// whose accept this is with a cold resolver (as on `FriendReject`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
     },
 
     #[serde(rename = "friend_reject")]
@@ -2015,7 +2053,7 @@ pub(crate) enum HavenMessage {
         /// dependent on a prior meeting. Absent = a pre-carried-list client, and the
         /// receiver falls back to the resolver.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
     },
 
     #[serde(rename = "friend_remove")]
@@ -2079,63 +2117,29 @@ pub(crate) enum HavenMessage {
         emotes: Vec<PersonalEmoteEntry>,
     },
 
-    // -- Multi-device sibling proof handshake (anti-mis-link) --
+    // -- Multi-device link (HOL-SEC-002, `link_pake`) --
 
-    /// Sent to an UNPROVEN peer that appeared in our own `inbox:{master}` room,
-    /// challenging it to prove it holds our master private key. A friend-request
-    /// sender lands in our inbox too but holds no master key and can never answer,
-    /// which is what stops a stranger being mis-merged as our device. `nonce` is a
-    /// fresh per-attempt value remembered in `pending_sibling_challenges`.
-    #[serde(rename = "sib_prove_req")]
-    SiblingProveRequest {
+    /// (Joiner to presenter) The SPAKE2 opening, keyed by the code's secret part.
+    #[serde(rename = "link_pake")]
+    LinkPake {
         #[serde(default)]
-        nonce: String,
+        msg: String,
     },
 
-    /// Response to a [`HavenMessage::SiblingProveRequest`]: the responder signs
-    /// `hollow-sibling:{challenger_master}:{responder_device}:{nonce}` with the
-    /// SHARED master key. The challenger verifies the signature binds to ITS OWN
-    /// master and to the device id it challenged before it runs any sibling merge.
-    /// `master_pubkey_b64` is the protobuf-encoded master pubkey (base64).
-    #[serde(rename = "sib_prove_resp")]
-    SiblingProveResponse {
+    /// (Presenter to joiner) The SPAKE2 answer and the key confirmation.
+    #[serde(rename = "link_pake_reply")]
+    LinkPakeReply {
         #[serde(default)]
-        nonce: String,
+        msg: String,
         #[serde(default)]
-        sig_b64: String,
-        #[serde(default)]
-        master_pubkey_b64: String,
+        confirm: String,
     },
 
-    // -- Multi-device link snapshot --
-
-    /// (Empty to populated sibling) "Send me your full DB snapshot", carrying the
-    /// requester's state summary so the populated device can show direction. It
-    /// answers with `SiblingLinkAvailable`, then `LinkSnapshotKey` plus the bytes.
-    #[serde(rename = "link_snapshot_request")]
-    LinkSnapshotRequest {
+    /// A `link_pake::LinkInner` sealed under the handshake's key for one direction.
+    #[serde(rename = "link_sealed")]
+    LinkSealed {
         #[serde(default)]
-        include_vault: bool,
-        #[serde(default)]
-        include_files: bool,
-        #[serde(default)]
-        msg_count: u32,
-        #[serde(default)]
-        friend_count: u32,
-        #[serde(default)]
-        has_profile: bool,
-    },
-
-    /// (Populated → empty) The one-time AES key/nonce to decrypt the snapshot bytes
-    /// that follow on the `LinkSnapshot` binary stream. `link_id` matches the stream id.
-    #[serde(rename = "link_snapshot_key")]
-    LinkSnapshotKey {
-        #[serde(default)]
-        link_id: String,
-        #[serde(default)]
-        aes_key: String,
-        #[serde(default)]
-        aes_nonce: String,
+        ct: String,
     },
 
     /// (Populated → empty) The populated device declined the link request.
@@ -2713,16 +2717,17 @@ pub(crate) enum HavenMessage {
         #[serde(default)]
         avatar_b64: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
     },
 
-    /// Our own device list, to one of OUR revoked devices only. Nothing else reaches
-    /// a revoked device (every session to it is gone, no profile goes to it), and this
-    /// list is what makes it wipe itself. Master-signed, so the relay reading it
-    /// cannot forge one; which devices are one person is routing it already sees.
-    #[serde(rename = "device_list_tombstone")]
-    DeviceListTombstone {
-        device_list: SignedDeviceList,
+    /// A roster where no session reaches: to one of our removed devices (it learns its
+    /// removal), or from a device asking to join, to its own inbox and its contacts (so
+    /// their seven days start). Every statement verifies on its own, so the relay
+    /// reading it can forge nothing; which devices are one person is routing it already
+    /// sees.
+    #[serde(rename = "roster_notice")]
+    RosterNotice {
+        roster: crate::identity::roster::Roster,
     },
 
     // -- Voice channel coordination (plaintext for MLS epoch resilience) --
@@ -3362,7 +3367,7 @@ pub(crate) enum MessageEnvelope {
         twitch_username: String,
         /// Multi-device: the sender's master-signed device list (Phase 6).
         #[serde(default)]
-        device_list: Option<SignedDeviceList>,
+        device_list: Option<crate::identity::roster::Roster>,
         /// Blob staleness hashes — see HavenMessage::ProfileUpdate.
         #[serde(default)]
         avatar_hash: String,
@@ -3910,7 +3915,7 @@ impl HavenMessage {
             | Self::PublicChannelRemoveReaction { .. }
             | Self::PublicChannelSyncResponse { .. }
             | Self::ProfileCard { .. }
-            | Self::DeviceListTombstone { .. }
+            | Self::RosterNotice { .. }
             | Self::ShareManifestResponse { .. } => false,
             Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
@@ -3935,10 +3940,9 @@ impl HavenMessage {
             | Self::SiblingStateSyncRequest
             | Self::ReadMarkers { .. }
             | Self::PersonalEmoteSync { .. }
-            | Self::SiblingProveRequest { .. }
-            | Self::SiblingProveResponse { .. }
-            | Self::LinkSnapshotRequest { .. }
-            | Self::LinkSnapshotKey { .. }
+            | Self::LinkPake { .. }
+            | Self::LinkPakeReply { .. }
+            | Self::LinkSealed { .. }
             | Self::LinkDeclined
             | Self::LinkSnapshotAck { .. }
             | Self::ChannelNotificationHint { .. }
@@ -4113,10 +4117,9 @@ impl HavenMessage {
             | Self::MlsKeyPackageRequest { .. }
             | Self::MlsEpochProbe { .. }
             | Self::ConferenceChat { .. }
-            | Self::SiblingProveRequest { .. }
-            | Self::SiblingProveResponse { .. }
-            | Self::LinkSnapshotRequest { .. }
-            | Self::LinkSnapshotKey { .. }
+            | Self::LinkPake { .. }
+            | Self::LinkPakeReply { .. }
+            | Self::LinkSealed { .. }
             | Self::LinkDeclined
             | Self::LinkSnapshotAck { .. }
             | Self::PublicChannelListRequest { .. }
@@ -4130,7 +4133,7 @@ impl HavenMessage {
             | Self::RtcShareAnswer { .. }
             | Self::RtcShareIceCandidate { .. }
             | Self::PeerExchange { .. }
-            | Self::DeviceListTombstone { .. }
+            | Self::RosterNotice { .. }
             | Self::RecoverySealed { .. }
             | Self::MeetingSealed { .. }
             | Self::ShareSealed { .. } => Lane::Relay,

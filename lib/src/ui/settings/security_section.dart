@@ -11,7 +11,11 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
-import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/core/providers/home_setup_provider.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/rust/api/roster.dart' as roster_api;
+import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -862,210 +866,97 @@ class _SecurityAppLockSectionState
       ];
 }
 
-/// The "Recovery" section: the 24 words and the backup file.
-class SecurityRecoverySection extends StatefulWidget {
+/// The "Recovery" section. The phrase is never stored (design ID-1), so it is
+/// checked, never revealed; it also takes the identity back from every other
+/// device. The backup file sits here too.
+class SecurityRecoverySection extends ConsumerWidget {
   const SecurityRecoverySection({super.key});
-  @override
-  State<SecurityRecoverySection> createState() =>
-      _SecurityRecoverySectionState();
-}
 
-class _SecurityRecoverySectionState extends State<SecurityRecoverySection> {
-  static const _title = 'Recovery phrase';
-
-  final _entry = TextEditingController();
-  bool _revealed = false;
-  bool _loading = true;
-  bool _saving = false;
-  String? _mnemonic;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadMnemonic();
-  }
-
-  @override
-  void dispose() {
-    _entry.dispose();
-    super.dispose();
-  }
-
-  Future<void> _loadMnemonic() async {
-    try {
-      final mnemonic = await storage_api.getMnemonic();
-      if (!mounted) return;
-      setState(() {
-        _mnemonic = mnemonic;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = friendlyError(e);
-        _loading = false;
-      });
-    }
-  }
-
-  Future<void> _onMnemonicSubmitted(String val) async {
-    if (_saving) return;
-    final words = val.trim().split(RegExp(r'\s+'));
-    if (words.length != 24) {
-      HollowToast.show(context, 'Must be exactly 24 words',
-          type: HollowToastType.error);
-      return;
-    }
-    setState(() => _saving = true);
-    try {
-      await storage_api.saveMnemonic(mnemonic: val.trim());
-      if (mounted) {
-        setState(() => _mnemonic = val.trim());
-        HollowToast.show(context, 'Recovery phrase saved',
-            type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, friendlyError(e),
-            type: HollowToastType.error);
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  Future<void> _copy() async {
-    await Clipboard.setData(ClipboardData(text: _mnemonic!));
-    if (!mounted) return;
-    HollowToast.show(context, 'Copied to clipboard',
+  Future<void> _check(BuildContext context, WidgetRef ref) async {
+    if (!await showCheckPhraseDialog(context)) return;
+    await ref.read(homeSetupProvider.notifier).markPhraseSaved().catchError((_) {});
+    if (!context.mounted) return;
+    HollowToast.show(context, "That's your recovery phrase. Keep that copy safe.",
         type: HollowToastType.success);
   }
 
+  Future<void> _removeOthers(BuildContext context, WidgetRef ref) async {
+    try {
+      final status = await roster_api.rosterStatus();
+      if (!context.mounted) return;
+      final done = await showRecoverWithPhraseDialog(
+        context,
+        status: status,
+        title: 'Remove devices with your recovery phrase',
+        body: 'This device stays, with the devices you pick. Every other '
+            "device is removed at once, a stolen one too, and it can't add "
+            'itself back.',
+        confirmLabel: 'Remove the rest',
+        danger: true,
+      );
+      if (!done || !context.mounted) return;
+      ref.invalidate(rosterStatusProvider);
+      HollowToast.show(context, 'Every other device was removed.',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
+      }
+    }
+  }
+
+  Future<void> _confirmStored(BuildContext context, WidgetRef ref) async {
+    try {
+      final stored = await roster_api.storedPhraseForUpgrade();
+      if (stored == null || !context.mounted) return;
+      await showPhraseUpgradeDialog(context, stored);
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
+      }
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final upgradePending = ref.watch(phraseUpgradePendingProvider).valueOrNull ?? false;
     return SettingsSection(
       title: 'Recovery',
       children: [
-        ..._phraseRows(HollowTheme.of(context)),
-        const BackupFileRow(),
-      ],
-    );
-  }
-
-  List<Widget> _phraseRows(HollowTheme hollow) {
-    if (_loading) {
-      return const [SettingsRow(title: _title, trailing: HollowSpinner())];
-    }
-    if (_error != null) {
-      return [
-        SettingsRow(
-          title: _title,
-          subtitleWidget: Text(
-            "Couldn't load the recovery phrase. $_error",
-            style: HollowTypography.bodySmall.copyWith(color: hollow.error),
+        if (upgradePending)
+          SettingsRow(
+            title: 'Confirm your recovery phrase',
+            subtitle: 'Hollow still keeps the copy it stored before. Confirm '
+                'it once and that copy is erased.',
+            trailing: HollowButton.outline(
+              compact: true,
+              onPressed: () => _confirmStored(context, ref),
+              child: const Text('Confirm'),
+            ),
           ),
-        ),
-      ];
-    }
-    if (_mnemonic == null) {
-      return [
         SettingsRow(
-          title: _title,
-          subtitle: 'None stored on this device. If you have your 24 words, '
-              'enter them below.',
+          title: 'Check your recovery phrase',
+          subtitle: "Type it to make sure the copy you keep is right. Hollow "
+              "doesn't store it.",
           trailing: HollowButton.outline(
             compact: true,
-            onPressed: _saving ? null : () => _onMnemonicSubmitted(_entry.text),
-            loading: _saving,
-            child: const Text('Save'),
+            onPressed: () => _check(context, ref),
+            child: const Text('Check'),
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-          child: HollowTextField(
-            controller: _entry,
-            hintText: 'Enter the 24 words',
-            isDense: true,
-            onSubmitted: _onMnemonicSubmitted,
-          ),
-        ),
-      ];
-    }
-    return [
-      SettingsRow(
-        title: _title,
-        subtitle: '24 words that bring your identity back on any device. '
-            'Anyone who has them owns it.',
-        trailing: HollowButton.ghost(
-          compact: true,
-          onPressed: () => setState(() => _revealed = !_revealed),
-          child: Text(_revealed ? 'Hide' : 'Reveal'),
-        ),
-      ),
-      if (_revealed) ...[
-        Container(
-          padding: const EdgeInsets.all(HollowSpacing.md),
-          decoration: BoxDecoration(
-            color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          child: _buildWordGrid(hollow),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
+        SettingsRow(
+          title: 'Remove devices with your recovery phrase',
+          subtitle: 'Keeps this device and the ones you pick, and removes '
+              'every other device at once.',
+          trailing: HollowButton.outline(
+            danger: true,
             compact: true,
-            onPressed: _copy,
-            child: const Text('Copy'),
+            onPressed: () => _removeOthers(context, ref),
+            child: const Text('Use phrase'),
           ),
         ),
+        const BackupFileRow(),
       ],
-    ];
-  }
-
-  Widget _buildWordGrid(HollowTheme hollow) {
-    final words = _mnemonic!.split(' ');
-    return LayoutBuilder(builder: (context, constraints) {
-      // Four columns where a word fits, three on a phone.
-      final cols = constraints.maxWidth >= 480 ? 4 : 3;
-      final rows = (words.length / cols).ceil();
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (int row = 0; row < rows; row++)
-            Padding(
-              padding: EdgeInsets.only(
-                bottom: row < rows - 1 ? HollowSpacing.xs : 0,
-              ),
-              child: Row(
-                children: [
-                  for (int col = 0; col < cols; col++) ...[
-                    if (col > 0) const SizedBox(width: HollowSpacing.sm),
-                    Expanded(child: _word(hollow, words, row * cols + col)),
-                  ],
-                ],
-              ),
-            ),
-        ],
-      );
-    });
-  }
-
-  Widget _word(HollowTheme hollow, List<String> words, int index) {
-    if (index >= words.length) return const SizedBox.shrink();
-    return Text.rich(
-      TextSpan(children: [
-        TextSpan(
-          text: '${(index + 1).toString().padLeft(2)}. ',
-          style: HollowTypography.monoSmall.copyWith(color: hollow.textTertiary),
-        ),
-        TextSpan(
-          text: words[index],
-          style: HollowTypography.monoSmall.copyWith(color: hollow.textPrimary),
-        ),
-      ]),
     );
   }
 }

@@ -71,17 +71,21 @@ Future<void> removePasswordProtection({required String password}) => RustLib
     .crateApiIdentityRemovePasswordProtection(password: password);
 
 /// Set (or replace) the duress code. `scope` is `device`, `device_revoke` or
-/// `identity`.
+/// `identity`. The `identity` scope erases every device, which only the recovery
+/// phrase may order (design ID-1): `phrase` signs a permission for this device, kept
+/// in the slot.
 Future<void> setDuressCode({
   required String password,
   required String duressCode,
   required String scope,
   required bool notifyFriends,
+  String? phrase,
 }) => RustLib.instance.api.crateApiIdentitySetDuressCode(
   password: password,
   duressCode: duressCode,
   scope: scope,
   notifyFriends: notifyFriends,
+  phrase: phrase,
 );
 
 /// Remove the duress code. The slot stays, holding random bytes under a random

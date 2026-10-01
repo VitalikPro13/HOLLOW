@@ -14,6 +14,7 @@ import 'api/emotes.dart';
 import 'api/gifs.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
+import 'api/roster.dart';
 import 'api/screen_audio.dart';
 import 'api/share.dart';
 import 'api/shop.dart';
@@ -384,6 +385,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<RemoteReadMarker> dco_decode_list_remote_read_marker(dynamic raw);
 
   @protected
+  List<RosterDevice> dco_decode_list_roster_device(dynamic raw);
+
+  @protected
   List<SecurityAlertFfi> dco_decode_list_security_alert_ffi(dynamic raw);
 
   @protected
@@ -570,6 +574,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RemoteReadMarker dco_decode_remote_read_marker(dynamic raw);
+
+  @protected
+  RosterDevice dco_decode_roster_device(dynamic raw);
+
+  @protected
+  RosterStatus dco_decode_roster_status(dynamic raw);
 
   @protected
   SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw);
@@ -1122,6 +1132,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<RosterDevice> sse_decode_list_roster_device(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<SecurityAlertFfi> sse_decode_list_security_alert_ffi(
     SseDeserializer deserializer,
   );
@@ -1358,6 +1373,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RemoteReadMarker sse_decode_remote_read_marker(SseDeserializer deserializer);
+
+  @protected
+  RosterDevice sse_decode_roster_device(SseDeserializer deserializer);
+
+  @protected
+  RosterStatus sse_decode_roster_status(SseDeserializer deserializer);
 
   @protected
   SecurityAlertFfi sse_decode_security_alert_ffi(SseDeserializer deserializer);
@@ -2079,6 +2100,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_roster_device(
+    List<RosterDevice> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_security_alert_ffi(
     List<SecurityAlertFfi> self,
     SseSerializer serializer,
@@ -2401,6 +2428,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     RemoteReadMarker self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_roster_device(RosterDevice self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_roster_status(RosterStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_security_alert_ffi(

@@ -36,6 +36,7 @@ class _Api implements RustLibApi {
     required String duressCode,
     required String scope,
     required bool notifyFriends,
+    String? phrase,
   }) async =>
       throw 'Wrong password or corrupted identity file';
 

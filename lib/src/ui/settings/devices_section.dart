@@ -2,7 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -12,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
+import 'package:hollow/src/ui/shell/roster_lock.dart' show rosterDateLabel;
 import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
@@ -43,6 +48,9 @@ class _DevicesCategoryViewState extends ConsumerState<DevicesCategoryView> {
     final devices = ref.watch(myDevicesProvider);
     final ghosts = devices.where((d) => !deviceIsActive(d)).length;
     final shown = _showAll ? devices : devices.where(deviceIsActive).toList();
+    final roster = ref.watch(rosterStatusProvider).valueOrNull;
+    final waiting = roster?.devices.where((d) => d.state == 'pending').toList() ?? const [];
+    final removed = roster?.devices.where((d) => d.state == 'removed').toList() ?? const [];
 
     return SettingsPage(
       title: 'Devices',
@@ -66,6 +74,7 @@ class _DevicesCategoryViewState extends ConsumerState<DevicesCategoryView> {
                       _showAll ? 'Hide old devices' : 'Show all ($ghosts offline)'),
                 ),
               ),
+            for (final d in waiting) _WaitingDeviceRow(key: ValueKey('waiting-${d.devicePeerId}'), device: d),
             SettingsRow(
               title: 'Link another device',
               subtitle: "Show a code here, type it on the new device. Keep both "
@@ -79,12 +88,25 @@ class _DevicesCategoryViewState extends ConsumerState<DevicesCategoryView> {
             ),
           ],
         ),
+        if (removed.isNotEmpty)
+          SettingsSection(
+            title: 'Removed devices',
+            children: [
+              for (final d in removed)
+                SettingsRow(
+                  key: ValueKey('removed-${d.devicePeerId}'),
+                  title: _rosterDeviceTitle(ref, d.devicePeerId),
+                  subtitle: 'Gets nothing of yours. Only your recovery phrase '
+                      'can bring it back.',
+                ),
+            ],
+          ),
         SettingsAdvanced(
           children: [
             const SyncCheckCard(),
             SettingsRow(
               title: 'Reset the device list',
-              subtitle: "Signs out every other device. Use it when old "
+              subtitle: 'Removes every other device. Use it when old '
                   "devices won't go away.",
               trailing: HollowButton.outline(
                 danger: true,
@@ -181,6 +203,77 @@ class _DeviceRow extends ConsumerWidget {
   }
 }
 
+String _rosterDeviceTitle(WidgetRef ref, String id) {
+  final label = ref.watch(deviceLabelProvider)[id];
+  return label != null && label.isNotEmpty ? label : shortenPeerId(id);
+}
+
+/// A device restored from a backup that asks to join. It joins on its own once
+/// seven days pass with nobody refusing it.
+class _WaitingDeviceRow extends ConsumerStatefulWidget {
+  final roster_api.RosterDevice device;
+  const _WaitingDeviceRow({super.key, required this.device});
+
+  @override
+  ConsumerState<_WaitingDeviceRow> createState() => _WaitingDeviceRowState();
+}
+
+class _WaitingDeviceRowState extends ConsumerState<_WaitingDeviceRow> {
+  bool? _approving;
+
+  Future<void> _answer(bool approve) async {
+    setState(() => _approving = approve);
+    try {
+      final id = widget.device.devicePeerId;
+      await (approve
+          ? roster_api.approveDevice(devicePeerId: id)
+          : roster_api.refuseDevice(devicePeerId: id));
+      ref.read(pendingDeviceAsksProvider.notifier).answered(id);
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _approving = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final seen = widget.device.firstSeenMs;
+    final joins = seen == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(seen.toInt()).add(const Duration(days: 7));
+    return SettingsRow(
+      title: _rosterDeviceTitle(ref, widget.device.devicePeerId),
+      titleTrailing: const HollowBadge('Waiting'),
+      leading: const _KindTile(LucideIcons.monitorSmartphone),
+      subtitle: joins == null
+          ? 'Restored from a backup. It asks to join your identity.'
+          : 'Restored from a backup. It joins on ${rosterDateLabel(context, joins)} '
+              'unless you refuse it.',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HollowButton.ghost(
+            compact: true,
+            onPressed: _approving != null ? null : () => _answer(false),
+            loading: _approving == false,
+            child: const Text('Refuse'),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.outline(
+            compact: true,
+            onPressed: _approving != null ? null : () => _answer(true),
+            loading: _approving == true,
+            child: const Text('Approve'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// The device-kind tile. Only the running device knows its own kind; a
 /// sibling's is not carried in the device list, so it takes the generic mark.
 class _DeviceKindTile extends StatelessWidget {
@@ -189,7 +282,6 @@ class _DeviceKindTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final IconData icon;
     if (!device.isThisDevice) {
       icon = LucideIcons.monitorSmartphone;
@@ -198,6 +290,17 @@ class _DeviceKindTile extends StatelessWidget {
     } else {
       icon = LucideIcons.monitor;
     }
+    return _KindTile(icon);
+  }
+}
+
+class _KindTile extends StatelessWidget {
+  final IconData icon;
+  const _KindTile(this.icon);
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return Container(
       width: 32,
       height: 32,

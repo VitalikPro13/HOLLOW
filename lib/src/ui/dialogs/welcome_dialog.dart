@@ -292,7 +292,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           title: 'Link a device',
           subtitle: phone
               ? 'Enter a code from your other device'
-              : 'Enter a 6-character code from your other device',
+              : 'Enter the 10-character code from your other device',
           trailing: Icon(
             LucideIcons.chevronRight,
             size: 16,

@@ -2318,16 +2318,16 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     }
 }
 
-/// Decryption material for an in-flight multi-device link snapshot. The bytes are
-/// AES-256-GCM encrypted with a one-time key generated for this link session; the
-/// receiver holds the key and nonce here until the chunked transfer reassembles.
+/// What opens an in-flight link snapshot and what it installs. Stashed with the blob
+/// for a next-launch import through the `import_backup` pipeline, never in place.
 pub(crate) struct LinkSnapshotState {
-    /// The link CODE the receiver typed — the passphrase the inbound `.hollow` blob
-    /// is encrypted with. We stash the blob + this code for a next-launch import via
-    /// the proven `import_backup` pipeline (NOT an in-place import).
-    pub code: String,
-    /// The device that announced it; only its stream may complete it.
+    /// The one-time passphrase of the `.hollow` blob, received inside the link channel.
+    pub passphrase: zeroize::Zeroizing<String>,
+    /// The device that offered it; only its stream may complete it.
     pub sender: String,
+    /// The device key this install runs as after the import (protobuf), the one the
+    /// presenter vouched for.
+    pub device: zeroize::Zeroizing<Vec<u8>>,
 }
 
 /// Handle a completed stream transfer (file, shard, or link snapshot).
@@ -2411,11 +2411,11 @@ async fn handle_link_snapshot_stream(
         return;
     };
 
-    // The inbound bytes are a full `.hollow` backup blob encrypted with the link
-    // CODE. Rather than import in place, STASH the blob and code and signal a
-    // restart, so the bootstrap imports it pre-node-start like a manual restore.
+    // Rather than import in place, STASH the blob, its key and our new device key
+    // and signal a restart, so the bootstrap imports it pre-node-start like a
+    // manual restore.
     let outcome: Result<(), String> = match tokio::fs::read(&request.temp_path).await {
-        Ok(blob) => crate::api::storage::stash_pending_link(&blob, &state.code)
+        Ok(blob) => crate::api::storage::stash_pending_link(&blob, &state.passphrase, &state.device)
             .map_err(|e| format!("stash failed: {e}")),
         Err(e) => Err(format!("read link blob: {e}")),
     };

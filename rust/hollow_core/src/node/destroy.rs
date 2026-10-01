@@ -1,13 +1,16 @@
-//! Master-signed destruction orders: who may act on one, and what a friend does when
-//! it is somebody else's identity that is gone. Two lanes carry the same
-//! self-authenticating payload (Olm, and the relay's kill list for a device Olm did
-//! not reach), so the verify and judge step lives here once.
+//! Destruction orders: who may act on one, and what a friend does when it is somebody
+//! else's identity that is gone. Two lanes carry the same self-authenticating payload
+//! (Olm, and the relay's kill list for a device Olm did not reach), so the verify and
+//! judge step lives here once. The recovery phrase is the authority (design ID-1): an
+//! order counts only under the identity's pinned recovery key, or from a member device
+//! holding the phrase's permission; the master key alone speaks only for an identity
+//! whose phrase was never typed on 0.12.
 
 use tokio::sync::mpsc;
 
 use crate::storage::MessageStore;
 use super::crypto_handler::{
-    build_destroy_identity, online_devices_for, revoke_self_device, send_encrypted_message,
+    destroy_order_authorised, online_devices_for, send_encrypted_message,
     send_encrypted_message_in_room, verify_destroy_identity,
 };
 use super::types::*;
@@ -83,6 +86,18 @@ pub(crate) fn stamp_device_link(db_path: &str, db_passphrase: &str, device_peer_
     let _ = store.save_setting(&key, &now_ms().to_string());
 }
 
+/// Whether the identity's authority stands behind `order`, judged against the roster
+/// we hold for it: its pinned recovery key, and its members for a permission.
+fn authorised(store: &MessageStore, order: &DestroyIdentity) -> bool {
+    match super::roster_book::load(store, &order.master_peer_id) {
+        Some(roster) => {
+            let state = super::roster_book::fold(store, &roster);
+            destroy_order_authorised(order, &roster.r_pub, &state)
+        }
+        None => destroy_order_authorised(order, "", &Default::default()),
+    }
+}
+
 pub(crate) fn identity_destroyed_at(store: &MessageStore, master: &str) -> Option<i64> {
     store
         .load_setting(&destroyed_key(master))
@@ -101,8 +116,8 @@ pub(crate) enum Verdict {
     RejectTransient(&'static str),
 }
 
-/// Signature, targeting, and freshness against both the link time and the last
-/// order applied.
+/// Signature, the phrase's authority, targeting, and freshness against both the link
+/// time and the last order applied.
 pub(crate) fn judge_own_order(
     order: &DestroyIdentity,
     local_master: &str,
@@ -122,6 +137,9 @@ pub(crate) fn judge_own_order(
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else {
         return Verdict::RejectTransient("database unavailable");
     };
+    if !authorised(&store, order) {
+        return Verdict::RejectPermanent("not signed with the recovery phrase");
+    }
     let linked_at = read_i64(&store, &link_key(local_device));
     if linked_at > 0 && order.issued_at_ms < linked_at {
         return Verdict::RejectPermanent("older than this device's link time");
@@ -171,6 +189,10 @@ async fn apply_friend_order(
         return;
     }
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
+    if !authorised(&store, order) {
+        hollow_log!("[HOLLOW-DESTROY] Refused a friend destruction order: not signed with the recovery phrase");
+        return;
+    }
     let master = order.master_peer_id.clone();
     let known = store.get_friend_status(&master).ok().flatten().is_some()
         || store.load_device_list(&master).ok().flatten().is_some();
@@ -282,21 +304,24 @@ pub(crate) fn encode_kill_blob(order: &DestroyIdentity) -> Option<String> {
 
 // -- Send lanes --
 
-/// Scope (b). Siblings drop the device on ingest, friends stop encrypting to it, and
-/// a revoked device that somehow keeps running self-nukes on its own ingest.
+/// Scope (b). This device removes itself: siblings drop it on ingest and friends stop
+/// encrypting to it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_publish_self_revocation(
     ws_cmd_tx: &WsCmdTx,
     ws_room_peers: &WsRoomPeers,
     server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     local_master: &str,
     local_device: &str,
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
 ) -> bool {
-    let signed = revoke_self_device(master_keypair, local_device, db_path, db_passphrase);
+    let Some(signed) = super::roster_book::remove_self(master_keypair, device_keypair, db_path, db_passphrase) else {
+        return false;
+    };
     let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
     let mut sent = 0;
     for pid in peers {
@@ -304,7 +329,7 @@ pub(crate) fn handle_publish_self_revocation(
             continue;
         }
         super::social::send_own_profile_with_device_list(
-            ws_cmd_tx, ws_room_peers, server_states, local_master, master_keypair, local_device,
+            ws_cmd_tx, ws_room_peers, server_states, local_master, master_keypair,
             &pid, signed.clone(), is_invisible, db_path, db_passphrase,
         );
         sent += 1;
@@ -313,9 +338,9 @@ pub(crate) fn handle_publish_self_revocation(
     sent > 0
 }
 
-/// One signed order to our other devices and, when asked, our friends. A sibling
+/// One signed order to our other devices and, when it says so, our friends. A sibling
 /// the Olm lane did not reach (offline, or no session) is parked on the relay's kill
-/// list instead.
+/// list instead. The order arrives signed: the phrase never enters the node.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_publish_destroy_identity(
     olm: &mut crate::crypto::OlmManager,
@@ -323,15 +348,13 @@ pub(crate) async fn handle_publish_destroy_identity(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &WsCmdTx,
     ws_room_peers: &WsRoomPeers,
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
     local_master: &str,
     local_device: &str,
-    targets: Vec<String>,
-    notify_friends: bool,
+    order: DestroyIdentity,
     db_path: &str,
     db_passphrase: &str,
 ) -> u32 {
-    let order = build_destroy_identity(master_keypair, now_ms(), targets, notify_friends);
+    let notify_friends = order.notify_friends;
     let envelope = serde_json::to_string(&MessageEnvelope::DestroyIdentityOrder {
         destroy: Box::new(order.clone()),
     })
@@ -450,21 +473,21 @@ mod tests {
         let me = master.peer_id();
         let device = "12D3KooWThisDevice".to_string();
 
-        let mut tampered = build_destroy_identity(&master, 5_000, Vec::new(), false);
+        let mut tampered = build_destroy_identity(&master, None, 5_000, Vec::new(), false);
         tampered.issued_at_ms = 6_000;
         assert_eq!(
             reason(&judge_own_order(&tampered, &me, &device, &path, &pass)),
             "bad signature",
         );
 
-        let foreign = build_destroy_identity(&stranger, 5_000, Vec::new(), false);
+        let foreign = build_destroy_identity(&stranger, None, 5_000, Vec::new(), false);
         assert_eq!(
             reason(&judge_own_order(&foreign, &me, &device, &path, &pass)),
             "foreign master",
         );
 
         let elsewhere =
-            build_destroy_identity(&master, 5_000, vec!["12D3KooWOther".into()], false);
+            build_destroy_identity(&master, None, 5_000, vec!["12D3KooWOther".into()], false);
         assert_eq!(
             reason(&judge_own_order(&elsewhere, &me, &device, &path, &pass)),
             "targets do not name this device",
@@ -472,13 +495,13 @@ mod tests {
 
         // Issued against a device that no longer exists.
         stamp_device_link(&path, &pass, &device);
-        let ancient = build_destroy_identity(&master, 1, Vec::new(), false);
+        let ancient = build_destroy_identity(&master, None, 1, Vec::new(), false);
         assert_eq!(
             reason(&judge_own_order(&ancient, &me, &device, &path, &pass)),
             "older than this device's link time",
         );
 
-        let good = build_destroy_identity(&master, now_ms() + 1_000, Vec::new(), false);
+        let good = build_destroy_identity(&master, None, now_ms() + 1_000, Vec::new(), false);
         assert!(is_apply(&judge_own_order(&good, &me, &device, &path, &pass)));
 
         // The kill list re-sends until acked, so neither the same order nor an
@@ -487,14 +510,13 @@ mod tests {
             reason(&judge_own_order(&good, &me, &device, &path, &pass)),
             "older than the last applied destroy",
         );
-        let older = build_destroy_identity(&master, good.issued_at_ms - 1, Vec::new(), false);
+        let older = build_destroy_identity(&master, None, good.issued_at_ms - 1, Vec::new(), false);
         assert_eq!(
             reason(&judge_own_order(&older, &me, &device, &path, &pass)),
             "older than the last applied destroy",
         );
 
-        let mine = build_destroy_identity(
-            &master, good.issued_at_ms + 1, vec![device.clone(), "12D3KooWOther".into()], false,
+        let mine = build_destroy_identity(&master, None, good.issued_at_ms + 1, vec![device.clone(), "12D3KooWOther".into()], false,
         );
         assert!(is_apply(&judge_own_order(&mine, &me, &device, &path, &pass)));
     }
@@ -506,7 +528,7 @@ mod tests {
         let (_dir, path, pass) = temp_db();
         let master = NativeKeypair::from_secret_bytes(&[0x33u8; 32]);
         let me = master.peer_id();
-        let order = build_destroy_identity(&master, 42, Vec::new(), false);
+        let order = build_destroy_identity(&master, None, 42, Vec::new(), false);
         assert!(is_apply(&judge_own_order(&order, &me, "dev-nostamp", &path, &pass)));
         assert!(!is_apply(&judge_own_order(&order, &me, "dev-nostamp", &path, &pass)));
     }
@@ -520,7 +542,7 @@ mod tests {
         let master = NativeKeypair::from_secret_bytes(&[0x55u8; 32]);
         let me = master.peer_id();
         let device = "dev-restart";
-        let order = build_destroy_identity(&master, 4_242, Vec::new(), false);
+        let order = build_destroy_identity(&master, None, 4_242, Vec::new(), false);
 
         assert!(is_apply(&judge_own_order(&order, &me, device, &path, &pass)));
         assert!(!is_apply(&judge_own_order(&order, &me, device, &path, &pass)));
@@ -553,7 +575,7 @@ mod tests {
         store().save_friend(&master, "accepted", "outgoing", 1).unwrap();
         let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(16);
 
-        let order = build_destroy_identity(&friend, 7_000, Vec::new(), true);
+        let order = build_destroy_identity(&friend, None, 7_000, Vec::new(), true);
         apply_friend_order(&event_tx, &order, &path, &pass).await;
         assert_eq!(identity_destroyed_at(&store(), &master), Some(7_000));
         note_identity_reappeared(&event_tx, &path, &pass, &master).await;
@@ -571,7 +593,7 @@ mod tests {
             "HOL-SEC-034: a replayed destroy order removed the verified flag",
         );
 
-        let newer = build_destroy_identity(&friend, 8_000, Vec::new(), true);
+        let newer = build_destroy_identity(&friend, None, 8_000, Vec::new(), true);
         apply_friend_order(&event_tx, &newer, &path, &pass).await;
         assert_eq!(identity_destroyed_at(&store(), &master), Some(8_000));
     }
@@ -579,7 +601,7 @@ mod tests {
     #[test]
     fn kill_blob_round_trips_and_rejects_junk() {
         let master = NativeKeypair::from_secret_bytes(&[0x44u8; 32]);
-        let order = build_destroy_identity(&master, 9, vec!["a".into()], true);
+        let order = build_destroy_identity(&master, None, 9, vec!["a".into()], true);
         let blob = encode_kill_blob(&order).expect("encode");
         let back = decode_kill_blob(&blob).expect("decode");
         assert_eq!(back.sig_b64, order.sig_b64);

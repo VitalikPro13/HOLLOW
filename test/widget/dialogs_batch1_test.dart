@@ -581,7 +581,12 @@ void main() {
     expect(find.text('word1'), findsOneWidget);
     expect(find.text('word24'), findsOneWidget);
     expect(find.text('24'), findsOneWidget);
-    expect(find.text("I've saved it"), findsOneWidget);
+    expect(find.text("I've written it down"), findsOneWidget);
+    // Then a few words are asked back; nothing stores the phrase.
+    await tester.tap(find.text("I've written it down"));
+    await tester.pumpAndSettle();
+    expect(find.text('Check your copy'), findsOneWidget);
+    expect(find.textContaining('Word '), findsNWidgets(3));
   });
 
   test('export file names keep letters and numbers only', () {

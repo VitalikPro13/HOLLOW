@@ -246,7 +246,41 @@ into possible holes, so this file itself belongs on the security branch.
   shape; the relay tests run plain and under ASan/UBSan in CI (job `Relay C++`), every
   test under a timeout. Docker path hardened too (no capabilities, `no-new-privileges`,
   read-only roots), proven on the Linux VM.
-- **Now (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood
+- **Sessions 20 to 22 (2026-09-30 to 10-01): ID-1 with HOL-SEC-002 DONE** (design:
+  `audit/design_ID1_identity_authority.md`, section 7a for the rules the build forced).
+  The recovery phrase is the root: a person's devices are a roster of self-verifying
+  statements (consent, vouch, pending join, removal, the phrase's recovery and admission),
+  the master key admits nothing, a restored backup waits seven quiet days unless approved
+  or the phrase is typed, a removed device locks and erases after three days, a remote
+  destroy needs the phrase. The phrase is never stored (shown once, three words typed back;
+  an old identity confirms its stored one once). Linking runs SPAKE2 on a 10-character
+  code (6 rendezvous + 4 secret) and the snapshot rides a random key inside the channel.
+  Findings: **HOL-SEC-002** Fixed, **HOL-SEC-076** (the phrase and Olm/MLS state rode every
+  backup and link snapshot), **HOL-SEC-077** (a stolen device or leaked backup held the
+  identity for good; closes AR-02, F2's unbound half, F3, F6, I8). AR-15 records the
+  residuals. Session 22 drove it all on throwaway fleet peers and found seven more gaps,
+  all fixed with tests: the roster FFI minted an identity before Welcome, the roster lock
+  and the phrase upgrade could route above the app lock's cover, a wrong phrase left the
+  check spinning, a restored backup showed no lock until a restart, a settled join ask
+  could still be refused, `HollowDialog` remounted its body when busy (scroll and focus
+  lost after every failed action), and five harness tests that raced under full load (each now waits on the result, not on an event).
+- **NEXT (Vitalik, 2026-10-01): the iOS check of ID-1, repairing the stale fleet journeys,
+  then a regression pass over the whole app on throwaway fleet peers** (messaging, sync,
+  files and media, calls, servers, multi-device, the key UI), so that the audit's fixes are
+  proven to break nothing and to let every honest flow through. Plan: tmp4.txt, session 23.
+- **AFTER THAT: ID-1R, the relay learns rosters.** Today the relay lets a socket
+  read an identity's inbox (the mailbox that holds friend requests, and the presence of
+  its other devices) when it shows a MASTER-signed device list naming it, so anyone
+  holding only the master key (a leaked backup, a removed thief's phone) still passes, and
+  can also win the version race that locks the owner's devices out of their own inbox.
+  The fix: the inbox proof becomes the device's roster; the relay verifies the statements
+  (consent, vouch, phrase admission, recovery, removals), pins each identity's first
+  recovery key, and keeps the removals it has seen so an old roster cannot drop them (a
+  fair-share bounded registry, snapshot codec bump). Pending joins never own an inbox at
+  the relay. Legacy identities keep the master-signed proof until their first recovery.
+  Deploy the relay BEFORE the 0.12 client, old proof accepted until release day like the
+  other `ACCEPT_*` switches.
+- **Before session 20 (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood
   limits wait for phase G. Fuzzing and flood limits wait for phase G. **On release day:** the
   relay (deployed 2026-09-29) must still precede any 0.12 client on self-hosted relays,
   and once 0.12 is out it goes again with `ACCEPT_AUTH_V1`, `ACCEPT_UNSIGNED_RING_CONTROL` and

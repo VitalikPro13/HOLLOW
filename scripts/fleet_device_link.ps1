@@ -517,14 +517,17 @@ function Close-Friends($peer) {
 }
 
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:HollowChip>text:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > semantics:$tab"; index = 0 }
 }
 
+$script:DmComposer = @{}
 function Open-Dm($peer, $friendName) {
     Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
     Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
-    Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
+    # The composer is named for whoever the DM is with.
+    $script:DmComposer[$peer] = "hint:Message $friendName"
+    Step $peer @{ op = 'wait_for'; target = $script:DmComposer[$peer]; timeout_ms = 30000 }
 }
 
 # The composer is TAPPED first: enter_text on an unfocused field reports success
@@ -533,8 +536,8 @@ function Open-Dm($peer, $friendName) {
 # Retried, because that wait has caught a real swallow before.
 function Send-Dm($peer, $body) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        Step $peer @{ op = 'tap'; target = 'hint:Type a message...' }
-        Step $peer @{ op = 'enter_text'; target = 'hint:Type a message...'; value = $body }
+        Step $peer @{ op = 'tap'; target = $script:DmComposer[$peer] }
+        Step $peer @{ op = 'enter_text'; target = $script:DmComposer[$peer]; value = $body }
         # Enter does not send on the mobile shell; the send button does.
         if (Test-SimBackend) {
             Step $peer @{ op = 'tap'; target = 'semantics:Send'; index = 0 }
@@ -629,12 +632,10 @@ function Open-SettingsDevices($peer) {
         return
     }
     Step $peer @{ op = 'tap'; target = 'semantics:Settings'; index = 0 }
-    Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 20000 }
-    # SCOPED to the dialog: the Home dashboard's stats card has a "Devices" row
-    # of its own, it comes first in tree order, and the settings dialog is
-    # sitting on top of it, so the unscoped tap lands on something covered.
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > text:Devices'; index = 0 }
-    Step $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent > text:Link a device'; timeout_ms = 20000 }
+    Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 20000 }
+    # Scoped to Settings: other surfaces carry a "Devices" label of their own.
+    Step $peer @{ op = 'tap'; target = 'type:SettingsPlace > text:Devices'; index = 0 }
+    Step $peer @{ op = 'wait_for'; target = 'type:SettingsPlace > text:Link a device'; timeout_ms = 20000 }
 }
 
 function Close-Settings($peer) {
@@ -646,35 +647,36 @@ function Close-Settings($peer) {
         Invoke-SoftStep $peer @{ op = 'tap'; target = 'semantics:Chats'; index = 0 } | Out-Null
         return
     }
-    $open = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 1500 }
+    $open = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'type:SettingsPlace'; timeout_ms = 1500 }
     if (-not $open.ok) { return }
     # Escape first: after a failed gate the link-code screen still covers the
     # Close button, and a tap that cannot reach it used to sink the cleanup.
     Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
-    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 3000 }
+    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 3000 }
     if ($gone.ok) { return }
-    Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 }
-    Step $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 10000 }
+    Step $peer @{ op = 'tap'; target = 'semantics:Close settings'; index = 0 }
+    Step $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 10000 }
 }
 
 # Opens "Link a device" on the populated side and reads the code off the screen.
 #
-# The dialog renders the code SPACED OUT (`code.split('').join(' ')`), and until
-# the notifier has minted one it renders six dots, so the capture is a regex for
-# six spaced code characters and it is retried rather than failed: the mint
-# happens a frame or two after the dialog appears.
+# The dialog renders the code SPACED OUT with a dash after the sixth character
+# (`ABCDEF-GHJK` as `A B C D E F - G H J K`), and until the notifier has minted
+# one it renders dots, so the capture is a regex for the spaced code and it is
+# retried rather than failed: the mint happens a frame or two after the dialog
+# appears. The field on the other side takes it without the dash.
 function Get-LinkCode($peer) {
-    $button = if (Test-SimBackend) { 'text:Link a device' } else { 'type:_UserSettingsContent > text:Link a device' }
+    $button = if (Test-SimBackend) { 'text:Link a device' } else { 'type:SettingsPlace > text:Link a device' }
     Step $peer @{ op = 'tap'; target = $button; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'type:_DeviceLinkContent'; timeout_ms = 20000 }
     for ($attempt = 1; $attempt -le 20; $attempt++) {
         $answer = Invoke-SoftStep $peer @{
             op = 'capture'; target = 'type:_DeviceLinkContent'; as = 'LINKCODE_RAW'
-            regex = '([A-Z2-9](?: [A-Z2-9]){5})'
+            regex = '([A-Z2-9](?: [A-Z2-9]){5} - [A-Z2-9](?: [A-Z2-9]){3})'
         }
         if ($answer.ok) {
-            $code = ($script:FleetVars['LINKCODE_RAW'] -replace '\s', '')
-            if ($code.Length -eq 6) {
+            $code = ($script:FleetVars['LINKCODE_RAW'] -replace '[\s-]', '')
+            if ($code.Length -eq 10) {
                 $script:FleetVars['LINKCODE'] = $code
                 Say "$peer is showing link code $code" 'Green'
                 return $code
@@ -682,7 +684,7 @@ function Get-LinkCode($peer) {
         }
         Start-Sleep -Milliseconds 700
     }
-    throw "[$peer] never rendered a 6-character link code"
+    throw "[$peer] never rendered a 10-character link code"
 }
 
 # Walks the welcome dialog to the enter-code screen. `relayDomain` empty leaves
@@ -776,7 +778,7 @@ try {
         Step b @{ op = 'wait_for'; target = 'contains:Connecting to the relay'; timeout_ms = 30000 }
         # And it holds at the PRESS, not only in the caption: Link waits for the
         # relay (loading) and never starts a link it cannot finish.
-        Step b @{ op = 'enter_text'; target = 'hint:ABC123'; value = 'ABC234' }
+        Step b @{ op = 'enter_text'; target = 'hint:ABC123'; value = 'ABC234DEFG' }
         Step b @{ op = 'tap'; target = 'text:Link'; index = 0 }
         Step b @{ op = 'wait'; ms = 6000 }
         Step b @{ op = 'expect_no_text'; value = 'Linking this device' }
@@ -801,7 +803,7 @@ try {
         Step b @{ op = 'wait_for'; target = 'text:Linking this device'; timeout_ms = 45000 }
         # a is deliberately left sitting on the confirm: the gate is that b
         # gives up on its own rather than waiting forever for a human.
-        $confirm = Invoke-SoftStep a @{ op = 'wait_for'; target = 'text:Send your data?'; timeout_ms = 45000 }
+        $confirm = Invoke-SoftStep a @{ op = 'wait_for'; target = 'text:Add this device?'; timeout_ms = 45000 }
         if ($confirm.ok) {
             Add-Note 'a reached the confirm prompt and was deliberately left there'
         } else {
@@ -885,7 +887,7 @@ try {
         Step a @{ op = 'key'; value = 'escape' }
 
         Step c @{ op = 'tap'; target = 'semantics:Create a server' }
-        Step c @{ op = 'enter_text'; target = 'hint:Invite link or server ID'; value = '${INVITE}' }
+        Step c @{ op = 'enter_text'; target = 'hint:Invite link'; value = '${INVITE}' }
         Step c @{ op = 'tap'; target = 'text:Join'; index = 0 }
         Step c @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 120000 }
         Step c @{ op = 'open_server'; name = $server }
@@ -948,9 +950,13 @@ try {
 
         # ---- G4: a confirms and the bytes cross ----------------------------
         Say '4/7 a confirms the push'
-        Step a @{ op = 'wait_for'; target = 'text:Send your data?'; timeout_ms = 60000 }
+        Step a @{ op = 'wait_for'; target = 'text:Add this device?'; timeout_ms = 60000 }
         Step a @{ op = 'shot'; name = "link-$runTag-a-confirm" }
-        Step a @{ op = 'tap'; target = 'text:Send data'; index = 0 }
+        # The prompt names the joiner by the label and platform it sent inside
+        # the sealed hello (the host name on a desktop).
+        $named = Invoke-SoftStep a @{ op = 'expect_text'; value = "$($env:COMPUTERNAME)" }
+        if (-not $named.ok) { Add-Note "a's prompt did not name b's host $($env:COMPUTERNAME)" }
+        Step a @{ op = 'tap'; target = 'text:Add device'; index = 0 }
         Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
         Step a @{ op = 'shot'; name = "link-$runTag-a-sent" }
         $bData = Get-PeerDataDir 'b'

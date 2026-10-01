@@ -6,6 +6,7 @@ pub mod emotes;
 pub mod gifs;
 pub mod identity;
 pub mod network;
+pub mod roster;
 pub mod screen_audio;
 pub mod share;
 pub mod shop;

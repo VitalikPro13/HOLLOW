@@ -44,6 +44,14 @@ function Test-WindowsBackend { return $script:FleetBackend -eq 'windows' }
 # reboot empties /tmp and would take the fixture identities with it.
 function Get-LinuxFleetHome { return (Join-Path $HOME 'hollow_fleet') }
 
+# The recovery phrase `fleet.ps1 -Onboard` saw for a peer's fixture identity.
+function Get-FixturePhrase($peer) {
+    $root = if (Test-WindowsBackend) { Join-Path $env:TEMP 'hollow_fleet\fixtures' } else { Join-Path (Join-Path $HOME 'hollow_fleet') 'fixtures' }
+    $file = Join-Path $root "$peer.phrase"
+    if (-not (Test-Path $file)) { throw "no phrase kept for '$peer': onboard it again with fleet.ps1 -Onboard -Fresh" }
+    return [System.IO.File]::ReadAllText($file).Trim()
+}
+
 # The shell a child fleet run is started with.
 function Get-PowerShellExe { if (Test-WindowsBackend) { return 'powershell' } else { return 'pwsh' } }
 

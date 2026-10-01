@@ -27,7 +27,7 @@ signed" but "is the signer allowed".
 | P-05 | **Malicious server member, admin or owner.** | CRDT ops at their role, MLS messages, channel traffic, KeyPackages and commits, conference traffic, public channel posts. | Ops above their role, if the gates hold. |
 | P-06 | **Formerly trusted peer.** Ex-friend, blocked identity, kicked or banned member, removed from a restricted channel. | Replay what they once legitimately held; keep old keys and state. | |
 | P-07 | **Own sibling device, still linked.** | Everything the identity can do: it holds the master key (WP 3.6). | |
-| P-08 | **Own revoked device**, lost or stolen and usable. | Holds the master key and device key; can sign as the master (see AT-2). | Use them while password-locked and powered off (verify B). |
+| P-08 | **Own revoked device**, lost or stolen and usable. | Holds the master key and device key; can sign as the master, and while it is still a member it can vouch and remove like any device (design ID-1). | Admit a device, keep itself in, or destroy remotely once removed or once the phrase recovers (HOL-SEC-077); use its keys while password-locked and powered off (verify B). |
 | P-09 | **Physical holder of a device.** Thief, border search, forensic lab, coercer. | Copy the disk, run forensic tools, attempt PINs offline, compel the user to unlock. | Break the OS keystore or Secure Enclave. |
 | P-10 | **Hostile infrastructure other than the relay.** Update and download host, asset CDN, shop backend, TURN, a member running the media forwarder. | Serve any bytes; see IPs; forward media ciphertext. | Produce signatures with keys it lacks. |
 | P-11 | **Push providers.** Apple, Google, a UnifiedPush distributor. | See every wake-up payload, its timing, device tokens. | |
@@ -124,14 +124,14 @@ rows in `authz_matrix.md`.
 | ID | Flow | Crosses | Protection today | Authority question |
 |---|---|---|---|---|
 | F-01 | Signed device list, on profile sync | TB-2, TB-1 | Master signature, monotonic version, union merge; foreign lists filtered by `speaks_for` (branch) | May this master name these device ids? |
-| F-02 | Revocation to the revoked device, which then wipes | TB-3 | Master signature; own-master sibling path only (branch) | Is a signature by the master enough when every device holds the master (AT-2)? |
+| F-02 | Removal to the removed device, which locks and erases after three days | TB-3 | A removal signed by a current device, in the roster's base (design ID-1) | Answered by HOL-SEC-077: the master signature no longer moves the roster |
 | F-03 | `DestroyIdentity` order | TB-2, TB-3 | Master signature, `judge_own_order` (own master, targets, link time, in-process applied stamp) | Replay after restart? Link-time rule vs a stolen device? |
 | F-04 | Relay kill list: order couriered on connect, `KillAck` back | TB-1, TB-10 | Relay is courier only; the order carries its own signature | Can the relay use withholding or ordering to cause harm? |
 | F-05 | Relay authentication | TB-1 | Device key challenge; relay derives peer_id from the pubkey; 60 s window | |
 | F-06 | Unlock, duress, app lock secret | TB-4 | Argon2id, both slots derived, keystore wrap | Offline PIN search (L-07) |
 | F-07 | Sibling sync: DM backfill, read markers, personal emotes, server re-announce, manual sync | TB-3 | "Sender proven to be the same identity" | How is "same identity" proven, and can a stranger's device be resolved to our master (the HOL-SEC-001 rebinding class)? |
 | F-11 | Link code claim and resolve (relay JSON, `link:{CODE}` room) | TB-1 | none: the code is in plaintext | HOL-SEC-002 |
-| F-12 | Link snapshot stream (full backup incl. `identity.key`) | TB-1 | Argon2id + AES-GCM with the code or the public master id as passphrase | HOL-SEC-002 |
+| F-12 | Link snapshot stream (full backup incl. `identity.key`, scrubbed of the phrase and Olm/MLS state) | TB-1 | SPAKE2 on the code's secret part, then AES-GCM under a random key sent inside the channel | Fixed: HOL-SEC-002, HOL-SEC-076 |
 | F-13 | Link confirmation prompt | TB-3 | On-screen accept on the populated device | Does the prompt show enough to spot a stranger's request? |
 
 ### 5.2 Direct messages and friends
@@ -229,19 +229,21 @@ lead that covers them.
 - OR: a destroy order Alice's device accepts
   - forged by another identity (master sig, `judge_own_order`)
   - replayed after a restart (applied stamp is in-process only): L-06
-  - signed with Alice's master key held by a stolen or linked device: AT-2
+  - signed with Alice's master key held by a stolen or linked device: closed by HOL-SEC-077 (a remote destroy needs the phrase or a permission it signed)
 - OR: duress triggered remotely (local-only by design: verify no remote path)
 - OR: any other path to `_selfNuke` / `SelfRevoked` / the wipe routine: enumerate in phase B
 
 **AT-2: Take over Alice's identity** (AS-01)
 - OR: obtain the master key
   - intercept a device link: HOL-SEC-002
-  - steal a device whose keys are usable (keychain mode, or unlocked): by design, see AR-02
+  - steal a device whose keys are usable (keychain mode, or unlocked): it signs as Alice, but since HOL-SEC-077 it holds the identity only until Alice types her phrase
   - copy the identity file and break its protection: C-06
   - read it from logs, backups, crash dumps: C-37
 - AND then (with the key): sign a higher-version device list un-revoking the
   attacker's device and revoking Alice's, and her honest devices wipe
-  themselves. Alice has no way to reclaim the identity except a new one.
+  themselves. Closed by HOL-SEC-077 (design ID-1): the master key moves no
+  roster; a device the attacker holds counts only while it is a member, and
+  Alice's phrase starts a new base that leaves it out. Residuals: AR-15.
 
 **AT-3: Read Alice's DMs** (AS-04)
 - OR: get a device of the attacker's into Alice's contact's device list (C-01, C-10)

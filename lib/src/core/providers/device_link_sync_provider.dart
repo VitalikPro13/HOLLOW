@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,7 +12,7 @@ enum LinkPhase {
   /// Nothing in progress.
   idle,
 
-  /// (Populated device) Showing a 6-char code, waiting for an empty device to
+  /// (Populated device) Showing a link code, waiting for an empty device to
   /// enter it. `code` is set; `countdownSeconds` ticks down from 300.
   showingCode,
 
@@ -19,8 +20,8 @@ enum LinkPhase {
   /// Confirm. `peerId` is the requesting device.
   confirmPush,
 
-  /// (Empty device) Entered a code / detected a sibling, waiting for the
-  /// populated device to come online / start sending.
+  /// (Empty device) Entered a code, waiting for the populated device to
+  /// answer and start sending.
   waiting,
 
   /// (Empty device) Receiving the snapshot. `bytesReceived`/`totalBytes` drive
@@ -57,6 +58,10 @@ class DeviceLinkState {
   final int theirFriendCount;
   final bool theirHasProfile;
 
+  /// What the asking device says it is: its name and its platform.
+  final String theirLabel;
+  final String theirPlatform;
+
   // Receiving side (empty device).
   final int bytesReceived;
   final int totalBytes;
@@ -76,6 +81,8 @@ class DeviceLinkState {
     this.theirMsgCount = 0,
     this.theirFriendCount = 0,
     this.theirHasProfile = false,
+    this.theirLabel = '',
+    this.theirPlatform = '',
     this.bytesReceived = 0,
     this.totalBytes = 0,
     this.msgCount = 0,
@@ -95,6 +102,8 @@ class DeviceLinkState {
     int? theirMsgCount,
     int? theirFriendCount,
     bool? theirHasProfile,
+    String? theirLabel,
+    String? theirPlatform,
     int? bytesReceived,
     int? totalBytes,
     int? msgCount,
@@ -110,6 +119,8 @@ class DeviceLinkState {
         theirMsgCount: theirMsgCount ?? this.theirMsgCount,
         theirFriendCount: theirFriendCount ?? this.theirFriendCount,
         theirHasProfile: theirHasProfile ?? this.theirHasProfile,
+        theirLabel: theirLabel ?? this.theirLabel,
+        theirPlatform: theirPlatform ?? this.theirPlatform,
         bytesReceived: bytesReceived ?? this.bytesReceived,
         totalBytes: totalBytes ?? this.totalBytes,
         msgCount: msgCount ?? this.msgCount,
@@ -124,10 +135,45 @@ final deviceLinkSyncProvider =
   DeviceLinkSyncNotifier.new,
 );
 
-/// 6-char code alphabet: unambiguous (no 0/O, 1/I/L) so it's easy to read off a
-/// screen and type on another device. Matches the relay's `is_valid_link_code`
-/// (6 chars of A-Z/2-9 is a subset of its A-Z0-9 check).
+/// Code alphabet: unambiguous (no 0/O, 1/I/L) so it's easy to read off a screen
+/// and type on another device. Matches Rust's `link_pake::ALPHABET`, and is a
+/// subset of the relay's A-Z0-9 check for the part it sees.
 const _codeAlphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+/// The part of a link code the relay sees (it brings the two devices together)
+/// and the part it never sees (it keys the handshake, HOL-SEC-002).
+const kLinkRendezvousLength = 6;
+const kLinkSecretLength = 4;
+const kLinkCodeLength = kLinkRendezvousLength + kLinkSecretLength;
+
+/// A code as shown and typed: `ABCDEF-GHJK`.
+String formatLinkCode(String code) => code.length <= kLinkRendezvousLength
+    ? code
+    : '${code.substring(0, kLinkRendezvousLength)}-${code.substring(kLinkRendezvousLength)}';
+
+/// What this device calls itself on the other device's confirm prompt: the
+/// computer's name on a desktop, nothing on a phone (which reports none worth
+/// showing), and the platform.
+({String label, String platform}) linkDeviceIdentity() {
+  final desktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+  var label = '';
+  if (desktop) {
+    try {
+      label = Platform.localHostname;
+    } catch (_) {}
+  }
+  return (label: label, platform: Platform.operatingSystem);
+}
+
+/// The platform a linking device reported, as people name it.
+String platformName(String platform) => switch (platform) {
+      'windows' => 'Windows',
+      'macos' => 'macOS',
+      'linux' => 'Linux',
+      'android' => 'Android',
+      'ios' => 'iOS',
+      _ => platform,
+    };
 
 class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   Timer? _waitingTimer;
@@ -164,11 +210,12 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
 
   String _generateCode() {
     final rng = Random.secure();
-    return List.generate(6, (_) => _codeAlphabet[rng.nextInt(_codeAlphabet.length)]).join();
+    return List.generate(kLinkCodeLength, (_) => _codeAlphabet[rng.nextInt(_codeAlphabet.length)]).join();
   }
 
-  /// (Populated device) Generate + claim a link code and show it. The relay echoes
-  /// `LinkCodeClaimed`, or `LinkCodeError` on collision, and we regenerate.
+  /// (Populated device) Generate a link code, claim its rendezvous part and show
+  /// it whole. The relay echoes `LinkCodeClaimed`, or `LinkCodeError` on a
+  /// collision, and we regenerate.
   Future<void> startShowingCode() async {
     final code = _generateCode();
     state = DeviceLinkState(
@@ -176,7 +223,10 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
       code: code,
       countdownSeconds: 300,
     );
-    await network_api.claimLinkCode(code: code);
+    await network_api.claimLinkCode(
+      rendezvous: code.substring(0, kLinkRendezvousLength),
+      secret: code.substring(kLinkRendezvousLength),
+    );
   }
 
   /// (Populated device) Stop showing / cancel the code.
@@ -185,34 +235,15 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     await network_api.releaseLinkCode();
   }
 
-  /// (Empty device) Resolve a code shown on the populated device and request its
-  /// snapshot with the chosen scope.
-  Future<void> enterCode(String code, {required bool includeVault, required bool includeFiles}) async {
-    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, code: code.toUpperCase()))) return; // design-ignore: link code, data
+  /// (Empty device) Link to the device showing [code]. The populated device
+  /// decides what the snapshot includes when it confirms.
+  Future<void> enterCode(String code) async {
+    final typed = code.toUpperCase(); // design-ignore: link code, data
+    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, code: typed))) return;
     final attempt = state;
+    final me = linkDeviceIdentity();
     try {
-      await network_api.resolveLinkCode(
-        code: code.toUpperCase(), // design-ignore: link code, data
-        includeVault: includeVault,
-        includeFiles: includeFiles,
-      );
-    } catch (_) {
-      if (!_disposed && identical(state, attempt)) {
-        onLinkFailed('Could not request the link. Check your connection and try again.');
-      }
-    }
-  }
-
-  /// (Empty device, mnemonic path) Pull from an already-known online sibling.
-  Future<void> pullFromSibling(String peerId, {required bool includeVault, required bool includeFiles}) async {
-    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, peerId: peerId))) return;
-    final attempt = state;
-    try {
-      await network_api.requestLinkSnapshot(
-        targetPeer: peerId,
-        includeVault: includeVault,
-        includeFiles: includeFiles,
-      );
+      await network_api.resolveLinkCode(code: typed, label: me.label, platform: me.platform);
     } catch (_) {
       if (!_disposed && identical(state, attempt)) {
         onLinkFailed('Could not request the link. Check your connection and try again.');
@@ -238,11 +269,8 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
 
   void reset() => state = const DeviceLinkState();
 
-  void onCodeClaimed(String code) {
-    if (state.phase == LinkPhase.showingCode) {
-      state = state.copyWith(code: code);
-    }
-  }
+  /// The relay echoes only the rendezvous part, so the code on screen stays.
+  void onCodeClaimed(String code) {}
 
   void onCodeError(String error, String code) {
     // A claim collision while showing → regenerate and re-claim.
@@ -271,8 +299,16 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     }
   }
 
-  /// (Populated device) An empty sibling is requesting data → show Confirm.
-  void onSiblingLinkAvailable(String peerId, int theirMsgCount, int theirFriendCount, bool theirHasProfile) {
+  /// (Populated device) A device that typed our code asks for our data: show
+  /// Confirm with what it says it is.
+  void onSiblingLinkAvailable(
+    String peerId,
+    int theirMsgCount,
+    int theirFriendCount,
+    bool theirHasProfile, {
+    String label = '',
+    String platform = '',
+  }) {
     // If WE initiated a pull (empty side) this is our own offer to pull: only
     // surface Confirm when we're showing a code or idle.
     if (state.phase == LinkPhase.waiting || state.phase == LinkPhase.receiving) return;
@@ -282,6 +318,8 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
       theirMsgCount: theirMsgCount,
       theirFriendCount: theirFriendCount,
       theirHasProfile: theirHasProfile,
+      theirLabel: label,
+      theirPlatform: platform,
     );
   }
 

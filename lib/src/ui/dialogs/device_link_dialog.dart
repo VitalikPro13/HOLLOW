@@ -252,7 +252,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   }
 
   Widget _showCode(HollowTheme hollow, DeviceLinkState state) {
-    final code = state.code ?? '······';
+    final code = formatLinkCode(state.code ?? '·' * kLinkCodeLength);
     return _phase(
       title: 'Link a device',
       subtitle:
@@ -319,7 +319,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
       }
     });
     final phone = WelcomeFrame.isPhone(context);
-    final complete = _codeController.text.length == 6;
+    final complete = _codeController.text.length == kLinkCodeLength;
     return WelcomeFrame(
       title: 'Link a device',
       onBack: _close,
@@ -377,11 +377,11 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
 
   void _pressLink(bool online) {
     final code = _codeController.text;
-    if (code.length != 6) {
+    if (code.length != kLinkCodeLength) {
       setState(
         () => _codeError = code.isEmpty
             ? 'Enter the code shown on your other device.'
-            : 'The code has 6 characters. Check it on your other device.',
+            : 'The code has $kLinkCodeLength characters. Check it on your other device.',
       );
       return;
     }
@@ -398,11 +398,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     // provider's failed phase.
     ref
         .read(deviceLinkSyncProvider.notifier)
-        .enterCode(
-          _codeController.text,
-          includeVault: false,
-          includeFiles: false,
-        )
+        .enterCode(_codeController.text)
         .catchError((_) {});
   }
 
@@ -650,10 +646,15 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
 
   Widget _confirmPush(HollowTheme hollow, String? peerId) {
     final declining = _decliningPeer != null;
+    final state = ref.watch(deviceLinkSyncProvider);
+    final platform = platformName(state.theirPlatform);
+    final who = state.theirLabel.isEmpty
+        ? (platform.isEmpty ? 'A device' : 'A $platform device')
+        : (platform.isEmpty ? state.theirLabel : '${state.theirLabel} ($platform)');
     return _phase(
-      title: 'Send your data?',
-      subtitle:
-          'Your other device is asking to sync. This sends your full history and identity to it.',
+      title: 'Add this device?',
+      subtitle: '$who typed your code. Adding it sends it your full history '
+          'and identity, and it becomes one of your devices.',
       children: [_scopeToggles(hollow)],
       actions: [
         HollowButton.ghost(
@@ -665,8 +666,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
           onPressed: peerId == null || actionRunning
               ? null
               : () => _accept(peerId),
-          icon: const Icon(LucideIcons.send, size: 14),
-          child: const Text('Send data'),
+          child: const Text('Add device'),
         ),
       ],
     );
@@ -781,9 +781,9 @@ class UpperCaseTextFormatter extends TextInputFormatter {
   }
 }
 
-/// The link code as six slots over one real text field, so typing, pasting,
-/// Enter and assistive tech all go through a normal field while each
-/// character sits in its own box.
+/// The link code as ten slots in two groups over one real text field, so typing,
+/// pasting (with or without the dash), Enter and assistive tech all go through a
+/// normal field while each character sits in its own box.
 class LinkCodeField extends StatefulWidget {
   final TextEditingController controller;
   final ValueChanged<String>? onChanged;
@@ -798,7 +798,7 @@ class LinkCodeField extends StatefulWidget {
     this.hasError = false,
   });
 
-  static const int length = 6;
+  static const int length = kLinkCodeLength;
 
   @override
   State<LinkCodeField> createState() => _LinkCodeFieldState();
@@ -857,7 +857,7 @@ class _LinkCodeFieldState extends State<LinkCodeField> {
           child: i < text.length
               ? Text(
                   text[i],
-                  style: HollowTypography.display.copyWith(
+                  style: HollowTypography.heading.copyWith(
                     color: hollow.textPrimary,
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
@@ -882,7 +882,16 @@ class _LinkCodeFieldState extends State<LinkCodeField> {
             child: Row(
               children: [
                 for (var i = 0; i < LinkCodeField.length; i++) ...[
-                  if (i > 0) const SizedBox(width: HollowSpacing.sm),
+                  if (i == kLinkRendezvousLength)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+                      child: Text(
+                        '-',
+                        style: HollowTypography.heading.copyWith(color: hollow.textTertiary),
+                      ),
+                    )
+                  else if (i > 0)
+                    const SizedBox(width: HollowSpacing.xs),
                   Expanded(child: slot(i)),
                 ],
               ],

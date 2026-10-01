@@ -1407,24 +1407,6 @@ pub fn get_missing_image_file_ids_for_server(server_id: String) -> Result<Vec<St
     ms.get_missing_image_file_ids_for_server(&server_id)
 }
 
-/// Save the recovery mnemonic to the database (called once on first identity generation).
-#[frb]
-pub fn save_mnemonic(mnemonic: String) -> Result<(), String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.save_setting("recovery_mnemonic", &mnemonic)
-}
-
-/// Retrieve the stored recovery mnemonic.
-#[frb]
-pub fn get_mnemonic() -> Result<Option<String>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.load_setting("recovery_mnemonic")
-}
-
 /// Check if an identity key file exists on disk.
 #[frb]
 pub fn has_identity() -> Result<bool, String> {
@@ -1458,8 +1440,8 @@ pub fn delete_identity() -> Result<(), String> {
 /// `messages.db`, optionally `vault/` shards and `files/` downloads.
 ///
 /// The shared core of both the on-disk backup (wrapped in Argon2id+AES) and the
-/// multi-device link snapshot (wrapped in a one-time random AES key).
-/// random AES key). Returns the raw zip bytes.
+/// multi-device link snapshot (wrapped in a one-time random AES key). Returns the raw
+/// zip bytes.
 pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> Result<Vec<u8>, String> {
     use std::io::Write;
 
@@ -1484,13 +1466,7 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
 
         let db_path = data_dir.join("messages.db");
         if db_path.exists() {
-            let db_passphrase = derive_db_key()?;
-            if let Ok(store) = crate::storage::MessageStore::open(
-                db_path.to_str().unwrap_or_default(), &db_passphrase,
-            ) {
-                let _ = store.wal_checkpoint();
-            }
-            let data = std::fs::read(&db_path).map_err(|e| format!("Failed to read messages.db: {e}"))?;
+            let data = scrubbed_db_copy(&data_dir, &db_path)?;
             zip.start_file("messages.db", options).map_err(|e| format!("Zip error: {e}"))?;
             zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
         }
@@ -1534,9 +1510,7 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
     Ok(zip_buf.into_inner())
 }
 
-/// Extract a plaintext snapshot ZIP into the data directory (REPLACES existing
-/// files of the same name). Shared core of `import_backup` and the link-snapshot
-/// import. Requires the zip to contain `identity.key`.
+/// Whether a snapshot ZIP carries `identity.key`, without which it is no identity.
 fn snapshot_has_identity(zip_bytes: &[u8]) -> bool {
     zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).is_ok_and(|mut archive| {
         (0..archive.len()).any(|i| {
@@ -1545,6 +1519,33 @@ fn snapshot_has_identity(zip_bytes: &[u8]) -> bool {
     })
 }
 
+/// The database as it may leave this device: a copy with this device's Olm and MLS
+/// identities and any stored recovery phrase removed. The live database is untouched.
+fn scrubbed_db_copy(data_dir: &std::path::Path, db_path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let db_passphrase = derive_db_key()?;
+    if let Ok(store) = crate::storage::MessageStore::open(
+        db_path.to_str().unwrap_or_default(), &db_passphrase,
+    ) {
+        let _ = store.wal_checkpoint();
+    }
+    let copy = data_dir.join("export_scrub.db");
+    let _ = std::fs::remove_file(&copy);
+    std::fs::copy(db_path, &copy).map_err(|e| format!("Failed to copy messages.db: {e}"))?;
+    let scrubbed = (|| {
+        let store = crate::storage::MessageStore::open(copy.to_str().unwrap_or_default(), &db_passphrase)?;
+        store.scrub_device_secrets()?;
+        drop(store);
+        std::fs::read(&copy).map_err(|e| format!("Failed to read the scrubbed copy: {e}"))
+    })();
+    for leftover in ["export_scrub.db", "export_scrub.db-wal", "export_scrub.db-shm"] {
+        let _ = std::fs::remove_file(data_dir.join(leftover));
+    }
+    scrubbed
+}
+
+/// Extract a plaintext snapshot ZIP into the data directory (REPLACES existing
+/// files of the same name). Shared core of `import_backup` and the link-snapshot
+/// import. Requires the zip to contain `identity.key`.
 pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     use std::io::Read;
 
@@ -1573,9 +1574,9 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     // CRITICAL: delete the THROWAWAY identity.device. The snapshot carries only a
     // plaintext identity.key, so keeping the throwaway's device file either cannot be
     // decrypted once the plaintext master replaces identity.key (the identity then
-    // never loads) or leaves a device id minted under an identity that is gone.
-    // Deleting it makes the next launch mint a fresh, distinct device key.
-    // key under the real master — the correct multi-device shape.
+    // never loads) or leaves a device id minted under an identity that is gone. A
+    // restored backup then mints a fresh device key; a link installs the one its
+    // presenter vouched for.
     let dev_path = data_dir.join("identity.device");
     if dev_path.exists() {
         let _ = std::fs::remove_file(&dev_path);
@@ -1603,6 +1604,17 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     // messages.db was just replaced, so the key ring must re-register against the
     // IMPORTED database rather than the one that is gone.
     crate::node::at_rest::forget_stores();
+
+    // A restored or linked device is a NEW device: it mints its own Olm and MLS
+    // identities. An older snapshot still carries its source's, and its phrase.
+    if let Ok(passphrase) = derive_db_key() {
+        let db_path = data_dir.join("messages.db");
+        if let Ok(store) = crate::storage::MessageStore::open(db_path.to_str().unwrap_or_default(), &passphrase)
+            && let Err(e) = store.scrub_device_secrets()
+        {
+            hollow_log!("[HOLLOW-LINK] Could not clear the source device's secrets: {e}");
+        }
+    }
 
     // Log what the imported identity resolves to: the master peer_id MUST match the
     // source device's, and the next launch derives the DB passphrase from this key.
@@ -1703,7 +1715,7 @@ pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), S
 }
 
 /// Open a `.hollow` blob to its snapshot zip without touching the data directory.
-fn decrypt_backup_bytes(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn decrypt_backup_bytes(blob: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
     use aes_gcm::Nonce;
 
@@ -1746,15 +1758,20 @@ fn pending_link_blob_path() -> Result<std::path::PathBuf, String> {
 fn pending_link_code_path() -> Result<std::path::PathBuf, String> {
     Ok(crate::identity::data_dir()?.join("pending_link.code"))
 }
+fn pending_link_device_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::identity::data_dir()?.join("pending_link.device"))
+}
 
-/// (Receiver) Stash an encrypted `.hollow` link blob and the code that decrypts it, to
-/// be imported on the NEXT launch before the node starts, the same window a manual
-/// "Restore from backup" uses. Importing in place was the fragile path.
-pub(crate) fn stash_pending_link(blob: &[u8], code: &str) -> Result<(), String> {
+/// (Receiver) Stash an encrypted `.hollow` link blob, its one-time passphrase and the
+/// device key this install will run as, to be imported on the NEXT launch before the
+/// node starts, the same window a manual "Restore from backup" uses.
+pub(crate) fn stash_pending_link(blob: &[u8], passphrase: &str, device: &[u8]) -> Result<(), String> {
     std::fs::write(pending_link_blob_path()?, blob)
         .map_err(|e| format!("Failed to stash link blob: {e}"))?;
-    std::fs::write(pending_link_code_path()?, code.as_bytes())
-        .map_err(|e| format!("Failed to stash link code: {e}"))?;
+    std::fs::write(pending_link_code_path()?, passphrase.as_bytes())
+        .map_err(|e| format!("Failed to stash link key: {e}"))?;
+    std::fs::write(pending_link_device_path()?, device)
+        .map_err(|e| format!("Failed to stash the new device key: {e}"))?;
     Ok(())
 }
 
@@ -1771,13 +1788,20 @@ pub fn has_pending_link() -> Result<bool, String> {
 pub fn import_pending_link() -> Result<(), String> {
     let blob_path = pending_link_blob_path()?;
     let code_path = pending_link_code_path()?;
+    let device_path = pending_link_device_path()?;
     let blob = std::fs::read(&blob_path)
         .map_err(|e| format!("Failed to read pending link blob: {e}"))?;
-    let code = std::fs::read_to_string(&code_path)
-        .map_err(|e| format!("Failed to read pending link code: {e}"))?;
+    let code = zeroize::Zeroizing::new(
+        std::fs::read_to_string(&code_path).map_err(|e| format!("Failed to read pending link key: {e}"))?,
+    );
+    let device = zeroize::Zeroizing::new(std::fs::read(&device_path).unwrap_or_default());
     // Clean up the stash regardless of outcome (a failed import shouldn't loop).
     let _ = std::fs::remove_file(&blob_path);
     let _ = std::fs::remove_file(&code_path);
+    let _ = std::fs::remove_file(&device_path);
+    // The presenter vouched for exactly this key, so nothing else may run here.
+    crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(&device)
+        .map_err(|_| "The link didn't finish on this device. Link it again.".to_string())?;
 
     // Open the blob BEFORE the identity it replaces is deleted: a snapshot that does
     // not decrypt, or holds no identity, must cost us nothing.
@@ -1794,28 +1818,10 @@ pub fn import_pending_link() -> Result<(), String> {
         if p.exists() { let _ = std::fs::remove_file(&p); }
     }
 
-    let result = import_snapshot_bytes(&zip_bytes);
-
-    // The imported DB contains the SOURCE device's MLS identity, and a linked sibling
-    // MUST NOT reuse it: two devices sharing one MLS signature key cannot both be
-    // group leaves. Wiping it makes the node mint a fresh one and re-join each
-    // server's group as its own leaf. The startup master-key comparison cannot catch
-    // this, because a sibling's master EQUALS the source's.
-    if result.is_ok() {
-        if let Ok(passphrase) = derive_db_key() {
-            let db_path = data_dir.join("messages.db");
-            if let Ok(store) = crate::storage::MessageStore::open(
-                db_path.to_str().unwrap_or_default(), &passphrase,
-            ) {
-                match store.clear_mls_identity() {
-                    Ok(()) => hollow_log!("[HOLLOW-LINK] Cleared inherited MLS identity — fresh one will be minted on start"),
-                    Err(e) => hollow_log!("[HOLLOW-LINK] Failed to clear inherited MLS identity: {e} (startup will still mint if absent)"),
-                }
-            } else {
-                hollow_log!("[HOLLOW-LINK] Could not open imported DB to clear MLS identity (will rely on startup)");
-            }
-        }
-    }
+    let result = import_snapshot_bytes(&zip_bytes).and_then(|()| {
+        std::fs::write(data_dir.join("identity.device"), &device[..])
+            .map_err(|e| format!("Failed to install the new device key: {e}"))
+    });
 
     match &result {
         Ok(()) => hollow_log!("[HOLLOW-LINK] Pending link imported via backup pipeline ({} bytes)", blob.len()),
@@ -1954,5 +1960,113 @@ mod tests {
                 "an ordinary cached blob is still evictable",
             );
         });
+    }
+
+    /// HOL-SEC-076: a backup or link snapshot carries none of this device's Olm or MLS
+    /// identity and no stored phrase, and an import clears an older snapshot's, so
+    /// every restored device mints its own.
+    #[test]
+    fn snapshots_leave_device_secrets_behind_both_ways() {
+        use std::io::{Read, Write};
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let master = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x61; 32]);
+        let key_bytes = master.to_protobuf_encoding().unwrap();
+        std::fs::write(tmp.path().join("identity.key"), &key_bytes).unwrap();
+        let pass = derive_db_key().unwrap();
+        let db = tmp.path().join("messages.db");
+        let open = |path: &std::path::Path| crate::storage::MessageStore::open(path.to_str().unwrap(), &pass).unwrap();
+        crate::storage::MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), &pass).unwrap();
+        {
+            let store = open(&db);
+            store.save_olm_account("{\"account\":1}").unwrap();
+            store.save_olm_session("peer", "{\"session\":1}").unwrap();
+            store.save_mls_identity(b"signer", b"credential", b"storage").unwrap();
+            store.save_setting("recovery_mnemonic", "abandon abandon about").unwrap();
+            store.save_setting("kept", "yes").unwrap();
+            store.wal_checkpoint().unwrap();
+        }
+        let secrets = |path: &std::path::Path| {
+            let store = open(path);
+            let mut left = Vec::new();
+            if store.load_olm_account().unwrap().is_some() {
+                left.push("olm account");
+            }
+            if !store.load_all_olm_sessions().unwrap().is_empty() {
+                left.push("olm sessions");
+            }
+            if store.load_mls_identity().unwrap().is_some() {
+                left.push("mls identity");
+            }
+            if store.load_setting("recovery_mnemonic").unwrap().is_some() {
+                left.push("recovery phrase");
+            }
+            assert_eq!(store.load_setting("kept").unwrap().as_deref(), Some("yes"), "everything else travels");
+            left
+        };
+        let raw_db = std::fs::read(&db).unwrap();
+
+        let zip = build_snapshot_bytes(false, false).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let mut exported = Vec::new();
+        archive.by_name("messages.db").unwrap().read_to_end(&mut exported).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let exported_path = out.path().join("exported.db");
+        std::fs::write(&exported_path, exported).unwrap();
+        assert_eq!(secrets(&exported_path), Vec::<&str>::new(), "the export carries device secrets");
+        assert_eq!(secrets(&db).len(), 4, "the live database keeps its own");
+
+        // An older snapshot, made before exports were scrubbed.
+        let mut old = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut old);
+            let options = zip::write::SimpleFileOptions::default();
+            z.start_file("identity.key", options).unwrap();
+            z.write_all(&key_bytes).unwrap();
+            z.start_file("messages.db", options).unwrap();
+            z.write_all(&raw_db).unwrap();
+            z.finish().unwrap();
+        }
+        import_snapshot_bytes(&old.into_inner()).unwrap();
+        assert_eq!(secrets(&db), Vec::<&str>::new(), "the import keeps the source device's secrets");
+    }
+
+    /// HOL-SEC-002: a link's stash installs the device key the presenter vouched for,
+    /// so the linked device runs as exactly that device, never as a fresh one.
+    #[test]
+    fn a_pending_link_installs_the_device_key_it_was_made_for() {
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let master = NativeKeypair::from_secret_bytes(&[0x62; 32]);
+        std::fs::write(tmp.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+        let pass = derive_db_key().unwrap();
+        let db = tmp.path().join("messages.db");
+        crate::storage::MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), &pass).unwrap();
+        crate::storage::MessageStore::open(db.to_str().unwrap(), &pass).unwrap().save_setting("kept", "yes").unwrap();
+        let key = "ab".repeat(32);
+        let blob = export_backup_bytes(&key, false, false).unwrap();
+
+        // The throwaway identity the link ran on, and the key minted for the link.
+        let throwaway = NativeKeypair::from_secret_bytes(&[0x64; 32]);
+        std::fs::write(tmp.path().join("identity.device"), throwaway.to_protobuf_encoding().unwrap()).unwrap();
+        let linked = NativeKeypair::from_secret_bytes(&[0x63; 32]);
+        stash_pending_link(&blob, &key, &linked.to_protobuf_encoding().unwrap()).unwrap();
+
+        import_pending_link().unwrap();
+        let installed = NativeKeypair::from_protobuf_encoding(&std::fs::read(tmp.path().join("identity.device")).unwrap())
+            .expect("a device key is installed");
+        assert_eq!(installed.peer_id(), linked.peer_id());
+        for stash in ["pending_link.hollow", "pending_link.code", "pending_link.device"] {
+            assert!(!tmp.path().join(stash).exists(), "{stash} outlived the import");
+        }
     }
 }

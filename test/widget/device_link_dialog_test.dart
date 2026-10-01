@@ -42,11 +42,7 @@ class _Link extends DeviceLinkSyncNotifier {
   }
 
   @override
-  Future<void> enterCode(
-    String code, {
-    required bool includeVault,
-    required bool includeFiles,
-  }) async {
+  Future<void> enterCode(String code) async {
     enteredCode = code;
   }
 }
@@ -101,7 +97,7 @@ void main() {
       showDeviceLinkDialog(_host, mode: DeviceLinkMode.showCode);
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Send data'));
+      await tester.tap(find.text('Add device'));
       await tester.pump();
       expect(find.text('Sending your data'), findsOneWidget);
       await tester.pump(const Duration(milliseconds: 20));
@@ -125,10 +121,10 @@ void main() {
 
     await tester.tap(find.text('Decline'));
     await tester.pump();
-    expect(find.text('Send your data?'), findsOneWidget);
+    expect(find.text('Add this device?'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 20));
     await tester.pumpAndSettle();
-    expect(find.text('Send your data?'), findsOneWidget);
+    expect(find.text('Add this device?'), findsOneWidget);
     expect(find.textContaining("can't reach the relay"), findsOneWidget);
   });
 
@@ -140,7 +136,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Decline'));
     await tester.pumpAndSettle();
-    expect(find.text('Send your data?'), findsNothing);
+    expect(find.text('Add this device?'), findsNothing);
   });
 
   testWidgets('a short code says why instead of doing nothing', (tester) async {
@@ -152,15 +148,15 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
     expect(
-      find.text('The code has 6 characters. Check it on your other device.'),
+      find.text('The code has 10 characters. Check it on your other device.'),
       findsOneWidget,
     );
     expect(_Link.enteredCode, isNull);
 
-    await tester.enterText(find.byType(TextField), 'ab3cd4');
+    await tester.enterText(find.byType(TextField), 'ab3cd4efgh');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
-    expect(_Link.enteredCode, 'AB3CD4', reason: 'Enter submits');
+    expect(_Link.enteredCode, 'AB3CD4EFGH', reason: 'Enter submits');
   });
 
   testWidgets('a pasted code keeps only letters and digits', (tester) async {
@@ -168,12 +164,12 @@ void main() {
     showDeviceLinkDialog(_host, mode: DeviceLinkMode.enterCode);
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), ' k7-q2 mx9');
+    await tester.enterText(find.byType(TextField), ' k7q2mx-9ab c');
     await tester.pump();
-    expect(find.text('K7Q2MX'), findsOneWidget);
+    expect(find.text('K7Q2MX9ABC'), findsOneWidget);
     await tester.tap(find.text('Link'));
     await tester.pumpAndSettle();
-    expect(_Link.enteredCode, 'K7Q2MX');
+    expect(_Link.enteredCode, 'K7Q2MX9ABC');
   });
 
   testWidgets('Link pressed before the relay is up goes once it is', (
@@ -189,7 +185,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.textContaining('Connecting to the relay'), findsOneWidget);
 
-    await tester.enterText(find.byType(TextField), 'AB3CD4');
+    await tester.enterText(find.byType(TextField), 'AB3CD4EFGH');
     await tester.pump();
     await tester.tap(find.text('Link'));
     await tester.pump();
@@ -204,7 +200,7 @@ void main() {
     container.read(_connection.notifier).state = OverallConnection.connected;
     await tester.pump();
     await tester.pump();
-    expect(_Link.enteredCode, 'AB3CD4');
+    expect(_Link.enteredCode, 'AB3CD4EFGH');
   });
 
   testWidgets('receiving shows the shared progress bar', (tester) async {

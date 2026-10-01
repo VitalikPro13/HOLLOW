@@ -425,13 +425,16 @@ fn save_duress_settings(scope: &str, notify_friends: bool) {
 }
 
 /// Set (or replace) the duress code. `scope` is `device`, `device_revoke` or
-/// `identity`.
+/// `identity`. The `identity` scope erases every device, which only the recovery
+/// phrase may order (design ID-1): `phrase` signs a permission for this device, kept
+/// in the slot.
 #[frb]
 pub fn set_duress_code(
     password: String,
     duress_code: String,
     scope: String,
     notify_friends: bool,
+    phrase: Option<String>,
 ) -> Result<(), String> {
     if duress_code.trim().is_empty() {
         return Err("Enter a duress code.".into());
@@ -446,7 +449,16 @@ pub fn set_duress_code(
     if duress_code == password || code_is_the_password(&duress_code) {
         return Err("The duress code has to be different from your password.".into());
     }
-    crate::identity::duress::set_code(&duress_code, &scope, notify_friends)?;
+    let permission = match (scope.as_str(), phrase.as_deref()) {
+        (crate::identity::duress::SCOPE_IDENTITY, Some(p)) => Some(super::roster::destroy_permission(p)?),
+        (crate::identity::duress::SCOPE_IDENTITY, None) => {
+            // Only an identity with no recovery key yet can erase everywhere without one.
+            super::roster::destroy_order(None, notify_friends)?;
+            None
+        }
+        _ => None,
+    };
+    crate::identity::duress::set_code(&duress_code, &scope, notify_friends, permission.as_ref())?;
     save_duress_settings(&scope, notify_friends);
     Ok(())
 }
@@ -823,28 +835,45 @@ mod duress_tests {
     /// `HOLLOW_DATA_DIR`, the session key and the derive counter are all
     /// process-global, so these share the crate-wide test lock.
     fn temp_identity() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        temp_identity_of(NativeKeypair::from_secret_bytes(&[0x5a; 32]))
+    }
+
+    fn temp_identity_of(master: NativeKeypair) -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         let g = crate::node::resolver::test_lock();
         let tmp = tempfile::tempdir().expect("tempdir");
         // SAFETY: serialized by the lock above.
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
         encryption::clear_session_key();
 
-        let salt = [0x21u8; 16];
-        let key = encryption::derive_wrapping_key_from_password(PASSWORD, &salt).expect("derive");
         // The master AND the per-device file, both under the same wrapping key: the
         // protection-change flows rewrite the device file too, so a fixture without
         // one exercises a different failure.
-        for (name, seed) in [("identity.key", 0x5au8), ("identity.device", 0x5bu8)] {
-            let plaintext = NativeKeypair::from_secret_bytes(&[seed; 32])
-                .to_protobuf_encoding()
-                .expect("encode");
-            let blob = encryption::encrypt_identity(&plaintext, &key, &salt, true, false)
+        for (name, kp) in [("identity.key", master), ("identity.device", device())] {
+            let plaintext = kp.to_protobuf_encoding().expect("encode");
+            let blob = encryption::encrypt_identity(&plaintext, &wrapping_key(), &SALT, true, false)
                 .expect("encrypt");
             std::fs::write(tmp.path().join(name), blob).expect("write key file");
         }
         duress::set_dummy().expect("dummy slot");
         (g, tmp)
     }
+
+    const SALT: [u8; 16] = [0x21; 16];
+
+    fn wrapping_key() -> [u8; 32] {
+        encryption::derive_wrapping_key_from_password(PASSWORD, &SALT).expect("derive")
+    }
+
+    fn device() -> NativeKeypair {
+        NativeKeypair::from_secret_bytes(&[0x5b; 32])
+    }
+
+    /// Settings only runs on an unlocked identity.
+    fn unlock() {
+        encryption::set_session_key(wrapping_key());
+    }
+
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     /// The whole design stands on this: a wrong password and a duress code must
     /// cost the same, so the work is a CONSTANT two derivations whatever happens.
@@ -861,7 +890,7 @@ mod duress_tests {
             );
         }
 
-        duress::set_code(CODE, duress::SCOPE_DEVICE, false).expect("set code");
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set code");
         for (label, secret) in [("right", PASSWORD), ("wrong", "not the password")] {
             let _ = encryption::take_derive_count();
             let _ = unlock_identity(Some(secret.to_string()));
@@ -910,7 +939,7 @@ mod duress_tests {
     #[test]
     fn change_password_refuses_the_duress_code() {
         let (_g, _tmp) = temp_identity();
-        duress::set_code(CODE, duress::SCOPE_DEVICE, false).expect("set code");
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set code");
 
         let err = change_password(PASSWORD.into(), CODE.into())
             .expect_err("the duress code must not become the password");
@@ -929,14 +958,15 @@ mod duress_tests {
     #[test]
     fn duress_code_must_differ_from_password() {
         let (_g, _tmp) = temp_identity();
+        unlock();
 
         let err = set_duress_code(
-            PASSWORD.into(), PASSWORD.into(), duress::SCOPE_DEVICE.into(), false,
+            PASSWORD.into(), PASSWORD.into(), duress::SCOPE_DEVICE.into(), false, None,
         )
         .expect_err("the password itself must be refused as a duress code");
         assert!(err.contains("different"), "unexpected message: {err}");
 
-        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), true)
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), true, None)
             .expect("a distinct code is accepted");
         let cfg = duress::probe(CODE).expect("the code opens its slot");
         assert_eq!(cfg.scope, duress::SCOPE_IDENTITY);
@@ -944,9 +974,61 @@ mod duress_tests {
 
         // The wrong owner password is a gate failure, not a silent no-op.
         assert!(set_duress_code(
-            "wrong".into(), "another code".into(), duress::SCOPE_DEVICE.into(), false,
+            "wrong".into(), "another code".into(), duress::SCOPE_DEVICE.into(), false, None,
         ).is_err());
         assert_eq!(duress::probe(CODE).map(|c| c.scope), Some(duress::SCOPE_IDENTITY.into()));
+        encryption::clear_session_key();
+    }
+
+    /// The "everywhere" scope keeps the phrase's permission for this device in the
+    /// slot; a phrase of another identity signs nothing.
+    #[test]
+    fn duress_everywhere_keeps_the_phrase_permission() {
+        let master = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase").0;
+        let (_g, _tmp) = temp_identity_of(master);
+        unlock();
+
+        let other = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        assert!(set_duress_code(
+            PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), false, Some(other.into()),
+        ).is_err(), "another identity's phrase must be refused");
+
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), false, Some(PHRASE.into()))
+            .expect("the identity's own phrase is accepted");
+        let cfg = duress::probe(CODE).expect("the code opens its slot");
+        let perm = cfg.permission.expect("the slot holds the permission");
+        let recovery = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase").1;
+        assert_eq!(perm.r_pub, recovery.public_key_bytes(), "signed by this identity's recovery key");
+        encryption::clear_session_key();
+    }
+
+    /// Once the phrase is the root, only the phrase orders every device erased: a
+    /// duress code set without it would carry an order nobody accepts.
+    #[test]
+    fn duress_everywhere_on_a_protected_identity_needs_the_phrase() {
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).expect("phrase");
+        let (_g, tmp) = temp_identity_of(
+            NativeKeypair::from_protobuf_encoding(&master.to_protobuf_encoding().expect("encode")).expect("decode"),
+        );
+        unlock();
+        let db = tmp.path().join("messages.db").to_str().expect("utf-8").to_string();
+        let pass = crate::api::storage::derive_db_key_public().expect("db key");
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).expect("migrate");
+        let store = crate::storage::MessageStore::open(&db, &pass).expect("open");
+        let genesis = crate::identity::roster::Roster::genesis(&master, &recovery, &device(), 1_000);
+        crate::node::roster_book::merge_for_test(&store, &genesis, &master.peer_id(), &device().peer_id());
+        drop(store);
+
+        let err = set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), false, None)
+            .expect_err("a protected identity refuses the scope without the phrase");
+        assert!(err.contains("recovery phrase"), "unexpected message: {err}");
+        assert!(duress::probe(CODE).is_none(), "refused means no code was stored");
+
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_DEVICE.into(), false, None)
+            .expect("the device scope needs no phrase");
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), false, Some(PHRASE.into()))
+            .expect("with the phrase it is accepted");
+        assert!(duress::probe(CODE).and_then(|c| c.permission).is_some());
         encryption::clear_session_key();
     }
 }

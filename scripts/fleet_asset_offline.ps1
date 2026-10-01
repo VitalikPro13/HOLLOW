@@ -226,7 +226,7 @@ try {
     Step a @{ op = 'wait_for'; gone = 'type:HollowDialog'; timeout_ms = 15000 }
 
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step b @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+    Step b @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
     Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
     Step b @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step b @{ op = 'key'; value = 'escape' }

@@ -10,6 +10,8 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/mention_preview_provider.dart';
@@ -22,7 +24,7 @@ import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
-import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -274,6 +276,22 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
   /// finished, the reminder has to live here or it vanishes unanswered.
   List<_AttentionItem> _phraseItems() {
     final setup = ref.watch(homeSetupProvider);
+    // An identity from before 0.12 still holds the phrase it stored; it stays
+    // here until the person confirms it, whatever the checklist says.
+    if (ref.watch(phraseUpgradePendingProvider).valueOrNull ?? false) {
+      return [
+        _AttentionItem(
+          id: 'phrase-upgrade',
+          leading: _GlyphTile(LucideIcons.keyRound, size: _leadingSize),
+          title: 'Confirm your recovery phrase',
+          body: 'It now decides which devices are yours, so Hollow stops '
+              'keeping a copy once you confirm it.',
+          primaryLabel: 'Confirm now',
+          onPrimary: () async => showRecoveryPhrase(context, ref),
+          failure: "Couldn't read your recovery phrase",
+        ),
+      ];
+    }
     if (!setup.loaded || setup.phraseSaved || homeShowsSetup(ref)) {
       return const [];
     }
@@ -594,24 +612,23 @@ class _HomeSetupChecklistState extends ConsumerState<HomeSetupChecklist> {
 
 }
 
-/// Opens the recovery phrase, read from storage when this session has not
-/// held it in memory.
+/// The recovery phrase step: shown once while a new identity still holds it in
+/// memory, confirmed once on an identity from before 0.12 that stored it, and
+/// otherwise checked against the copy kept (Hollow stores none, design ID-1).
 Future<void> showRecoveryPhrase(BuildContext context, WidgetRef ref) async {
-  var phrase = ref.read(identityProvider).mnemonic;
-  if (phrase == null) {
-    try {
-      phrase = await storage_api.getMnemonic();
-    } catch (_) {
-      phrase = null;
-    }
-  }
-  if (!context.mounted) return;
-  if (phrase == null || phrase.isEmpty) {
-    HollowToast.show(context, "Couldn't read your recovery phrase",
-        type: HollowToastType.error);
+  final phrase = ref.read(identityProvider).mnemonic;
+  if (phrase != null && phrase.isNotEmpty) {
+    showMnemonicDialog(context, phrase);
     return;
   }
-  showMnemonicDialog(context, phrase);
+  final stored = await roster_api.storedPhraseForUpgrade();
+  if (!context.mounted) return;
+  if (stored != null) {
+    await showPhraseUpgradeDialog(context, stored);
+    return;
+  }
+  if (!await showCheckPhraseDialog(context)) return;
+  await ref.read(homeSetupProvider.notifier).markPhraseSaved();
 }
 
 class _SetupRow extends StatelessWidget {

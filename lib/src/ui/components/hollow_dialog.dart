@@ -629,8 +629,9 @@ class HollowDialog extends StatelessWidget {
         ],
       ),
     );
-    if (busy) dialog = PopScope(canPop: false, child: dialog);
-    return dialog;
+    // Always wrapped: a wrapper that comes and goes with [busy] remounts the body,
+    // which loses its scroll and refocuses the autofocus field after every action.
+    return PopScope(canPop: !busy, child: dialog);
   }
 }
 

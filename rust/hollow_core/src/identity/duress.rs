@@ -2,7 +2,9 @@
 //! and always destroys. `identity.duress` shares `identity.key`'s HKEYV1 layout with
 //! its OWN salt and EXISTS whenever password protection does (random bytes under a
 //! random key when unset), so disk and timing look identical either way. The scope
-//! rides the slot because `unlock_identity` runs BEFORE the database opens.
+//! rides the slot because `unlock_identity` runs BEFORE the database opens, and so
+//! does the recovery phrase's permission for this device to destroy the identity
+//! everywhere (design ID-1), which only the phrase can sign.
 
 use std::path::PathBuf;
 
@@ -11,8 +13,10 @@ use super::encryption;
 /// Tells a real duress code from a lucky decrypt of random bytes.
 const TAG: &[u8; 8] = b"HDURESS1";
 const MARKER_LEN: usize = 32;
+/// The permission: a presence byte, `at_ms`, the recovery public key, its signature.
+const PERMISSION_LEN: usize = 1 + 8 + 32 + 64;
 /// FIXED, so the dummy slot and a configured one are the same size.
-const PLAINTEXT_LEN: usize = 8 + MARKER_LEN + 2;
+const PLAINTEXT_LEN: usize = 8 + MARKER_LEN + 2 + PERMISSION_LEN;
 
 pub(crate) const SCOPE_DEVICE: &str = "device";
 pub(crate) const SCOPE_DEVICE_REVOKE: &str = "device_revoke";
@@ -22,6 +26,15 @@ pub(crate) const SCOPE_IDENTITY: &str = "identity";
 pub(crate) struct DuressConfig {
     pub scope: String,
     pub notify_friends: bool,
+    pub permission: Option<DestroyPermission>,
+}
+
+/// The recovery phrase's signature letting THIS device order the identity destroyed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DestroyPermission {
+    pub at_ms: i64,
+    pub r_pub: [u8; 32],
+    pub sig_r: [u8; 64],
 }
 
 pub(crate) fn slot_path() -> Result<PathBuf, String> {
@@ -56,13 +69,28 @@ fn write_slot(plaintext: &[u8], key: &[u8; 32], salt: &[u8; 16]) -> Result<(), S
         .map_err(|e| format!("Failed to write the duress slot: {e}"))
 }
 
-pub(crate) fn set_code(code: &str, scope: &str, notify_friends: bool) -> Result<(), String> {
+pub(crate) fn set_code(
+    code: &str,
+    scope: &str,
+    notify_friends: bool,
+    permission: Option<&DestroyPermission>,
+) -> Result<(), String> {
     let scope = scope_byte(scope)?;
     let mut plaintext = [0u8; PLAINTEXT_LEN];
     plaintext[..8].copy_from_slice(TAG);
     random(&mut plaintext[8..8 + MARKER_LEN])?;
     plaintext[8 + MARKER_LEN] = scope;
     plaintext[9 + MARKER_LEN] = u8::from(notify_friends);
+    let p = 10 + MARKER_LEN;
+    match permission {
+        Some(perm) => {
+            plaintext[p] = 1;
+            plaintext[p + 1..p + 9].copy_from_slice(&perm.at_ms.to_be_bytes());
+            plaintext[p + 9..p + 41].copy_from_slice(&perm.r_pub);
+            plaintext[p + 41..p + 105].copy_from_slice(&perm.sig_r);
+        }
+        None => random(&mut plaintext[p + 1..])?,
+    }
 
     let mut salt = [0u8; 16];
     random(&mut salt)?;
@@ -106,9 +134,20 @@ pub(crate) fn probe(code: &str) -> Option<DuressConfig> {
     if plaintext.len() != PLAINTEXT_LEN || plaintext[..8] != *TAG {
         return None;
     }
+    let p = 10 + MARKER_LEN;
+    let permission = (plaintext[p] == 1).then(|| {
+        let mut at = [0u8; 8];
+        at.copy_from_slice(&plaintext[p + 1..p + 9]);
+        let mut r_pub = [0u8; 32];
+        r_pub.copy_from_slice(&plaintext[p + 9..p + 41]);
+        let mut sig_r = [0u8; 64];
+        sig_r.copy_from_slice(&plaintext[p + 41..p + 105]);
+        DestroyPermission { at_ms: i64::from_be_bytes(at), r_pub, sig_r }
+    });
     Some(DuressConfig {
         scope: scope_name(plaintext[8 + MARKER_LEN]).to_string(),
         notify_friends: plaintext[9 + MARKER_LEN] == 1,
+        permission,
     })
 }
 
@@ -132,10 +171,12 @@ mod tests {
     fn duress_slot_opens_only_for_its_code_and_carries_the_scope() {
         let _g = guard();
         let _tmp = temp_root();
-        set_code("burn it", SCOPE_IDENTITY, true).unwrap();
+        let perm = DestroyPermission { at_ms: 1_234, r_pub: [7u8; 32], sig_r: [9u8; 64] };
+        set_code("burn it", SCOPE_IDENTITY, true, Some(&perm)).unwrap();
         let cfg = probe("burn it").expect("the duress code must open its own slot");
         assert_eq!(cfg.scope, SCOPE_IDENTITY);
         assert!(cfg.notify_friends);
+        assert_eq!(cfg.permission, Some(perm));
         assert!(probe("something else").is_none());
     }
 
@@ -147,9 +188,15 @@ mod tests {
         let dummy_len = std::fs::metadata(slot_path().unwrap()).unwrap().len();
         assert!(probe("anything").is_none());
 
-        set_code("burn it", SCOPE_DEVICE, false).unwrap();
+        set_code("burn it", SCOPE_DEVICE, false, None).unwrap();
         let real_len = std::fs::metadata(slot_path().unwrap()).unwrap().len();
         assert_eq!(dummy_len, real_len, "the two slots must be byte-identical in size");
+        assert_eq!(probe("burn it").unwrap().permission, None);
+
+        let perm = DestroyPermission { at_ms: 1, r_pub: [1u8; 32], sig_r: [2u8; 64] };
+        set_code("burn it", SCOPE_IDENTITY, false, Some(&perm)).unwrap();
+        let with_permission = std::fs::metadata(slot_path().unwrap()).unwrap().len();
+        assert_eq!(dummy_len, with_permission, "a permission must not change the size either");
     }
 
     #[test]

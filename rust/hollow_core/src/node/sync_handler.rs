@@ -1450,9 +1450,7 @@ pub(crate) async fn handle_join_server(
     // Our own signed device list, built ONCE and cached for the re-sends. A member
     // serving this from the ring has never been online with us, so it is the only
     // thing that attributes the request to our MASTER rather than to this device.
-    let device_list = super::crypto_handler::build_local_device_list(
-        master_keypair, device_peer_id, db_path, db_passphrase,
-    );
+    let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
     // The KeyPackage this join will be added with. Minted ONCE per row: a re-ask
     // refreshes the nonce and keeps the package, because the ring may already hold
     // a copy naming it. `mint_key_package` persists the private half immediately,
@@ -1984,6 +1982,46 @@ pub(crate) async fn handle_kick_member(
 /// device list with the target tombstoned, re-broadcasts it so friends stop
 /// encrypting to the revoked device, and returns the revoked device id so the
 /// caller drops the Olm session and removes the MLS leaf. `None` when rejected.
+/// Our roster changed: hand it first to each device in `first` on the relay lane (a
+/// removed device has no session left, and an approved one may have none yet), then
+/// announce it to every peer we share a room with.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn announce_roster_change(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    is_invisible: bool,
+    first: &[String],
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if let Some(roster) = super::roster_book::own_roster(local_peer_str, db_path, db_passphrase) {
+        for target in first {
+            super::crypto_handler::send_message_to_peer(
+                ws_cmd_tx, ws_room_peers, target,
+                HavenMessage::RosterNotice { roster: roster.clone() },
+            );
+        }
+    }
+    let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
+    let mut told: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pid in peers {
+        if pid == local_peer_str || pid == device_peer_id || first.contains(&pid) || !told.insert(pid.clone()) {
+            continue;
+        }
+        super::social::send_own_profile_to_peer(
+            ws_cmd_tx, ws_room_peers, server_states,
+            local_peer_str, master_keypair, &pid,
+            is_invisible, db_path, db_passphrase,
+        );
+    }
+}
+
+/// This device removes `target_device` from our roster, or refuses its pending join.
+/// The removed device learns it first, while the relay still routes to it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_revoke_device(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1991,6 +2029,7 @@ pub(crate) async fn handle_revoke_device(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server_states: &HashMap<String, ServerState>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     master_peer_str: &str,
     local_peer_str: &str,
     device_peer_id: &str,
@@ -1999,42 +2038,16 @@ pub(crate) async fn handle_revoke_device(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<String> {
-    let signed = super::crypto_handler::revoke_own_device(
-        master_keypair, device_peer_id, &target_device, db_path, db_passphrase,
-    );
-    if signed.is_none() {
-        let _ = event_tx.send(NetworkEvent::Error {
-            message: "Cannot remove that device".to_string(),
-        }).await;
+    if let Err(e) = super::roster_book::remove(
+        master_keypair, device_keypair, &target_device, db_path, db_passphrase,
+    ) {
+        let _ = event_tx.send(NetworkEvent::Error { message: e }).await;
         return None;
     }
-
-    // CRITICAL: send the tombstone TO THE REVOKED DEVICE FIRST. It is the one peer
-    // that most needs the v+1 list naming itself revoked, because its ingest fires
-    // `SelfRevoked` and it wipes itself. Sent before the relay drops it from our
-    // shared rooms as a side effect of the MLS leaf removal, so the message still
-    // routes; skipping it left a revoked device running as the master forever.
-    super::social::send_own_profile_to_peer(
-        ws_cmd_tx, ws_room_peers, server_states,
-        local_peer_str, master_keypair, device_peer_id, &target_device,
-        is_invisible, db_path, db_passphrase,
+    announce_roster_change(
+        ws_cmd_tx, ws_room_peers, server_states, master_keypair, local_peer_str,
+        device_peer_id, is_invisible, std::slice::from_ref(&target_device), db_path, db_passphrase,
     );
-
-    // Then re-announce to every other peer we share a room with — friends converge
-    // immediately and drop the revoked device. Skip ourselves and the target (just
-    // sent above); siblings get it via their own ingest.
-    let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
-    for pid in peers {
-        if pid == local_peer_str || pid == device_peer_id || pid == target_device {
-            continue;
-        }
-        super::social::send_own_profile_to_peer(
-            ws_cmd_tx, ws_room_peers, server_states,
-            local_peer_str, master_keypair, device_peer_id, &pid,
-            is_invisible, db_path, db_passphrase,
-        );
-    }
-
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
         master_peer_id: master_peer_str.to_string(),
     }).await;
@@ -2043,9 +2056,8 @@ pub(crate) async fn handle_revoke_device(
 
 // ── 10a2. ResetDeviceLists (full sibling teardown) ───────────────────
 
-/// Tombstone EVERY sibling device in one version bump and propagate it: friends
-/// converge and drop them, and each revoked sibling self-nukes on ingest. Returns
-/// the revoked device ids, or `None` when we were already the sole device.
+/// This device removes every other device and pending join, and each learns it
+/// first. Returns the removed ids, or `None` when we were already the only one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_reset_device_lists(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2053,6 +2065,7 @@ pub(crate) async fn handle_reset_device_lists(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server_states: &HashMap<String, ServerState>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     master_peer_str: &str,
     local_peer_str: &str,
     device_peer_id: &str,
@@ -2060,47 +2073,58 @@ pub(crate) async fn handle_reset_device_lists(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<Vec<String>> {
-    let (_signed, revoked) = match super::crypto_handler::revoke_all_other_devices(
-        master_keypair, device_peer_id, db_path, db_passphrase,
+    let removed = match super::roster_book::remove_all_others(
+        master_keypair, device_keypair, db_path, db_passphrase,
     ) {
-        Some(r) => r,
-        None => {
-            // Nothing to revoke — still refresh the UI so it reflects the clean state.
+        Ok((_, _, removed)) => removed,
+        Err(_) => {
+            // Nothing to remove: still refresh the UI so it reflects the clean state.
             let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
                 master_peer_id: master_peer_str.to_string(),
             }).await;
             return None;
         }
     };
-
-    // Push the v+1 tombstoned list to EACH revoked sibling FIRST (same ordering as
-    // single revoke) so its ingest fires SelfRevoked → wipe + relaunch, before the
-    // MLS-leaf removal drops it from our shared rooms.
-    for target in &revoked {
-        super::social::send_own_profile_to_peer(
-            ws_cmd_tx, ws_room_peers, server_states,
-            local_peer_str, master_keypair, device_peer_id, target,
-            is_invisible, db_path, db_passphrase,
-        );
-    }
-    // Then re-announce to every other peer we share a room with so friends converge
-    // and drop the revoked devices. Skip ourselves and the revoked targets.
-    let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
-    for pid in peers {
-        if pid == local_peer_str || pid == device_peer_id || revoked.contains(&pid) {
-            continue;
-        }
-        super::social::send_own_profile_to_peer(
-            ws_cmd_tx, ws_room_peers, server_states,
-            local_peer_str, master_keypair, device_peer_id, &pid,
-            is_invisible, db_path, db_passphrase,
-        );
-    }
-
+    announce_roster_change(
+        ws_cmd_tx, ws_room_peers, server_states, master_keypair, local_peer_str,
+        device_peer_id, is_invisible, &removed, db_path, db_passphrase,
+    );
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
         master_peer_id: master_peer_str.to_string(),
     }).await;
-    Some(revoked)
+    Some(removed)
+}
+
+/// This device vouches for a device asking to join (a restored backup), which learns
+/// it first.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_approve_device(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    is_invisible: bool,
+    target_device: String,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if let Err(e) = super::roster_book::vouch(
+        master_keypair, device_keypair, &target_device, db_path, db_passphrase,
+    ) {
+        let _ = event_tx.send(NetworkEvent::Error { message: e }).await;
+        return;
+    }
+    announce_roster_change(
+        ws_cmd_tx, ws_room_peers, server_states, master_keypair, local_peer_str,
+        device_peer_id, is_invisible, std::slice::from_ref(&target_device), db_path, db_passphrase,
+    );
+    let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+        master_peer_id: local_peer_str.to_string(),
+    }).await;
 }
 
 // ── 10b. LeaveServer ─────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 # HOL-SEC-002: A relay operator can decrypt every device-link snapshot, master key included
 
 ```
-ID:          HOL-SEC-002                 Status: Open (confirmed by code reading, exploit not yet reproduced)
+ID:          HOL-SEC-002                 Status: Fixed on local main (2026-10-01), retest at release
 Severity:    High, possibly Critical      (Impact H: total identity compromise; Exploitability M: needs the relay position, then passive)
 Category:    Cryptography / Authentication
 Component:   rust/hollow_core/src/node/link_handler.rs (handle_claim_link_code, handle_resolve_link_code,
@@ -35,30 +35,42 @@ relay does carry ciphertext, but it holds the key to it.
 
 ## Reproduction
 
-Not yet written (see Test). The relay needs nothing beyond what it already
-records: the link code or the public master id opens the snapshot, and nothing
-on the user's side shows it happened.
+`link_the_relay_cannot_open_the_snapshot` records every frame and command the mock
+relay sees during a real link and tries to open the snapshot with each value it saw.
+On the old code the link code itself was the passphrase, so the first try opened it.
+Candidate I8 (two relay oracles that let a link code be guessed past the throttle) is
+folded in here: a guessed rendezvous part opens nothing, and the secret part can only
+be tried online, once per code.
 
-## Fix
+## Fix (design ID-1, section 6)
 
-- **Short term:** the rendezvous value sent to the relay must not be the
-  passphrase, and the passphrase must not be derivable from anything the
-  relay sees. A hash of the code as the room id is NOT enough: the code space
-  is about 30 bits, so the relay brute-forces it offline.
-- **Long term (class kill):** a PAKE (CPace or SPAKE2) keyed by the code, so
-  the relay can at best make one online guess per attempt, or an ephemeral
-  X25519 exchange between the two devices confirmed by a short
-  authentication string compared on both screens. The mnemonic path should
-  derive its key from the mnemonic secret, never from a public id.
-
-## Variants to search
-
-Every place a secret is derived from a value that crosses the relay in
-plaintext: room names, relay JSON commands, `ws_room_for_peer` rooms, backup
-and share passphrases, invite fragments, `.hollow` exports, vault shards.
+The code has two parts: six rendezvous characters the relay sees (claim, resolve, the
+`link:{rv}` room) and four secret characters it never sees. The two devices run SPAKE2
+(RustCrypto `spake2`, Ed25519 group) keyed by the secret and bound to the rendezvous;
+the presenter proves the key with an HMAC confirm before the joiner seals anything.
+HKDF-SHA256 (salt = the rendezvous) gives one AES-256-GCM key per direction; the AAD
+names the rendezvous and the direction. The joiner's hello and the presenter's offer
+ride that channel; the snapshot travels under a fresh random 32-byte key carried in
+the offer, never under anything the relay holds. The code answers ONE handshake: a
+second device in the room is ignored and a hello that does not open burns it. The
+mnemonic path (the public master id as the passphrase) is deleted; nothing reached it.
+Code: `node/link_pake.rs` (new), `node/link_handler.rs` (rewritten),
+`api/network.rs` `claim_link_code(rendezvous, secret)` / `resolve_link_code`.
 
 ## Test
 
-To write: a harness test where the relay double records every frame and
-every JSON command, then attempts to decrypt the `LinkSnapshot` stream using
-only what it recorded. Must succeed before the fix and fail after.
+`link_the_relay_cannot_open_the_snapshot` (no relay-visible candidate, nor the whole
+code, opens the blob; the label is unreadable; the stash holds the presenter's vouch
+for the device the joiner minted), `authz_a_relay_that_answers_the_code_gets_one_guess`
+(relay as presenter: a wrong confirm and the joiner seals nothing; relay as joiner:
+outside the room ignored, a second handshake ignored, a bad hello burns the code and
+the real joiner gets `not_found`), `authz_link_frames_from_a_stranger_are_refused`,
+`every_layer_binds_on_its_own` (link_pake: identities, salt, AAD and direction each
+bind alone), `a_pending_link_installs_the_device_key_it_was_made_for`. Mutation pass:
+9/9 link rules killed.
+
+## Residual
+
+A relay that plays one side gets one online guess at 20 bits per link attempt, and each
+guess costs the person a new code. The rendezvous part tells the relay that a link is
+happening and between which two connections.

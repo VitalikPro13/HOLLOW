@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -30,6 +31,8 @@ import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/file_attachment_widget.dart'
     show FileAttachmentWidget;
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart' show RecoveryPhraseGrid;
 import 'package:hollow/src/ui/chat/video_message_bubble.dart'
     show InlineVideoPlayer, VideoMessageBubble;
 import 'package:video_player/video_player.dart' show VideoPlayer;
@@ -554,6 +557,9 @@ class ProbeRunner {
       case 'capture':
         return _capture(step, extra);
 
+      case 'answer_phrase':
+        return _answerPhrase(step);
+
       case 'import_pack':
         return _importPack(step);
 
@@ -562,6 +568,9 @@ class ProbeRunner {
 
       case 'arm_image_pick':
         return _armImagePick(step);
+
+      case 'arm_file_pick':
+        return _armFilePick(step);
 
       case 'channel_rows':
         return _channelRows(step);
@@ -669,6 +678,16 @@ class ProbeRunner {
     debugArmedImagePick = () async => bytes;
     final name = path.split(RegExp(r'[\\/]')).last;
     return 'armed $name (${bytes.length} bytes)';
+  }
+
+  /// Answers the NEXT file pick or save with `path`: Welcome's backup restore
+  /// and Settings' backup export. The native picker is a modal owned by the OS,
+  /// which a widget test can neither open nor answer.
+  Future<String> _armFilePick(Map<String, dynamic> step) async {
+    final path = '${step['path'] ?? ''}';
+    if (path.isEmpty) throw _ProbeFailure('arm_file_pick needs a "path"');
+    FilePicker.platform = _ProbeFilePicker(path, FilePicker.platform);
+    return 'armed a file pick at $path';
   }
 
   /// Reads the channel's rows straight out of the local database, so a
@@ -1402,6 +1421,14 @@ class ProbeRunner {
       // be tapped, so the index a step needs is not knowable when it is
       // written.
       value = '${ProbeTargets.resolve('${step['target']}').evaluate().length}';
+    } else if (from == 'phrase') {
+      // The words the recovery phrase dialog is showing: Hollow keeps no copy
+      // once it is confirmed, so this is the only moment a run can learn it.
+      final grid = find.byType(RecoveryPhraseGrid);
+      if (grid.evaluate().isEmpty) {
+        throw _ProbeFailure('no recovery phrase is on screen');
+      }
+      value = tester.widget<RecoveryPhraseGrid>(grid.first).mnemonic;
     } else if (from == 'clipboard') {
       final data = await tester.runAsync(
           () => Clipboard.getData(Clipboard.kTextPlain));
@@ -1433,6 +1460,33 @@ class ProbeRunner {
     extra['captured'] = {name: value};
     extra['value'] = value;
     return 'captured $name = "$value"';
+  }
+
+  /// Types back the words "Check your copy" asks for, taking them from the
+  /// phrase in `value`: `{"op":"answer_phrase","value":"${PHRASE}"}`.
+  Future<String> _answerPhrase(Map<String, dynamic> step) async {
+    final words = '${step['value'] ?? ''}'.trim().split(RegExp(r'\s+'));
+    final dialog = find.byType(HollowDialog).last;
+    final asked = <int>[];
+    for (final e in find
+        .descendant(of: dialog, matching: find.byType(Text))
+        .evaluate()) {
+      final m = RegExp(r'^Word (\d+)$').firstMatch((e.widget as Text).data ?? '');
+      if (m != null) asked.add(int.parse(m.group(1)!));
+    }
+    final fields = find.descendant(of: dialog, matching: find.byType(EditableText));
+    if (asked.isEmpty || fields.evaluate().length != asked.length) {
+      throw _ProbeFailure('the phrase check is not on screen '
+          '(${asked.length} words asked, ${fields.evaluate().length} fields)');
+    }
+    for (var i = 0; i < asked.length; i++) {
+      if (asked[i] > words.length) {
+        throw _ProbeFailure('word ${asked[i]} asked, the phrase has ${words.length}');
+      }
+      await tester.enterText(fields.at(i), words[asked[i] - 1]);
+      await settle(frames: 5);
+    }
+    return 'answered words ${asked.join(', ')}';
   }
 
   /// All the text a widget carries, itself or anywhere below it.
@@ -1806,4 +1860,47 @@ class _ProbeFailure implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+/// Answers one pick or save with a fixed path, then puts the real picker back.
+class _ProbeFilePicker extends FilePicker {
+  _ProbeFilePicker(this.path, this.real);
+  final String path;
+  final FilePicker real;
+
+  @override
+  Future<FilePickerResult?> pickFiles({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    bool allowCompression = false,
+    int compressionQuality = 0,
+    bool allowMultiple = false,
+    bool withData = false,
+    bool withReadStream = false,
+    bool lockParentWindow = false,
+    bool readSequential = false,
+  }) async {
+    FilePicker.platform = real;
+    final name = path.split(RegExp(r'[\\/]')).last;
+    return FilePickerResult(
+        [PlatformFile(path: path, name: name, size: File(path).lengthSync())]);
+  }
+
+  @override
+  Future<String?> saveFile({
+    String? dialogTitle,
+    String? fileName,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Uint8List? bytes,
+    bool lockParentWindow = false,
+  }) async {
+    FilePicker.platform = real;
+    if (bytes != null) File(path).writeAsBytesSync(bytes);
+    return path;
+  }
 }

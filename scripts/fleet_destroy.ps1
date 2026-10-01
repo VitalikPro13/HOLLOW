@@ -515,7 +515,7 @@ function Close-Friends($peer) {
 }
 
 function Show-FriendsTab($peer, $tab) {
-    Step $peer @{ op = 'tap'; target = "type:HollowChip>text:$tab"; index = 0 }
+    Step $peer @{ op = 'tap'; target = "type:_FriendsManager > semantics:$tab"; index = 0 }
 }
 
 function Open-Dm($peer, $friendName) {

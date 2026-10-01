@@ -458,6 +458,39 @@ Two peers, fresh identities, both ONLINE throughout, six gates, about 3 min per 
   Windows only; ship uncommitted files to the mini with `tar` over ssh, and never reset its tree
   afterwards (Vitalik just `git pull`s there).
 
+## Design ID-1 and the selector drift (2026-10-01)
+
+**Onboarding answers the phrase check.** A new identity shows its phrase once and asks for
+three words back. `capture from:"phrase"` reads the words off `RecoveryPhraseGrid` (never
+the clipboard, never the deduped text of the grid), `answer_phrase value:"${PHRASE}"` fills
+the "Check your copy" fields, then `tap dialog > text:Check`. `fleet.ps1 -Onboard` keeps the
+throwaway phrase beside the fixture as `fixtures\<peer>.phrase`; read it with
+`Get-FixturePhrase` (fleet_lib) for any journey that recovers or joins with the phrase.
+
+**`arm_file_pick path`** answers the NEXT file picker pick or save with that path (the
+plugin's platform is swapped for one call): Welcome's "Restore from a backup" and Settings'
+backup export. A restored backup on a fresh peer is how a waiting (pending) device is made.
+
+**The link code** renders as `A B C D E F - G H J K`; the field takes it with or without
+the dash, in any case. The presenter's prompt is "Add this device?" naming the joiner's
+host name and platform; its button is "Add device".
+
+**More peers than the scripts stage.** Robocopy `build\fleet\a` to `build\fleet\d` and
+launch it with its own `HOLLOW_DATA_DIR`, `UI_PROBE_OUT` and `UI_PROBE_PEER` (the same
+env `Start-PeerProcess` sets); `fleet_send` then drives it like any peer. A relaunch the app
+does itself (link import, Erase now) replays the inbox from line 0: truncate `inbox.jsonl`
+and delete `live-ready` before the new process starts.
+
+**Selectors that drifted with the 09-26 design pass.** The Friends manager's tabs are a
+`HollowTabBar`: `type:_FriendsManager > semantics:<tab>` (fixed in every script). Settings is
+the `SettingsPlace` place, closed by `semantics:Close settings` (fixed in
+`fleet_device_link.ps1`). The join field's hint is `Invite link`; a DM composer's hint is
+`Message <name>` (both fixed in `fleet_device_link.ps1` only). STILL STALE on `hint:Type a
+message...`: `fleet_asset_offline`, `fleet_at_rest`, `fleet_destroy`, `fleet_file_card_states`,
+`fleet_multidevice_dm_gap`, `fleet_relay_switch` and the `home_mobile_before` and
+`mobile_friend_dm` scenarios. `fleet_device_link.ps1`'s G7 to G9 were not rerun after the
+fixes; session 22 drove the link itself by hand.
+
 ## Honest scope
 
 The fleet proves the app DOES the thing. It does not prove the thing FEELS right, and it does not

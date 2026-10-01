@@ -220,73 +220,34 @@ fn send_personal_emotes_to_sibling(
     count
 }
 
-/// Run the full sibling-convergence machinery for a peer we have
-/// CRYPTOGRAPHICALLY PROVEN is our own other device (it already resolves to us,
-/// or it answered a [`HavenMessage::SiblingProveRequest`] with a valid
-/// master-signed proof). Bare `inbox:{our_master}` membership is NOT enough: a
-/// friend-request sender satisfies that, and taking it mis-merges a stranger.
+/// Run the sibling convergence for `peer_id`, one of our own devices: our roster names
+/// it a member (design ID-1). Holding the master key is not enough, and neither is
+/// bare `inbox:{our_master}` membership: a friend-request sender sits there too.
 ///
-/// Seeds the resolver, unions the sibling into our master-signed device list,
-/// pushes our profile and friends and pulls theirs, requests a DM backfill,
-/// re-announces our servers, and auto-requests a snapshot if WE are empty.
-/// Synchronous: none of these calls await.
+/// Pushes our profile and friends and pulls theirs, requests a DM backfill, and
+/// re-announces our servers. Synchronous: none of these calls await.
 #[allow(clippy::too_many_arguments)]
 fn on_verified_sibling(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     local_peer_str: &str,
     server_states: &HashMap<String, ServerState>,
-    link_snapshot_requested: &mut std::collections::HashSet<String>,
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
     peer_id: &str,
 ) {
-    // Every revoked device still holds the master key, so the proof alone would
-    // re-bind it and hand it our friends, servers and DM history (HOL-SEC-032).
-    if super::crypto_handler::sibling_proof_refused(local_peer_str, peer_id, db_path, db_passphrase) {
-        hollow_log!("[HOLLOW-REVOKE] Refused sibling convergence with revoked device {peer_id}");
+    if !super::resolver::same_identity(peer_id, local_peer_str) || super::resolver::is_revoked(peer_id) {
+        hollow_log!("[HOLLOW-ROSTER] {peer_id} is not one of this identity's devices: no sibling state");
         return;
     }
     let own_inbox = format!("inbox:{}", local_peer_str);
-    super::resolver::update(peer_id, local_peer_str);
 
-    // CRITICAL: merge the proven sibling into our own master-signed device list
-    // HERE rather than waiting for a ProfileUpdate carrying a device_list. A
-    // freshly-imported sibling has no profile and never sends one, so our list
-    // would stay at one device and a friend would show us offline whenever that
-    // one device quits. Union, re-sign, persist, then re-announce our profile.
-    let our_set_grew = super::crypto_handler::merge_sibling_device_id(
-        master_keypair, device_peer_id, peer_id,
-        db_path, db_passphrase,
-    );
-    if our_set_grew {
-        let peers: Vec<String> = ws_room_peers.values()
-            .flat_map(|p| p.iter().cloned())
-            .collect();
-        hollow_log!(
-            "[HOLLOW-DEVICES] Inbox sibling {peer_id} merged — re-announcing to {} room peer(s)",
-            peers.len()
-        );
-        for pid in peers {
-            if pid == local_peer_str || pid == device_peer_id { continue; }
-            if super::resolver::same_identity(&pid, local_peer_str) { continue; }
-            social::send_own_profile_to_peer(
-                ws_cmd_tx, ws_room_peers, server_states,
-                local_peer_str, master_keypair, device_peer_id, &pid,
-                is_invisible,
-                db_path, db_passphrase,
-            );
-        }
-    }
-    // Also hand the sibling our device list directly (via a ProfileUpdate) so IT
-    // converges on the union too — covers the case where the sibling is the one with a
-    // profile and we are the fresh device.
+    // Hand the sibling our roster (in a ProfileUpdate), so it holds everything we do.
     social::send_own_profile_to_peer(
         ws_cmd_tx, ws_room_peers, server_states,
-        local_peer_str, master_keypair, device_peer_id, peer_id,
+        local_peer_str, master_keypair, peer_id,
         is_invisible,
         db_path, db_passphrase,
     );
@@ -330,64 +291,47 @@ fn on_verified_sibling(
             .count()
     );
 
-    // If WE are essentially empty (a fresh mnemonic import) and a populated sibling
-    // is online, auto-request a full snapshot; the sibling confirms before sending.
-    // Gated on a near-empty DB so a populated device never re-pulls, once per sibling.
-    let (my_msgs, my_friends, _my_servers, _hp) =
-        crate::api::storage::snapshot_state_summary();
-    if my_msgs == 0 && my_friends == 0
-        && link_snapshot_requested.insert(peer_id.to_string())
-    {
-        hollow_log!(
-            "[HOLLOW-LINK] Empty device — auto-requesting snapshot from sibling {peer_id}"
-        );
-        // Mnemonic path has no typed code; both siblings share the master id, so use it
-        // as the .hollow passphrase.
-        link_handler::set_my_link_code(local_peer_str);
-        link_handler::handle_request_link_snapshot(
-            ws_cmd_tx, ws_room_peers, peer_id, false, false,
+}
+
+/// Converge with each sibling an ingest just admitted that sits in our inbox now.
+#[allow(clippy::too_many_arguments)]
+fn converge_new_siblings(
+    added: &[String],
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    local_peer_str: &str,
+    server_states: &HashMap<String, ServerState>,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let own_inbox = format!("inbox:{local_peer_str}");
+    let Some(present) = ws_room_peers.get(&own_inbox) else { return };
+    for device in added.iter().filter(|d| d.as_str() != device_peer_id && present.contains(*d)) {
+        on_verified_sibling(
+            ws_cmd_tx, ws_room_peers, master_keypair, local_peer_str,
+            server_states, is_invisible, db_path, db_passphrase, device,
         );
     }
 }
 
-/// Challenge an UNPROVEN peer in our own `inbox:{master}` room to prove it holds
-/// our master key. Only such a peer can answer, so a friend-request sender (a
-/// stranger) is never mis-merged as our device. Deduped against a live challenge.
-fn issue_sibling_challenge(
+/// Hand our roster to a device in our own inbox that it does not name. The relay shows
+/// an inbox only to devices that proved they hold its master key, so this tells it
+/// nothing new; from the roster it learns whether it is one of ours, and we learn the
+/// same from its answer.
+fn offer_roster(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    pending_sibling_challenges: &mut HashMap<String, (String, std::time::Instant)>,
+    local_peer_str: &str,
     peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    const CHALLENGE_TTL: Duration = Duration::from_secs(60);
-    const MAX_PENDING: usize = 64;
-    // Live unexpired challenge already out for this peer → don't spam.
-    if pending_sibling_challenges
-        .get(peer_id)
-        .is_some_and(|(_, t)| t.elapsed() < CHALLENGE_TTL)
-    {
-        return;
+    if let Some(roster) = super::roster_book::own_roster(local_peer_str, db_path, db_passphrase) {
+        send_message_to_peer(ws_cmd_tx, ws_room_peers, peer_id, HavenMessage::RosterNotice { roster });
     }
-    // Bound the map: drop expired entries, and if still full, refuse a new challenge.
-    if pending_sibling_challenges.len() >= MAX_PENDING {
-        pending_sibling_challenges.retain(|_, (_, t)| t.elapsed() < CHALLENGE_TTL);
-        if pending_sibling_challenges.len() >= MAX_PENDING {
-            hollow_log!("[HOLLOW-SIBLING] Challenge map full — dropping new challenge to {peer_id}");
-            return;
-        }
-    }
-    let nonce = hex::encode({
-        let mut b = [0u8; 16];
-        getrandom::fill(&mut b)
-            .expect("system RNG unavailable — cannot generate secure random bytes");
-        b
-    });
-    pending_sibling_challenges.insert(peer_id.to_string(), (nonce.clone(), std::time::Instant::now()));
-    hollow_log!("[HOLLOW-SIBLING] Challenging unproven inbox peer {peer_id} for sibling proof");
-    send_message_to_peer(
-        ws_cmd_tx, ws_room_peers,
-        peer_id, HavenMessage::SiblingProveRequest { nonce },
-    );
 }
 
 use crate::crdt::hlc::Hlc;
@@ -787,29 +731,21 @@ async fn run_event_loop(
     // Persisted device links must reach the process-global resolver BEFORE the loop
     // handles any message, or an early message from a friend's other device is
     // misattributed. A no-op self-mapping on a pre-multi-device install.
+    // Our own roster comes up to date here (design ID-1), and the resolver holds its
+    // members only: holding the master key makes no device one of ours.
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             super::resolver::warm_from_store(&store);
-            // Always UNION this running device into the self-seed. A freshly LINKED sibling
-            // imported the SOURCE device's list, which does not contain our brand-new device
-            // id, so without this our own id resolves to itself rather than to the master
-            // and "Your devices" shows one device until the source comes online.
-            match store.load_device_list(&master_peer_str) {
-                Ok(Some(list)) => {
-                    let mut devs = list.devices.clone();
-                    if !devs.iter().any(|d| d == &device_peer_id) {
-                        devs.push(device_peer_id.clone());
-                    }
-                    super::resolver::seed_self(&master_peer_str, &devs);
-                    // Our own tombstones predate the revoked_devices table on older installs.
-                    let revoked: Vec<String> = list.revoked.iter()
-                        .filter(|r| **r != device_peer_id)
-                        .cloned()
-                        .collect();
-                    super::resolver::mark_revoked(&revoked);
-                }
-                _ => super::resolver::seed_self(&master_peer_str, &[device_peer_id.clone()]),
-            }
+            let (_roster, own_state) =
+                super::roster_book::ensure_own(&store, &master_keypair, &device_keypair, &db_path);
+            drop(store);
+            super::roster_book::announce_own_state(
+                &event_tx, &device_peer_id, &own_state, &db_path, &db_passphrase,
+            ).await;
+            // The UI read the gate before this start settled it (a new join ask).
+            let _ = event_tx
+                .send(NetworkEvent::DeviceListUpdated { master_peer_id: master_keypair.peer_id() })
+                .await;
         }
     }
     // Install the device-to-master resolver into the `crdt` module so
@@ -1031,17 +967,7 @@ async fn run_event_loop(
     // rejoin, so one re-send per connection is exactly one per replay burst.
     let mut reject_resent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pending_nickname_resolve: Option<String> = None;
-    // `pending_link_resolve` = (code, include_vault, include_files) carried from
-    // ResolveLinkCode to the LinkCodeResolved event. `pending_link_code` = the code
-    // WE claimed, so we can leave its room on release.
-    let mut pending_link_resolve: Option<(String, bool, bool)> = None;
-    let mut pending_link_code: Option<String> = None;
-    // Siblings we've already auto-requested a snapshot from this session (fire-once).
-    let mut link_snapshot_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Sibling-proof challenges in flight: inbox peer_id -> (nonce, issued_at). Only
-    // a peer holding our shared master key can sign the nonce, which is what gates
-    // the merge and the snapshot. 60s TTL, bounded, one live challenge per peer.
-    let mut pending_sibling_challenges: HashMap<String, (String, std::time::Instant)> = HashMap::new();
+    let mut link = link_handler::LinkState::default();
     // Destruction freshness: the first start of a device stamps when it joined the
     // identity, so an order issued before it existed can never wipe it.
     super::destroy::stamp_device_link(&db_path, &db_passphrase, &device_peer_id);
@@ -1088,9 +1014,7 @@ async fn run_event_loop(
             let rows = store.load_pending_joins().unwrap_or_default();
             if !rows.is_empty() {
                 // ONE build for all of them: this opens the DB.
-                let device_list = crypto_handler::build_local_device_list(
-                    &master_keypair, &device_peer_id, &db_path, &db_passphrase,
-                );
+                let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), &db_path, &db_passphrase);
                 let card = super::profile_card::own_card(&master_keypair, &db_path, &db_passphrase);
                 let mut restored = 0usize;
                 for row in rows {
@@ -1485,14 +1409,14 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RevokeDevice { device_peer_id: target } => {
-                        if let Some(revoked) = sync_handler::handle_revoke_device(
+                        if let Some(revoked) = Box::pin(sync_handler::handle_revoke_device(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
-                            &master_peer_str, &local_peer_str, &device_peer_id,
+                            &device_keypair, &master_peer_str, &local_peer_str, &device_peer_id,
                             is_invisible, target, &db_path, &db_passphrase,
-                        ).await {
-                            // Drop our Olm session to the revoked device + (coordinator)
-                            // remove its MLS leaf from shared servers — same enforcement
-                            // path a friend runs when it ingests the tombstoned list.
+                        )).await {
+                            // Drop our Olm session to the removed device + (coordinator)
+                            // remove its MLS leaf from shared servers: the same enforcement
+                            // a friend runs when it ingests the removal.
                             enforce_device_revocations(
                                 &[revoked], &mut olm, &crypto_store, mls.as_ref(),
                                 &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
@@ -1503,19 +1427,64 @@ async fn run_event_loop(
                     NodeCommand::PublishSelfRevocation { reply } => {
                         let ok = destroy::handle_publish_self_revocation(
                             &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
-                            &master_peer_str, &device_peer_id, is_invisible,
+                            &device_keypair, &master_peer_str, &device_peer_id, is_invisible,
                             &db_path, &db_passphrase,
                         );
                         let _ = reply.send(ok);
                     }
 
-                    NodeCommand::PublishDestroyIdentity { targets, notify_friends, reply } => {
-                        let reached = destroy::handle_publish_destroy_identity(
+                    NodeCommand::PublishDestroyIdentity { order, reply } => {
+                        let reached = Box::pin(destroy::handle_publish_destroy_identity(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &master_keypair, &master_peer_str, &device_peer_id,
-                            targets, notify_friends, &db_path, &db_passphrase,
-                        ).await;
+                            &master_peer_str, &device_peer_id, *order, &db_path, &db_passphrase,
+                        )).await;
                         let _ = reply.send(reached);
+                    }
+
+                    NodeCommand::PublishDelegatedDestroy { delegation, notify_friends, reply } => {
+                        let order = crypto_handler::build_delegated_destroy(
+                            &master_keypair, &device_keypair, delegation,
+                            destroy::now_ms(), notify_friends,
+                        );
+                        let reached = Box::pin(destroy::handle_publish_destroy_identity(
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &master_peer_str, &device_peer_id, order, &db_path, &db_passphrase,
+                        )).await;
+                        let _ = reply.send(reached);
+                    }
+
+                    NodeCommand::ApproveDevice { device_peer_id: target } => {
+                        Box::pin(sync_handler::handle_approve_device(
+                            &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
+                            &device_keypair, &local_peer_str, &device_peer_id, is_invisible,
+                            target, &db_path, &db_passphrase,
+                        )).await;
+                    }
+
+                    NodeCommand::RosterChanged { newly_revoked } => {
+                        enforce_device_revocations(
+                            &newly_revoked, &mut olm, &crypto_store, mls.as_ref(),
+                            &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                        );
+                        sync_handler::announce_roster_change(
+                            &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
+                            &local_peer_str, &device_peer_id, is_invisible, &newly_revoked,
+                            &db_path, &db_passphrase,
+                        );
+                        super::roster_book::announce_phrase_change(
+                            &ws_cmd_tx, &local_peer_str, server_states.keys(), &db_path, &db_passphrase,
+                        );
+                        if let Some((_, state)) = super::roster_book::own(&local_peer_str, &db_path, &db_passphrase) {
+                            super::roster_book::announce_own_state(
+                                &event_tx, &device_peer_id, &state, &db_path, &db_passphrase,
+                            ).await;
+                            if state.is_member(&device_peer_id) {
+                                let _ = event_tx.send(NetworkEvent::DeviceRestored).await;
+                            }
+                        }
+                        let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+                            master_peer_id: master_peer_str.clone(),
+                        }).await;
                     }
 
                     NodeCommand::UnregisterPushToken => {
@@ -1533,11 +1502,11 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::ResetDeviceLists => {
-                        if let Some(revoked) = sync_handler::handle_reset_device_lists(
+                        if let Some(revoked) = Box::pin(sync_handler::handle_reset_device_lists(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
-                            &master_peer_str, &local_peer_str, &device_peer_id,
+                            &device_keypair, &master_peer_str, &local_peer_str, &device_peer_id,
                             is_invisible, &db_path, &db_passphrase,
-                        ).await {
+                        )).await {
                             // Drop Olm sessions to every revoked sibling + (coordinator)
                             // remove their MLS leaves from shared servers — same path a
                             // friend runs ingesting the tombstones.
@@ -2220,42 +2189,25 @@ async fn run_event_loop(
                     }
 
                     // -- Multi-device linking --
-                    NodeCommand::ClaimLinkCode { code } => {
-                        pending_link_code = Some(code.clone());
-                        link_handler::handle_claim_link_code(&ws_cmd_tx, &code);
+                    NodeCommand::ClaimLinkCode { rendezvous, secret } => {
+                        link_handler::claim(&mut link, &ws_cmd_tx, &rendezvous, &secret);
                     }
                     NodeCommand::ReleaseLinkCode => {
-                        if let Some(code) = pending_link_code.take() {
-                            link_handler::handle_release_link_code(&ws_cmd_tx, &code);
+                        link_handler::release(&mut link, &ws_cmd_tx);
+                    }
+                    NodeCommand::ResolveLinkCode { code, label, platform } => {
+                        if let Err(error) = link_handler::resolve(&mut link, &ws_cmd_tx, &code, &label, &platform) {
+                            let _ = event_tx.send(NetworkEvent::LinkFailed { link_id: String::new(), error }).await;
                         }
                     }
-                    NodeCommand::ResolveLinkCode { code, include_vault, include_files } => {
-                        pending_link_resolve = Some((code.clone(), include_vault, include_files));
-                        link_handler::set_my_link_code(&code); // receiver: decrypts the blob
-                        link_handler::handle_resolve_link_code(&ws_cmd_tx, &code);
-                    }
-                    NodeCommand::RequestLinkSnapshot { target_peer, include_vault, include_files } => {
-                        link_handler::handle_request_link_snapshot(
-                            &ws_cmd_tx, &ws_room_peers, &target_peer, include_vault, include_files,
-                        );
-                    }
                     NodeCommand::AcceptLinkPush { target_peer, include_vault, include_files } => {
-                        // Code path: encrypt with the code WE claimed. Mnemonic path
-                        // (no claimed code): the requester is a sibling sharing our
-                        // master, so use the master id as the shared passphrase.
-                        let code = match &pending_link_code {
-                            Some(c) if !c.is_empty() => c.clone(),
-                            _ => local_peer_str.to_string(),
-                        };
-                        link_handler::handle_accept_link_push(
-                            &ws_cmd_tx, &ws_room_peers, &event_tx,
-                            &target_peer, include_vault, include_files, &device_peer_id, &code,
-                        ).await;
+                        Box::pin(link_handler::accept(
+                            &mut link, &ws_cmd_tx, &event_tx, &master_keypair, &device_keypair,
+                            &target_peer, include_vault, include_files, &db_path, &db_passphrase,
+                        )).await;
                     }
                     NodeCommand::DeclineLinkPush { target_peer } => {
-                        send_message_to_peer(
-                            &ws_cmd_tx, &ws_room_peers, &target_peer, HavenMessage::LinkDeclined,
-                        );
+                        link_handler::decline(&mut link, &ws_cmd_tx, &target_peer);
                     }
 
                     NodeCommand::RegisterPushToken { token, platform } => {
@@ -2297,7 +2249,7 @@ async fn run_event_loop(
                     NodeCommand::RejectFriendRequest { peer_id: peer_id_str } => {
                         social::handle_reject_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &master_keypair, &device_peer_id,
+                            &master_keypair,
                             peer_id_str,
                             &mut pending_friend_requests,
                             &mut pending_friend_accepts,
@@ -3012,6 +2964,7 @@ async fn run_event_loop(
                                 &mut pending_file_streams,
                                 &mut pending_shard_streams, &mut early_file_streams,
                                 &mut pending_link_snapshots,
+                                &mut link,
                                 &mut decrypt_fail_cooldown,
                                 &mut pending_mls_key_packages, &mut pending_mls_removals,
                                 &mut mls_epoch_hint_cooldown,
@@ -3029,7 +2982,6 @@ async fn run_event_loop(
                                 &subscribed_channels,
                                 &db_path, &db_passphrase,
                                 &local_peer_str, &sender_peer_id, is_invisible,
-                                &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
                                 &mut reject_resent,
@@ -3214,9 +3166,7 @@ async fn run_event_loop(
                         // just collects nothing from the mailbox.
                         {
                             let inbox_room = format!("inbox:{}", local_peer_str);
-                            match crypto_handler::build_local_device_list(
-                                &master_keypair, &device_peer_id, &db_path, &db_passphrase,
-                            ) {
+                            match super::roster_book::inbox_proof(&master_keypair, &db_path, &db_passphrase) {
                                 Some(proof) => {
                                     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinInbox {
                                         room_code: inbox_room,
@@ -3229,6 +3179,12 @@ async fn run_event_loop(
                                     });
                                 }
                             }
+                            // A device our roster does not admit yet asks, on every
+                            // connect: the mailbox and the rooms forget.
+                            super::roster_book::announce_pending(
+                                &ws_cmd_tx, &local_peer_str, &device_peer_id, server_states.keys(),
+                                &db_path, &db_passphrase,
+                            );
                         }
                         // ASYNC FRIENDING: re-deposit every still-pending outgoing request into the
                         // target's master-keyed mailbox. A target we hold no DEVICE for is unreachable
@@ -3640,7 +3596,7 @@ async fn run_event_loop(
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {joined_master}), (re)sending FriendAccept");
                                         social::send_friend_accept(
-                                            &ws_cmd_tx, &local_peer_str, &master_keypair, &device_peer_id,
+                                            &ws_cmd_tx, &local_peer_str, &master_keypair,
                                             &joined_master, &peer_id, stamp, &db_path, &db_passphrase,
                                         );
                                     }
@@ -3649,7 +3605,7 @@ async fn run_event_loop(
                                 if is_new {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers, &server_states,
-                                        &local_peer_str, &master_keypair, &device_peer_id, &peer_id,
+                                        &local_peer_str, &master_keypair, &peer_id,
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -3665,25 +3621,18 @@ async fn run_event_loop(
                                         );
                                     }
 
-                                    // A peer in OUR OWN inbox room MIGHT be our own other device, but the
-                                    // friend-request protocol makes a STRANGER join our inbox to deliver, so bare
-                                    // room membership is NOT proof and taking it mis-merges strangers as siblings.
-                                    // A sibling we already resolve to ourselves runs the convergence directly; an
-                                    // UNPROVEN inbox peer must first sign a nonce with our SHARED MASTER key.
+                                    // A peer in OUR OWN inbox room is our device only when our roster
+                                    // says so: a friend-request sender joins our inbox to deliver, and a
+                                    // device holding just the master key is nobody's member.
                                     let own_inbox = format!("inbox:{}", local_peer_str);
                                     if room == own_inbox && peer_id != device_peer_id {
                                         if super::resolver::same_identity(&peer_id, &local_peer_str) {
                                             on_verified_sibling(
-                                                &ws_cmd_tx, &ws_room_peers, &master_keypair,
-                                                &device_peer_id, &local_peer_str, &server_states,
-                                                &mut link_snapshot_requested, is_invisible,
-                                                &db_path, &db_passphrase, &peer_id,
+                                                &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
+                                                is_invisible, &db_path, &db_passphrase, &peer_id,
                                             );
                                         } else {
-                                            issue_sibling_challenge(
-                                                &ws_cmd_tx, &ws_room_peers,
-                                                &mut pending_sibling_challenges, &peer_id,
-                                            );
+                                            offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, &peer_id, &db_path, &db_passphrase);
                                         }
                                     }
 
@@ -3868,10 +3817,6 @@ async fn run_event_loop(
                         if room == format!("fwd:{device_peer_id}") {
                             embedded_fwd.peer_gone(&peer_id);
                         }
-
-                        // Drop any in-flight sibling-proof challenge for a peer that left
-                        // our inbox (it'll be re-challenged on its next appearance).
-                        pending_sibling_challenges.remove(&peer_id);
 
                         // Hollow Share: drop the peer from peer_have + free
                         // any in-flight chunk requests so the scheduler retries.
@@ -4158,7 +4103,7 @@ async fn run_event_loop(
                                 if pid != &local_peer && pid.as_str() != device_peer_id {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers, &server_states,
-                                        &local_peer_str, &master_keypair, &device_peer_id, pid,
+                                        &local_peer_str, &master_keypair, pid,
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -4195,7 +4140,7 @@ async fn run_event_loop(
                                 if is_new {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers, &server_states,
-                                        &local_peer_str, &master_keypair, &device_peer_id, pid_str,
+                                        &local_peer_str, &master_keypair, pid_str,
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -4318,22 +4263,17 @@ async fn run_event_loop(
                                     // that sibling on our side. This is the directional half a fresh mnemonic
                                     // link needs: the new EMPTY device joins last, learns of the populated
                                     // sibling here, and is the side that must PULL the snapshot. Membership in
-                                    // `inbox:{master}` is not proof, so an unproven peer is challenged first.
+                                    // `inbox:{master}` is not proof: only a member of our roster converges.
                                     {
                                         let own_inbox = format!("inbox:{}", local_peer_str);
                                         if room == own_inbox && pid_str.as_str() != device_peer_id {
                                             if super::resolver::same_identity(pid_str, &local_peer_str) {
                                                 on_verified_sibling(
-                                                    &ws_cmd_tx, &ws_room_peers, &master_keypair,
-                                                    &device_peer_id, &local_peer_str, &server_states,
-                                                    &mut link_snapshot_requested, is_invisible,
-                                                    &db_path, &db_passphrase, pid_str,
+                                                    &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
+                                                    is_invisible, &db_path, &db_passphrase, pid_str,
                                                 );
                                             } else {
-                                                issue_sibling_challenge(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    &mut pending_sibling_challenges, pid_str,
-                                                );
+                                                offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, pid_str, &db_path, &db_passphrase);
                                             }
                                         }
                                     }
@@ -4448,7 +4388,7 @@ async fn run_event_loop(
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {joined_master}), (re)sending FriendAccept");
                                         social::send_friend_accept(
-                                            &ws_cmd_tx, &local_peer_str, &master_keypair, &device_peer_id,
+                                            &ws_cmd_tx, &local_peer_str, &master_keypair,
                                             &joined_master, pid_str, stamp, &db_path, &db_passphrase,
                                         );
                                     }
@@ -4610,6 +4550,7 @@ async fn run_event_loop(
                                 &mut pending_file_streams,
                                 &mut pending_shard_streams, &mut early_file_streams,
                                 &mut pending_link_snapshots,
+                                &mut link,
                                 &mut decrypt_fail_cooldown,
                                 &mut pending_mls_key_packages, &mut pending_mls_removals,
                                 &mut mls_epoch_hint_cooldown,
@@ -4627,7 +4568,6 @@ async fn run_event_loop(
                                 &subscribed_channels,
                                 &db_path, &db_passphrase,
                                 &local_peer_str, &from, is_invisible,
-                                &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
                                 &mut reject_resent,
@@ -4761,25 +4701,13 @@ async fn run_event_loop(
                     WsEvent::LinkCodeClaimed { code } => {
                         let _ = event_tx.send(NetworkEvent::LinkCodeClaimed { code }).await;
                     }
-                    WsEvent::LinkCodeReleased => {
-                        pending_link_code = None;
-                        link_handler::note_link_code_released();
-                    }
+                    WsEvent::LinkCodeReleased => {}
                     WsEvent::LinkCodeError { error, code } => {
-                        // A resolve we initiated failing means the code was wrong/expired.
-                        if pending_link_resolve.as_ref().map(|(c, _, _)| c.as_str()) == Some(code.as_str()) {
-                            pending_link_resolve = None;
-                        }
+                        link_handler::on_code_error(&mut link, &code);
                         let _ = event_tx.send(NetworkEvent::LinkCodeError { error, code }).await;
                     }
                     WsEvent::LinkCodeResolved { code, peer_id } => {
-                        if let Some((c, include_vault, include_files)) = pending_link_resolve.take() {
-                            if c == code {
-                                link_handler::handle_link_code_resolved(
-                                    &ws_cmd_tx, &ws_room_peers, &peer_id, include_vault, include_files,
-                                );
-                            }
-                        }
+                        link_handler::on_resolved(&mut link, &ws_cmd_tx, &code, &peer_id);
                     }
                     ws_frame @ (WsEvent::Message { .. } | WsEvent::DirectMessage { .. }) => {
                         let direct = matches!(ws_frame, WsEvent::DirectMessage { .. });
@@ -5176,6 +5104,7 @@ async fn run_event_loop(
                                             &mut pending_file_streams,
                                             &mut pending_shard_streams, &mut early_file_streams,
                                             &mut pending_link_snapshots,
+                                            &mut link,
                                             &mut decrypt_fail_cooldown,
                                             &mut pending_mls_key_packages, &mut pending_mls_removals,
                                             &mut mls_epoch_hint_cooldown,
@@ -5193,7 +5122,6 @@ async fn run_event_loop(
                                             &subscribed_channels,
                                             &db_path, &db_passphrase,
                                             &local_peer_str, &from, is_invisible,
-                                            &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                             &mut pending_friend_accepts, &mut pending_friend_requests,
                                             &mut pending_friend_removals,
                                             &mut reject_resent,
@@ -6907,6 +6835,7 @@ async fn handle_incoming_request(
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     early_file_streams: &mut HashMap<String, (std::path::PathBuf, u64, String)>,
     pending_link_snapshots: &mut HashMap<String, file_handler::LinkSnapshotState>,
+    link: &mut link_handler::LinkState,
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
@@ -6930,8 +6859,6 @@ async fn handle_incoming_request(
     local_peer_str: &str,
     peer_str: &str,
     is_invisible: bool,
-    link_snapshot_requested: &mut std::collections::HashSet<String>,
-    pending_sibling_challenges: &mut HashMap<String, (String, std::time::Instant)>,
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
@@ -9494,38 +9421,23 @@ async fn handle_incoming_request(
             // Every gate below reads this value too, so a wrong answer here is a
             // wrong ban check, not just a wrong label.
             //
-            // So the request CARRIES the joiner's master-signed device list and
-            // attribution becomes cryptographic: the list must verify, its signer
-            // must BE the master it claims, and the sender device must be listed
-            // and un-revoked. `if list.is_some()` must not be the bypass.
+            // So the request CARRIES the joiner's roster and attribution becomes
+            // cryptographic: the sender device must be a member of it (design ID-1).
+            // `if list.is_some()` must not be the bypass.
             let member_master = match device_list.as_ref() {
                 Some(list) => {
-                    let bad = if !crypto_handler::verify_device_list(list) {
-                        Some("bad signature or master binding")
-                    } else if !list.devices.iter().any(|d| d == peer_str) {
-                        Some("sender device not in the signed list")
-                    } else if list.revoked.iter().any(|r| r == peer_str) {
-                        Some("sender device is revoked")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = bad {
-                        hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: carried device list rejected ({reason})");
-                        return;
-                    }
-                    // Ingest through the SAME path every other carried list uses,
+                    // Ingest through the SAME path every other carried roster uses,
                     // so the resolver, the device store and every later send agree.
-                    let outcome = crypto_handler::ingest_device_list(
-                        event_tx, master_peer_str, device_peer_id, master_keypair,
-                        peer_str, ws_cmd_tx,
-                        device_list.clone(), db_path, db_passphrase,
+                    let outcome = super::roster_book::ingest(
+                        event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
+                        peer_str, device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
                         &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                         local_peer_str, ws_room_peers, pending_mls_removals,
                     );
-                    let Some(master) = crypto_handler::carried_list_master(list, peer_str) else {
-                        hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: its list did not bind the sender (revoked or claimed elsewhere)");
+                    let Some(master) = super::roster_book::carried_master(list, peer_str) else {
+                        hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: its roster does not make the sender one of its devices");
                         return;
                     };
                     master
@@ -10285,54 +10197,6 @@ async fn handle_incoming_request(
                 }
             }
         }
-        HavenMessage::SiblingProveRequest { nonce } => {
-            // A peer in OUR inbox is challenging us to prove we are its sibling. We
-            // sign `hollow-sibling:{our_master}:{our_device}:{nonce}` with the MASTER
-            // key: a genuine challenger shares that master and can verify it, and
-            // anyone else gains nothing, because the proof binds to OUR master.
-            let (sig_b64, master_pubkey_b64) =
-                super::crypto_handler::build_sibling_proof(master_keypair, device_peer_id, &nonce);
-            hollow_log!("[HOLLOW-SIBLING] Answering sibling-proof challenge from {peer_str}");
-            send_message_to_peer(
-                ws_cmd_tx, ws_room_peers,
-                peer_str, HavenMessage::SiblingProveResponse { nonce, sig_b64, master_pubkey_b64 },
-            );
-        }
-
-        HavenMessage::SiblingProveResponse { nonce, sig_b64, master_pubkey_b64 } => {
-            // The peer we challenged answered. Verify the proof binds to OUR master, to
-            // the device id WE challenged (`peer_str`, from the routing layer and never
-            // self-reported) AND to the nonce we issued, before treating it as a sibling.
-            let Some((expected_nonce, issued_at)) = pending_sibling_challenges.get(peer_str) else {
-                hollow_log!("[HOLLOW-SIBLING] Unsolicited/expired SiblingProveResponse from {peer_str} — ignored");
-                return;
-            };
-            if *expected_nonce != nonce {
-                hollow_log!("[HOLLOW-SIBLING] Nonce mismatch in SiblingProveResponse from {peer_str} — ignored");
-                return;
-            }
-            if issued_at.elapsed() >= Duration::from_secs(60) {
-                hollow_log!("[HOLLOW-SIBLING] Stale SiblingProveResponse from {peer_str} — ignored");
-                pending_sibling_challenges.remove(peer_str);
-                return;
-            }
-            if !super::crypto_handler::verify_sibling_proof(
-                local_peer_str, peer_str, &nonce, &sig_b64, &master_pubkey_b64,
-            ) {
-                hollow_log!("[HOLLOW-SIBLING] INVALID sibling proof from {peer_str} — NOT a sibling, no merge");
-                pending_sibling_challenges.remove(peer_str);
-                return;
-            }
-            pending_sibling_challenges.remove(peer_str);
-            hollow_log!("[HOLLOW-SIBLING] Verified sibling {peer_str} via master-signed proof — converging");
-            on_verified_sibling(
-                ws_cmd_tx, ws_room_peers, master_keypair,
-                device_peer_id, local_peer_str, server_states,
-                link_snapshot_requested, is_invisible,
-                db_path, db_passphrase, peer_str,
-            );
-        }
-
         HavenMessage::SiblingServerAnnounce { server_id, owner, join_key } => {
             // Multi-device: one of OUR OWN devices created a server and is telling us
             // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
@@ -10375,7 +10239,7 @@ async fn handle_incoming_request(
                 twitch_proof_json: None,
                 nsfw_confirmed: true,
                 owner_pin: owner,
-                device_list: crypto_handler::build_local_device_list(master_keypair, device_peer_id, db_path, db_passphrase),
+                device_list: super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase),
                 join_key,
                 reply_secret: super::join_lane::ReplySecret::new(),
                 ..Default::default()
@@ -10505,7 +10369,12 @@ async fn handle_incoming_request(
                         // The leaf proves both the sending DEVICE and its MASTER:
                         // `sender_master` for attribution (channel messages, edits and
                         // reactions are signed by the master), `sender_peer_id` for
-                        // replies and transport.
+                        // replies and transport. A device the master's roster does not
+                        // admit speaks for nobody, whatever the master key signed for it.
+                        if super::resolver::disowns(&sender.master, &sender.device) {
+                            hollow_log!("[HOLLOW-SECURITY] Dropped an envelope in {group_key} from leaf {sender_peer_id}: its master's roster does not admit it");
+                            return;
+                        }
                         let sender_master = sender.master.clone();
 
                         match envelope {
@@ -10706,7 +10575,7 @@ async fn handle_incoming_request(
                                 }
                                 let envelope_revoked = super::social::handle_envelope_profile_update(
                                     event_tx, server_states, master_peer_str,
-                                    device_peer_id, master_keypair, ws_cmd_tx, ws_room_peers,
+                                    device_peer_id, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
                                     device_list, avatar_hash, banner_hash, showcase_board,
@@ -11114,6 +10983,7 @@ async fn handle_incoming_request(
             // it. The batch processor removes any STALE leaf sharing the sender's
             // credential and adds the new one to the SAME group: one epoch, no fork.
             let sibling_readd = sender_leaf.master == local_peer_str
+                && super::resolver::same_identity(peer_str, local_peer_str)
                 && peer_str != device_peer_id
                 && mls.as_ref().is_some_and(|m| {
                     if !m.has_group(&group_key) {
@@ -11483,41 +11353,27 @@ async fn handle_incoming_request(
 
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
-            // ASYNC FRIENDING: the request may carry the sender's master-signed device
-            // list. Ingest it FIRST. A stranger reaching us out of the mailbox has
-            // never sent us a ProfileUpdate, so our resolver is cold for them: the
-            // friends row would key under their DEVICE id and `dm_room_code` would
-            // compute a room they are not in, addressing our accept nowhere.
-            // `ingest_device_list` applies the same signature, version-monotonicity
-            // and revocation gates as a ProfileUpdate-carried list, so this adds a
-            // transport, not a trust level.
+            // ASYNC FRIENDING: the request may carry the sender's roster. Ingest it
+            // FIRST. A stranger reaching us out of the mailbox has never sent us a
+            // ProfileUpdate, so our resolver is cold for them: the friends row would key
+            // under their DEVICE id and `dm_room_code` would compute a room they are not
+            // in, addressing our accept nowhere. The roster ingest is the same one a
+            // profile's goes through, so this adds a transport, not a trust level.
             //
-            // This inbox is stranger-reachable, so a captured list replayed from an
-            // unlisted socket is a DROPPED request: `list.is_some()` is not a bypass.
+            // This inbox is stranger-reachable, so a roster that does not make its
+            // deliverer a member is a DROPPED request: `list.is_some()` is not a bypass.
             if let Some(list) = device_list.as_ref() {
-                let bad = if !crypto_handler::verify_device_list(list) {
-                    Some("bad signature or master binding")
-                } else if !crypto_handler::device_list_binds_sender(list, peer_str) {
-                    Some("sender device not in the signed list, or revoked")
-                } else {
-                    None
-                };
-                if let Some(reason) = bad {
-                    hollow_log!("[HOLLOW-FRIENDS] Dropping FriendRequest from {peer_str}: carried device list rejected ({reason})");
-                    return;
-                }
-                let outcome = crypto_handler::ingest_device_list(
-                    event_tx, master_peer_str, device_peer_id, master_keypair,
-                    peer_str, ws_cmd_tx,
-                    device_list.clone(), db_path, db_passphrase,
+                let outcome = super::roster_book::ingest(
+                    event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
+                    peer_str, device_list.clone(), db_path, db_passphrase,
                 ).await;
                 enforce_device_revocations(
                     &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                     local_peer_str, ws_room_peers, pending_mls_removals,
                 );
-                // The carried bundle and profile below are keyed by the list's master.
-                if crypto_handler::carried_list_master(list, peer_str).is_none() {
-                    hollow_log!("[HOLLOW-FRIENDS] Dropping FriendRequest from {peer_str}: its list did not bind the sender (revoked or claimed elsewhere)");
+                // The carried bundle and profile below are keyed by the roster's master.
+                if super::roster_book::carried_master(list, peer_str).is_none() {
+                    hollow_log!("[HOLLOW-FRIENDS] Dropping FriendRequest from {peer_str}: its roster does not make the sender one of its devices");
                     return;
                 }
                 // A blocked identity's never-seen device resolves to itself above and
@@ -11533,7 +11389,7 @@ async fn handle_incoming_request(
             // reboot away) can build the Olm session with the requester long gone.
             // REJECT on any failure: an unverifiable bundle is simply not stored.
             if let (Some(bundle), Some(list)) = (carried_bundle.as_ref(), device_list.as_ref()) {
-                if crypto_handler::verify_carried_bundle(master_peer_str, list, bundle) {
+                if crypto_handler::verify_carried_bundle(master_peer_str, list, bundle, db_path, db_passphrase) {
                     let record = social::CarriedRequestRecord {
                         bundle: bundle.clone(),
                         device_list: list.clone(),
@@ -11544,16 +11400,16 @@ async fn handle_incoming_request(
                             ws_room_peers, peer_str,
                         ).is_some(),
                     };
-                    // Key by the SIGNED list's master, not the resolver: the list is
-                    // the authenticated statement of who this device speaks for.
-                    let key = social::in_bundle_key(&list.master_peer_id);
+                    // Key by the roster's master, not the resolver: the roster is the
+                    // authenticated statement of who this device speaks for.
+                    let key = social::in_bundle_key(&list.master);
                     if let (Ok(store), Ok(json)) = (
                         crate::storage::MessageStore::open(db_path, db_passphrase),
                         serde_json::to_string(&record),
                     ) {
                         let _ = store.save_setting(&key, &json);
                     }
-                    hollow_log!("[HOLLOW-FRIENDS] Stored verified carried bundle from {peer_str} (master {})", list.master_peer_id);
+                    hollow_log!("[HOLLOW-FRIENDS] Stored verified carried bundle from {peer_str} (master {})", list.master);
                 } else {
                     hollow_log!("[HOLLOW-SECURITY] REJECTED carried bundle in friend request from {peer_str} — verification FAILED");
                 }
@@ -11593,9 +11449,7 @@ async fn handle_incoming_request(
                             social::send_friend_reject(
                                 ws_cmd_tx, ws_room_peers, peer_str,
                                 &req_master_early, stored_req,
-                                crypto_handler::build_local_device_list(
-                                    master_keypair, device_peer_id, db_path, db_passphrase,
-                                ),
+                                super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase),
                             );
                         }
                         return;
@@ -11713,7 +11567,7 @@ async fn handle_incoming_request(
             // the shared DM room, so it never fires again. Send to the SENDER device.
             social::send_own_profile_to_peer(
                 ws_cmd_tx, ws_room_peers, server_states,
-                local_peer_str, master_keypair, device_peer_id, &peer_str,
+                local_peer_str, master_keypair, peer_str,
                 is_invisible,
                 db_path, db_passphrase,
             );
@@ -11728,23 +11582,16 @@ async fn handle_incoming_request(
             // so a cold resolver cannot file the accept under a bare device id.
             let master = match device_list.as_ref() {
                 Some(list) => {
-                    if !crypto_handler::verify_device_list(list)
-                        || !crypto_handler::device_list_binds_sender(list, peer_str)
-                    {
-                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendAccept from {peer_str}: carried device list rejected");
-                        return;
-                    }
-                    let outcome = crypto_handler::ingest_device_list(
-                        event_tx, master_peer_str, device_peer_id, master_keypair,
-                        peer_str, ws_cmd_tx,
-                        device_list.clone(), db_path, db_passphrase,
+                    let outcome = super::roster_book::ingest(
+                        event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
+                        peer_str, device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
                         &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                         local_peer_str, ws_room_peers, pending_mls_removals,
                     );
-                    let Some(master) = crypto_handler::carried_list_master(list, peer_str) else {
-                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendAccept from {peer_str}: its list did not bind the sender");
+                    let Some(master) = super::roster_book::carried_master(list, peer_str) else {
+                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendAccept from {peer_str}: its roster does not make the sender one of its devices");
                         return;
                     };
                     master
@@ -11823,7 +11670,7 @@ async fn handle_incoming_request(
             // the FriendRequest handler — the is_new gate otherwise suppresses it).
             social::send_own_profile_to_peer(
                 ws_cmd_tx, ws_room_peers, server_states,
-                local_peer_str, master_keypair, device_peer_id, &peer_str,
+                local_peer_str, master_keypair, peer_str,
                 is_invisible,
                 db_path, db_passphrase,
             );
@@ -11840,40 +11687,25 @@ async fn handle_incoming_request(
             // answers somebody we have never been online with, so we have ingested no
             // device list for them and `resolve(device)` hands the device back.
             //
-            // So the reject CARRIES the decliner's own master-signed device list, exactly
-            // like a friend request, and attribution becomes cryptographic: the list must
-            // verify, its signer must BE the master it claims, and the relay-authenticated
-            // sender device must be listed and un-revoked. A list that is present but bad
-            // is a REJECTED message, never a downgrade: `list.is_some()` is not a bypass.
+            // So the reject CARRIES the decliner's roster, exactly like a friend request,
+            // and attribution becomes cryptographic: the relay-authenticated sender device
+            // must be a member of it. A roster that does not make it one is a REJECTED
+            // message, never a downgrade: `list.is_some()` is not a bypass.
             let master = match device_list.as_ref() {
                 Some(list) => {
-                    let reason = if !crypto_handler::verify_device_list(list) {
-                        Some("bad signature or master binding")
-                    } else if !list.devices.iter().any(|d| d == peer_str) {
-                        Some("sender device not in the signed list")
-                    } else if list.revoked.iter().any(|r| r == peer_str) {
-                        Some("sender device is revoked")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = reason {
-                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendReject from {peer_str}: carried device list rejected ({reason})");
-                        return;
-                    }
                     // Ingest through the SAME path the FriendRequest arm uses, so the
                     // resolver, the device store and the DM room key all agree afterwards:
                     // an accept or DM that follows must not compute a different room.
-                    let outcome = crypto_handler::ingest_device_list(
-                        event_tx, master_peer_str, device_peer_id, master_keypair,
-                        peer_str, ws_cmd_tx,
-                        device_list.clone(), db_path, db_passphrase,
+                    let outcome = super::roster_book::ingest(
+                        event_tx, ws_cmd_tx, master_peer_str, device_peer_id,
+                        peer_str, device_list.clone(), db_path, db_passphrase,
                     ).await;
                     enforce_device_revocations(
                         &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                         local_peer_str, ws_room_peers, pending_mls_removals,
                     );
-                    let Some(master) = crypto_handler::carried_list_master(list, peer_str) else {
-                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendReject from {peer_str}: its list did not bind the sender (revoked or claimed elsewhere)");
+                    let Some(master) = super::roster_book::carried_master(list, peer_str) else {
+                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendReject from {peer_str}: its roster does not make the sender one of its devices");
                         return;
                     };
                     master
@@ -12060,7 +11892,7 @@ async fn handle_incoming_request(
                     //
                     // A freshly-imported device has no profile row: never gate on load_profile.
                     if let Some(msg) = social::own_profile_update(
-                        master_keypair, local_peer_str, device_peer_id, is_invisible, false, None,
+                        master_keypair, local_peer_str, is_invisible, false, None,
                         db_path, db_passphrase,
                     ) {
                         super::olm_lane::carry(ws_cmd_tx, &entry.peer_id, Some(&room), &msg, super::olm_lane::NoSession::Queue);
@@ -12136,8 +11968,8 @@ async fn handle_incoming_request(
 
         HavenMessage::FriendListRequest => {
             // Multi-device (Phase 6): a sibling asked for our friend list. Reply
-            // ONLY to our own other device (verified-self). Pull companion to the
-            // push in ingest_sibling_device_list — fixes the join-timing race.
+            // ONLY to our own other device (a roster member). Pull companion to
+            // the push a sibling gets when it joins: fixes the join-timing race.
             if !super::resolver::same_identity(peer_str, local_peer_str) {
                 hollow_log!(
                     "[HOLLOW-MULTIDEV] Dropped FriendListRequest from non-self peer {peer_str}"
@@ -12223,43 +12055,36 @@ async fn handle_incoming_request(
             );
         }
 
-        // -- Multi-device link snapshot --
-        HavenMessage::LinkSnapshotRequest { include_vault: _, include_files: _, msg_count, friend_count, has_profile } => {
-            // An empty device wants our full snapshot. A code-path requester is not a
-            // sibling yet, so the gate is the room of the code WE claimed; the human
-            // Confirm on THIS device is the second one, and Accept hands over everything.
-            if !link_handler::link_request_allowed(peer_str, local_peer_str, ws_room_peers) {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED snapshot request from {peer_str}: not in our link room and not our device");
-                return;
-            }
-            link_handler::handle_inbound_link_request(
-                &event_tx, peer_str, msg_count, friend_count, has_profile,
-            ).await;
+        // -- Multi-device link (`link_handler`, `link_pake`) --
+        HavenMessage::LinkPake { msg } => {
+            link_handler::on_pake(link, ws_cmd_tx, event_tx, ws_room_peers, peer_str, &msg).await;
         }
 
-        HavenMessage::LinkSnapshotKey { link_id, aes_key: _, aes_nonce: _ } => {
-            // The populated device announced the link_id. The `.hollow` blob that
-            // follows is encrypted with the CODE WE typed (no key travels in the
-            // message), so register the pending stash keyed by link_id + our code.
-            link_handler::handle_inbound_link_key(
-                pending_link_snapshots, &link_id, peer_str, link_handler::my_link_code(),
-            );
+        HavenMessage::LinkPakeReply { msg, confirm } => {
+            link_handler::on_pake_reply(link, ws_cmd_tx, event_tx, peer_str, &msg, &confirm).await;
+        }
+
+        HavenMessage::LinkSealed { ct } => {
+            link_handler::on_sealed(link, ws_cmd_tx, event_tx, pending_link_snapshots, peer_str, &ct).await;
         }
 
         HavenMessage::LinkDeclined => {
-            hollow_log!("[HOLLOW-LINK] Link request declined by {peer_str}");
-            let _ = event_tx.send(NetworkEvent::LinkFailed {
-                link_id: String::new(),
-                error: "declined by other device".to_string(),
-            }).await;
+            if link_handler::on_declined(link, ws_cmd_tx, peer_str) {
+                hollow_log!("[HOLLOW-LINK] Link request declined by {peer_str}");
+                let _ = event_tx.send(NetworkEvent::LinkFailed {
+                    link_id: String::new(),
+                    error: "Your other device declined the link.".to_string(),
+                }).await;
+            }
         }
 
         HavenMessage::LinkSnapshotAck { link_id } => {
-            // (Sender side) The empty device confirmed it received + stashed the full
-            // snapshot. Only NOW flip the sender UI to "Data sent" — the prior
-            // queued-bytes-leaving-our-channel signal was premature.
-            hollow_log!("[HOLLOW-LINK] LinkSnapshotAck for {link_id} from {peer_str} — receiver has everything");
-            let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: 0 }).await;
+            // The joiner stashed the whole snapshot: only now does the sender show
+            // "Data sent", since bytes leaving our channel prove nothing.
+            if link_handler::on_ack(link, ws_cmd_tx, peer_str) {
+                hollow_log!("[HOLLOW-LINK] LinkSnapshotAck for {link_id} from {peer_str}");
+                let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: 0 }).await;
+            }
         }
 
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, file_meta } => {
@@ -12793,47 +12618,46 @@ async fn handle_incoming_request(
                 }).await;
             }
 
-            // Multi-device: ingest the sender's signed device list (verify, monotonic,
-            // persist, resolver update, DeviceListUpdated). A list for our OWN master
-            // is a sibling device and is merged as a union.
+            // Multi-device: fold the sender's roster into ours for its master (verify,
+            // merge, persist, resolver update, DeviceListUpdated).
             //
-            // ORDER, and why it is this way round (CRYPTO-1): the list is ingested
-            // BEFORE the profile signature is checked, deliberately. The list
-            // authenticates itself twice over, by the master's own signature and by
-            // `device_list_binds_sender`, so it needs nothing from the profile. The
-            // profile signature needs the list: it verifies against `resolve(sender)`,
-            // and this ingest is what teaches the resolver device-to-master. The
-            // profile FIELDS are still refused without a valid signature, downstream.
-            let ingest_outcome = super::crypto_handler::ingest_device_list(
-                event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
-                ws_cmd_tx, device_list, db_path, db_passphrase,
+            // ORDER, and why it is this way round (CRYPTO-1): the roster is ingested
+            // BEFORE the profile signature is checked, deliberately. Every statement in
+            // it verifies on its own, so it needs nothing from the profile. The profile
+            // signature needs it: it verifies against `resolve(sender)`, and this ingest
+            // is what teaches the resolver device-to-master. The profile FIELDS are
+            // still refused without a valid signature, downstream.
+            let ingest_outcome = super::roster_book::ingest(
+                event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
+                device_list, db_path, db_passphrase,
             ).await;
             let our_devices_grew = ingest_outcome.our_devices_grew;
+            converge_new_siblings(
+                &ingest_outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,
+                local_peer_str, server_states, is_invisible, db_path, db_passphrase,
+            );
             // Step 7: enforce any device revocations learned from this list — drop
             // Olm sessions + (coordinator) remove the revoked leaf from shared servers.
             enforce_device_revocations(
                 &ingest_outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                 local_peer_str, ws_room_peers, pending_mls_removals,
             );
-            // If a sibling merge added one of OUR device ids, re-announce our profile
-            // with the merged device list to every peer we share a room with, so
-            // friends converge on the full device set immediately. Without this a
-            // friend learns the union only when our substitute device joins their room.
+            // Our own roster changed: re-announce it to every peer we share a room
+            // with, our other devices included, so everyone converges now rather than
+            // when each next meets the device that changed it.
             if our_devices_grew {
                 let peers: Vec<String> = ws_room_peers.values()
                     .flat_map(|p| p.iter().cloned())
                     .collect();
                 hollow_log!(
-                    "[HOLLOW-DEVICES] Sibling merge grew our device set — re-announcing profile to {} room peer(s)",
+                    "[HOLLOW-ROSTER] Our roster changed: re-announcing profile to {} room peer(s)",
                     peers.len()
                 );
                 for pid in peers {
-                    if pid == local_peer_str || pid == device_peer_id { continue; }
-                    // Skip our own other devices (siblings) — they already have it.
-                    if super::resolver::same_identity(&pid, local_peer_str) { continue; }
+                    if pid == local_peer_str || pid == device_peer_id || pid == peer_str { continue; }
                     social::send_own_profile_to_peer(
                         ws_cmd_tx, ws_room_peers, server_states,
-                        local_peer_str, master_keypair, device_peer_id, &pid,
+                        local_peer_str, master_keypair, &pid,
                         is_invisible,
                         db_path, db_passphrase,
                     );
@@ -13440,17 +13264,17 @@ async fn handle_incoming_request(
             // with its avatar for someone we are not close to.
             social::send_own_profile_full_to_peer(
                 ws_cmd_tx, ws_room_peers, server_states,
-                local_peer_str, master_keypair, device_peer_id, peer_str,
+                local_peer_str, master_keypair, peer_str,
                 is_invisible,
                 db_path, db_passphrase,
             );
         }
 
         HavenMessage::ProfileCard { card, avatar_b64, device_list } => {
-            // The list first: it is what binds the sending device to the card's master.
-            let outcome = crypto_handler::ingest_device_list(
-                event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
-                ws_cmd_tx, device_list, db_path, db_passphrase,
+            // The roster first: it is what binds the sending device to the card's master.
+            let outcome = super::roster_book::ingest(
+                event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
+                device_list, db_path, db_passphrase,
             ).await;
             enforce_device_revocations(
                 &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
@@ -13477,11 +13301,15 @@ async fn handle_incoming_request(
             );
         }
 
-        HavenMessage::DeviceListTombstone { device_list } => {
-            let outcome = crypto_handler::ingest_device_list(
-                event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
-                ws_cmd_tx, Some(device_list), db_path, db_passphrase,
+        HavenMessage::RosterNotice { roster } => {
+            let outcome = super::roster_book::ingest(
+                event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
+                Some(roster), db_path, db_passphrase,
             ).await;
+            converge_new_siblings(
+                &outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,
+                local_peer_str, server_states, is_invisible, db_path, db_passphrase,
+            );
             enforce_device_revocations(
                 &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                 local_peer_str, ws_room_peers, pending_mls_removals,
@@ -13671,54 +13499,52 @@ mod tests {
     use super::*;
     use crate::identity::native_identity::NativeKeypair;
 
-    /// HOL-SEC-032. A revoked device still holds the master key, so it answers the
-    /// sibling proof. The proof re-bound it before anything read our tombstones,
-    /// then handed it our friends, servers and DM history.
+    /// HOL-SEC-032 and design ID-1. A device holding our master key is ours only when
+    /// our roster makes it a member: a removed device, or one that restored a backup and
+    /// was never admitted, is neither bound to our master nor sent our friends, servers
+    /// or DM history, whatever key it holds.
     #[test]
-    fn authz_a_revoked_sibling_is_not_re_bound_by_the_proof() {
+    fn authz_only_a_roster_member_gets_sibling_state() {
         let _lock = super::super::resolver::test_lock();
         super::super::resolver::clear_all();
 
         let master = NativeKeypair::from_secret_bytes(&[0x01; 32]);
         let master_id = master.peer_id();
         let local_device = NativeKeypair::from_secret_bytes(&[0x02; 32]).peer_id();
-        let revoked = NativeKeypair::from_secret_bytes(&[0x03; 32]).peer_id();
+        let removed = NativeKeypair::from_secret_bytes(&[0x03; 32]).peer_id();
+        let never_admitted = NativeKeypair::from_secret_bytes(&[0x04; 32]).peer_id();
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sibling.db").to_str().unwrap().to_string();
         let pass = "cd".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
-        {
-            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
-            let list = crypto_handler::build_signed_device_list(
-                &master, 2, vec![local_device.clone()], vec![revoked.clone()],
-            );
-            let json = serde_json::to_string(&list).unwrap();
-            store.save_device_list(&master_id, &json, list.version, &list.devices, 0).unwrap();
-            store.save_friend("friend", "accepted", "outgoing", 1).unwrap();
-        }
+        crate::storage::MessageStore::open(&db, &pass)
+            .unwrap()
+            .save_friend("friend", "accepted", "outgoing", 1)
+            .unwrap();
         super::super::resolver::seed_self(&master_id, std::slice::from_ref(&local_device));
+        super::super::resolver::mark_revoked(std::slice::from_ref(&removed));
         let (ws_cmd_tx, mut ws_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
         let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::from([(
             format!("inbox:{master_id}"),
-            std::collections::HashSet::from([local_device.clone(), revoked.clone()]),
+            std::collections::HashSet::from([local_device.clone(), removed.clone(), never_admitted.clone()]),
         )]);
-        let mut snapshot_asked = std::collections::HashSet::new();
 
-        on_verified_sibling(
-            &ws_cmd_tx, &rooms, &master, &local_device, &master_id, &HashMap::new(),
-            &mut snapshot_asked, false, &db, &pass, &revoked,
-        );
-
-        assert_ne!(
-            super::super::resolver::resolve(&revoked),
-            master_id,
-            "HOL-SEC-032: the proof re-bound a revoked device to our master",
-        );
-        assert!(
-            ws_cmd_rx.try_recv().is_err(),
-            "HOL-SEC-032: a revoked device was sent our state",
-        );
+        for outsider in [&removed, &never_admitted] {
+            on_verified_sibling(
+                &ws_cmd_tx, &rooms, &master, &master_id, &HashMap::new(),
+                false, &db, &pass, outsider,
+            );
+            assert_ne!(
+                super::super::resolver::resolve(outsider),
+                master_id,
+                "a device outside our roster was bound to our master",
+            );
+            assert!(
+                ws_cmd_rx.try_recv().is_err(),
+                "a device outside our roster was sent our state",
+            );
+        }
         super::super::resolver::clear_all();
     }
 }

@@ -185,11 +185,11 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
 | F1 | A foreign device list claims another identity's MASTER id (`speaks_for` treats an unbound id as free): friendship with that master moves to the attacker, and at next boot its server membership and role fold into the attacker | identity:S1 | Critical? | FIXED HOL-SEC-006 |
-| F2 | A foreign list "revokes" a legacy (device == master) contact or any unbound device: DMs dropped, Olm session deleted, MLS leaf removal queued | identity:S2 | High | Legacy (device == master) half FIXED HOL-SEC-006; unbound-device half = F6 (co-signatures, ID-1) |
-| F3 | A revoked device signs a higher list and revokes the real ones (they wipe) | identity:S3 | Critical | KNOWN (AR-02, design ID-1); the comment at crypto_handler.rs:879 overclaims |
+| F2 | A foreign list "revokes" a legacy (device == master) contact or any unbound device: DMs dropped, Olm session deleted, MLS leaf removal queued | identity:S2 | High | Legacy (device == master) half FIXED HOL-SEC-006; unbound-device half FIXED HOL-SEC-077 (ID-1: a device counts only with its own consent) |
+| F3 | A revoked device signs a higher list and revokes the real ones (they wipe) | identity:S3 | Critical | FIXED HOL-SEC-077 (design ID-1: a removal is final in its base, the phrase is the last word) |
 | F4 | A revoked sibling re-enters through the sibling proof (resolver re-bound before the merge refuses it) and gets friends, servers, DM backfill | identity:S4 | High | FIXED HOL-SEC-032 (`sibling_proof_refused` first in `on_verified_sibling`) |
 | F5 | Revoked devices resolve to themselves, so they pass the key-exchange and HOL-SEC-003 device check | dm:S-18 | High | FIXED HOL-SEC-032 (enforced revocations recorded in `revoked_devices`, warmed at every start; key exchange refuses a revoked device) |
-| F6 | First-come squatting of device ids we have not met yet | identity:S13 | Medium | PLAUSIBLE |
+| F6 | First-come squatting of device ids we have not met yet | identity:S13 | Medium | FIXED HOL-SEC-077 (consent: a roster names a device only if its key signed up for that master) |
 | F7 | `FriendRequest`/`FriendReject`/`ServerJoinRequest` drop `newly_revoked` (no Olm/MLS enforcement) and attribute to `list.master_peer_id` even when the binding was refused | identity parity notes | Medium | FIXED HOL-SEC-033 (`carried_list_master` after ingest; all three arms enforce the revocations) |
 | F8 | Destroy-notice replay loop after an identity reappears; any list raises a false "reappeared" alert | identity:S10 | Low | FIXED HOL-SEC-034 (a never-cleared floor for friend notices; only a never-seen device counts as the return) |
 
@@ -240,7 +240,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | I5 | Anyone with a server id turns ring retention on, extends or clears it | relay:9 | Medium | FIXED HOL-SEC-065 (ring control signed by the change key of the server's newest join lock) |
 | I6 | Anyone with a server id reads the `~join` ring (plaintext join requests: device list, KeyPackage, Twitch credential) and every channel ring | relay:10 | Medium | Join half FIXED HOL-SEC-062 (the `~join` ring holds only sealed boxes); control half FIXED HOL-SEC-065 |
 | I7 | Ring flush with junk 0x07 frames; guests unthrottled on 0x07 | relay:11 | Medium | FIXED + DEPLOYED HOL-SEC-030: fair-share ring eviction (a flooder evicts itself); guests may not send topic frames |
-| I8 | Link-code guess throttle bypassed by two oracles (`claim` answers "taken", joining `link:{CODE}` returns the roster) | relay:4 | Medium | OPEN, folded into HOL-SEC-002 (the link-code redesign) |
+| I8 | Link-code guess throttle bypassed by two oracles (`claim` answers "taken", joining `link:{CODE}` returns the roster) | relay:4 | Medium | FIXED with HOL-SEC-002 (the rendezvous part opens nothing; the secret part gets one online guess per code) |
 | I9 | Offline-buffer global backstop evicted by throwaway identities | relay:18 | Low | FIXED HOL-SEC-070 (one byte budget over every waiting frame, weighed with its overhead and evicted by address share; the per-identity key caps are gone); AR-07 closed |
 | I10 | A revoked sibling reads the mailbox again after any relay restart (version marks in RAM only) | relay:19 | Medium | FIXED + DEPLOYED HOL-SEC-031: the device-list marks ride the restart snapshot (codec version 3) |
 | I11 | Guests deposit and trigger pushes through JSON `direct` | relay:20 | Low | FIXED + DEPLOYED HOL-SEC-030 (guests may not send JSON `direct`) |

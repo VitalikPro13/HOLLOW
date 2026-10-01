@@ -504,7 +504,11 @@ fn try_process_channel_msg(
                         return None;
                     }
                     // The leaf proves the sender's master: the message is signed by
-                    // and attributed to it, so the row is master-keyed like the live one.
+                    // and attributed to it, so the row is master-keyed like the live one,
+                    // and like the live one a device its roster does not admit is nobody.
+                    if crate::node::resolver::disowns(&sender.master, &sender.device) {
+                        return None;
+                    }
                     let sender_master = sender.master.clone();
                     // Reject a present-but-invalid signature (defence in depth
                     // behind MLS group membership) — see fetch_channel_sig_rejected.

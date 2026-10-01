@@ -77,6 +77,9 @@ hmac = "0.12"
 # Join-lane sealed boxes (node/sealed_box.rs); both already in the tree through openmls.
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 hkdf = "0.12"
+# Device-link handshake (node/link_handler.rs): the code's secret half keys a PAKE, so
+# the relay, which sees the other half, gets one guess per attempt (HOL-SEC-002).
+spake2 = "0.4"
 # Pure-Rust Opus (libopus transpiled via c2rust) — decodes screen-share audio
 # packets on mobile. Pure Rust = no cmake/NDK, rides the existing cross-compile.
 unsafe-libopus = "0.2"

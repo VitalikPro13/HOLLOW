@@ -50,7 +50,7 @@ Future<BuildContext> _open(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('Link a device names the code as it is: 6 characters', (
+  testWidgets('Link a device names the code as it is: 10 characters', (
     tester,
   ) async {
     showWelcomeDialog(await _open(tester));
@@ -61,7 +61,7 @@ void main() {
       findsNothing,
       reason: 'the link code is letters and digits, so "digit" misleads',
     );
-    expect(find.textContaining('6-character code'), findsOneWidget);
+    expect(find.textContaining('10-character code'), findsOneWidget);
   });
 
   testWidgets('creating an identity is the one filled action, and no phrase '

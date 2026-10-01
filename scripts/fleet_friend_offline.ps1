@@ -135,7 +135,7 @@ Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
 # --- 1. b goes offline; a sends the request -> deposited in b's mailbox. ------
 Stop-Peer b
 Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step a @{ op = 'tap'; target = 'type:HollowChip>text:Add friend'; index = 0 }
+Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Add friend'; index = 0 }
 # Assert the id really IS in the field before sending: enter_text has reported
 # success into this field while it held only a fragment ("nh" once, which the
 # app then resolved as a nickname and never deposited), and that failure is
@@ -154,7 +154,7 @@ Say "a sent the request to an offline b (deposited in the relay mailbox)"
 Stop-Peer a
 Restart-Peer b
 Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step b @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+Step b @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
 Step b @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
 Step b @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
 Say "b accepted the request delivered from the mailbox"
@@ -174,7 +174,7 @@ Step b @{ op = 'wait_for'; target = 'text:probe-a'; timeout_ms = 60000 }
 Say "PASS gate 1: b still shows probe-a as an accepted friend after re-delivery"
 # And nothing is waiting under Requests (no resurrected pending request).
 Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step b @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+Step b @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
 Step b @{ op = 'wait_for'; target = 'text:No requests waiting'; timeout_ms = 15000 }
 Say "PASS gate 2: nothing waits under b's Requests - the accepted friend was not downgraded"
 

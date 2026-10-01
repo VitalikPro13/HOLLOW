@@ -293,7 +293,7 @@ void main() {
       'welcome_link_2_entercode_light',
       const DeviceLinkState(),
       light: true,
-      typed: 'K7Q2MX',
+      typed: 'K7Q2MXH4PZ',
     );
   }, variant: _desktop);
   testWidgets('link: enter code, relay not up yet', (t) async {
@@ -340,6 +340,15 @@ void main() {
       const DeviceLinkState(),
       size: _hand,
       typed: 'K7Q',
+    );
+  }, variant: _phone);
+  testWidgets('link: phone code, all ten', (t) async {
+    await shootLink(
+      t,
+      'welcome_phone_link_code_full_dark',
+      const DeviceLinkState(),
+      size: _hand,
+      typed: 'K7Q2MXH4PZ',
     );
   }, variant: _phone);
   testWidgets('link: phone receiving', (t) async {

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
@@ -17,6 +19,7 @@ class _DuressApi implements RustLibApi {
   int saves = 0;
   int clears = 0;
   int destroys = 0;
+  String? lastPhrase;
 
   @override
   Future<void> crateApiIdentitySetDuressCode({
@@ -24,8 +27,10 @@ class _DuressApi implements RustLibApi {
     required String duressCode,
     required String scope,
     required bool notifyFriends,
+    String? phrase,
   }) async {
     saves++;
+    lastPhrase = phrase;
     if (error != null) throw error!;
   }
 
@@ -38,8 +43,9 @@ class _DuressApi implements RustLibApi {
 
   @override
   Future<void> crateApiWipeDestroyWithScope(
-      {required String scope, required bool notifyFriends}) async {
+      {required String scope, required bool notifyFriends, String? phrase}) async {
     destroys++;
+    lastPhrase = phrase;
     if (error != null) throw error!;
   }
 
@@ -62,6 +68,7 @@ void main() {
     api.saves = 0;
     api.clears = 0;
     api.destroys = 0;
+    api.lastPhrase = null;
   });
 
   identity_api.ProtectionStatus protection({
@@ -80,6 +87,7 @@ void main() {
     Widget card, {
     identity_api.DuressStatus? status,
     identity_api.ProtectionStatus? protectionStatus,
+    bool phraseIsRoot = false,
   }) async {
     tester.view.physicalSize = const Size(500, 900);
     tester.view.devicePixelRatio = 1.0;
@@ -95,6 +103,11 @@ void main() {
             duressStatusProvider.overrideWith((ref) async => status),
           identityProtectionProvider
               .overrideWith((ref) async => protectionStatus ?? protection()),
+          rosterStatusProvider.overrideWith((ref) async => roster_api.RosterStatus(
+                member: true,
+                protected: phraseIsRoot,
+                devices: const [],
+              )),
         ]),
         child: MaterialApp(
           debugShowCheckedModeBanner: false,
@@ -374,6 +387,38 @@ void main() {
       expect(find.text('Remove duress code'), findsOneWidget);
       expect(find.text("That password isn't right."), findsOneWidget);
     });
+  });
+
+  testWidgets('once the phrase is the root, destroying everywhere asks for it',
+      (tester) async {
+    await pumpCard(tester, const AccountDangerZoneCard(), phraseIsRoot: true);
+
+    await tester.tap(find.text('Destroy identity'));
+    await tester.pumpAndSettle();
+    expect(find.text('Recovery phrase'), findsOneWidget);
+    final destroy = find.widgetWithText(HollowButton, 'Destroy');
+    await tester.enterText(find.byType(TextField).last, 'DESTROY');
+    await tester.pumpAndSettle();
+    expect(tester.widget<HollowButton>(destroy).onPressed, isNull,
+        reason: 'no phrase typed yet');
+
+    const phrase = 'abandon abandon abandon abandon abandon abandon abandon '
+        'abandon abandon abandon abandon about';
+    // Rust refuses after reading it, so the dialog stays and nothing relaunches.
+    api.error = 'boom';
+    await tester.enterText(find.byType(TextField).first, '  ${phrase.toUpperCase()} ');
+    await tester.pumpAndSettle();
+    await tester.tap(destroy);
+    await tester.pumpAndSettle();
+    expect(api.destroys, 1);
+    expect(api.lastPhrase, phrase, reason: 'Rust gets the phrase normalised');
+
+    // Unlinking this device alone never asks for it.
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Destroy device'));
+    await tester.pumpAndSettle();
+    expect(find.text('Recovery phrase'), findsNothing);
   });
 
   testWidgets('a failed destroy is said inside the dialog', (tester) async {

@@ -9,6 +9,7 @@ import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/providers/showcase_assets_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -147,8 +148,7 @@ class EventStreamNotifier extends Notifier<bool> {
 
   bool _selfNuking = false;
 
-  /// This device lost its right to the identity (revoked, or a signed destroy
-  /// reached it). The wipe runs in Rust and leaves a marker, because the live
+  /// This device lost its right to the identity: a signed destroy reached it. The wipe runs in Rust and leaves a marker, because the live
   /// node holds open SQLCipher handles and an in-process delete fails on
   /// Windows; the next launch finishes it before the node starts.
   /// Idempotent, since the event can repeat.
@@ -862,6 +862,11 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Device list updated: $masterPeerId');
         ref.read(deviceLinkProvider.notifier).refresh();
         ref.read(deviceLabelProvider.notifier).refresh();
+        ref.invalidate(rosterStatusProvider);
+        // Our own roster moved: this device may have started or stopped waiting.
+        if (masterPeerId == ref.read(identityProvider).peerId) {
+          ref.read(rosterGateProvider.notifier).refresh();
+        }
         // The ingest may have RE-KEYED a friend row from a device id to this master
         // (a friend added by temporary nickname was stranded under the device id).
         ref.read(friendsProvider.notifier).loadAll();
@@ -878,11 +883,22 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.invalidate(identityDestroyedProvider(peerId));
         }
 
-      case NetworkEvent_SelfRevoked():
-        // THIS device was revoked: wipe the data dir and relaunch to a clean Welcome.
-        // The cryptographic cutoff already happened; this is the honest teardown.
-        debugPrint('[HOLLOW] This device was REVOKED — self-nuking');
-        _selfNuke('This device was removed from your identity. Resetting…');
+      case NetworkEvent_DeviceRemoved(:final by, :final wipeAtMs):
+        // THIS device was removed: it locks, and erases itself at the deadline
+        // unless the recovery phrase brings it back. Contacts already stopped
+        // sending to it.
+        debugPrint('[HOLLOW] This device was removed by $by');
+        ref.read(rosterGateProvider.notifier).removed(by, wipeAtMs.toInt());
+
+      case NetworkEvent_DeviceRestored():
+        ref.read(rosterGateProvider.notifier).restored();
+        ref.invalidate(rosterStatusProvider);
+
+      case NetworkEvent_PendingDeviceAsking(:final devicePeerId):
+        // A device restored from a backup asks to join: the shell asks the
+        // person whether it is theirs.
+        ref.read(pendingDeviceAsksProvider.notifier).add(devicePeerId);
+        ref.invalidate(rosterStatusProvider);
 
       case NetworkEvent_DestroyReceived(:final scope):
         // A destroy signed by our own master reached this device, online or on
@@ -1036,12 +1052,16 @@ class EventStreamNotifier extends Notifier<bool> {
           :final theirMsgCount,
           :final theirFriendCount,
           :final theirHasProfile,
+          :final label,
+          :final platform,
         ):
         ref.read(deviceLinkSyncProvider.notifier).onSiblingLinkAvailable(
               peerId,
               theirMsgCount,
               theirFriendCount,
               theirHasProfile,
+              label: label,
+              platform: platform,
             );
 
       case NetworkEvent_LinkProgress(:final bytesReceived, :final totalBytes):

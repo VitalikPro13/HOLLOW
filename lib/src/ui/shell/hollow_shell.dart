@@ -135,6 +135,9 @@ import 'package:hollow/src/ui/components/panel_resize_handle.dart';
 import 'package:hollow/src/ui/shell/member_panel.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/mobile/mobile_shell.dart';
+import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/rust/api/roster.dart' as roster_api;
+import 'package:hollow/src/ui/shell/roster_lock.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/ui/guest/public_channel_browser.dart';
@@ -476,6 +479,83 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
   }
 
+  Route<void>? _rosterLock;
+  bool _pendingDeviceDialogOpen = false;
+
+  /// Keeps the roster lock in step with the gate (design ID-1), and asks about
+  /// each device restored from a backup that wants to join.
+  void _armRosterGate() {
+    ref.listenManual<RosterGate>(rosterGateProvider, (_, _) => _syncRosterLock(),
+        fireImmediately: true);
+    ref.listenManual<bool>(appLockedProvider, (_, _) => _syncRosterLock());
+    ref.listenManual<List<String>>(pendingDeviceAsksProvider, (_, asks) {
+      if (asks.isNotEmpty) _askAboutPendingDevices();
+    });
+  }
+
+  /// Nothing routes above the app lock's cover, so the roster lock goes up only
+  /// once the cover has lifted.
+  void _syncRosterLock() {
+    if (!mounted) return;
+    final gate = ref.read(rosterGateProvider);
+    final nav = hollowNavigatorKey.currentState;
+    final route = _rosterLock;
+    if (gate.kind != RosterGateKind.none && route == null) {
+      if (ref.read(appLockedProvider)) return;
+      final lock = rosterLockRoute();
+      _rosterLock = lock;
+      nav?.push(lock);
+    } else if (gate.kind == RosterGateKind.none && route != null) {
+      _rosterLock = null;
+      if (route.isActive) nav?.removeRoute(route);
+    }
+  }
+
+  /// Completes once the app lock is off.
+  Future<void> _untilUnlocked() async {
+    if (!ref.read(appLockedProvider)) return;
+    final unlocked = Completer<void>();
+    final sub = ref.listenManual<bool>(appLockedProvider, (_, locked) {
+      if (!locked && !unlocked.isCompleted) unlocked.complete();
+    });
+    await unlocked.future;
+    sub.close();
+  }
+
+  Future<void> _askAboutPendingDevices() async {
+    if (_pendingDeviceDialogOpen) return;
+    _pendingDeviceDialogOpen = true;
+    try {
+      while (mounted) {
+        await _untilUnlocked();
+        if (!mounted) break;
+        final asks = ref.read(pendingDeviceAsksProvider);
+        // Only a device that belongs can answer for another.
+        if (asks.isEmpty || ref.read(rosterGateProvider).kind != RosterGateKind.none) break;
+        await showPendingDeviceDialog(context, ref, asks.first);
+      }
+    } finally {
+      _pendingDeviceDialogOpen = false;
+    }
+  }
+
+  /// An identity from before 0.12 still holds the phrase it stored: shown once,
+  /// checked, made the root, erased. "Later" leaves a Home reminder.
+  Future<void> _offerPhraseUpgrade() async {
+    // The stored phrase is on screen in this dialog: never under a locked app.
+    await _untilUnlocked();
+    if (!mounted || ref.read(rosterGateProvider).kind != RosterGateKind.none) return;
+    String? stored;
+    try {
+      stored = await roster_api.storedPhraseForUpgrade();
+    } catch (e) {
+      debugPrint('[HOLLOW] Stored phrase check skipped: $e');
+      return;
+    }
+    if (stored == null || !mounted) return;
+    await showPhraseUpgradeDialog(context, stored);
+  }
+
   /// Unlocks the identity, showing a blocking dialog when one is needed.
   /// Returns false when the user cancelled.
   Future<bool> _unlockIdentity() async {
@@ -763,9 +843,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
       showConnectingDialog(context, message: 'Connecting to link your device…');
     }
 
+    // Shown once and never stored: the dialog asks for a few words back.
     if (identity.mnemonic != null && mounted && !isLinkDevice) {
-      await storage_api.saveMnemonic(mnemonic: identity.mnemonic!);
-      if (!mounted) return;
       showMnemonicDialog(context, identity.mnemonic!);
     }
 
@@ -863,6 +942,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(lockAfterMinutesProvider.notifier).load();
     _armAppLock();
     await _lockAtLaunchIfNeeded();
+    // A removed device, or one restored from a backup and still waiting, locks
+    // before the local lists show.
+    await ref.read(rosterGateProvider.notifier).refresh();
+    _armRosterGate();
     // Whether the shop has been woken up here. The dock bar watches the gate on
     // the first frame, so it loads here, never in build().
     await ref.read(shopUnlockedProvider.notifier).load();
@@ -940,6 +1023,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     await ref.read(nodeProvider.notifier).start();
+
+    // The node brings our own roster up to date at start.
+    await ref.read(rosterGateProvider.notifier).refresh();
+    unawaited(_offerPhraseUpgrade());
 
     await _resumeInviteAfterRelaySwitch();
 

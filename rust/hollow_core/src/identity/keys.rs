@@ -79,6 +79,13 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
     save_keypair_to(&device_keypair_path()?, &device_keypair)?;
     let device_peer_id = device_keypair.peer_id();
 
+    // The phrase exists only now, so the recovery key signs the identity's genesis
+    // here: this device alone, the phrase as the root (design ID-1).
+    let seed = zeroize::Zeroizing::new(mnemonic.to_seed(""));
+    let recovery = super::recovery::recovery_keypair_from_seed(&seed);
+    let genesis = super::roster::Roster::genesis(&keypair, &recovery, &device_keypair, now_ms());
+    crate::node::roster_book::write_bootstrap(&data_dir()?, &genesis)?;
+
     Ok(IdentityData {
         keypair,
         peer_id,
@@ -86,6 +93,13 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
         device_peer_id,
         mnemonic: Some(mnemonic_phrase),
     })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// Restore an identity from an existing mnemonic phrase.
@@ -107,6 +121,18 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
     let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
     save_keypair_to(&device_keypair_path()?, &device_keypair)?;
     let device_peer_id = device_keypair.peer_id();
+
+    // The phrase was typed on this device, so it admits it (design ID-1).
+    let seed = zeroize::Zeroizing::new(mnemonic.to_seed(""));
+    let recovery = super::recovery::recovery_keypair_from_seed(&seed);
+    let mut roster = super::roster::Roster::new(&peer_id);
+    roster.add_consent(super::roster::sign_consent(&device_keypair, &peer_id));
+    roster.add_phrase_statement(
+        &super::roster::r_pub_of(&recovery),
+        None,
+        Some(super::roster::sign_phrase_admit(&keypair, &recovery, now_ms(), &device_peer_id)),
+    )?;
+    crate::node::roster_book::write_bootstrap(&data_dir()?, &roster)?;
 
     Ok(IdentityData {
         keypair,

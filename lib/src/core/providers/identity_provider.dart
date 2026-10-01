@@ -2,7 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 
-/// Identity state: peer ID, mnemonic (first run only), loaded flag.
+/// Identity state: peer ID, mnemonic (first run only, until it is confirmed),
+/// loaded flag.
 class IdentityState {
   final String? peerId;
   final String? mnemonic;
@@ -34,6 +35,14 @@ class IdentityState {
 class IdentityNotifier extends Notifier<IdentityState> {
   @override
   IdentityState build() => const IdentityState();
+
+  /// The phrase was written down and checked: nothing keeps it after this
+  /// (design ID-1).
+  void forgetMnemonic() => state = IdentityState(
+        peerId: state.peerId,
+        isLoaded: state.isLoaded,
+        error: state.error,
+      );
 
   /// Load identity from disk (or create new) and open the message store.
   Future<void> load() async {

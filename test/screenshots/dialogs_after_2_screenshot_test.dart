@@ -339,8 +339,7 @@ class _Link extends DeviceLinkSyncNotifier {
   @override
   DeviceLinkState build() => seed;
   @override
-  Future<void> enterCode(String code,
-      {required bool includeVault, required bool includeFiles}) async {}
+  Future<void> enterCode(String code) async {}
 }
 
 class _Twitch extends TwitchJoinCalls {

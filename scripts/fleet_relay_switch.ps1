@@ -424,7 +424,7 @@ function Close-Settings($peer) {
 function Remove-Friendship($peer, $friendName) {
     Close-Settings $peer
     Open-Friends $peer
-    Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:HollowChip>text:Friends'; index = 0 } | Out-Null
+    Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Friends'; index = 0 } | Out-Null
     if (-not (Test-Target $peer 'semantics:Remove friend' 10000)) {
         Add-Note "$peer's Friends tab shows no Remove friend control for $friendName"
         Close-Friends $peer
@@ -735,7 +735,7 @@ try {
             Step c @{ op = 'tap'; target = 'text:Send request'; index = 0 }
             Open-Friends a
             # The Accept button only exists on the INCOMING tab.
-            Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+            Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
             Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 90000 }
             Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
             Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 60000 }

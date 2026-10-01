@@ -42,7 +42,7 @@
   {
    "peer": "b",
    "op": "tap",
-   "target": "type:HollowChip>text:Add friend",
+   "target": "type:_FriendsManager > semantics:Add friend",
    "index": 0
   },
   {

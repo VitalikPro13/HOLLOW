@@ -198,8 +198,14 @@ pub enum NetworkEvent {
     /// identity, or one re-keyed. `peer_id` is the MASTER, `kind` is `new_device` or
     /// `identity_key_changed`.
     SecurityAlert { peer_id: String, kind: String, detail: String, created_at: i64 },
-    /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
-    SelfRevoked,
+    /// A current device removed THIS one (design ID-1). Dart locks the app and erases
+    /// it at `wipe_at_ms` unless the recovery phrase is typed.
+    DeviceRemoved { by: String, wipe_at_ms: i64 },
+    /// A recovery kept this device after all: the lock lifts.
+    DeviceRestored,
+    /// A device asked to join our identity with nobody vouching (a restored backup):
+    /// Dart asks whether to approve it. It joins in seven days unless refused.
+    PendingDeviceAsking { device_peer_id: String },
     /// A verified destruction order for THIS identity arrived. Dart runs the wipe
     /// and relaunches; `scope` is `device` | `device_revoke` | `identity`.
     DestroyReceived { scope: String },
@@ -311,6 +317,8 @@ pub enum NetworkEvent {
         their_msg_count: u32,
         their_friend_count: u32,
         their_has_profile: bool,
+        label: String,
+        platform: String,
     },
     LinkProgress {
         link_id: String,
@@ -918,7 +926,13 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ProfileUpdated { peer_id } => {
             NetworkEvent::ProfileUpdated { peer_id }
         }
-        node::NetworkEvent::SelfRevoked => NetworkEvent::SelfRevoked,
+        node::NetworkEvent::DeviceRemoved { by, wipe_at_ms } => {
+            NetworkEvent::DeviceRemoved { by, wipe_at_ms }
+        }
+        node::NetworkEvent::DeviceRestored => NetworkEvent::DeviceRestored,
+        node::NetworkEvent::PendingDeviceAsking { device_peer_id } => {
+            NetworkEvent::PendingDeviceAsking { device_peer_id }
+        }
         node::NetworkEvent::DestroyReceived { scope } => {
             NetworkEvent::DestroyReceived { scope }
         }
@@ -1064,8 +1078,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::LinkCodeError { error, code } => {
             NetworkEvent::LinkCodeError { error, code }
         }
-        node::NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile } => {
-            NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile }
+        node::NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile, label, platform } => {
+            NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile, label, platform }
         }
         node::NetworkEvent::LinkProgress { link_id, bytes_received, total_bytes } => {
             NetworkEvent::LinkProgress { link_id, bytes_received, total_bytes }
@@ -1735,7 +1749,7 @@ fn open_local_store() -> Result<MessageStore, String> {
 /// Local-only, so a person's two devices may show different labels for a third.
 #[frb]
 pub fn set_device_label(device_peer_id: String, label: String) -> Result<(), String> {
-    let label = if label.len() > 48 { label[..48].to_string() } else { label };
+    let label = crate::node::crypto_handler::clip_bytes(&label, 48).to_string();
     open_local_store()?.set_device_label(&device_peer_id, &label)
 }
 
@@ -2415,8 +2429,8 @@ pub(crate) fn send_node_command(cmd: node::NodeCommand) -> Result<(), String> {
 /// room, so an empty sibling can pull your data by entering it. The code is
 /// generated client-side and displayed with a 5-minute countdown.
 #[frb]
-pub fn claim_link_code(code: String) -> Result<(), String> {
-    send_node_command(node::NodeCommand::ClaimLinkCode { code })
+pub fn claim_link_code(rendezvous: String, secret: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::ClaimLinkCode { rendezvous, secret })
 }
 
 /// (Populated device) Release the currently claimed link code + leave its room.
@@ -2425,18 +2439,11 @@ pub fn release_link_code() -> Result<(), String> {
     send_node_command(node::NodeCommand::ReleaseLinkCode)
 }
 
-/// (Empty device) Resolve a link code shown on the populated device, then request
-/// its full snapshot. `include_vault`/`include_files` control snapshot scope.
+/// (Empty device) Link to the device that shows `code` (ten characters, dashes and
+/// case ignored). `label` and `platform` are shown on its confirm prompt.
 #[frb]
-pub fn resolve_link_code(code: String, include_vault: bool, include_files: bool) -> Result<(), String> {
-    send_node_command(node::NodeCommand::ResolveLinkCode { code, include_vault, include_files })
-}
-
-/// (Empty device, mnemonic path) Request a full snapshot directly from a known
-/// sibling device (no code; used when the sibling is already in a shared room).
-#[frb]
-pub fn request_link_snapshot(target_peer: String, include_vault: bool, include_files: bool) -> Result<(), String> {
-    send_node_command(node::NodeCommand::RequestLinkSnapshot { target_peer, include_vault, include_files })
+pub fn resolve_link_code(code: String, label: String, platform: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::ResolveLinkCode { code, label, platform })
 }
 
 /// (Populated device) Accept an inbound link request and push the snapshot to the

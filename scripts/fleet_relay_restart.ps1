@@ -536,7 +536,7 @@ try {
     Step b @{ op = 'wait_for'; target = 'text:${PEER_A}'; timeout_ms = 15000 }
     Step b @{ op = 'tap'; target = 'text:Send request'; index = 0 }
     Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-    Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+    Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Accept friend request'; timeout_ms = 60000 }
     Step a @{ op = 'tap'; target = 'semantics:Accept friend request'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'text:probe-b'; timeout_ms = 60000 }

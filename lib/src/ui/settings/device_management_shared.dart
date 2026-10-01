@@ -70,14 +70,15 @@ Future<void> syncFromDeviceFlow(
       type: HollowToastType.info);
 }
 
-/// Confirms, then permanently revokes the device.
+/// Confirms, then removes the device from our roster.
 Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
   final name = deviceTitle(device);
   final removed = await showHollowConfirm(
     context: context,
     title: 'Remove "$name"?',
-    message: '"$name" leaves your identity for good. It stops getting your '
-        'messages and is taken off your servers.',
+    message: '"$name" stops getting your messages at once and is taken off '
+        'your servers. It locks, and erases itself in three days unless your '
+        'recovery phrase is typed on it.',
     confirmLabel: 'Remove device',
     destructive: true,
     onConfirm: () => network_api.revokeDevice(devicePeerId: device.peerId),
@@ -86,13 +87,14 @@ Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
   HollowToast.show(context, 'Device removed', type: HollowToastType.success);
 }
 
-/// Confirms, then drops ALL other linked devices.
+/// Confirms, then removes every other device from our roster.
 Future<void> resetDeviceListsFlow(BuildContext context) async {
   final reset = await showHollowConfirm(
     context: context,
     title: 'Remove every other device?',
-    message: 'Every device except this one is signed out and wiped, and your '
-        'friends stop seeing them. To use one again, link it fresh.',
+    message: 'Every device except this one stops getting your messages, '
+        'locks, and erases itself in three days. To use one again, link it '
+        'fresh.',
     confirmLabel: 'Remove other devices',
     destructive: true,
     onConfirm: network_api.resetDeviceLists,

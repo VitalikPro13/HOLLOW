@@ -77,6 +77,9 @@ struct RelayInner {
     /// device_peer_id -> its keypair, so a test can put a frame on the wire as that
     /// device (sealed with its own key), exactly as the device itself would.
     keys: HashMap<String, NativeKeypair>,
+    /// Claimed link codes (their rendezvous part) -> the claiming device. One per
+    /// device, consumed by the first resolve, as on the relay; TTL not modelled.
+    link_codes: HashMap<String, String>,
     /// (querying device, queried ids) for every `check_peers`: what a node ASKS the
     /// relay, which the reply alone cannot show.
     check_peers_log: Vec<(String, Vec<String>)>,
@@ -1031,8 +1034,37 @@ impl MockRelay {
                     inner.kill_list.remove(from);
                 }
             }
-            // Channel-direct offline push, linkcode/push registries: not
-            // needed for the current tests — no-op (add when a test does).
+            WsCommand::ClaimLinkCode { code } => {
+                let code = code.to_uppercase();
+                inner.link_codes.retain(|_, owner| owner != from);
+                let reply = if inner.link_codes.contains_key(&code) {
+                    WsEvent::LinkCodeError { error: "taken".into(), code: String::new() }
+                } else {
+                    inner.link_codes.insert(code.clone(), from.to_string());
+                    WsEvent::LinkCodeClaimed { code }
+                };
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(reply);
+                }
+            }
+            WsCommand::ReleaseLinkCode => {
+                inner.link_codes.retain(|_, owner| owner != from);
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(WsEvent::LinkCodeReleased);
+                }
+            }
+            WsCommand::ResolveLinkCode { code } => {
+                let code = code.to_uppercase();
+                let reply = match inner.link_codes.remove(&code) {
+                    Some(peer_id) => WsEvent::LinkCodeResolved { code, peer_id },
+                    None => WsEvent::LinkCodeError { error: "not_found".into(), code },
+                };
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(reply);
+                }
+            }
+            // Channel-direct offline push and the push registries: not needed
+            // for the current tests, so a no-op (add when a test does).
             _ => {}
         }
     }
@@ -1758,27 +1790,23 @@ impl TestNode {
             .unwrap_or_else(|| "absent".to_string())
     }
 
-    /// Revocation tombstones this node has PERSISTED for `master` (Step 7).
-    /// Empty when no signed device list is stored yet. This is the settle
-    /// signal that a peer durably ingested a revocation — both the sender-side
-    /// device targeting and the receive-side is_revoked guard read this list.
+    /// Devices removed from `master`'s roster as this node PERSISTED it. Empty
+    /// when no roster is stored yet. This is the settle signal that a peer durably
+    /// ingested a removal: both the sender-side device targeting and the
+    /// receive-side is_revoked guard read it.
     pub(crate) fn revoked_devices(&self, master: &str) -> Vec<String> {
-        self.store()
-            .load_device_list(master)
-            .ok()
-            .flatten()
-            .map(|l| l.revoked)
+        let store = self.store();
+        super::roster_book::load(&store, master)
+            .map(|r| super::roster_book::fold(&store, &r).removed.into_keys().collect())
             .unwrap_or_default()
     }
 
-    /// Active device ids this node has PERSISTED for `master`. Empty until a
-    /// signed device list for that identity has been ingested.
+    /// Members of `master`'s roster as this node PERSISTED it. Empty until a
+    /// roster for that identity has been ingested.
     pub(crate) fn known_devices(&self, master: &str) -> Vec<String> {
-        self.store()
-            .load_device_list(master)
-            .ok()
-            .flatten()
-            .map(|l| l.devices)
+        let store = self.store();
+        super::roster_book::load(&store, master)
+            .map(|r| super::roster_book::fold(&store, &r).members.into_iter().collect())
             .unwrap_or_default()
     }
 
@@ -1910,16 +1938,32 @@ async fn spawn_node_with_friends(
     spawn_node_full(relay, master_tag, device_tag, friend_masters, None).await
 }
 
-/// Full spawn with an optional pre-seeded SIGNED self device list (Step 9C/C5):
-/// persists a master-signed `{devices}` list into the node's DB BEFORE start, so
-/// startup's resolver self-seed reads it — mimicking a freshly-LINKED sibling whose
-/// imported DB holds the SOURCE device's list (and NOT yet its own new device id).
+/// Full spawn with an optional pre-seeded roster (Step 9C/C5): the devices tagged in
+/// `pre_seed_self_devices` hold legacy seats, and a running device the list does not
+/// name holds a vouch from the first one, as a link from that device would leave it.
+/// Startup then reads it, mimicking a freshly LINKED sibling's imported database.
 async fn spawn_node_full(
     relay: &MockRelay,
     master_tag: u8,
     device_tag: u8,
     friend_masters: &[&str],
-    pre_seed_self_devices: Option<&[String]>,
+    pre_seed_self_devices: Option<&[u8]>,
+) -> TestNode {
+    let roster = pre_seed_self_devices.map(|tags| {
+        let linked = (!tags.contains(&device_tag)).then_some(device_tag);
+        legacy_roster(master_tag, tags, linked)
+    });
+    spawn_node_seeded(relay, master_tag, device_tag, friend_masters, roster).await
+}
+
+/// Spawn with `roster` merged into the node's own before it starts, as an imported
+/// database would hold it.
+async fn spawn_node_seeded(
+    relay: &MockRelay,
+    master_tag: u8,
+    device_tag: u8,
+    friend_masters: &[&str],
+    roster: Option<crate::identity::roster::Roster>,
 ) -> TestNode {
     let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
     let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
@@ -1945,16 +1989,9 @@ async fn spawn_node_full(
         for fm in friend_masters {
             store.save_friend(fm, "accepted", "outgoing", 0).expect("seed friend");
         }
-        // Pre-seed a signed self device list (C5: simulate the imported source list).
-        if let Some(devices) = pre_seed_self_devices {
-            let signed = super::crypto_handler::build_signed_device_list(
-                &master, 1, devices.to_vec(), Vec::new(),
-            );
-            if let Ok(json) = serde_json::to_string(&signed) {
-                store.save_device_list(
-                    &signed.master_peer_id, &json, signed.version, &signed.devices, 0,
-                ).expect("persist pre-seed device list");
-            }
+        // Pre-seed our roster (C5: simulate the imported source database).
+        if let Some(roster) = &roster {
+            super::roster_book::merge_for_test(&store, roster, &master.peer_id(), &device.peer_id());
         }
         mgr
     };
@@ -2472,18 +2509,30 @@ async fn sealed_to_joiner(relay: &MockRelay, joiner: &TestNode, server_id: &str,
     super::join_lane::seal_to_joiner(&key, &door, tip.n, server_id, from_device, &joiner.device_id, msg).expect("seals")
 }
 
-/// Persist a master-signed v1 `SignedDeviceList` (devices = `device_ids`) into the
-/// DB at `db_path`, the way an inbox-proof / ProfileUpdate ingest would leave it.
-/// This is the precondition `revoke_own_device` reads (it bumps + re-signs from the
-/// stored version). `master_tag` is the shared sibling master seed tag.
-fn seed_device_list_into_db(db_path: &str, passphrase: &str, master_tag: u8, device_ids: &[String]) {
+/// A legacy roster for `master_tag`: every tagged device claimed by the master and
+/// consenting, plus `linked` vouched for by the first of them.
+fn legacy_roster(master_tag: u8, device_tags: &[u8], linked: Option<u8>) -> crate::identity::roster::Roster {
+    use crate::identity::roster;
     let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
-    let signed = super::crypto_handler::build_signed_device_list(&master, 1, device_ids.to_vec(), Vec::new());
-    let json = serde_json::to_string(&signed).expect("serialize device list");
+    let devices: Vec<NativeKeypair> =
+        device_tags.iter().map(|t| NativeKeypair::from_secret_bytes(&seed_bytes(*t))).collect();
+    let mut r = roster::Roster::legacy_for_test(&master, &devices.iter().collect::<Vec<_>>());
+    if let (Some(tag), Some(voucher)) = (linked, devices.first()) {
+        let new = NativeKeypair::from_secret_bytes(&seed_bytes(tag));
+        r.add_consent(roster::sign_consent(&new, &master.peer_id()));
+        r.add_vouch(roster::sign_vouch(voucher, &master.peer_id(), roster::LEGACY_BASE, &new.peer_id()));
+    }
+    r
+}
+
+/// Merge a legacy roster naming the tagged devices into the node's own roster, the
+/// state two siblings reach once they have met. `master_tag` is the shared sibling
+/// master seed tag; `device_tag` is the node the DB belongs to.
+fn seed_device_list_into_db(db_path: &str, passphrase: &str, master_tag: u8, device_tags: &[u8]) {
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag)).peer_id();
     let store = crate::storage::MessageStore::open(db_path, passphrase).expect("open store");
-    store
-        .save_device_list(&signed.master_peer_id, &json, signed.version, &signed.devices, 0)
-        .expect("persist device list");
+    let roster = legacy_roster(master_tag, device_tags, None);
+    super::roster_book::merge_for_test(&store, &roster, &master, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -3090,8 +3139,8 @@ async fn channel_typing_roundtrips_master_attributed() {
     );
 }
 
-// Rung 3: device REVOCATION. One sibling revokes another and the cutoff is total:
-// the revoked device gets SelfRevoked, the revoker drops its Olm session, and a
+// Rung 3: device REMOVAL. One sibling removes another and the cutoff is total:
+// the removed device gets DeviceRemoved, the remover drops its Olm session, and a
 // later DM from a friend never reaches it, because fan-out targets only devices
 // currently in a room.
 
@@ -3114,8 +3163,8 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
     let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
 
-    // Seed the resolver: M has devices B + C (so devices_for/same_identity work and
-    // revoke_own_device's `belongs` check passes).
+    // Seed the resolver: M has devices B + C, so devices_for/same_identity work
+    // before the rosters are exchanged.
     super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
 
     // A is friends with M; B and C are friends with A.
@@ -3125,16 +3174,16 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     sleep_ms(1200).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
 
-    // Persist a v1 signed device list {B,C} into BOTH siblings' DBs (what an
-    // inbox-proof / ProfileUpdate ingest would leave) so revoke bumps from v1→v2.
-    seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[b_dev.clone(), c_dev.clone()]);
-    seed_device_list_into_db(&c.db_path, &c.passphrase, M_MASTER, &[b_dev.clone(), c_dev.clone()]);
+    // Both siblings hold the roster {B, C}, as a roster exchange would leave it, so
+    // B's removal of C is a removal by a member.
+    seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[B_DEV, C_DEV]);
+    seed_device_list_into_db(&c.db_path, &c.passphrase, M_MASTER, &[B_DEV, C_DEV]);
 
     // Let Olm sessions confirm all around (A↔B, A↔C, B↔C siblings). Poll until
     // every direction is CONFIRMED instead of a fixed sleep — under llvm-cov
     // instrumentation / full-suite parallel load the handshakes take far longer
     // than 5s, and revocation traffic sent over a half-established (glare)
-    // session decrypts to "invalid MAC", so the tombstone silently never lands.
+    // session decrypts to "invalid MAC", so the removal silently never lands.
     // Early-exits as soon as everything is confirmed (~2-5s uncontended).
     let mut olm_ok = false;
     for _ in 0..60 {
@@ -3171,6 +3220,9 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         "B should hold an Olm session with sibling C before revoking it"
     );
 
+    // Only what the revoke itself emits may answer the waits below.
+    drain_events(&mut b);
+    drain_events(&mut c);
     b.cmd_tx
         .send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() })
         .await
@@ -3184,13 +3236,13 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     .await;
     assert!(b_updated, "revoker B should emit DeviceListUpdated");
 
-    // The revoked device C receives the tombstone (ProfileUpdate to it FIRST) and
-    // emits SelfRevoked — the trigger for the Dart-side data wipe.
+    // The removed device C receives our roster (first, on the relay lane) and emits
+    // DeviceRemoved, the trigger for the Dart-side lock and its erase countdown.
     let c_nuked = wait_event(&mut c, std::time::Duration::from_secs(20), |ev| {
-        matches!(ev, NetworkEvent::SelfRevoked)
+        matches!(ev, NetworkEvent::DeviceRemoved { .. })
     })
     .await;
-    assert!(c_nuked, "revoked device C should emit SelfRevoked");
+    assert!(c_nuked, "removed device C should emit DeviceRemoved");
 
     // B's Olm session to C is torn down (enforce_device_revocations). The drop
     // runs async after the revoke command — poll instead of a fixed sleep.
@@ -3208,12 +3260,11 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         b.olm_status(&c.device_id).await
     );
 
-    // Friend A must durably ingest the revocation (B re-broadcasts the signed
-    // list to friends so they stop encrypting to the revoked device) BEFORE the
-    // post-revoke DM is sent — under load the tombstone propagation lags, and
-    // sending early races A's collect_target_devices against the ingest. Poll
-    // A's PERSISTED list for the tombstone (the exact state the sender-side
-    // device targeting reads).
+    // Friend A must durably ingest the removal (B re-broadcasts the roster to
+    // friends so they stop encrypting to the removed device) BEFORE the post-revoke
+    // DM is sent: under load the propagation lags, and sending early races A's
+    // collect_target_devices against the ingest. Poll A's PERSISTED roster (the
+    // exact state the sender-side device targeting reads).
     let mut a_ingested = false;
     for _ in 0..60 {
         sleep_ms(500).await;
@@ -3224,16 +3275,16 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     }
     assert!(
         a_ingested,
-        "friend A must ingest + persist the revocation tombstone for C before \
+        "friend A must ingest + persist the removal of C before \
          the post-revoke DM (got revoked={:?})",
         a.revoked_devices(&m_master)
     );
 
-    // --- Ghost fan-out guard: C self-nukes → disconnect; a later DM must NOT
-    // reach it. Simulate C's disconnect (the real device wipes + drops its socket). ---
+    // --- Ghost fan-out guard: C goes offline; a later DM must NOT reach it. The
+    // real device stays locked until it erases itself or the phrase brings it back. ---
     relay.set_online(&c.device_id, false);
-    // Let A/B process the peer_left broadcast (the load-bearing settle — A's
-    // tombstone ingest — was already confirmed above).
+    // Let A/B process the peer_left broadcast (the load-bearing settle, A's
+    // ingest of the removal, was already confirmed above).
     sleep_ms(1000).await;
     drain_events(&mut c);
 
@@ -3302,7 +3353,7 @@ async fn friend_is_warned_when_a_new_device_joins_their_contact() {
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
 
-    seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[b_dev.clone()]);
+    seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[B_DEV]);
 
     let mut a_saw_b = false;
     for _ in 0..40 {
@@ -3964,22 +4015,15 @@ async fn authz_link_frames_from_a_stranger_are_refused() {
     );
     drain_events(&mut alice);
 
-    let request = HavenMessage::LinkSnapshotRequest {
-        include_vault: false,
-        include_files: false,
-        msg_count: 0,
-        friend_count: 0,
-        has_profile: false,
-    };
-    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&request).unwrap());
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (_, opening) = super::link_pake::joiner_start("ABCDEF", "GHJK");
+    let pake = HavenMessage::LinkPake { msg: b64.encode(opening) };
+    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&pake).unwrap());
+    let sealed = HavenMessage::LinkSealed { ct: b64.encode([7u8; 64]) };
+    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&sealed).unwrap());
 
     let link_id = "link_mallory";
-    let key = HavenMessage::LinkSnapshotKey {
-        link_id: link_id.to_string(),
-        aes_key: String::new(),
-        aes_nonce: String::new(),
-    };
-    relay.inject_direct(&inbox, &mallory.device_id, &alice.device_id, serde_json::to_vec(&key).unwrap());
     // One TYPE_LINK stream frame: [type][id padded to 64][size u64 LE][bytes].
     let blob = b"not a backup anyone can open".to_vec();
     let mut frame = vec![3u8];
@@ -4060,7 +4104,8 @@ fn pending_link_import_keeps_the_identity_when_the_blob_does_not_open() {
     for name in ["identity.key", "identity.device", "messages.db"] {
         std::fs::write(data_dir.path().join(name), b"the real one").unwrap();
     }
-    crate::api::storage::stash_pending_link(b"HOLLOW-but-not-decryptable-at-all-000000000000000000", "")
+    let device = NativeKeypair::from_secret_bytes(&seed_bytes(79)).to_protobuf_encoding().unwrap();
+    crate::api::storage::stash_pending_link(b"HOLLOW-but-not-decryptable-at-all-000000000000000000", "", &device)
         .expect("stash");
 
     let result = crate::api::storage::import_pending_link();
@@ -7602,7 +7647,7 @@ async fn linked_sibling_resolves_both_devices_at_startup() {
     // its own id. The test_guard already cleared the resolver.
 
     // Spawn the sibling with a pre-seeded SOURCE-ONLY device list (mimics import).
-    let sib = spawn_node_full(&relay, M_MASTER, SIB_DEV, &[], Some(&[source_dev.clone()])).await;
+    let sib = spawn_node_full(&relay, M_MASTER, SIB_DEV, &[], Some(&[SOURCE_DEV])).await;
     sleep_ms(800).await; // let startup run its resolver self-seed
 
     // --- THE C5 ASSERTION: the resolver knows BOTH devices → master ---
@@ -9822,24 +9867,24 @@ async fn showcase_board_replicates_preserves_and_clears() {
     drop(b);
 }
 
-// The sibling-proof handshake links two genuine siblings that meet LIVE in the inbox
-// with NO pre-seeded resolver: neither device knows the other at boot, so the
-// challenge, master-signed response and merge are the only way they converge. The
-// handshake must not break genuine multi-device convergence.
+// Two devices of one legacy identity that meet LIVE in the inbox with NO pre-seeded
+// resolver converge on their rosters: each offers its roster to an inbox owner it does
+// not know, and each legacy claim makes the other a member. Holding the master key
+// alone proves nothing; the claims in the roster do.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
-async fn genuine_siblings_converge_via_proof_handshake() {
+async fn siblings_converge_on_their_rosters() {
     let _g = test_guard();
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
 
-    // ONE identity M, two devices B and C (same master tag → SHARED master key).
-    // CRUCIAL: do NOT seed_self — the resolver starts empty for both, so each
-    // device's startup seeds only ITSELF. They can only learn of each other by
-    // answering each other's inbox sibling-proof challenge.
+    // ONE identity M, two devices B and C (same master tag, SHARED master key).
+    // CRUCIAL: do NOT seed_self: the resolver starts empty for both, so each
+    // device's startup seeds only ITSELF. They learn of each other only from the
+    // rosters they exchange in the inbox.
     const M_MASTER: u8 = 5;
     const B_DEV: u8 = 6;
     const C_DEV: u8 = 7;
@@ -9850,25 +9895,39 @@ async fn genuine_siblings_converge_via_proof_handshake() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
     sleep_ms(1000).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
-    // Allow the handshake round-trip (challenge → response → verify → merge) and the
-    // device-list re-sign that follows.
-    sleep_ms(3000).await;
+    assert!(
+        wait_until(15, async || super::resolver::devices_for(&m_master).len() == 2).await,
+        "the siblings' rosters must name both devices, got {:?}",
+        super::resolver::devices_for(&m_master),
+    );
+    // The resolver is process-global, so each node's own roster is checked on disk:
+    // the only per-node signal, polled once the shared one has settled.
+    for n in [&b, &c] {
+        let holds_both = async || {
+            let known = n.known_devices(&m_master);
+            known.contains(&b_dev) && known.contains(&c_dev)
+        };
+        assert!(
+            wait_until(10, holds_both).await,
+            "{} must hold both devices as members, got {:?}",
+            n.device_id,
+            n.known_devices(&m_master),
+        );
+    }
     drain_events(&mut b);
     drain_events(&mut c);
 
-    // After the handshake, BOTH devices resolve to the shared master, and the
-    // resolver lists both — i.e. the merge ran via the verified-proof path.
     assert!(
         super::resolver::same_identity(&b_dev, &c_dev),
-        "the two genuine sibling devices must resolve to the same identity after the handshake"
+        "the two sibling devices must resolve to the same identity"
     );
     assert_eq!(
         super::resolver::resolve(&c_dev), m_master,
-        "sibling C's device must resolve to the shared master after a verified proof"
+        "sibling C's device must resolve to the shared master"
     );
     assert_eq!(
         super::resolver::resolve(&b_dev), m_master,
-        "sibling B's device must resolve to the shared master after a verified proof"
+        "sibling B's device must resolve to the shared master"
     );
     let mut devs = super::resolver::devices_for(&m_master);
     devs.sort();
@@ -9876,7 +9935,7 @@ async fn genuine_siblings_converge_via_proof_handshake() {
     expected.sort();
     assert_eq!(
         devs, expected,
-        "the resolver must list BOTH sibling devices for the master after the proof handshake"
+        "the resolver must list BOTH sibling devices for the master"
     );
 
     drop(b);
@@ -11536,7 +11595,7 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&o_master]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
-    sleep_ms(3000).await; // O<->B rooms + B<->C sibling proof + Olm settle
+    sleep_ms(3000).await; // O<->B rooms + B<->C roster exchange + Olm settle
     drain_events(&mut o);
     drain_events(&mut b);
     drain_events(&mut c);
@@ -14604,14 +14663,16 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
         .send(send_update("hi", Some(still.clone()), Some(hash.clone())))
         .await
         .unwrap();
-    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
-        matches!(ev, NetworkEvent::ProfileUpdated { .. })
-    })
-    .await;
-    assert!(got, "B must receive A's profile update");
-    sleep_ms(300).await;
-    let p = b.store().load_profile(&a_master).unwrap()
-        .expect("B must hold A's profile keyed by A's MASTER (device != master)");
+    // Polled on the row itself: any earlier profile announce of A's also emits
+    // ProfileUpdated, and under load one can land after the drain above.
+    let profile_where = |node: &TestNode, pred: &dyn Fn(&crate::storage::messages::StoredProfile) -> bool| {
+        node.store().load_profile(&a_master).ok().flatten().is_some_and(|p| pred(&p))
+    };
+    assert!(
+        wait_until(10, async || profile_where(&b, &|p| p.status == "hi")).await,
+        "B must hold A's profile keyed by A's MASTER (device != master)"
+    );
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
     assert_eq!(p.avatar_anim, hash, "the animation HASH must replicate");
     assert_eq!(
         p.avatar_bytes.as_deref(),
@@ -14650,30 +14711,25 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
     // is also exactly what an old client sends. ---
     drain_events(&mut b);
     a.cmd_tx.send(send_update("status changed", None, None)).await.unwrap();
-    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
-        matches!(ev, NetworkEvent::ProfileUpdated { .. })
-    })
-    .await;
-    assert!(got, "B must receive A's second update");
-    sleep_ms(300).await;
+    assert!(
+        wait_until(10, async || profile_where(&b, &|p| p.status == "status changed")).await,
+        "the untouched field must update"
+    );
     let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
-    assert_eq!(p.status, "status changed", "the untouched field must update");
     assert_eq!(
         p.avatar_anim, hash,
         "an update that didn't touch the animation must NOT lose it"
     );
 
-    drain_events(&mut b);
     a.cmd_tx
         .send(send_update("still now", Some(still.clone()), Some(String::new())))
         .await
         .unwrap();
-    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
-        matches!(ev, NetworkEvent::ProfileUpdated { .. })
-    })
-    .await;
-    assert!(got, "B must receive A's clear update");
-    sleep_ms(300).await;
+    drain_events(&mut b);
+    assert!(
+        wait_until(10, async || profile_where(&b, &|p| p.status == "still now")).await,
+        "B must receive A's clear update"
+    );
     let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
     assert_eq!(p.avatar_anim, "", "an explicit empty hash must clear on B");
 
@@ -16692,7 +16748,7 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
     super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
     super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
     let c = spawn_node_full(
-        &relay, M_MASTER, C_DEV, &[&a_master], Some(&[b_dev.clone()]),
+        &relay, M_MASTER, C_DEV, &[&a_master], Some(&[B_DEV]),
     )
     .await;
     sleep_ms(9000).await; // link → inbox join → DmSiblingSyncRequest → batch
@@ -16814,8 +16870,8 @@ async fn sibling_fills_a_dm_gap_behind_its_newest_message() {
 
     let f = spawn_node_with_friends(&relay, F, F, &[&m_master]).await;
     sleep_ms(1200).await; // spawn stagger, as in the freshly-linked test above
-    let n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&siblings)).await;
-    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&siblings)).await;
+    let n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&[D1, D2])).await;
+    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&[D1, D2])).await;
     expect_dm_pair_ready(&relay, &f, &n1, 15).await;
     expect_dm_pair_ready(&relay, &f, &n2, 15).await;
 
@@ -16901,8 +16957,8 @@ async fn offline_sibling_gets_a_buffered_copy_of_an_own_send() {
 
     let mut f = spawn_node_with_friends(&relay, F, F, &[&m_master]).await;
     sleep_ms(1200).await; // spawn stagger, as in the DM gap test above
-    let mut n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&siblings)).await;
-    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&siblings)).await;
+    let mut n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&[D1, D2])).await;
+    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&[D1, D2])).await;
     expect_dm_pair_ready(&relay, &f, &n1, 15).await;
     expect_dm_pair_ready(&relay, &f, &n2, 15).await;
     expect_olm_confirmed(&n1, &n2, 15).await;
@@ -18451,9 +18507,7 @@ async fn friend_request_carries_a_sealed_card() {
     super::dm_room::register(&c_master_kp);
     let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
     let c_master = c_master_kp.peer_id();
-    let c_list = super::crypto_handler::build_signed_device_list(
-        &c_master_kp, 1, vec![c_dev.clone()], Vec::new(),
-    );
+    let c_list = legacy_roster(C_MASTER, &[C_DEV], None);
     let pk = {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(c_master_kp.public_key_protobuf())
@@ -18591,10 +18645,7 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
         .unwrap()
         .as_millis() as i64;
     let newer_at = now_ms + 60_000;
-    let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER));
-    let a_list = super::crypto_handler::build_signed_device_list(
-        &a_master_kp, 1, vec![a_device.clone()], Vec::new(),
-    );
+    let a_list = legacy_roster(A_MASTER, &[A_DEV], None);
     let frame = super::types::HavenMessage::FriendRequest {
         requested_at: newer_at,
         carried_bundle: None,
@@ -18884,7 +18935,7 @@ async fn mailbox_requires_ownership_proof() {
 #[test]
 fn carried_bundle_freshness_is_its_own_rule() {
     use super::crypto_handler::{
-        build_signed_device_list, carried_bundle_signing_payload, key_bundle_signing_payload,
+        carried_bundle_signing_payload, key_bundle_signing_payload,
         key_exchange_now, signed_carried_bundle, verify_carried_bundle, verify_key_exchange,
         KeyExchangeAuth, KEY_EXCHANGE_SKEW_SECS,
     };
@@ -18897,9 +18948,11 @@ fn carried_bundle_freshness_is_its_own_rule() {
     let sender_device_id = sender_device.peer_id();
     let our_master = NativeKeypair::from_secret_bytes(&seed_bytes(93)).peer_id();
     let our_device = NativeKeypair::from_secret_bytes(&seed_bytes(94)).peer_id();
-    let list = build_signed_device_list(
-        &sender_master, 1, vec![sender_device_id.clone()], Vec::new(),
-    );
+    let list = crate::identity::roster::Roster::legacy_for_test(&sender_master, &[&sender_device]);
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("carried.db").to_str().unwrap().to_string();
+    let pass = "cd".repeat(32);
+    crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
     let now = key_exchange_now();
 
     // A CARRIED bundle three days old is fine: it has been sitting in a mailbox,
@@ -18917,7 +18970,7 @@ fn carried_bundle_freshness_is_its_own_rule() {
         device_pk_b64: b64.encode(sender_device.public_key_protobuf()),
     };
     assert!(
-        verify_carried_bundle(&our_master, &list, &old_carried),
+        verify_carried_bundle(&our_master, &list, &old_carried, &db, &pass),
         "a three-day-old CARRIED bundle must still be accepted",
     );
 
@@ -19310,10 +19363,7 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     // deposit per requester, so the test must own exactly when the first swallow happens;
     // a mailbox replaying twice on one boot would spend the budget here.
     relay.expire_mailbox(&b_master);
-    let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER));
-    let a_list = super::crypto_handler::build_signed_device_list(
-        &a_master_kp, 1, vec![a_device.clone()], Vec::new(),
-    );
+    let a_list = legacy_roster(A_MASTER, &[A_DEV], None);
     let request_frame = serde_json::to_vec(&super::types::HavenMessage::FriendRequest {
         requested_at: original_at,
         carried_bundle: None,
@@ -19540,9 +19590,7 @@ async fn newer_request_advances_stored_requested_at() {
     let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(161));
     let a_master = a_master_kp.peer_id();
     let a_device = NativeKeypair::from_secret_bytes(&seed_bytes(162)).peer_id();
-    let a_list = super::crypto_handler::build_signed_device_list(
-        &a_master_kp, 1, vec![a_device.clone()], Vec::new(),
-    );
+    let a_list = legacy_roster(161, &[162], None);
 
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
     let inbox = format!("inbox:{b_master}");
@@ -19630,11 +19678,9 @@ async fn stale_reject_never_deletes_an_accepted_friendship() {
     let b_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
     let b_master = b_master_kp.peer_id();
     let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
-    // B's own master-signed device list, exactly what its reject carries. Every
-    // frame below is attributed through THIS, not through the resolver.
-    let b_list = super::crypto_handler::build_signed_device_list(
-        &b_master_kp, 1, vec![b_device.clone()], Vec::new(),
-    );
+    // B's own roster, exactly what its reject carries. Every frame below is
+    // attributed through THIS, not through the resolver.
+    let b_list = legacy_roster(B_MASTER, &[B_DEV], None);
 
     // A and B are already friends. Re-seed the row so it carries a REAL request
     // stamp: the freshness compare is the whole gate, and the harness's seeded
@@ -19743,9 +19789,7 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
     let b_master = b_master_kp.peer_id();
     let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
     let b_unlisted = NativeKeypair::from_secret_bytes(&seed_bytes(185)).peer_id();
-    let b_list = super::crypto_handler::build_signed_device_list(
-        &b_master_kp, 1, vec![b_device.clone()], Vec::new(),
-    );
+    let b_list = legacy_roster(B_MASTER, &[B_DEV], None);
 
     const STORED: i64 = 1_700_000_000_000;
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
@@ -19754,17 +19798,10 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
         store.remove_friend(&b_master).unwrap();
         store.save_friend(&b_master, "accepted", "", STORED).unwrap();
     }
-    // The resolver KNOWS the unlisted device speaks for B. Every drop below is
-    // therefore the carried-list gate refusing, not attribution failing to resolve.
-    super::resolver::update(&b_unlisted, &b_master);
-    assert_eq!(
-        super::resolver::resolve(&b_unlisted), b_master,
-        "precondition: the resolver would have found the row on its own",
-    );
     drain_events(&mut a);
 
     let room = super::types::dm_room_code(&a.master_id, &b_master);
-    let reject_with = |list: Option<super::types::SignedDeviceList>| {
+    let reject_with = |list: Option<crate::identity::roster::Roster>| {
         serde_json::to_vec(&super::types::HavenMessage::FriendReject {
             requested_at: STORED,
             device_list: list,
@@ -19772,16 +19809,26 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
         .unwrap()
     };
 
-    // (1) Sender device is NOT in the list it carries. A valid list captured off
+    // A learns B's genuine roster from B's own device first, so every frame below is
+    // judged against a KNOWN master, never dropped as an unknown one.
+    let notice = super::types::HavenMessage::RosterNotice { roster: b_list.clone() };
+    relay.inject_direct(&room, &b_device, &a.device_id, serde_json::to_vec(&notice).unwrap());
+    assert!(
+        wait_until(10, async || super::resolver::resolve(&b_device) == b_master).await,
+        "A must hold B's roster before the hostile frames",
+    );
+
+    // (1) Sender device is NOT in the roster it carries. A valid roster captured off
     //     the wire must not let any other device speak for that identity.
     relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(Some(b_list.clone())));
-    // (2) A RELABELLED list: B's signed payload wearing a stranger's master id.
-    //     The pubkey -> peer_id binding inside verify_device_list is what stops it.
+    // (2) A RELABELLED roster: B's statements wearing a stranger's master id. Every
+    //     statement signs its master, so none of them verifies for the stranger.
     let mut stolen = b_list.clone();
-    stolen.master_peer_id = NativeKeypair::from_secret_bytes(&seed_bytes(186)).peer_id();
+    stolen.master = NativeKeypair::from_secret_bytes(&seed_bytes(186)).peer_id();
     relay.inject_direct(&room, &b_device, &a.device_id, reject_with(Some(stolen)));
+    // (3) B's claim edited to name the unlisted device: its signature covers B's.
     let mut tampered = b_list.clone();
-    tampered.devices.push(b_unlisted.clone());
+    tampered.legacy[0].device = b_unlisted.clone();
     relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(Some(tampered)));
 
     let unfriended = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
@@ -19798,12 +19845,11 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
         "and must leave the friendship untouched",
     );
 
-    // (4) CONTROL, and destructive so it runs last: the SAME frame from the SAME
-    //     device with NO list at all is a pre-carried-list client, falls back to
-    //     the resolver, and lands. The only difference from (1) is the bad list --
-    //     which is the proof that the drops above were the gate, not the lookup.
+    // (4) CONTROL, and destructive so it runs last: the same frame from B's own
+    //     device, a member of the roster A holds, lands with no roster at all. So the
+    //     drops above were the gate, not a cold lookup.
     drain_events(&mut a);
-    relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(None));
+    relay.inject_direct(&room, &b_device, &a.device_id, reject_with(None));
     assert!(
         wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
             matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
@@ -19824,7 +19870,7 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
 // the 15s timeout. It now PARKS: the request is persisted locally and deposited into
 // the server room's `~join` ring, the next member back reads the ring, admits or
 // rejects, and publishes its answer there for the joiner's next connect. The request
-// carries a signed device list because a member serving a parked request has never
+// carries the joiner's roster because a member serving a parked request has never
 // been online with the joiner, so `resolve` would hand back a DEVICE id; the tests
 // call `resolver::forget` to hold that shape against a process-global resolver.
 
@@ -20171,7 +20217,7 @@ async fn parked_join_completes_with_zero_overlap() {
     go_offline(&relay, &b, &server_id).await;
     // The harness resolver is PROCESS-GLOBAL, so without this A could attribute
     // B's device from a link no real member could possibly hold. Forgetting it
-    // makes the carried signed device list the only thing that can work.
+    // makes the carried roster the only thing that can work.
     super::resolver::forget(&b.device_id);
 
     relay.set_online(&a.device_id, true);
@@ -21172,15 +21218,12 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     // A list that was signed over ONE device set and then edited to claim
     // another. The signature no longer covers what the list says.
     let forged_master = NativeKeypair::from_secret_bytes(&seed_bytes(98));
-    let honest_device = NativeKeypair::from_secret_bytes(&seed_bytes(99)).peer_id();
-    let tampered_device = NativeKeypair::from_secret_bytes(&seed_bytes(128)).peer_id();
-    let mut tampered = super::crypto_handler::build_signed_device_list(
-        &forged_master,
-        1,
-        vec![honest_device],
-        Vec::new(),
-    );
-    tampered.devices = vec![tampered_device.clone()];
+    let honest_device = NativeKeypair::from_secret_bytes(&seed_bytes(99));
+    let tampered_kp = NativeKeypair::from_secret_bytes(&seed_bytes(128));
+    let tampered_device = tampered_kp.peer_id();
+    let mut tampered = crate::identity::roster::Roster::legacy_for_test(&forged_master, &[&honest_device]);
+    tampered.legacy[0].device = tampered_device.clone();
+    tampered.add_consent(crate::identity::roster::sign_consent(&tampered_kp, &forged_master.peer_id()));
     let forged_master_id = forged_master.peer_id();
 
     let now = super::types::now_ms();
@@ -22978,7 +23021,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // card the owner must never store (1.0 s).
     // 2026-09-29: the relay (A-D4) tests added three spawn staggers and two absence
     // proofs, a refused ring control and a nickname request never sent (2.4 s).
-    const BUDGET_MS: u64 = 651_300;
+    // 2026-10-01: the ID-1 tests added absence proofs only: a thief's DM nobody files,
+    // old-base statements that change nothing, and three link handshakes nobody answers
+    // (10.5 s).
+    const BUDGET_MS: u64 = 661_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -23321,12 +23367,12 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
     drop(b);
 }
 
-// CRYPTO-1, over the wire. A master-signed device list reaches every friend and
-// co-member, and in the clear any revoked device, so a peer can hold a genuine,
-// perfectly valid list for somebody else. The receiver used to bind whichever device
-// DELIVERED it to that master, which hands the attacker the victim's DM fan-out, its
-// Olm authorisation and its CRDT role checks. The attacker here is a bare device id
-// with a socket, replaying the list through the one door a list rides in the clear.
+// CRYPTO-1, over the wire. A roster reaches every friend and co-member, and in the
+// clear any removed device, so a peer can hold a genuine, perfectly valid roster for
+// somebody else. The receiver used to bind whichever device DELIVERED it to that
+// master, which hands the attacker the victim's DM fan-out, its Olm authorisation and
+// its CRDT role checks. The attacker here is a bare device id with a socket,
+// replaying the roster through the one door it rides in the clear.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -23337,7 +23383,7 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
 
     let relay = MockRelay::new();
 
-    // V = the victim whose signed list is public. T = the target that must not
+    // V = the victim whose roster is public. T = the target that must not
     // be fooled. A = a device id V has never named.
     const V_MASTER: u8 = 191;
     const V_DEV: u8 = 192;
@@ -23382,9 +23428,9 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
         t.known_devices(&v_master),
     );
 
-    // V's real master-signed device list, exactly as T ingested it.
-    let genuine = t.store().load_device_list(&v_master).unwrap().expect("T holds V's signed device list");
-    let replay = serde_json::to_vec(&super::types::HavenMessage::DeviceListTombstone { device_list: genuine }).unwrap();
+    // V's real roster, exactly as T ingested it.
+    let genuine = super::roster_book::load(&t.store(), &v_master).expect("T holds V's roster");
+    let replay = serde_json::to_vec(&super::types::HavenMessage::RosterNotice { roster: genuine }).unwrap();
 
     // The resolver is process-global in this harness, so clear anything already
     // known about the attacker's id: a pass has to mean "refused", never
@@ -23483,10 +23529,11 @@ async fn friend_request_from_an_unlisted_device_does_not_bind() {
 
     // V's genuine list, signed by V's own master key. Nothing about it is
     // forged; the attacker simply is not in it.
-    let v_list = super::crypto_handler::build_signed_device_list(
-        &v_keypair, 1, vec![v_dev.clone()], Vec::new(),
+    let v_list = legacy_roster(V_MASTER, &[V_DEV], None);
+    assert!(
+        v_list.verified(super::types::now_ms()).fold(|_| None, super::types::now_ms()).is_member(&v_dev),
+        "the carried roster is real",
     );
-    assert!(super::crypto_handler::verify_device_list(&v_list), "the carried list is real");
 
     super::resolver::forget(&a_dev);
 
@@ -25449,8 +25496,8 @@ fn wipe_survivors(root: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Scope (b): the device publishes a master-signed list that tombstones ITSELF, so
-/// the sibling stops routing to it, and only then erases its own disk.
+/// Scope (b): the device publishes a roster that removes ITSELF, so the sibling
+/// stops routing to it, and only then erases its own disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn destroy_scope_b_sibling_drops_the_device() {
@@ -25467,8 +25514,8 @@ async fn destroy_scope_b_sibling_drops_the_device() {
 
     let b1 = spawn_node_on(&relay, M_MASTER, B1_DEV).await;
     let mut b2 = spawn_node_on(&relay, M_MASTER, B2_DEV).await;
-    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
-    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[B1_DEV, B2_DEV]);
+    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[B1_DEV, B2_DEV]);
     expect_siblings_ready(&relay, &b1, &b2, 30).await;
     seed_install_files(&b1.data_root);
     drain_events(&mut b2);
@@ -25488,13 +25535,13 @@ async fn destroy_scope_b_sibling_drops_the_device() {
 
     assert!(
         wait_until(30, async || b2.revoked_devices(&m_master).contains(&b1_dev)).await,
-        "the sibling must tombstone the destroyed device, got revoked={:?} devices={:?}",
+        "the sibling must remove the destroyed device, got revoked={:?} devices={:?}",
         b2.revoked_devices(&m_master),
         b2.known_devices(&m_master),
     );
     assert!(
         !b2.known_devices(&m_master).contains(&b1_dev),
-        "a tombstoned device may never stay in the active set",
+        "a removed device may never stay a member",
     );
 
     let left = shutdown_and_wipe(&relay, b1).await;
@@ -25523,19 +25570,15 @@ async fn destroy_scope_c_online_sibling_wipes() {
 
     let b1 = spawn_node_on(&relay, M_MASTER, B1_DEV).await;
     let mut b2 = spawn_node_on(&relay, M_MASTER, B2_DEV).await;
-    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
-    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[B1_DEV, B2_DEV]);
+    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[B1_DEV, B2_DEV]);
     expect_siblings_ready(&relay, &b1, &b2, 30).await;
     seed_install_files(&b2.data_root);
     drain_events(&mut b2);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     b1.cmd_tx
-        .send(NodeCommand::PublishDestroyIdentity {
-            targets: Vec::new(),
-            notify_friends: false,
-            reply: tx,
-        })
+        .send(NodeCommand::PublishDestroyIdentity { order: Box::new(super::crypto_handler::build_destroy_identity(&b1.master_kp, None, super::destroy::now_ms(), Vec::new(), false)), reply: tx })
         .await
         .unwrap();
     let reached = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
@@ -25575,8 +25618,8 @@ async fn destroy_scope_c_offline_sibling_wipes_on_next_auth_via_kill_list() {
 
     let b1 = spawn_node_on(&relay, M_MASTER, B1_DEV).await;
     let mut b2 = spawn_node_on(&relay, M_MASTER, B2_DEV).await;
-    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
-    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[B1_DEV, B2_DEV]);
+    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[B1_DEV, B2_DEV]);
     expect_siblings_ready(&relay, &b1, &b2, 30).await;
     seed_install_files(&b2.data_root);
     drain_events(&mut b2);
@@ -25592,11 +25635,7 @@ async fn destroy_scope_c_offline_sibling_wipes_on_next_auth_via_kill_list() {
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     b1.cmd_tx
-        .send(NodeCommand::PublishDestroyIdentity {
-            targets: Vec::new(),
-            notify_friends: false,
-            reply: tx,
-        })
+        .send(NodeCommand::PublishDestroyIdentity { order: Box::new(super::crypto_handler::build_destroy_identity(&b1.master_kp, None, super::destroy::now_ms(), Vec::new(), false)), reply: tx })
         .await
         .unwrap();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
@@ -25655,9 +25694,7 @@ async fn destroy_refuses_signal_older_than_link_time() {
     seed_install_files(&b.data_root);
     drain_events(&mut b);
 
-    let stale = super::crypto_handler::build_destroy_identity(
-        &b.master_kp,
-        super::destroy::now_ms() - 600_000,
+    let stale = super::crypto_handler::build_destroy_identity(&b.master_kp, None, super::destroy::now_ms() - 600_000,
         Vec::new(),
         false,
     );
@@ -25720,9 +25757,7 @@ async fn kill_signal_with_foreign_blob_is_dropped() {
 
     // Correctly signed, just not by us: the hostile peer owns its own identity and
     // can say anything it likes about it.
-    let foreign = super::crypto_handler::build_destroy_identity(
-        &hostile_kp,
-        super::destroy::now_ms() + 60_000,
+    let foreign = super::crypto_handler::build_destroy_identity(&hostile_kp, None, super::destroy::now_ms() + 60_000,
         Vec::new(),
         false,
     );
@@ -25781,11 +25816,7 @@ async fn destroy_friend_announce_flips_verified_and_banner() {
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     b.cmd_tx
-        .send(NodeCommand::PublishDestroyIdentity {
-            targets: Vec::new(),
-            notify_friends: true,
-            reply: tx,
-        })
+        .send(NodeCommand::PublishDestroyIdentity { order: Box::new(super::crypto_handler::build_destroy_identity(&b.master_kp, None, super::destroy::now_ms(), Vec::new(), true)), reply: tx })
         .await
         .unwrap();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
@@ -26934,7 +26965,7 @@ async fn join_lock_the_card_rides_inside_the_request() {
     let pk = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, other.public_key_protobuf());
     let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&other, &pk, &payload) else { panic!("signs") };
     let foreign = super::types::SignedCard { master: other.peer_id(), display_name: "Not Jo".into(), avatar_hash: String::new(), updated_at: 7, sig, pk };
-    let list = super::crypto_handler::build_signed_device_list(&j.master_kp, 1, vec![j.device_id.clone()], Vec::new());
+    let list = legacy_roster(207, &[207], None);
     let forged = sealed_to_members(&relay, &server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, requested_at: 5,
         device_list: Some(list), parked: false, key_package: None, reply_key: fresh_reply_key(),
@@ -27150,7 +27181,7 @@ async fn authz_backfill_refuses_a_post_by_someone_never_a_member() {
     let relay = MockRelay::new();
     const M: u8 = 191;
     const STRANGER: u8 = 193;
-    let (o, m, mut x, server_id) = three_member_server(&relay, 190, M, 192).await;
+    let (o, m, x, server_id) = three_member_server(&relay, 190, M, 192).await;
     let general = general_channel_of(&server_id);
     let ts = super::types::now_ms() - 30_000;
     for node in [&o, &m] {
@@ -27158,16 +27189,16 @@ async fn authz_backfill_refuses_a_post_by_someone_never_a_member() {
         plant_signed_channel_message(node, M, &server_id, &general, false, ts + 1, "e4-member", "from inside");
     }
 
-    drain_events(&mut x);
+    // Polled on X's rows: under load X's own join-time catch-up can backfill the
+    // post first, and then every sync asked here rightly finds nothing new.
     let mut filled = false;
     for _ in 0..4 {
         x.cmd_tx
             .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
             .await
             .unwrap();
-        filled = wait_event(&mut x, std::time::Duration::from_secs(6), |ev| {
-            matches!(ev, NetworkEvent::MessageSyncCompleted { server_id: sid, new_message_count }
-                if *sid == server_id && *new_message_count > 0)
+        filled = wait_until(6, async || {
+            x.channel_messages(&server_id, &general).iter().any(|m| m.text == "from inside")
         })
         .await;
         if filled {
@@ -28126,10 +28157,20 @@ async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
     relay.start_wiretap();
     let (o, mut m, x, server_id) = three_member_server(&relay, 209, 210, 211).await;
     let o_key = NativeKeypair::from_secret_bytes(&seed_bytes(209));
-    assert!(
-        m.live_server_state(&server_id).await.is_some_and(|s| s.member_since(&m.master_id).is_some()),
-        "precondition: M's record holds its membership"
-    );
+    // Both, settled: under load X's join can still be landing, and a kick sealed
+    // before X's own membership is (rightly) ignored as one from before it joined.
+    for who in [&m, &x] {
+        assert!(
+            wait_until(20, async || {
+                who.live_server_state(&server_id).await.is_some_and(|s| s.member_since(&who.master_id).is_some())
+            })
+            .await,
+            "precondition: each member's record holds its membership"
+        );
+        // The notices are Olm frames: under load the sessions are still re-keying
+        // (handshake-race heal), and a notice sealed on a churned session never opens.
+        expect_olm_confirmed(&o, who, 20).await;
+    }
 
     // The relay holds back O's kick notices to M and X, genuine Olm frames both.
     relay.swallow_direct(&o.device_id, &m.device_id);
@@ -28141,24 +28182,40 @@ async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
             .await
             .unwrap();
     }
-    let notice_to = |device: &str| {
+    // A kick also sends other members the removal op, so which held frame is the
+    // notice depends on timing: every one O held for a member is handed over, in order.
+    let held_for = |device: &str| -> Vec<Vec<u8>> {
         relay.wiretap().frames[marker..]
             .iter()
-            .rev()
-            .find(|f| f.from == o.device_id && f.to.as_deref() == Some(device) && f.kind() == "encrypted")
+            .filter(|f| f.from == o.device_id && f.to.as_deref() == Some(device) && f.kind() == "encrypted")
             .map(|f| f.body.clone())
+            .collect()
     };
+    // O handles commands in order, so once it answers both kicks are fully sent;
+    // then the relay has recorded them once O's frame count stops moving.
+    let _ = o.live_server_state(&server_id).await;
+    let mut last = usize::MAX;
     assert!(
-        wait_until(10, async || notice_to(&m.device_id).is_some() && notice_to(&x.device_id).is_some()).await,
+        wait_until(10, async || {
+            let now = relay.wiretap().frames.iter().filter(|f| f.from == o.device_id).count();
+            std::mem::replace(&mut last, now) == now
+                && !held_for(&m.device_id).is_empty()
+                && !held_for(&x.device_id).is_empty()
+        })
+        .await,
         "O's kick notices must reach the wire"
     );
 
     // M's membership began a moment ago; its notice, stamped an hour ago, predates it.
     let an_hour_ago = super::frame_auth::now_ms() - 3600 * 1000;
-    let held = super::frame_auth::seal_at(&o_key, &server_id, &m.device_id, an_hour_ago, [4; 16], &notice_to(&m.device_id).unwrap());
-    relay.inject_raw_direct(&server_id, &o.device_id, &m.device_id, held);
-    let fresh = super::frame_auth::seal(&o_key, &server_id, &x.device_id, &notice_to(&x.device_id).unwrap());
-    relay.inject_raw_direct(&server_id, &o.device_id, &x.device_id, fresh);
+    for (i, body) in held_for(&m.device_id).iter().enumerate() {
+        let held = super::frame_auth::seal_at(&o_key, &server_id, &m.device_id, an_hour_ago, [i as u8 + 4; 16], body);
+        relay.inject_raw_direct(&server_id, &o.device_id, &m.device_id, held);
+    }
+    for body in held_for(&x.device_id) {
+        let fresh = super::frame_auth::seal(&o_key, &server_id, &x.device_id, &body);
+        relay.inject_raw_direct(&server_id, &o.device_id, &x.device_id, fresh);
+    }
     assert!(
         wait_until(10, async || x.live_server_state(&server_id).await.is_none()).await,
         "a kick sealed now lands"
@@ -29009,7 +29066,12 @@ async fn authz_a_replayed_public_unreaction_or_card_never_undoes_a_later_one() {
     }
     let first_card = recorded_frame(&relay, &o.device_id, "pub_lp_set", "replay-card-a");
     relay.inject(&server_id, &o.device_id, &j.device_id, first_card);
-    let flipped = seen_before_flush(&relay, &mut j, |ev| matches!(ev, NetworkEvent::ChannelLinkPreviewUpdated { .. })).await;
+    // Card B can arrive twice (public channel ops ride two transports), so only the
+    // replayed card counts as a flip.
+    let flipped = seen_before_flush(&relay, &mut j, |ev| {
+        matches!(ev, NetworkEvent::ChannelLinkPreviewUpdated { preview: Some(p), .. } if p.title == "replay-card-a")
+    })
+    .await;
     let shown = j.store().get_channel_message_sig_row(MID).and_then(|r| r.link_preview).map(|c| c.title);
     assert!(!flipped && shown.as_deref() == Some("replay-card-b"), "a replayed older card replaced the newer one: {shown:?}");
 }
@@ -29578,4 +29640,760 @@ async fn c24_share_control_opens_only_with_the_link_key() {
     assert_eq!(tap.lane_leaks(), Vec::<String>::new(), "share control reached the relay in the clear");
     assert_eq!(tap.readable("c24-share-canary"), Vec::<String>::new(), "the relay read the shared file's name");
     drain_events(&mut a);
+}
+
+// ---------------------------------------------------------------------------
+// DESIGN ID-1: the recovery phrase, not the master key, decides which devices are an
+// identity's. Every party below signs correctly; what is tested is that a correct
+// signature by the WRONG principal (the master key alone, a removed device, a base the
+// phrase superseded) changes nothing.
+// ---------------------------------------------------------------------------
+
+fn tag_kp(tag: u8) -> NativeKeypair {
+    NativeKeypair::from_secret_bytes(&seed_bytes(tag))
+}
+
+/// The recovery key standing in for `master_tag`'s phrase: any key the master binds.
+fn recovery_kp(master_tag: u8) -> NativeKeypair {
+    let mut seed = seed_bytes(master_tag);
+    seed.reverse();
+    NativeKeypair::from_secret_bytes(&seed)
+}
+
+/// A roster the phrase made the root of: a recovery dated `at_ms` keeping every
+/// tagged device, each consenting.
+fn protected_roster(master_tag: u8, device_tags: &[u8], at_ms: i64) -> crate::identity::roster::Roster {
+    use crate::identity::roster;
+    let master = tag_kp(master_tag);
+    let recovery = recovery_kp(master_tag);
+    let keep: Vec<String> = device_tags.iter().map(|t| tag_kp(*t).peer_id()).collect();
+    let mut r = roster::Roster::new(&master.peer_id());
+    for t in device_tags {
+        r.add_consent(roster::sign_consent(&tag_kp(*t), &master.peer_id()));
+    }
+    r.add_phrase_statement(
+        &roster::r_pub_of(&recovery),
+        Some(roster::sign_recovery(&master, &recovery, at_ms, &keep)),
+        None,
+    )
+    .expect("a fresh roster takes any recovery key");
+    r
+}
+
+const EIGHT_DAYS_MS: i64 = 8 * 24 * 60 * 60 * 1000;
+
+/// A restored backup holds the master key and the whole database, and is still
+/// nobody: it asks, the owner's device is told, a friend never routes to it and
+/// never attributes its frames to the owner, until a current device approves it. A
+/// second one the owner refuses stays out even once seven days have passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 141;
+    const O_DEV: u8 = 142;
+    const T_DEV: u8 = 143;
+    const T2_DEV: u8 = 144;
+    const F_MASTER: u8 = 145;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let o_dev = tag_kp(O_DEV).peer_id();
+    let t_dev = tag_kp(T_DEV).peer_id();
+    let t2_dev = tag_kp(T2_DEV).peer_id();
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let now = super::roster_book::now_ms();
+
+    let mut o = spawn_node_seeded(
+        &relay, O_MASTER, O_DEV, &[&f_master], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000)),
+    ).await;
+    let f = spawn_node_with_friends(&relay, F_MASTER, F_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &f, 20).await;
+    // F's own copy of O's roster is the only per-node signal (the resolver is shared).
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master) == vec![o_dev.clone()]).await,
+        "F must hold O's roster first, got {:?}",
+        f.known_devices(&o_master),
+    );
+
+    // The thief restores a backup: O's database (its roster, its friends) on a new device.
+    let stolen = super::roster_book::load(&o.store(), &o_master).expect("O holds its roster");
+    let mut t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[&f_master], Some(stolen.clone())).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t_dev)
+        })
+        .await,
+        "the owner's device must be asked about the restored backup",
+    );
+    let (_, t_view) = super::roster_book::own(&o_master, &t.db_path, &t.passphrase).expect("T's roster");
+    assert!(t_view.pending.contains(&t_dev) && !t_view.is_member(&t_dev), "the thief waits: {t_view:?}");
+    assert!(
+        wait_until(20, async || f.store().load_roster_seen(&o_master).unwrap_or_default().contains_key(&t_dev)).await,
+        "the friend must start its seven days on the request",
+    );
+    assert_eq!(super::resolver::resolve(&t_dev), t_dev, "the thief resolves to nobody");
+    assert!(!f.known_devices(&o_master).contains(&t_dev), "and is no member at the friend");
+
+    // A DM to the owner reaches the owner's device and never the thief.
+    expect_olm_confirmed(&t, &f, 20).await;
+    drain_events(&mut t);
+    f.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: o_master.clone(),
+            text: "for the owner".to_string(),
+            message_id: "id1-a-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "for the owner")
+        })
+        .await,
+        "the owner's device receives the DM",
+    );
+    // ABSENCE: nothing to poll for a frame that never comes.
+    assert!(
+        !wait_event(&mut t, std::time::Duration::from_secs(4), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "for the owner")
+        })
+        .await,
+        "the friend must never fan the owner's DM out to the thief",
+    );
+
+    // What the thief says as the owner lands nowhere.
+    t.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: f_master.clone(),
+            text: "from the thief".to_string(),
+            message_id: "id1-a-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(4000).await; // ABSENCE again
+    assert!(
+        !f.dm_thread(&o_master).iter().any(|b| b.text == "from the thief"),
+        "the thief's DM must never be attributed to the owner",
+    );
+    assert!(f.dm_thread(&t_dev).is_empty(), "nor kept as anyone else's");
+
+    // The owner approves: a member everywhere, the thief's own device included.
+    o.cmd_tx.send(NodeCommand::ApproveDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRestored)).await,
+        "the approved device learns it belongs",
+    );
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master).contains(&t_dev)).await,
+        "the friend learns the approval, got {:?}",
+        f.known_devices(&o_master),
+    );
+    assert_eq!(super::resolver::resolve(&t_dev), o_master, "an approved device is the owner's");
+
+    // A second restored backup, refused by the owner.
+    let mut t2 = spawn_node_seeded(&relay, O_MASTER, T2_DEV, &[&f_master], Some(stolen)).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t2_dev)
+        })
+        .await,
+        "the owner is asked about the second backup",
+    );
+    assert!(
+        wait_until(20, async || f.store().load_roster_seen(&o_master).unwrap_or_default().contains_key(&t2_dev)).await,
+        "the friend saw the second request",
+    );
+    o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut t2, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRemoved { .. })).await,
+        "the refused device learns it was refused",
+    );
+    assert!(
+        wait_until(20, async || f.revoked_devices(&o_master).contains(&t2_dev)).await,
+        "the friend learns the refusal",
+    );
+    f.store().set_roster_seen(&o_master, &t2_dev, now - EIGHT_DAYS_MS).unwrap();
+    assert!(
+        !f.known_devices(&o_master).contains(&t2_dev),
+        "a refused request never matures, got {:?}",
+        f.known_devices(&o_master),
+    );
+    assert_ne!(super::resolver::resolve(&t2_dev), o_master);
+
+    drop((o, f, t, t2));
+}
+
+/// A stolen MEMBER device removes the owner's device; the owner types the phrase on
+/// it, which keeps only that device. The thief stops counting everywhere, and
+/// whatever it signs later, in the old base or the new one, changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
+    use crate::identity::roster;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 146;
+    const O_DEV: u8 = 147;
+    const T_DEV: u8 = 148;
+    const X_DEV: u8 = 149;
+    const F_MASTER: u8 = 150;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let o_dev = tag_kp(O_DEV).peer_id();
+    let t_dev = tag_kp(T_DEV).peer_id();
+    let x_dev = tag_kp(X_DEV).peer_id();
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let now = super::roster_book::now_ms();
+    let first = protected_roster(O_MASTER, &[O_DEV, T_DEV], now - 60_000);
+    let old_base = first.base();
+
+    let mut o = spawn_node_seeded(&relay, O_MASTER, O_DEV, &[&f_master], Some(first.clone())).await;
+    let mut t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[&f_master], Some(first.clone())).await;
+    let f = spawn_node_with_friends(&relay, F_MASTER, F_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &f, 20).await;
+    expect_olm_confirmed(&t, &f, 20).await;
+    let both = |n: &TestNode| {
+        let known = n.known_devices(&o_master);
+        known.contains(&o_dev) && known.contains(&t_dev)
+    };
+    assert!(wait_until(20, async || both(&f)).await, "F holds both of O's devices first");
+
+    // The thief removes the owner's device.
+    t.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: o_dev.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::DeviceRemoved { by, .. } if *by == t_dev)
+        })
+        .await,
+        "the owner's device learns who removed it",
+    );
+    assert!(
+        wait_until(20, async || f.revoked_devices(&o_master).contains(&o_dev)).await,
+        "a removal by a member counts at the friend too",
+    );
+
+    // The owner types the phrase on the removed device and keeps only it.
+    let (before, _) = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).map(|(_, s)| (s.members, ())).unwrap();
+    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[], &o.db_path, &o.passphrase)
+        .expect("the phrase recovers");
+    let after = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().1.members;
+    assert_eq!(after.iter().cloned().collect::<Vec<_>>(), vec![o_dev.clone()]);
+    drain_events(&mut o);
+    o.cmd_tx
+        .send(NodeCommand::RosterChanged { newly_revoked: before.difference(&after).cloned().collect() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRestored)).await,
+        "the recovered device unlocks",
+    );
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master) == vec![o_dev.clone()]).await,
+        "the friend follows the phrase: only the owner's device, got {:?}",
+        f.known_devices(&o_master),
+    );
+    assert_eq!(super::resolver::resolve(&t_dev), t_dev, "the thief's device is nobody's now");
+
+    // The friend's DM reaches the owner and not the thief.
+    drain_events(&mut t);
+    f.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: o_master.clone(),
+            text: "after the recovery".to_string(),
+            message_id: "id1-b-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "after the recovery")
+        })
+        .await,
+        "the owner receives the DM",
+    );
+    assert!(
+        !wait_event(&mut t, std::time::Duration::from_secs(4), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "after the recovery")
+        })
+        .await,
+        "the thief must not",
+    );
+
+    // Everything the thief can still sign: its removal of the owner and a vouch for
+    // a new device, in the old base and in the new one.
+    let new_base = super::roster_book::load(&f.store(), &o_master).expect("F's roster").base();
+    assert_ne!(new_base, old_base);
+    let mut forged = first.clone();
+    forged.add_consent(roster::sign_consent(&tag_kp(X_DEV), &o_master));
+    for base in [&old_base, &new_base] {
+        forged.add_removal(roster::sign_removal(&tag_kp(T_DEV), &o_master, base, &o_dev, &[]));
+        forged.add_vouch(roster::sign_vouch(&tag_kp(T_DEV), &o_master, base, &x_dev));
+    }
+    let room = super::types::dm_room_code(&o_master, &f_master);
+    let notice = serde_json::to_vec(&super::types::HavenMessage::RosterNotice { roster: forged }).unwrap();
+    relay.inject_direct(&room, &t_dev, &f.device_id, notice);
+    sleep_ms(3000).await; // ABSENCE: an ingest that changes nothing leaves nothing to poll
+    assert_eq!(
+        f.known_devices(&o_master),
+        vec![o_dev.clone()],
+        "nothing the superseded device signs counts",
+    );
+    assert!(!f.revoked_devices(&o_master).contains(&o_dev), "its removal of the owner is void");
+
+    drop((o, f, t));
+}
+
+/// Once the phrase is the root, only the phrase destroys the identity everywhere: an
+/// order the master key alone signed is refused by the owner's other device on every
+/// lane and by friends, and the same order signed with the phrase is obeyed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_destroy_order_needs_the_phrase() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 151;
+    const O_DEV: u8 = 152;
+    const O2_DEV: u8 = 153;
+    const F_MASTER: u8 = 154;
+    const ISSUER: u8 = 155;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let o2_dev = tag_kp(O2_DEV).peer_id();
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let now = super::roster_book::now_ms();
+    let first = protected_roster(O_MASTER, &[O_DEV, O2_DEV], now - 60_000);
+
+    let o = spawn_node_seeded(&relay, O_MASTER, O_DEV, &[&f_master], Some(first.clone())).await;
+    let mut o2 = spawn_node_seeded(&relay, O_MASTER, O2_DEV, &[&f_master], Some(first)).await;
+    let mut f = spawn_node_with_friends(&relay, F_MASTER, F_MASTER, &[&o_master]).await;
+    expect_siblings_ready(&relay, &o, &o2, 30).await;
+    expect_dm_pair_ready(&relay, &o, &f, 20).await;
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master).contains(&o2_dev)).await,
+        "F holds O's protected roster first",
+    );
+    seed_install_files(&o2.data_root);
+    drain_events(&mut o2);
+    drain_events(&mut f);
+
+    let publish = async |order: super::types::DestroyIdentity| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        o.cmd_tx.send(NodeCommand::PublishDestroyIdentity { order: Box::new(order), reply: tx }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("the node must answer inside the caller's bound")
+            .expect("reply channel")
+    };
+
+    // The master key alone, live over Olm and to the friend.
+    let master_only = super::crypto_handler::build_destroy_identity(&o.master_kp, None, super::destroy::now_ms(), Vec::new(), true);
+    assert!(publish(master_only).await >= 1, "the order must reach the sibling to be refused by it");
+    // ABSENCE: refused orders leave nothing behind.
+    assert!(
+        !wait_event(&mut o2, std::time::Duration::from_secs(6), |ev| matches!(ev, NetworkEvent::DestroyReceived { .. })).await,
+        "the sibling must refuse an order without the phrase",
+    );
+    assert_eq!(f.identity_destroyed_at(&o_master), None, "and so must the friend");
+
+    // The master key alone, parked in the relay's kill list.
+    relay.set_online(&o2_dev, false);
+    let parked = super::crypto_handler::build_destroy_identity(&o.master_kp, None, super::destroy::now_ms(), Vec::new(), false);
+    let issuer = raw_socket(&relay, &tag_kp(ISSUER).peer_id());
+    issuer
+        .cmd_tx
+        .send(WsCommand::KillDeposit {
+            targets: vec![o2_dev.clone()],
+            issued_at_ms: parked.issued_at_ms,
+            blob: super::destroy::encode_kill_blob(&parked).expect("encode"),
+        })
+        .unwrap();
+    assert!(wait_until(10, async || relay.kill_entry(&o2_dev).is_some()).await, "the order is parked");
+    relay.set_online(&o2_dev, true);
+    assert!(
+        !wait_event(&mut o2, std::time::Duration::from_secs(6), |ev| matches!(ev, NetworkEvent::DestroyReceived { .. })).await,
+        "a parked order without the phrase is refused too",
+    );
+    assert!(
+        wait_until(15, async || relay.kill_entry(&o2_dev).is_none()).await,
+        "and acked, so it stops repeating",
+    );
+    expect_siblings_ready(&relay, &o, &o2, 30).await;
+
+    // Signed with the phrase: obeyed by the sibling and the friend.
+    let signed = super::crypto_handler::build_destroy_identity(
+        &o.master_kp, Some(&recovery_kp(O_MASTER)), super::destroy::now_ms(), Vec::new(), true,
+    );
+    assert!(publish(signed).await >= 1);
+    assert!(
+        wait_event(&mut o2, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::DestroyReceived { scope } if scope == "identity")
+        })
+        .await,
+        "the phrase's order is obeyed",
+    );
+    assert!(
+        wait_until(20, async || f.identity_destroyed_at(&o_master).is_some()).await,
+        "and the friend records the destruction",
+    );
+    drop((o, o2, f));
+}
+
+/// A restored backup nobody answers becomes a member at a contact once that contact
+/// has seen the request for seven days, on its own clock, and the contact is warned
+/// about the new device then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_restored_device_matures_at_a_contact_after_seven_quiet_days() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 156;
+    const O_DEV: u8 = 157;
+    const T_DEV: u8 = 158;
+    const F_MASTER: u8 = 159;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let o_dev = tag_kp(O_DEV).peer_id();
+    let t_dev = tag_kp(T_DEV).peer_id();
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let now = super::roster_book::now_ms();
+
+    let o = spawn_node_seeded(
+        &relay, O_MASTER, O_DEV, &[&f_master], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000)),
+    ).await;
+    let f = spawn_node_with_friends(&relay, F_MASTER, F_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &f, 20).await;
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master) == vec![o_dev.clone()]).await,
+        "F holds O's roster first",
+    );
+    let restored = super::roster_book::load(&o.store(), &o_master).expect("O's roster");
+    let t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[&f_master], Some(restored)).await;
+    assert!(
+        wait_until(20, async || f.store().load_roster_seen(&o_master).unwrap_or_default().contains_key(&t_dev)).await,
+        "the friend starts its clock on the request",
+    );
+    assert!(!f.known_devices(&o_master).contains(&t_dev), "a fresh request is not a member");
+    assert!(
+        !f.security_alerts().iter().any(|a| a.detail == t_dev),
+        "and nobody is warned about a request",
+    );
+
+    // Seven quiet days pass on every clock that saw the request.
+    for n in [&o, &f, &t] {
+        n.store().set_roster_seen(&o_master, &t_dev, now - EIGHT_DAYS_MS).unwrap();
+    }
+    // The next roster the friend hears (any announce of O's) folds it in.
+    o.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Owner".to_string(),
+            status: "seven days on".to_string(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || f.store().device_links_for(&o_master).unwrap_or_default().contains(&t_dev)).await,
+        "the matured device is saved as a member at the friend, got {:?}",
+        f.store().device_links_for(&o_master),
+    );
+    assert!(
+        wait_until(10, async || f.security_alerts().iter().any(|a| a.peer_id == o_master && a.detail == t_dev)).await,
+        "and the friend is warned about the new device",
+    );
+    drop((o, f, t));
+}
+
+/// A restored backup's own UI reads the gate before the node has asked to join, so
+/// the node says when its start has settled our roster: the waiting lock goes up
+/// without a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_restored_device_tells_its_ui_once_it_waits() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 167;
+    const O_DEV: u8 = 168;
+    const T_DEV: u8 = 169;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let t_dev = tag_kp(T_DEV).peer_id();
+    let now = super::roster_book::now_ms();
+
+    let o = spawn_node_seeded(&relay, O_MASTER, O_DEV, &[], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000))).await;
+    let restored = super::roster_book::load(&o.store(), &o_master).expect("O's roster");
+    let mut t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[], Some(restored)).await;
+
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::DeviceListUpdated { master_peer_id } if *master_peer_id == o_master)
+        })
+        .await,
+        "the restored device tells its UI that its own roster settled",
+    );
+    let store = t.store();
+    let roster = super::roster_book::load(&store, &o_master).expect("T's roster");
+    assert!(super::roster_book::fold(&store, &roster).pending.contains(&t_dev), "and it is waiting by then");
+    assert!(
+        store.load_roster_seen(&o_master).unwrap_or_default().contains_key(&t_dev),
+        "with its own clock started, which dates the waiting lock",
+    );
+    drop((o, t));
+}
+
+// ---------------------------------------------------------------------------
+// HOL-SEC-002: device linking. The relay sees the code's rendezvous part and every
+// frame; what it may never do is open the snapshot or answer the code twice.
+// ---------------------------------------------------------------------------
+
+/// A populated device whose identity and database sit in the process data root, the
+/// way an export reads them. `HOLLOW_DATA_DIR` must already point at `root`.
+async fn spawn_presenter_in_data_root(relay: &MockRelay, root: &tempfile::TempDir, master_tag: u8, device_tag: u8) -> TestNode {
+    let master = tag_kp(master_tag);
+    let device = tag_kp(device_tag);
+    std::fs::write(root.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+    std::fs::write(root.path().join("identity.device"), device.to_protobuf_encoding().unwrap()).unwrap();
+    let db_path = root.path().join("messages.db").to_str().unwrap().to_string();
+    let passphrase = passphrase_for(&master);
+    crate::storage::MessageStore::migrate_auto_vacuum_once(&db_path, &passphrase).unwrap();
+    {
+        let store = crate::storage::MessageStore::open(&db_path, &passphrase).unwrap();
+        super::roster_book::merge_for_test(
+            &store, &legacy_roster(master_tag, &[device_tag], None), &master.peer_id(), &device.peer_id(),
+        );
+    }
+    // The node owns a throwaway dir of its own; its database is the data root's.
+    spawn_node_on_db(relay, master_tag, device_tag, &db_path, tempfile::tempdir().unwrap()).await
+}
+
+/// The whole link with the relay recording every frame: the snapshot opens with
+/// the key that rode the channel and with nothing the relay saw, and the roster
+/// inside it already vouches for the device id the joiner will run as.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn link_the_relay_cannot_open_the_snapshot() {
+    let _g = test_guard();
+    let root = tempfile::tempdir().expect("data root");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", root.path()); }
+    crate::identity::encryption::clear_session_key();
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+
+    const P_MASTER: u8 = 161;
+    const P_DEV: u8 = 162;
+    const N_TAG: u8 = 163;
+    let mut p = spawn_presenter_in_data_root(&relay, &root, P_MASTER, P_DEV).await;
+    let mut n = spawn_node_on(&relay, N_TAG, N_TAG).await;
+
+    p.cmd_tx
+        .send(NodeCommand::ClaimLinkCode { rendezvous: "ABCDEF".into(), secret: "GHJK".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut p, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::LinkCodeClaimed { .. })).await,
+        "the relay must confirm the claim",
+    );
+    n.cmd_tx
+        .send(NodeCommand::ResolveLinkCode { code: "abcdef-ghjk".into(), label: "Test laptop".into(), platform: "linux".into() })
+        .await
+        .unwrap();
+    let mut asked = None;
+    assert!(
+        wait_event(&mut p, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::SiblingLinkAvailable { peer_id, label, platform, .. } => {
+                asked = Some((peer_id.clone(), label.clone(), platform.clone()));
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "the presenter must be asked once the handshake confirms",
+    );
+    assert_eq!(asked, Some((n.device_id.clone(), "Test laptop".into(), "linux".into())));
+
+    p.cmd_tx
+        .send(NodeCommand::AcceptLinkPush { target_peer: n.device_id.clone(), include_vault: false, include_files: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut n, std::time::Duration::from_secs(60), |ev| matches!(ev, NetworkEvent::LinkComplete { .. })).await,
+        "the joiner must stash the snapshot",
+    );
+    assert!(
+        wait_event(&mut p, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::LinkPushComplete { .. })).await,
+        "and the presenter must hear its ack",
+    );
+
+    let blob = std::fs::read(root.path().join("pending_link.hollow")).expect("stashed blob");
+    let key = std::fs::read_to_string(root.path().join("pending_link.code")).expect("stashed key");
+    let device = NativeKeypair::from_protobuf_encoding(&std::fs::read(root.path().join("pending_link.device")).unwrap())
+        .expect("stashed device key");
+    assert_ne!(device.peer_id(), n.device_id, "the joiner runs as a device key minted for the link");
+
+    // Everything the relay saw, and the whole code besides: none of it opens the blob.
+    let tap = relay.wiretap();
+    for candidate in [
+        "ABCDEF", "abcdef", "ABCDEFGHJK", "ABCDEF-GHJK", "GHJK", "link:ABCDEF", "",
+        &p.master_id, &p.device_id, &n.device_id, &n.master_id,
+    ] {
+        assert!(
+            crate::api::storage::decrypt_backup_bytes(&blob, candidate).is_err(),
+            "HOL-SEC-002: the snapshot opened with {candidate:?}",
+        );
+    }
+    for secret in [key.as_str(), "Test laptop"] {
+        assert_eq!(tap.readable(secret), Vec::<String>::new(), "the relay read {secret:?}");
+    }
+    assert_eq!(tap.lane_leaks(), Vec::<String>::new());
+    assert!(tap.frames.iter().any(|f| f.kind() == "link_sealed"), "the link rode the sealed channel");
+
+    // The real key opens it, and its roster holds the vouch for that exact device.
+    let zip = crate::api::storage::decrypt_backup_bytes(&blob, &key).expect("the channel's key opens it");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+    let mut db = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("messages.db").unwrap(), &mut db).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let db_path = out.path().join("linked.db");
+    std::fs::write(&db_path, db).unwrap();
+    let store = crate::storage::MessageStore::open(db_path.to_str().unwrap(), &passphrase_for(&tag_kp(P_MASTER))).unwrap();
+    let roster = super::roster_book::load(&store, &p.master_id).expect("the snapshot carries the roster");
+    assert!(
+        roster.vouches.iter().any(|v| v.device == device.peer_id() && v.by == p.device_id),
+        "the presenter's vouch names the linked device, got {:?}",
+        roster.vouches,
+    );
+    assert!(store.load_olm_account().unwrap().is_none(), "and none of the presenter's device secrets");
+    drop((p, n));
+}
+
+/// A relay that answers the code itself gets one guess at the secret part, and a
+/// wrong guess ends the link: playing the presenter, it gets no hello; playing the
+/// joiner, it gets no offer, and the code is burned for everyone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_relay_that_answers_the_code_gets_one_guess() {
+    use base64::Engine as _;
+    use super::types::HavenMessage;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+
+    let mut p = spawn_node_on(&relay, 164, 165).await;
+    let mut n = spawn_node_on(&relay, 166, 166).await;
+    let rogue = tag_kp(167);
+    relay.register_key(&rogue);
+    let mut rogue_socket = raw_socket(&relay, &rogue.peer_id());
+
+    // 1. The relay plays the presenter: it holds the rendezvous, not the secret.
+    rogue_socket.cmd_tx.send(WsCommand::ClaimLinkCode { code: "QWERTY".into() }).unwrap();
+    rogue_socket.cmd_tx.send(WsCommand::JoinRoom { room_code: super::link_handler::link_room("QWERTY") }).unwrap();
+    let _ = rogue_socket.events(300).await;
+    n.cmd_tx
+        .send(NodeCommand::ResolveLinkCode { code: "QWERTYGHJK".into(), label: "Phone".into(), platform: "android".into() })
+        .await
+        .unwrap();
+    let opening = async || {
+        relay.wiretap().frames.iter().rev().find_map(|f| {
+            let HavenMessage::LinkPake { msg } = serde_json::from_slice(&f.body).ok()? else { return None };
+            (f.from == n.device_id).then(|| b64.decode(msg).ok()).flatten()
+        })
+    };
+    assert!(wait_until(10, async || opening().await.is_some()).await, "the joiner opens the handshake");
+    let (_, reply, confirm) = super::link_pake::presenter_answer("QWERTY", "WRNG", &opening().await.unwrap()).unwrap();
+    let answer = HavenMessage::LinkPakeReply { msg: b64.encode(reply), confirm: b64.encode(confirm) };
+    relay.inject_direct(&super::link_handler::link_room("QWERTY"), &rogue.peer_id(), &n.device_id, serde_json::to_vec(&answer).unwrap());
+    assert!(
+        wait_event(&mut n, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::LinkFailed { .. })).await,
+        "a wrong guess must end the link on the joiner",
+    );
+    assert!(
+        !relay.wiretap().frames.iter().any(|f| f.from == n.device_id && f.kind() == "link_sealed"),
+        "the joiner must seal nothing under a key the relay could test",
+    );
+
+    // 2. The relay plays the joiner against a real presenter.
+    p.cmd_tx
+        .send(NodeCommand::ClaimLinkCode { rendezvous: "ZXCVBN".into(), secret: "GHJK".into() })
+        .await
+        .unwrap();
+    let room = super::link_handler::link_room("ZXCVBN");
+    // From outside the code's room a handshake is nobody's.
+    let (_, early) = super::link_pake::joiner_start("ZXCVBN", "GHJK");
+    relay.inject_direct(&room, &rogue.peer_id(), &p.device_id, serde_json::to_vec(&HavenMessage::LinkPake { msg: b64.encode(early) }).unwrap());
+    sleep_ms(1000).await; // ABSENCE
+    assert!(
+        !relay.wiretap().frames.iter().any(|f| f.from == p.device_id && f.kind() == "link_pake_reply"),
+        "a handshake from outside the code's room must get no answer",
+    );
+    rogue_socket.cmd_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    assert!(
+        wait_until(10, async || p.sees_peer(&rogue.peer_id()).await).await,
+        "the presenter must see the rogue in the code's room",
+    );
+    let (_, guess) = super::link_pake::joiner_start("ZXCVBN", "WRNG");
+    let pake = HavenMessage::LinkPake { msg: b64.encode(&guess) };
+    relay.inject_direct(&room, &rogue.peer_id(), &p.device_id, serde_json::to_vec(&pake).unwrap());
+    assert!(
+        wait_until(10, async || relay.wiretap().frames.iter().any(|f| f.from == p.device_id && f.kind() == "link_pake_reply")).await,
+        "the presenter answers the one handshake it gets",
+    );
+    // A second handshake while the first is open: the code already answered.
+    let (_, second) = super::link_pake::joiner_start("ZXCVBN", "GHJL");
+    relay.inject_direct(&room, &rogue.peer_id(), &p.device_id, serde_json::to_vec(&HavenMessage::LinkPake { msg: b64.encode(second) }).unwrap());
+    sleep_ms(1000).await; // ABSENCE
+    let forged = HavenMessage::LinkSealed { ct: b64.encode([9u8; 80]) };
+    relay.inject_direct(&room, &rogue.peer_id(), &p.device_id, serde_json::to_vec(&forged).unwrap());
+    assert!(
+        wait_event(&mut p, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::LinkFailed { .. })).await,
+        "a hello that does not open must end the link on the presenter",
+    );
+    // A second try, as if the relay kept guessing: nothing answers it.
+    let (_, again) = super::link_pake::joiner_start("ZXCVBN", "GHJM");
+    relay.inject_direct(&room, &rogue.peer_id(), &p.device_id, serde_json::to_vec(&HavenMessage::LinkPake { msg: b64.encode(again) }).unwrap());
+    sleep_ms(1500).await; // ABSENCE
+    let replies = relay.wiretap().frames.iter().filter(|f| f.from == p.device_id && f.kind() == "link_pake_reply").count();
+    assert_eq!(replies, 1, "the code answers once");
+    assert!(
+        !relay.wiretap().frames.iter().any(|f| f.from == p.device_id && f.kind() == "link_sealed"),
+        "the presenter must never send an offer",
+    );
+    // And the code is gone for the real joiner too.
+    drain_events(&mut n);
+    n.cmd_tx
+        .send(NodeCommand::ResolveLinkCode { code: "ZXCVBN-GHJK".into(), label: "Phone".into(), platform: "android".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut n, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::LinkCodeError { .. })).await,
+        "a burned code resolves to nobody",
+    );
+    drop((p, n));
 }

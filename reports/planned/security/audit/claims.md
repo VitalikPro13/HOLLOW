@@ -24,11 +24,11 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-01 | Only my own master key can add, revoke or rebind my devices. No message from any other identity changes which devices count as mine, or which devices count as someone else's. | P-01, all peers | WP 3.2, 23.1 | Broken, fixed on branch (HOL-SEC-001) |
-| C-02 | Nothing another identity sends can wipe, lock or destroy data on my devices. Only my own master's destroy order, or my own duress secret typed on the device, can. | P-01, all peers | WP 23.1 | Broken, fixed on branch (HOL-SEC-001) |
-| C-03 | Once I revoke a device, everyone who has seen the revocation stops sending it DMs, server messages and media keys, and its old sessions are dropped. | P-01, P-08 | WP 3.6 | Overclaimed today; design ID-1 agreed to make it true (note 1) |
-| C-04 | A replayed older device list can never un-revoke a device. | P-01, all peers | WP 3.2 | Believed |
-| C-05 | Linking a new device hands my identity only to that device, and only after I confirm on a device I already hold. Neither the relay nor anyone else learns anything from the transfer. | P-01, P-02, all peers | WP 3.4 | Broken (HOL-SEC-002) |
+| C-01 | Only a current device of mine or my recovery phrase adds or removes my devices; the master key alone admits nothing. No message from any other identity changes which devices count as mine, or which devices count as someone else's. | P-01, all peers, P-08, P-09 | WP 3.2, 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1, 2026-10-01), retest at release |
+| C-02 | Nothing another identity sends can wipe, lock or destroy data on my devices. Only my recovery phrase (or a permission it signed for one device) orders my devices destroyed remotely; my own duress secret typed on a device wipes that device. | P-01, all peers, P-08 | WP 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1), retest at release |
+| C-03 | A removed device stops getting anything at once: everyone who has seen the removal stops sending it DMs, server messages and media keys, and its old sessions are dropped. It locks, and erases itself after three days unless the recovery phrase is typed on it. | P-01, P-08 | WP 3.6 | Fixed on local main (HOL-SEC-077, design ID-1; note 1), retest at release |
+| C-04 | A replayed older roster never brings back a removed device. | P-01, all peers | WP 3.2 | Believed (removals are a plain union inside a base; only a newer recovery, signed by the phrase, starts a new one) |
+| C-05 | Linking a new device hands my identity only to that device, and only after I confirm on a device I already hold. The relay never holds a secret that opens a link transfer; a relay that answers the code gets one guess. | P-01, P-02, all peers | WP 3.4 | Fixed on local main (HOL-SEC-002, reworded 2026-10-01), retest at release |
 | C-06 | A copy of my identity file is useless without my machine (keychain mode) or my password (password mode). | P-09 | WP 2.3, 23.1 | Believed; "no protection" mode excluded by design |
 | C-07 | Typing the duress secret destroys local data and shows nothing, and checking it costs the same as checking the real secret. | P-09 | WP 23.1 | Believed |
 
@@ -114,15 +114,14 @@ adds):
 ## Notes
 
 1. **C-03 and the master key on every device.** WP 3.6: "all of a person's
-   devices hold the master key". Revocation therefore binds an HONEST revoked
-   device, which wipes itself. A thief with a stolen, usable device holds the
-   master key and can sign a higher-version list that un-revokes itself and
-   revokes the owner's real devices, which then wipe themselves. It can also
-   issue master-signed destroy orders. The claim holds only while the stolen
-   device cannot use its key (password mode and the device locked). The
-   public "Stolen/lost device" row in WP 23.1 promises more than this. Decided
-   2026-09-26: design ID-1 (the recovery phrase as the root of authority) fixes
-   it; see the plan and AR-02.
+   devices hold the master key". Until 0.12 that key was also the authority over
+   the device list, so a stolen usable device could un-revoke itself, revoke the
+   owner's real devices (they wiped themselves) and issue destroy orders (AR-02).
+   Design ID-1 (built 2026-10-01, HOL-SEC-077) takes that authority off the master
+   key: a device list is a roster of statements by current devices and by the
+   recovery phrase, which no device stores. A stolen device can still remove other
+   devices while it is a member; the owner types the phrase and every device the
+   thief holds or vouched stops counting. Residuals: AR-15.
 2. **C-24 and the relay assumption.** WP 23.3 assumes the relay is
    honest-but-curious. The Matrix attacks of 2022 all came from a malicious
    homeserver, and anyone can run a Hollow relay. This audit assumes an

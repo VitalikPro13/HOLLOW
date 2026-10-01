@@ -34,8 +34,11 @@ impl GroupRules<'_> {
     }
 }
 
-fn revoked(device: &str) -> bool {
-    super::resolver::is_revoked(device)
+/// A leaf that holds no seat whatever its certificate says: a revoked device, or one
+/// its master's roster does not admit (design ID-1: the master key alone certifies
+/// nothing).
+fn refused(leaf: &LeafIdentity) -> bool {
+    super::resolver::is_revoked(&leaf.device) || super::resolver::disowns(&leaf.master, &leaf.device)
 }
 
 /// A commit may remove a leaf of the committer's own identity, an unbound leaf, a
@@ -43,7 +46,7 @@ fn revoked(device: &str) -> bool {
 fn removable(leaf: &LeafView, committer: &LeafIdentity, adds: &[LeafView], rules: &GroupRules) -> bool {
     let Some(target) = leaf.bound() else { return true };
     target.master == committer.master
-        || revoked(&target.device)
+        || refused(target)
         || rules.membership(&target.master, "") != Verdict::Accept
         || adds.iter().any(|a| a.bound().is_some_and(|b| b.device == target.device))
 }
@@ -85,8 +88,8 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
         }
         (LeafView::Bound(identity), _) => identity,
     };
-    if let Some(add) = facts.adds.iter().filter_map(LeafView::bound).find(|a| revoked(&a.device)) {
-        return Verdict::Refuse(format!("adds revoked device {}", add.device));
+    if let Some(add) = facts.adds.iter().filter_map(LeafView::bound).find(|a| refused(a)) {
+        return Verdict::Refuse(format!("adds revoked or disowned device {}", add.device));
     }
     if let GroupRules::Meeting { host } = rules {
         return if *host == Some(committer.master.as_str()) {
@@ -121,8 +124,8 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
     if let Some(leaf) = facts.leaves.iter().find(|l| l.bound().is_none()) {
         return Verdict::Refuse(format!("holds unbound leaf {}", leaf.id()));
     }
-    if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(|l| revoked(&l.device)) {
-        return Verdict::Refuse(format!("holds revoked device {}", leaf.device));
+    if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(|l| refused(l)) {
+        return Verdict::Refuse(format!("holds revoked or disowned device {}", leaf.device));
     }
     if facts.replaces && !asked {
         return Verdict::Refuse("would replace our group, and we asked for nothing".into());
@@ -162,7 +165,7 @@ pub(crate) fn plan_membership(
         let Ok(view) = MlsManager::key_package_identity(&kp) else { continue };
         let Some(identity) = view.bound() else { continue };
         if identity.device != device
-            || revoked(&identity.device)
+            || refused(identity)
             || rules.membership(&identity.master, "") != Verdict::Accept
         {
             continue;
@@ -269,7 +272,7 @@ pub(crate) fn stale_leaves(leaves: &[LeafView], ourselves: &str, rules: &GroupRu
         .filter(|leaf| match leaf.bound() {
             None => true,
             Some(identity) => {
-                revoked(&identity.device) || rules.membership(&identity.master, "") != Verdict::Accept
+                refused(identity) || rules.membership(&identity.master, "") != Verdict::Accept
             }
         })
         .map(|leaf| leaf.id().to_string())
@@ -387,6 +390,36 @@ mod tests {
         assert_eq!(
             commit_verdict(&CommitFacts { removes: vec![stolen], ..facts(owner) }, &rules),
             Verdict::Accept
+        );
+        crate::node::resolver::clear_all();
+    }
+
+    /// ID-1: a leaf certified by the master key alone holds no seat once its master's
+    /// roster is known and does not name the device.
+    #[test]
+    fn disowned_devices_are_never_added_or_welcomed_and_always_removable() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update_many("alice", ["alice-d"]);
+        let state = server(&["owner", "alice"]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let owner = leaf("owner-d", "owner");
+        let restored = leaf("alice-restored", "alice");
+        assert!(matches!(
+            commit_verdict(&CommitFacts { adds: vec![restored.clone()], ..facts(owner.clone()) }, &rules),
+            Verdict::Refuse(_)
+        ));
+        assert_eq!(
+            commit_verdict(&CommitFacts { removes: vec![restored.clone()], ..facts(owner.clone()) }, &rules),
+            Verdict::Accept
+        );
+        assert!(matches!(
+            welcome_verdict(&welcome(owner.clone(), vec![owner.clone(), restored.clone()], false), &rules, true),
+            Verdict::Refuse(_)
+        ));
+        assert_eq!(
+            stale_leaves(&[owner, restored, leaf("alice-d", "alice")], "owner-d", &rules),
+            vec!["alice-restored".to_string()]
         );
         crate::node::resolver::clear_all();
     }

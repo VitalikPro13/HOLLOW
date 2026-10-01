@@ -321,11 +321,11 @@ Initial state: all `null`, `isLoaded = false`.
    - If no file: generates 256-bit entropy via `getrandom`, creates BIP-39 mnemonic (24 words), derives Ed25519 keypair via `NativeKeypair::from_mnemonic()` (first 32 bytes of BIP-39 seed), saves keypair to disk, returns `IdentityData` with `mnemonic: Some(phrase)`.
 5. **Open message store:** After identity loads, `storageService.openMessageStore()` opens the SQLCipher database (keyed from the identity).
 6. **State update:** Sets `peerId`, `mnemonic` (if new), `isLoaded = true`.
-7. **Mnemonic dialog:** If `mnemonic` is non-null (first creation), bootstrap saves it to DB via `storage_api.saveMnemonic()` then shows `MnemonicDialog` for user backup.
+7. **Mnemonic dialog:** If `mnemonic` is non-null (first creation), bootstrap shows `MnemonicDialog`: the phrase once, then three random words typed back, then `identityProvider.forgetMnemonic()`. It is never written anywhere (design ID-1, HOL-SEC-076).
 
 ### Mnemonic Availability
 
-- **First-time:** `mnemonic` is non-null. Displayed once in `MnemonicDialog`. Saved to DB for later retrieval (user can view it again in settings).
+- **First-time:** `mnemonic` is non-null. Displayed once in `MnemonicDialog`, checked by three words, then forgotten. Settings can only CHECK a typed phrase (`roster_api.checkRecoveryPhrase`), never show it. An identity from before 0.12 still holds the phrase it stored as `recovery_mnemonic`: `storedPhraseForUpgrade()` feeds `showPhraseUpgradeDialog` once, and confirming it signs the first recovery and erases it.
 - **Restored from mnemonic:** `restoreFromMnemonic(phrase)` calls `identityService.restoreIdentityFromMnemonic(phrase:)`. Rust parses the mnemonic, derives the keypair, saves to disk, returns with `mnemonic: Some(phrase)`.
 - **Subsequent loads:** `mnemonic` is `null`. The keypair file on disk does NOT contain the mnemonic — it's a one-time backup responsibility.
 

@@ -30,7 +30,7 @@ pub(crate) const FRIEND_HANDSHAKE_SENTINEL: &str = "\u{0}hollow-friend-handshake
 /// requester could not decrypt. Refusing at the cap is the honest failure.
 pub(crate) const MAX_OUTSTANDING_FRIEND_REQUESTS: usize = 32;
 
-/// The carried bundle plus the device list that authenticates it, persisted
+/// The carried bundle plus the roster that authenticates it, persisted
 /// between "the request arrived" and "the human clicked Accept" (which may be a
 /// reboot apart), and between "we sent a request" and the next re-deposit.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -38,7 +38,7 @@ pub(crate) struct CarriedRequestRecord {
     #[serde(default)]
     pub bundle: CarriedBundle,
     #[serde(default)]
-    pub device_list: SignedDeviceList,
+    pub device_list: crate::identity::roster::Roster,
     /// True when the request reached us while the requester was actually in a
     /// room with us, rather than out of the relay mailbox.
     ///
@@ -86,9 +86,7 @@ pub(crate) fn build_friend_request(
     db_path: &str,
     db_passphrase: &str,
 ) -> HavenMessage {
-    let device_list = super::crypto_handler::build_local_device_list(
-        master_keypair, device_peer_id, db_path, db_passphrase,
-    );
+    let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
     let key = out_bundle_key(target_master);
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
 
@@ -204,7 +202,7 @@ pub(crate) fn send_friend_reject(
     peer_id_str: &str,
     master: &str,
     requested_at: i64,
-    device_list: Option<SignedDeviceList>,
+    device_list: Option<crate::identity::roster::Roster>,
 ) {
     let msg = HavenMessage::FriendReject { requested_at, device_list };
 
@@ -229,7 +227,7 @@ pub(crate) fn send_friend_reject(
 
 /// Builds the accept for the request stamped `requested_at` (0 = no row, sent bare),
 /// carrying our own signed device list.
-pub(crate) fn friend_accept_msg(requested_at: i64, device_list: Option<SignedDeviceList>) -> HavenMessage {
+pub(crate) fn friend_accept_msg(requested_at: i64, device_list: Option<crate::identity::roster::Roster>) -> HavenMessage {
     HavenMessage::FriendAccept {
         requested_at: (requested_at > 0).then_some(requested_at),
         device_list,
@@ -244,7 +242,6 @@ pub(crate) fn send_friend_accept(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     master: &str,
     device: &str,
     requested_at: i64,
@@ -252,9 +249,7 @@ pub(crate) fn send_friend_accept(
     db_passphrase: &str,
 ) {
     let dm_room = dm_room_code(local_peer_str, master);
-    let list = super::crypto_handler::build_local_device_list(
-        master_keypair, device_peer_id, db_path, db_passphrase,
-    );
+    let list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
     send_message_to_peer_in_room(ws_cmd_tx, &dm_room, device, friend_accept_msg(requested_at, list));
 }
 
@@ -543,9 +538,7 @@ pub(crate) async fn handle_accept_friend_request(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: dm_room.clone(),
     });
-    let own_list = super::crypto_handler::build_local_device_list(
-        master_keypair, device_peer_id, db_path, db_passphrase,
-    );
+    let own_list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
 
     // -- Async friending: establish the Olm session from the CARRIED bundle. --
     //
@@ -567,7 +560,7 @@ pub(crate) async fn handle_accept_friend_request(
             // disk since the request arrived, and the freshness window may have
             // lapsed while it sat there.
             let ok = super::crypto_handler::verify_carried_bundle(
-                local_peer_str, &rec.device_list, &rec.bundle,
+                local_peer_str, &rec.device_list, &rec.bundle, db_path, db_passphrase,
             );
             match (ok, requester_device) {
                 (true, Some(device)) => {
@@ -588,8 +581,7 @@ pub(crate) async fn handle_accept_friend_request(
                         // session with a device id it cannot attribute, so its own
                         // reply targets nobody.
                         send_own_profile_to_peer_in_room(
-                            ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair,
-                            device_peer_id, &device, &dm_room, is_invisible,
+                            ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, &device, &dm_room, is_invisible,
                             db_path, db_passphrase,
                         );
                         // The accept itself, addressed into the DETERMINISTIC DM
@@ -657,7 +649,7 @@ pub(crate) async fn handle_accept_friend_request(
     for t in &friend_device_targets(&ws_room_peers, &peer_id_str, &master) {
         send_own_profile_to_peer(
             &ws_cmd_tx, &ws_room_peers, server_states,
-            local_peer_str, master_keypair, device_peer_id, t,
+            local_peer_str, master_keypair, t,
             is_invisible,
             db_path, db_passphrase,
         );
@@ -675,7 +667,6 @@ pub(crate) async fn handle_reject_friend_request(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     peer_id_str: String,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_accepts: &mut HashMap<String, i64>,
@@ -729,9 +720,7 @@ pub(crate) async fn handle_reject_friend_request(
     // ORIGINAL requested_at, so a replay cannot delete a newer request.
     send_friend_reject(
         ws_cmd_tx, ws_room_peers, &peer_id_str, &master, original_requested_at,
-        super::crypto_handler::build_local_device_list(
-            master_keypair, device_peer_id, db_path, db_passphrase,
-        ),
+        super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase),
     );
 
     let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
@@ -1045,9 +1034,7 @@ pub(crate) async fn handle_update_profile(
 
     // Build our master-signed device list so friends learn (tamper-proof) which
     // device peer_ids resolve to us (multi-device, Phase 6).
-    let device_list = super::crypto_handler::build_local_device_list(
-        master_keypair, device_peer_id, db_path, db_passphrase,
-    );
+    let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
 
     // The credentials field carries its OWN master signature, over the field we are
     // about to send and the timestamp we send it with (see `verify_support_creds_sig`).
@@ -1531,14 +1518,13 @@ pub(crate) fn send_own_profile_to_peer(
     server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     target_peer: &str,
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair,
         target_peer, is_invisible, db_path, db_passphrase, false, None, None,
     );
 }
@@ -1556,7 +1542,6 @@ pub(crate) fn send_own_profile_to_peer_in_room(
     server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     target_peer: &str,
     room_code: &str,
     is_invisible: bool,
@@ -1564,16 +1549,15 @@ pub(crate) fn send_own_profile_to_peer_in_room(
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair,
         target_peer, is_invisible, db_path, db_passphrase, false, Some(room_code), None,
     );
 }
 
-/// Announce our profile carrying an EXPLICIT device list instead of the one
-/// `build_local_device_list` would rebuild.
+/// Announce our profile carrying an EXPLICIT roster instead of our stored one.
 ///
-/// Destruction scope (b) is the only caller: the list it publishes tombstones the
-/// device we are running on, and the rebuild deliberately refuses to do that.
+/// Destruction scope (b) is the only caller: its roster removes the device we are
+/// running on, which the stored roster never says about itself.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send_own_profile_with_device_list(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -1581,15 +1565,14 @@ pub(crate) fn send_own_profile_with_device_list(
     server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     target_peer: &str,
-    list: SignedDeviceList,
+    list: crate::identity::roster::Roster,
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair,
         target_peer, is_invisible, db_path, db_passphrase, false, None, Some(list),
     );
 }
@@ -1603,14 +1586,13 @@ pub(crate) fn send_own_profile_full_to_peer(
     server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     target_peer: &str,
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
 ) {
     send_own_profile_inner(
-        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair, device_peer_id,
+        ws_cmd_tx, ws_room_peers, server_states, local_peer_str, master_keypair,
         target_peer, is_invisible, db_path, db_passphrase, true, None, None,
     );
 }
@@ -1622,7 +1604,6 @@ fn send_own_profile_inner(
     server_states: &HashMap<String, ServerState>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     target_peer: &str,
     is_invisible: bool,
     db_path: &str,
@@ -1631,8 +1612,8 @@ fn send_own_profile_inner(
     // Some(room) = address the announce into THAT room (so an offline recipient
     // gets it buffered); None = today's reachable-peer lookup.
     room_code: Option<&str>,
-    // Some = publish THIS list verbatim instead of rebuilding ours.
-    override_device_list: Option<SignedDeviceList>,
+    // Some = publish THIS roster verbatim instead of our stored one.
+    override_device_list: Option<crate::identity::roster::Roster>,
 ) {
     if send_tombstone_if_revoked(ws_cmd_tx, ws_room_peers, local_peer_str, target_peer, db_path, db_passphrase) {
         return;
@@ -1640,7 +1621,7 @@ fn send_own_profile_inner(
     match profile_audience(server_states, local_peer_str, target_peer, db_path, db_passphrase) {
         Audience::Full => {
             let msg = own_profile_update(
-                master_keypair, local_peer_str, device_peer_id, is_invisible, include_blobs,
+                master_keypair, local_peer_str, is_invisible, include_blobs,
                 override_device_list, db_path, db_passphrase,
             );
             if let Some(msg) = msg {
@@ -1648,7 +1629,7 @@ fn send_own_profile_inner(
             }
         }
         Audience::Card => send_own_card(
-            ws_cmd_tx, master_keypair, device_peer_id, target_peer, room_code, include_blobs, db_path, db_passphrase,
+            ws_cmd_tx, master_keypair, target_peer, room_code, include_blobs, db_path, db_passphrase,
         ),
         Audience::None => {}
     }
@@ -1659,7 +1640,6 @@ fn send_own_profile_inner(
 pub(crate) fn send_own_card(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
-    device_peer_id: &str,
     target_peer: &str,
     room_code: Option<&str>,
     with_avatar: bool,
@@ -1674,7 +1654,7 @@ pub(crate) fn send_own_card(
         .flatten()
         .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
         .unwrap_or_default();
-    let device_list = super::crypto_handler::build_local_device_list(master_keypair, device_peer_id, db_path, db_passphrase);
+    let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase);
     super::olm_lane::carry(
         ws_cmd_tx, target_peer, room_code,
         &HavenMessage::ProfileCard { card, avatar_b64, device_list },
@@ -1682,9 +1662,9 @@ pub(crate) fn send_own_card(
     );
 }
 
-/// When `target_peer` is one of OUR revoked devices, hand it our tombstoning list in
-/// the clear and nothing else: no session reaches it any more, and that list is what
-/// makes it wipe itself. Returns whether it was one.
+/// When `target_peer` is one of OUR removed devices, hand it our roster on the relay
+/// lane and nothing else: no session reaches it any more, and the roster is how it
+/// learns it was removed. Returns whether it was one.
 fn send_tombstone_if_revoked(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -1693,14 +1673,13 @@ fn send_tombstone_if_revoked(
     db_path: &str,
     db_passphrase: &str,
 ) -> bool {
-    let Some(list) = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|st| st.load_device_list(local_master).ok().flatten())
-        .filter(|list| list.revoked.iter().any(|d| d == target_peer))
-    else {
+    let Some((roster, state)) = super::roster_book::own(local_master, db_path, db_passphrase) else {
         return false;
     };
-    send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, HavenMessage::DeviceListTombstone { device_list: list });
+    if !state.removed.contains_key(target_peer) {
+        return false;
+    }
+    send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, HavenMessage::RosterNotice { roster });
     true
 }
 
@@ -1712,10 +1691,9 @@ fn send_tombstone_if_revoked(
 pub(crate) fn own_profile_update(
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     local_master: &str,
-    device_peer_id: &str,
     is_invisible: bool,
     include_blobs: bool,
-    override_device_list: Option<SignedDeviceList>,
+    override_device_list: Option<crate::identity::roster::Roster>,
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<HavenMessage> {
@@ -1739,7 +1717,7 @@ pub(crate) fn own_profile_update(
             .unwrap_or_default()
     };
     let device_list = override_device_list.or_else(|| {
-        super::crypto_handler::build_local_device_list(master_keypair, device_peer_id, db_path, db_passphrase)
+        super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase)
     });
     // The credentials field carries its OWN master signature, over the stored field
     // and the stored timestamp this frame re-announces.
@@ -1873,7 +1851,6 @@ pub(crate) async fn handle_envelope_profile_update(
     server_states: &mut HashMap<String, ServerState>,
     local_master_peer_id: &str,
     local_device_peer_id: &str,
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sender_peer_id: String,
@@ -1884,7 +1861,7 @@ pub(crate) async fn handle_envelope_profile_update(
     avatar_b64: String,
     banner_b64: String,
     twitch_username: String,
-    device_list: Option<SignedDeviceList>,
+    device_list: Option<crate::identity::roster::Roster>,
     avatar_hash: String,
     banner_hash: String,
     showcase_board: Option<String>,
@@ -1900,17 +1877,16 @@ pub(crate) async fn handle_envelope_profile_update(
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
-    // Multi-device: ingest the sender's signed device list (verify, monotonic,
-    // persist, resolver update, DeviceListUpdated). A list for our OWN master is
-    // a sibling device and is merged as a union. No-op for old clients.
+    // Multi-device: fold the sender's roster into ours for its master (verify,
+    // merge, persist, resolver update, DeviceListUpdated).
     //
-    // Siblings meet in the inbox room over the PLAINTEXT path, not this MLS
-    // server-member envelope, so the "our device set grew" re-announce is that
-    // handler's job, not ours. `newly_revoked` is surfaced so the swarm caller can
-    // drop Olm sessions and remove MLS leaves for a device revoked this way.
-    let outcome = super::crypto_handler::ingest_device_list(
-        event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
-        &sender_peer_id, ws_cmd_tx, device_list, db_path, db_passphrase,
+    // Siblings meet in the inbox room over the Olm path, not this MLS server-member
+    // envelope, so the "our roster changed" re-announce is that handler's job, not
+    // ours. `newly_revoked` is surfaced so the swarm caller can drop Olm sessions and
+    // remove MLS leaves for a device removed this way.
+    let outcome = super::roster_book::ingest(
+        event_tx, ws_cmd_tx, local_master_peer_id, local_device_peer_id,
+        &sender_peer_id, device_list, db_path, db_passphrase,
     ).await;
     let newly_revoked = outcome.newly_revoked;
     if profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {

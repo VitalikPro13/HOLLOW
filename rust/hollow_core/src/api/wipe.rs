@@ -30,6 +30,8 @@ const KEY_FILES: &[&str] = &[
     "identity.device",
     "identity.duress",
     "identity.dpapi",
+    "pending_link.code",
+    "pending_link.device",
 ];
 
 fn zero_and_remove(path: &Path) {
@@ -96,14 +98,32 @@ pub fn destroy_local() -> Result<(), String> {
 }
 
 /// `scope` is `device` | `device_revoke` | `identity`; its signal never blocks the wipe.
+/// `identity` needs the recovery phrase once the identity has one (design ID-1): it is
+/// checked BEFORE anything is erased, so a wrong phrase costs nothing.
 #[frb]
-pub fn destroy_with_scope(scope: String, notify_friends: bool) -> Result<(), String> {
+pub fn destroy_with_scope(
+    scope: String,
+    notify_friends: bool,
+    phrase: Option<String>,
+) -> Result<(), String> {
     duress::scope_byte(&scope)?;
-    publish_scope(&scope, notify_friends);
+    let order = if scope == duress::SCOPE_IDENTITY {
+        Some(super::roster::destroy_order(phrase.as_deref(), notify_friends)?)
+    } else {
+        None
+    };
+    publish_scope(&scope, order.map(Signal::Order));
     destroy_local()
 }
 
-fn publish_scope(scope: &str, notify_friends: bool) {
+/// What an `identity` scope publishes: an order the phrase signed, or the duress
+/// code's permission for this device.
+enum Signal {
+    Order(crate::node::DestroyIdentity),
+    Delegated(crate::node::DestroyDelegation, bool),
+}
+
+fn publish_scope(scope: &str, signal: Option<Signal>) {
     match scope {
         duress::SCOPE_DEVICE_REVOKE => {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -117,12 +137,18 @@ fn publish_scope(scope: &str, notify_friends: bool) {
         }
         duress::SCOPE_IDENTITY => {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            if super::network::send_node_command(NodeCommand::PublishDestroyIdentity {
-                targets: Vec::new(),
-                notify_friends,
-                reply: tx,
-            })
-            .is_ok()
+            let cmd = match signal {
+                Some(Signal::Order(order)) => Some(NodeCommand::PublishDestroyIdentity {
+                    order: Box::new(order),
+                    reply: tx,
+                }),
+                Some(Signal::Delegated(delegation, notify_friends)) => {
+                    Some(NodeCommand::PublishDelegatedDestroy { delegation, notify_friends, reply: tx })
+                }
+                None => None,
+            };
+            if let Some(cmd) = cmd
+                && super::network::send_node_command(cmd).is_ok()
             {
                 wait_for(rx);
             }
@@ -138,11 +164,21 @@ fn wait_for<T>(rx: tokio::sync::oneshot::Receiver<T>) {
 }
 
 /// Called with the WRONG password by definition, so nothing can be signed and a cold
-/// launch destroys locally only. A running node still holds the master key.
+/// launch destroys locally only. A running node still holds this device's key, which
+/// signs under the phrase's permission the slot carries; a legacy identity's master
+/// signs alone.
 #[frb(ignore)]
 pub(crate) fn run_duress(cfg: &duress::DuressConfig) {
     hollow_log!("[HOLLOW-DESTROY] Duress code entered");
-    publish_scope(&cfg.scope, cfg.notify_friends);
+    let signal = if cfg.scope == duress::SCOPE_IDENTITY {
+        match cfg.permission.as_ref().and_then(super::roster::delegation_from) {
+            Some(d) => Some(Signal::Delegated(d, cfg.notify_friends)),
+            None => super::roster::destroy_order(None, cfg.notify_friends).ok().map(Signal::Order),
+        }
+    } else {
+        None
+    };
+    publish_scope(&cfg.scope, signal);
     let _ = destroy_local();
 }
 

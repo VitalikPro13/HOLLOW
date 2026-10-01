@@ -156,7 +156,7 @@ Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
 # --- 1. b offline; a sends -> deposited in b's mailbox. ----------------------
 Stop-Peer $Decliner
 Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step a @{ op = 'tap'; target = 'type:HollowChip>text:Add friend'; index = 0 }
+Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Add friend'; index = 0 }
 # Assert the id really IS in the field before sending: enter_text has reported
 # success into this field while it held only a fragment ("nh" once, which the
 # app then resolved as a nickname and never deposited), and that failure is
@@ -174,7 +174,7 @@ Say "a sent the request to an offline b (deposited in the relay mailbox)"
 Stop-Peer a
 Restart-Peer $Decliner
 Step $Decliner @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step $Decliner @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+Step $Decliner @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
 Step $Decliner @{ op = 'wait_for'; target = 'semantics:Decline friend request'; timeout_ms = 60000 }
 Step $Decliner @{ op = 'tap'; target = 'semantics:Decline friend request'; index = 0 }
 Say "b declined the request delivered from the mailbox"
@@ -185,7 +185,7 @@ Stop-Peer $Decliner
 Restart-Peer $Decliner
 Step $Decliner @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step $Decliner @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step $Decliner @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+Step $Decliner @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
 Step $Decliner @{ op = 'wait_for'; target = 'text:No requests waiting'; timeout_ms = 15000 }
 Say "PASS gate 1: b's Incoming is empty after re-delivery - the decline stuck"
 # And no friendship was created. Scope the tab tap to the tab WIDGET: bare
@@ -194,7 +194,7 @@ Say "PASS gate 1: b's Incoming is empty after re-delivery - the decline stuck"
 # covering and fails as "on screen but a click at its centre does not reach it".
 # (The row's own 'tabs' semantic label is not reachable as a target; the tab
 # button type is, the way probe_targets already scopes _ServerContent.)
-Step $Decliner @{ op = 'tap'; target = 'type:HollowChip>text:Friends'; index = 0 }
+Step $Decliner @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Friends'; index = 0 }
 Step $Decliner @{ op = 'wait_for'; target = 'text:No friends yet'; timeout_ms = 15000 }
 Say "PASS gate 2: b has no friend - a declined request never became a friendship"
 
@@ -207,7 +207,7 @@ Stop-Peer $Decliner
 Restart-Peer a
 Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step a @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+Step a @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
 # 'Cancel friend request' is the sent ROW's own action, so it is on screen
 # only while a still believes the request is pending. gone: proves it left.
 Step a @{ op = 'wait_for'; gone = 'semantics:Cancel friend request'; timeout_ms = 60000 }
@@ -232,7 +232,7 @@ Stop-Peer a
 Restart-Peer $Decliner
 Step $Decliner @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step $Decliner @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
-Step $Decliner @{ op = 'tap'; target = 'type:HollowChip>text:Requests'; index = 0 }
+Step $Decliner @{ op = 'tap'; target = 'type:_FriendsManager > semantics:Requests'; index = 0 }
 Step $Decliner @{ op = 'wait_for'; target = 'text:No requests waiting'; timeout_ms = 30000 }
 Say "PASS gate 4: a second reboot still finds no incoming request - nothing was re-deposited"
 Step $Decliner @{ op = 'dump'; name = 'friend_decline_second_reboot' }

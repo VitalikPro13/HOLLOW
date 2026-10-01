@@ -363,11 +363,10 @@ Signature: `fn save_setting(key: String, value: String) -> Result<(), String>`. 
 ### storage.rs:load_setting()
 Signature: `fn load_setting(key: String) -> Result<Option<String>, String>`. Loads a setting by key. Returns `None` if not set. Delegates to `ms.load_setting()`.
 
-### storage.rs:save_mnemonic()
-Convenience wrapper. Calls `ms.save_setting("recovery_mnemonic", &mnemonic)`. Called once on first identity generation.
-
-### storage.rs:get_mnemonic()
-Convenience wrapper. Calls `ms.load_setting("recovery_mnemonic")`. Returns the stored BIP-39 recovery mnemonic.
+### The recovery phrase is never stored (design ID-1)
+`save_mnemonic` and `get_mnemonic` are gone (HOL-SEC-076). A pre-0.12 identity's stored
+`recovery_mnemonic` is read once by `api/roster.rs::stored_phrase_for_upgrade` and erased by
+the first recovery; exports and imports scrub it (`scrub_device_secrets`).
 
 ## Verified Peers / RAT Files (storage.rs)
 
@@ -450,7 +449,7 @@ Signature: `fn import_backup(backup_path: String, passphrase: String) -> Result<
 `crdt.rs`: `get_joined_servers`, `get_server_channels`, `get_server_members`, `get_server_setting`, `get_server_avatar` (wraps get_server_setting), `get_my_role`, `get_my_permissions`, `get_role_permissions`, `get_channel_layout`, `get_pinned_messages`, `get_banned_members`, `get_server_labels`, `get_storage_stats`, `get_vault_file_statuses`
 
 ### Global store singleton functions (use STORE static):
-`storage.rs`: All functions -- `open_message_store`, `save_message`, `load_messages`, `load_all_dm_messages`, `load_message_edits`, `count_dm_messages`, `count_channel_messages_ffi`, `save_channel_message`, `load_channel_messages`, `load_all_channel_messages`, `search_channel_messages`, `search_dm_messages`, `load_reactions`, `get_profile`, `get_all_profiles`, `save_setting`, `load_setting`, `set_peer_verified`, `remove_peer_verified`, `is_peer_verified`, `get_verified_peers`, `count_unread_dm`, `count_unread_channel`, `count_all_unread_dm`, `count_all_unread_channel`, `get_dm_peer_ids`, `load_friends`, `get_file_metadata`, `get_content_id_for_file`, `get_files_for_message`, `get_incomplete_files`, `mark_file_complete`, `get_missing_file_ids`, `reset_stale_files`, `get_missing_image_file_ids_for_server`, `save_mnemonic`, `get_mnemonic`, `has_identity`, `export_backup`, `import_backup`
+`storage.rs`: All functions -- `open_message_store`, `save_message`, `load_messages`, `load_all_dm_messages`, `load_message_edits`, `count_dm_messages`, `count_channel_messages_ffi`, `save_channel_message`, `load_channel_messages`, `load_all_channel_messages`, `search_channel_messages`, `search_dm_messages`, `load_reactions`, `get_profile`, `get_all_profiles`, `save_setting`, `load_setting`, `set_peer_verified`, `remove_peer_verified`, `is_peer_verified`, `get_verified_peers`, `count_unread_dm`, `count_unread_channel`, `count_all_unread_dm`, `count_all_unread_channel`, `get_dm_peer_ids`, `load_friends`, `get_file_metadata`, `get_content_id_for_file`, `get_files_for_message`, `get_incomplete_files`, `mark_file_complete`, `get_missing_file_ids`, `reset_stale_files`, `get_missing_image_file_ids_for_server`, `has_identity`, `export_backup`, `import_backup`
 
 ## DB Access Pattern
 

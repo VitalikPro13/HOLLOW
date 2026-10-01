@@ -380,6 +380,7 @@ function Reset-PeerData($peer) {
         # "this run wanted a new identity" greppable rather than implied.
         if ($Fresh -and (Test-Path $fixture)) {
             Remove-Item $fixture -Recurse -Force
+            Remove-Item "$fixture.phrase" -Force -ErrorAction SilentlyContinue
             Write-Step "$peer discarded its old fixture identity" 'Yellow'
         }
         if (Test-Path $run) { Remove-Item $run -Recurse -Force }
@@ -407,6 +408,11 @@ function Save-Fixture($peer) {
     # The WAL has to be folded in before a copy, and the app does that on exit,
     # so this only ever runs after the instances are stopped.
     Copy-Mirror $run $fixture
+    # A throwaway identity's phrase, next to the fixture and never inside a data
+    # directory, read back with Get-FixturePhrase.
+    if ($script:phrases[$peer]) {
+        [System.IO.File]::WriteAllText("$fixture.phrase", $script:phrases[$peer])
+    }
     Write-Step "stamped the $peer fixture -> $fixture" 'Green'
 }
 
@@ -416,6 +422,7 @@ function Save-Fixture($peer) {
 
 $script:processes = @{}
 $script:onboardOk = $false
+$script:phrases = @{}
 
 function Start-Peer($peer) {
     $out = Join-Path $outRoot $peer
@@ -610,12 +617,23 @@ function Invoke-Steps($steps, $label, $alwaysSoft = $false) {
 # in Settings is labelled by its subtitle, not "Profile"; and the Save sits in
 # the Profile page's top bar, above the software keyboard. Back is a button,
 # not Escape.
+# The phrase is shown once and three of its words are typed back (design
+# ID-1: Hollow keeps no copy). It is captured on the way, and kept beside the
+# fixture, because a journey that recovers or joins with the phrase needs it.
+$phraseCheckSteps = @(
+    @{ op = 'capture'; from = 'phrase'; as = 'PHRASE' },
+    @{ op = 'tap'; target = "text:I've written it down"; index = 0; frames = 40 },
+    @{ op = 'wait_for'; target = 'text:Check your copy'; timeout_ms = 10000 },
+    @{ op = 'answer_phrase'; value = '${PHRASE}' },
+    @{ op = 'tap'; target = 'dialog > text:Check'; index = 0; frames = 40 },
+    @{ op = 'wait_for'; gone = 'text:Check your copy'; timeout_ms = 30000 }
+)
+
 $onboardStepsMobile = @(
     @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 60000 },
     @{ op = 'tap'; target = 'text:Create an identity'; frames = 60 },
-    @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 },
-    @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
-    @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
+    @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 }
+) + $phraseCheckSteps + @(
     @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 },
     @{ op = 'tap'; target = 'semantics:Settings'; index = 0; frames = 40 },
     @{ op = 'wait_for'; target = 'text:Name, status, avatar and banner'; timeout_ms = 20000 },
@@ -635,9 +653,8 @@ $onboardSteps = @(
     @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 60000 },
     @{ op = 'tap'; target = 'text:Create an identity'; frames = 60 },
     # The recovery-phrase dialog is the app confirming the identity exists.
-    @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 },
-    @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
-    @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
+    @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 }
+) + $phraseCheckSteps + @(
     # Proof the node came up, not just the widget tree.
     @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 },
     # A display name, because without one every peer, every friend row, every
@@ -694,6 +711,7 @@ try {
             $steps = $onboardSteps | ForEach-Object { [pscustomobject]($_ + @{ peer = $peer }) }
             $failures = Invoke-Steps $steps "onboarding $peer"
             if ($failures -gt 0) { throw "onboarding $peer failed" }
+            $script:phrases[$peer] = $script:FleetVars['PHRASE']
         }
         $script:onboardOk = $true
     }
