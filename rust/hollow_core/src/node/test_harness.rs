@@ -15,7 +15,7 @@ use crate::crdt::server_state::ServerState;
 use crate::crypto::{CryptoStore, OlmManager};
 use crate::identity::native_identity::NativeKeypair;
 use super::crdt_store::CrdtStore;
-use super::types::{NetworkEvent, NodeCommand, ReadMarker};
+use super::types::{CallPresence, NetworkEvent, NodeCommand, ReadMarker};
 use super::ws_client::{WsCommand, WsEvent};
 
 /// Process-wide guard: the resolver and the other global statics the nodes touch
@@ -3604,6 +3604,23 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
     .await;
     assert!(rang, "callee device B must receive the routed CallInvite (master→device routing)");
     assert_eq!(got_call_id.as_deref(), Some("call-1"), "the invite carried the right call_id");
+
+    // B takes the call: from here on, signals addressed to M's master reach B.
+    b.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: a.device_id.clone(),
+            signal_type: "accept".to_string(),
+            payload: serde_json::json!({ "call_id": "call-1", "sframe_key": "" }).to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::CallSignal { signal_type, .. } if signal_type == "accept")
+        })
+        .await,
+        "the caller hears B take the call",
+    );
 
     drain_events(&mut b);
 
@@ -30954,14 +30971,14 @@ async fn link_the_relay_cannot_open_the_snapshot() {
         "the relay must confirm the claim",
     );
     n.cmd_tx
-        .send(NodeCommand::ResolveLinkCode { code: "abcdef-ghjk".into(), label: "Test laptop".into(), platform: "linux".into() })
+        .send(NodeCommand::ResolveLinkCode { code: "abcdef-ghjk".into(), kind: "phone".into() })
         .await
         .unwrap();
     let mut asked = None;
     assert!(
         wait_event(&mut p, std::time::Duration::from_secs(15), |ev| match ev {
-            NetworkEvent::SiblingLinkAvailable { peer_id, label, platform, .. } => {
-                asked = Some((peer_id.clone(), label.clone(), platform.clone()));
+            NetworkEvent::SiblingLinkAvailable { peer_id, kind, .. } => {
+                asked = Some((peer_id.clone(), kind.clone()));
                 true
             }
             _ => false,
@@ -30969,7 +30986,7 @@ async fn link_the_relay_cannot_open_the_snapshot() {
         .await,
         "the presenter must be asked once the handshake confirms",
     );
-    assert_eq!(asked, Some((n.device_id.clone(), "Test laptop".into(), "linux".into())));
+    assert_eq!(asked, Some((n.device_id.clone(), "phone".into())), "the prompt learns the kind and nothing else");
 
     p.cmd_tx
         .send(NodeCommand::AcceptLinkPush { target_peer: n.device_id.clone(), include_vault: false, include_files: false })
@@ -30988,6 +31005,10 @@ async fn link_the_relay_cannot_open_the_snapshot() {
     let key = std::fs::read_to_string(root.path().join("pending_link.code")).expect("stashed key");
     let device = NativeKeypair::from_protobuf_encoding(&std::fs::read(root.path().join("pending_link.device")).unwrap())
         .expect("stashed device key");
+    assert!(
+        p.store().get_all_device_kinds().unwrap().contains(&(device.peer_id(), "phone".to_string())),
+        "the presenter names the new device by its kind",
+    );
     assert_ne!(device.peer_id(), n.device_id, "the joiner runs as a device key minted for the link");
 
     // Everything the relay saw, and the whole code besides: none of it opens the blob.
@@ -31001,9 +31022,8 @@ async fn link_the_relay_cannot_open_the_snapshot() {
             "HOL-SEC-002: the snapshot opened with {candidate:?}",
         );
     }
-    for secret in [key.as_str(), "Test laptop"] {
-        assert_eq!(tap.readable(secret), Vec::<String>::new(), "the relay read {secret:?}");
-    }
+    assert_eq!(tap.readable(&key), Vec::<String>::new(), "the relay read the snapshot key");
+
     assert_eq!(tap.lane_leaks(), Vec::<String>::new());
     assert!(tap.frames.iter().any(|f| f.kind() == "link_sealed"), "the link rode the sealed channel");
 
@@ -31052,7 +31072,7 @@ async fn authz_a_relay_that_answers_the_code_gets_one_guess() {
     rogue_socket.cmd_tx.send(WsCommand::JoinRoom { room_code: super::link_handler::link_room("QWERTY") }).unwrap();
     let _ = rogue_socket.events(300).await;
     n.cmd_tx
-        .send(NodeCommand::ResolveLinkCode { code: "QWERTYGHJK".into(), label: "Phone".into(), platform: "android".into() })
+        .send(NodeCommand::ResolveLinkCode { code: "QWERTYGHJK".into(), kind: "phone".into() })
         .await
         .unwrap();
     let opening = async || {
@@ -31123,7 +31143,7 @@ async fn authz_a_relay_that_answers_the_code_gets_one_guess() {
     // And the code is gone for the real joiner too.
     drain_events(&mut n);
     n.cmd_tx
-        .send(NodeCommand::ResolveLinkCode { code: "ZXCVBN-GHJK".into(), label: "Phone".into(), platform: "android".into() })
+        .send(NodeCommand::ResolveLinkCode { code: "ZXCVBN-GHJK".into(), kind: "phone".into() })
         .await
         .unwrap();
     assert!(
@@ -31131,4 +31151,261 @@ async fn authz_a_relay_that_answers_the_code_gets_one_guess() {
         "a burned code resolves to nobody",
     );
     drop((p, n));
+}
+
+// ── Calls across one identity's devices ─────────────────────────────────
+//
+// A friend's call rings every online device; the first accept takes it, the
+// others hear that it was answered elsewhere, a late accept is refused, and the
+// call's later signals reach the device that took it alone. One call at a time
+// for the whole identity: a sibling in a call or voice channel makes the rest
+// answer busy, and a sibling that was away learns of the call on reconnect.
+
+/// A friend F and a two-device identity M (D1, D2), all ready to call.
+async fn call_trio(relay: &MockRelay, f_tag: u8, m_tag: u8, d1_tag: u8, d2_tag: u8) -> (TestNode, TestNode, TestNode) {
+    let f_master = NativeKeypair::from_secret_bytes(&seed_bytes(f_tag)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(m_tag)).peer_id();
+    let d1 = NativeKeypair::from_secret_bytes(&seed_bytes(d1_tag)).peer_id();
+    let d2 = NativeKeypair::from_secret_bytes(&seed_bytes(d2_tag)).peer_id();
+    super::resolver::seed_self(&m_master, &[d1.clone(), d2.clone()]);
+    super::resolver::update_many(&m_master, [d1.as_str(), d2.as_str()]);
+
+    let mut f = spawn_node_with_friends(relay, f_tag, f_tag, &[&m_master]).await;
+    assert!(wait_until(10, async || relay.online_devices().contains(&f.device_id)).await);
+    let mut n1 = spawn_node_full(relay, m_tag, d1_tag, &[&f_master], Some(&[d1_tag, d2_tag])).await;
+    let mut n2 = spawn_node_full(relay, m_tag, d2_tag, &[&f_master], Some(&[d1_tag, d2_tag])).await;
+    expect_dm_pair_ready(relay, &f, &n1, 20).await;
+    expect_dm_pair_ready(relay, &f, &n2, 20).await;
+    expect_olm_confirmed(&n1, &n2, 20).await;
+    drain_events(&mut f);
+    drain_events(&mut n1);
+    drain_events(&mut n2);
+    (f, n1, n2)
+}
+
+async fn send_call_signal(node: &TestNode, to: &str, signal_type: &str, payload: String) {
+    node.cmd_tx
+        .send(NodeCommand::CallSendSignal { peer_id: to.to_string(), signal_type: signal_type.to_string(), payload })
+        .await
+        .unwrap();
+}
+
+/// The sender and payload of the next `signal_type` call signal, if one comes.
+async fn next_call_signal(node: &mut TestNode, signal_type: &str, secs: u64) -> Option<(String, String)> {
+    let mut got = None;
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| match ev {
+        NetworkEvent::CallSignal { peer_id, signal_type: t, payload } if t == signal_type => {
+            got = Some((peer_id.clone(), payload.clone()));
+            true
+        }
+        _ => false,
+    })
+    .await;
+    got
+}
+
+fn invite_json(call_id: &str) -> String {
+    serde_json::json!({ "call_id": call_id, "video": false, "sframe_key": "00".repeat(32) }).to_string()
+}
+
+async fn set_presence(node: &TestNode, kind: &str, with: &str) {
+    let presence = (!kind.is_empty()).then(|| CallPresence {
+        kind: kind.into(), with: with.into(), channel: String::new(), started_ms: 0,
+    });
+    node.cmd_tx.send(NodeCommand::SetCallPresence { presence }).await.unwrap();
+}
+
+/// The next sibling report `node` hears about `device`: Some(kind) while it is in
+/// something, Some("") once it is free.
+async fn next_sibling_call(node: &mut TestNode, device: &str, secs: u64) -> Option<String> {
+    let mut got = None;
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| match ev {
+        NetworkEvent::SiblingCallState { device: d, active, kind, .. } if d == device => {
+            got = Some(if *active { kind.clone() } else { String::new() });
+            true
+        }
+        _ => false,
+    })
+    .await;
+    got
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_call_rings_every_device_and_the_first_accept_takes_it() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut f, mut n1, mut n2) = call_trio(&relay, 91, 92, 93, 94).await;
+    let m_master = n1.master_id.clone();
+
+    send_call_signal(&f, &m_master, "invite", invite_json("ring-all")).await;
+    assert!(next_call_signal(&mut n1, "invite", 15).await.is_some(), "the first device rings");
+    assert!(next_call_signal(&mut n2, "invite", 15).await.is_some(), "and so does the second");
+
+    send_call_signal(&n2, &f.device_id, "accept", serde_json::json!({ "call_id": "ring-all", "sframe_key": "" }).to_string()).await;
+    let (answered_by, _) = next_call_signal(&mut f, "accept", 15).await.expect("the caller hears the accept");
+    assert_eq!(answered_by, n2.device_id, "the accept is the device that took the call");
+    assert!(
+        next_call_signal(&mut n1, "answered_elsewhere", 15).await.is_some(),
+        "the device that kept ringing is told the call was answered elsewhere",
+    );
+
+    send_call_signal(&n1, &f.device_id, "accept", serde_json::json!({ "call_id": "ring-all", "sframe_key": "" }).to_string()).await;
+    assert!(
+        next_call_signal(&mut n1, "answered_elsewhere", 15).await.is_some(),
+        "a late accept is answered: someone else took the call",
+    );
+    assert!(next_call_signal(&mut f, "accept", 2).await.is_none(), "and never reaches the caller's call");
+
+    // Everything after the accept, still addressed to the master, goes to D2 alone.
+    send_call_signal(&f, &m_master, "sdp_offer", serde_json::json!({ "call_id": "ring-all", "sdp": "v=0" }).to_string()).await;
+    assert!(next_call_signal(&mut n2, "sdp_offer", 15).await.is_some(), "the device in the call gets the offer");
+    send_call_signal(&f, &m_master, "end", "ring-all".to_string()).await;
+    assert!(next_call_signal(&mut n2, "end", 15).await.is_some(), "and the hang-up");
+    assert!(next_call_signal(&mut n1, "sdp_offer", 2).await.is_none(), "the other device sees none of the call");
+    drop((f, n1, n2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_decline_on_one_device_stops_the_others_ringing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut f, mut n1, mut n2) = call_trio(&relay, 95, 96, 97, 98).await;
+    let m_master = n1.master_id.clone();
+
+    send_call_signal(&f, &m_master, "invite", invite_json("declined")).await;
+    assert!(next_call_signal(&mut n1, "invite", 15).await.is_some());
+    assert!(next_call_signal(&mut n2, "invite", 15).await.is_some());
+    send_call_signal(&n1, &f.device_id, "reject", "declined".to_string()).await;
+    assert!(next_call_signal(&mut f, "reject", 15).await.is_some(), "the caller hears the decline");
+    assert!(next_call_signal(&mut n2, "end", 15).await.is_some(), "the other device stops ringing");
+
+    // Hanging up before anyone answers stops every device too.
+    send_call_signal(&f, &m_master, "invite", invite_json("cancelled")).await;
+    assert!(next_call_signal(&mut n1, "invite", 15).await.is_some());
+    assert!(next_call_signal(&mut n2, "invite", 15).await.is_some());
+    send_call_signal(&f, &m_master, "end", "cancelled".to_string()).await;
+    assert!(next_call_signal(&mut n1, "end", 15).await.is_some());
+    assert!(next_call_signal(&mut n2, "end", 15).await.is_some());
+    drop((f, n1, n2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_device_in_a_call_makes_the_whole_identity_busy() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut f, mut n1, mut n2) = call_trio(&relay, 99, 100, 101, 102).await;
+    let m_master = n1.master_id.clone();
+
+    // D1 is in a voice channel: it alone rings, where answering leaves the room,
+    // and its sibling stays quiet. Nobody turns the caller away.
+    set_presence(&n1, "voice", "some-server").await;
+    assert_eq!(next_sibling_call(&mut n2, &n1.device_id, 15).await.as_deref(), Some("voice"), "the sibling is told");
+    send_call_signal(&f, &m_master, "invite", invite_json("in-a-room")).await;
+    assert!(next_call_signal(&mut n1, "invite", 15).await.is_some(), "the device in the room rings");
+    assert!(next_call_signal(&mut n2, "invite", 2).await.is_none(), "its sibling stays quiet");
+    assert!(next_call_signal(&mut f, "busy", 1).await.is_none(), "and nobody answers busy");
+    send_call_signal(&f, &m_master, "end", "in-a-room".to_string()).await;
+    assert!(next_call_signal(&mut n1, "end", 15).await.is_some());
+
+    // D1 is in a DM call with someone else: the whole identity is busy.
+    set_presence(&n1, "call", "someone-else").await;
+    assert_eq!(next_sibling_call(&mut n2, &n1.device_id, 15).await.as_deref(), Some("call"));
+    drain_events(&mut f);
+    send_call_signal(&f, &m_master, "invite", invite_json("while-busy")).await;
+    assert!(next_call_signal(&mut f, "busy", 15).await.is_some(), "the caller gets busy");
+    assert!(next_call_signal(&mut n2, "invite_busy", 15).await.is_some(), "the sibling notes a missed call");
+    assert!(next_call_signal(&mut n2, "invite", 2).await.is_none(), "and never rings");
+
+    // A sibling dialling this same friend is glare, not busy: nothing here rings
+    // or answers for it.
+    set_presence(&n1, "call", &f.master_id).await;
+    assert_eq!(next_sibling_call(&mut n2, &n1.device_id, 15).await.as_deref(), Some("call"));
+    drain_events(&mut f);
+    send_call_signal(&f, &m_master, "invite", invite_json("glare")).await;
+    assert!(next_call_signal(&mut n1, "invite", 15).await.is_some(), "the device dialling them settles the glare");
+    assert!(next_call_signal(&mut n2, "invite", 2).await.is_none(), "its sibling stays out of it");
+    assert!(next_call_signal(&mut f, "busy", 1).await.is_none(), "and nobody answers busy");
+
+    set_presence(&n1, "", "").await;
+    assert_eq!(next_sibling_call(&mut n2, &n1.device_id, 15).await.as_deref(), Some(""), "free again");
+    send_call_signal(&f, &m_master, "invite", invite_json("free")).await;
+    assert!(next_call_signal(&mut n2, "invite", 15).await.is_some(), "a free identity rings again");
+    drop((f, n1, n2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_sibling_back_online_learns_the_call_from_the_device_in_it() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (f, n1, mut n2) = call_trio(&relay, 103, 104, 105, 106).await;
+
+    assert!(
+        wait_until(15, async || n2.store().get_all_device_kinds().unwrap_or_default().iter()
+            .any(|(d, k)| *d == n1.device_id && k == super::call_book::own_device_kind())).await,
+        "siblings tell each other what kind of device they are",
+    );
+
+    // An unclean drop: D1 is never told D2 left, so D2's return is not news to it,
+    // and the update D1 sends meanwhile is lost, as a live frame older than the
+    // relay's freshness window would be. Only D2's ask can bring the call back.
+    relay.start_wiretap();
+    relay.drop_socket_silently(&n2.device_id);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&n2.device_id)).await);
+    relay.swallow_direct(&n1.device_id, &n2.device_id);
+    let sent_before = relay.wiretap().frames.len();
+    set_presence(&n1, "call", &f.master_id).await;
+    assert!(
+        wait_until(10, async || relay.wiretap().frames[sent_before..].iter()
+            .any(|fr| fr.from == n1.device_id && fr.to.as_deref() == Some(n2.device_id.as_str()))).await,
+        "D1 tells the sibling it still lists",
+    );
+    relay.release_direct(&n1.device_id, &n2.device_id);
+    drain_events(&mut n2);
+    relay.set_online(&n2.device_id, true);
+    assert_eq!(
+        next_sibling_call(&mut n2, &n1.device_id, 20).await.as_deref(),
+        Some("call"),
+        "the device in the call tells its sibling as soon as it is back",
+    );
+
+    relay.set_online(&n1.device_id, false);
+    assert_eq!(
+        next_sibling_call(&mut n2, &n1.device_id, 20).await.as_deref(),
+        Some(""),
+        "a sibling that went away no longer holds the identity's call",
+    );
+    drop((f, n1, n2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn an_answer_to_the_callers_master_reaches_the_device_that_rang() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    // M (D1, D2) calls F from D2; F's app answers M by master, as the UI does.
+    let (mut f, mut n1, mut n2) = call_trio(&relay, 107, 108, 109, 110).await;
+    let m_master = n1.master_id.clone();
+
+    send_call_signal(&n2, &f.master_id, "invite", invite_json("from-d2")).await;
+    assert!(next_call_signal(&mut f, "invite", 15).await.is_some());
+    send_call_signal(&f, &m_master, "accept", serde_json::json!({ "call_id": "from-d2", "sframe_key": "" }).to_string()).await;
+    assert!(next_call_signal(&mut n2, "accept", 15).await.is_some(), "the device that rang hears the accept");
+    send_call_signal(&f, &m_master, "end", "from-d2".to_string()).await;
+    assert!(next_call_signal(&mut n2, "end", 15).await.is_some(), "and the hang-up");
+    assert!(next_call_signal(&mut n1, "accept", 2).await.is_none(), "its sibling hears none of the call");
+    drop((f, n1, n2));
 }

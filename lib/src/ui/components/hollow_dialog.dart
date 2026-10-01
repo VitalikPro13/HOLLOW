@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
@@ -603,26 +605,9 @@ class HollowDialog extends StatelessWidget {
             SizedBox(height: error != null ? HollowSpacing.md : HollowSpacing.xl),
             HollowButtonTouchScope(
               touch: compact,
-              child: Row(
-                children: [
-                  for (var i = 0; i < leadingActions.length; i++) ...[
-                    if (i > 0) const SizedBox(width: HollowSpacing.sm),
-                    leadingActions[i],
-                  ],
-                  if (leadingActions.isNotEmpty)
-                    const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Align(
-                      alignment: Alignment.centerRight,
-                      child: Wrap(
-                        alignment: WrapAlignment.end,
-                        spacing: HollowSpacing.sm,
-                        runSpacing: HollowSpacing.sm,
-                        children: actions,
-                      ),
-                    ),
-                  ),
-                ],
+              child: HollowDialogActionRow(
+                leadingCount: leadingActions.length,
+                children: [...leadingActions, ...actions],
               ),
             ),
           ],
@@ -633,6 +618,171 @@ class HollowDialog extends StatelessWidget {
     // which loses its scroll and refocuses the autofocus field after every action.
     return PopScope(canPop: !busy, child: dialog);
   }
+}
+
+/// A dialog's action row: leading actions at the start and the rest at the
+/// end on one line, or, when they do not all fit, every button full width
+/// in one column in list order, so the primary (last) sits at the bottom.
+/// Never a partial wrap: that strands one button on a line of its own.
+class HollowDialogActionRow extends MultiChildRenderObjectWidget {
+  /// How many of [children] belong at the leading edge.
+  final int leadingCount;
+
+  const HollowDialogActionRow({
+    super.key,
+    required this.leadingCount,
+    required super.children,
+  });
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      RenderHollowDialogActionRow(leadingCount);
+
+  @override
+  void updateRenderObject(
+      BuildContext context, RenderHollowDialogActionRow renderObject) {
+    renderObject.leadingCount = leadingCount;
+  }
+}
+
+class _ActionRowParentData extends ContainerBoxParentData<RenderBox> {}
+
+class RenderHollowDialogActionRow extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _ActionRowParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _ActionRowParentData> {
+  RenderHollowDialogActionRow(this._leadingCount);
+
+  static const _gap = HollowSpacing.sm;
+
+  int _leadingCount;
+  set leadingCount(int value) {
+    if (value == _leadingCount) return;
+    _leadingCount = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _ActionRowParentData) {
+      child.parentData = _ActionRowParentData();
+    }
+  }
+
+  List<RenderBox> get _children {
+    final out = <RenderBox>[];
+    var child = firstChild;
+    while (child != null) {
+      out.add(child);
+      child = childAfter(child);
+    }
+    return out;
+  }
+
+  double _rowWidth(List<double> widths) {
+    if (widths.isEmpty) return 0;
+    return widths.fold<double>(0, (a, b) => a + b) + _gap * (widths.length - 1);
+  }
+
+  bool _fits(List<double> widths, double maxWidth) =>
+      _rowWidth(widths) <= maxWidth + 0.5;
+
+  @override
+  double computeMinIntrinsicWidth(double height) => _children.fold<double>(
+      0, (m, c) => math.max(m, c.getMinIntrinsicWidth(height)));
+
+  @override
+  double computeMaxIntrinsicWidth(double height) =>
+      _rowWidth([for (final c in _children) c.getMaxIntrinsicWidth(height)]);
+
+  @override
+  double computeMinIntrinsicHeight(double width) {
+    final kids = _children;
+    final widths = [for (final c in kids) c.getMaxIntrinsicWidth(double.infinity)];
+    if (_fits(widths, width)) {
+      return kids.fold<double>(
+          0, (m, c) => math.max(m, c.getMinIntrinsicHeight(double.infinity)));
+    }
+    if (kids.isEmpty) return 0;
+    return kids.fold<double>(0, (s, c) => s + c.getMinIntrinsicHeight(width)) +
+        _gap * (kids.length - 1);
+  }
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      computeMinIntrinsicHeight(width);
+
+  @override
+  Size computeDryLayout(covariant BoxConstraints constraints) {
+    final kids = _children;
+    final loose = BoxConstraints(maxWidth: constraints.maxWidth);
+    final sizes = [for (final c in kids) c.getDryLayout(loose)];
+    final maxWidth = constraints.maxWidth;
+    if (_fits([for (final s in sizes) s.width], maxWidth)) {
+      final h = sizes.fold<double>(0, (m, s) => math.max(m, s.height));
+      return constraints.constrain(Size(
+          maxWidth.isFinite ? maxWidth : _rowWidth([for (final s in sizes) s.width]),
+          h));
+    }
+    final tight = BoxConstraints.tightFor(width: maxWidth);
+    var h = 0.0;
+    for (var i = 0; i < kids.length; i++) {
+      if (i > 0) h += _gap;
+      h += kids[i].getDryLayout(tight).height;
+    }
+    return constraints.constrain(Size(maxWidth, h));
+  }
+
+  @override
+  void performLayout() {
+    final kids = _children;
+    final maxWidth = constraints.maxWidth;
+    final loose = BoxConstraints(maxWidth: maxWidth);
+    for (final c in kids) {
+      c.layout(loose, parentUsesSize: true);
+    }
+    final widths = [for (final c in kids) c.size.width];
+    if (_fits(widths, maxWidth)) {
+      final width = maxWidth.isFinite ? maxWidth : _rowWidth(widths);
+      final height =
+          kids.fold<double>(0, (m, c) => math.max(m, c.size.height));
+      var x = 0.0;
+      for (var i = 0; i < _leadingCount && i < kids.length; i++) {
+        _place(kids[i], x, (height - kids[i].size.height) / 2);
+        x += kids[i].size.width + _gap;
+      }
+      x = width;
+      for (var i = kids.length - 1; i >= _leadingCount; i--) {
+        x -= kids[i].size.width;
+        _place(kids[i], x, (height - kids[i].size.height) / 2);
+        x -= _gap;
+      }
+      size = constraints.constrain(Size(width, height));
+      return;
+    }
+
+    final tight = BoxConstraints.tightFor(width: maxWidth);
+    var y = 0.0;
+    for (var i = 0; i < kids.length; i++) {
+      if (i > 0) y += _gap;
+      kids[i].layout(tight, parentUsesSize: true);
+      _place(kids[i], 0, y);
+      y += kids[i].size.height;
+    }
+    size = constraints.constrain(Size(maxWidth, y));
+  }
+
+  void _place(RenderBox child, double x, double y) {
+    (child.parentData! as _ActionRowParentData).offset = Offset(x, y);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
 }
 
 /// The dialog close button: a ghost X that pops the route, 44 on a phone. Only

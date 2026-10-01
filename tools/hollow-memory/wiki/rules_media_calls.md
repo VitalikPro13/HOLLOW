@@ -14,6 +14,14 @@ whitelist) stay in CLAUDE.md.
   `peerId` is a DEVICE, outgoing a MASTER: compare via `isDmCallWith`. A call change
   reaches all 3 CallStage hosts (DM, voice channel, meeting). Wiki `ui_call_surfaces`,
   `feedback_call_stage_three_hosts`.
+- 1:1 calls across devices = `node/call_book.rs`: ring EVERY online device, first accept wins,
+  everything after routes by call_id to the device that answered (caller side) or rang (callee
+  side). Dart keeps addressing the MASTER; never re-add a lowest-device pick for call signals.
+  A device in a DM call, voice channel or meeting blocks the others from starting or joining
+  one (buttons say why). An incoming call is BUSY only while a device is in a DM call; while one
+  is in a voice channel or meeting, that device alone rings ("Answering will leave #channel")
+  and the others stay silent. The locked "In a call on another device" strip is `CallElsewhereRow` /
+  `MobileCallElsewhereBar`. `project_one_call_per_identity`.
 - VAD/speaking state lives in `speaking_provider.dart`, NEVER in CallState/
   VoiceChannelState. REMOTE peers membership-select; OURSELVES = a bool
   (`vcLocalSpeakingProvider`, the set is DEVICE-keyed). LOCAL mic level =

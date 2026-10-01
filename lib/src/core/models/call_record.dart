@@ -36,6 +36,10 @@ enum CallEndCause {
   remoteEnd,
   remoteBusy,
   linkLost,
+
+  /// Another of our devices took the call or rings for it alone: this one
+  /// keeps no line for it.
+  answeredElsewhere,
 }
 
 /// The stored outcome for a call that ended by [cause]. [pickedUp] = the

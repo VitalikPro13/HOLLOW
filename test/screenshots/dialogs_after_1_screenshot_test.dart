@@ -356,6 +356,13 @@ void main() {
           'orbit velvet canyon ladder pepper noble frost cable mirror anchor '
           'lunar spice garden humble token civic ripple ozone thunder amber '
           'silk harbor quiet zebra'));
+  shoot(
+      'phrase_upgrade',
+      (t) => showPhraseUpgradeDialog(
+          host,
+          'orbit velvet canyon ladder pepper noble frost cable mirror anchor '
+          'lunar spice garden humble token civic ripple ozone thunder amber '
+          'silk harbor quiet zebra'));
   shoot('invite',
       (t) => showInviteDialog(host, 'https://hollow.chat/join#server=srv1&relay=relay.anonlisten.com', 'srv1'));
   shoot('create_channel', (t) => showCreateChannelDialog(host, 'srv1'));

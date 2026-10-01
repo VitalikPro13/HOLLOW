@@ -24,6 +24,7 @@ import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/audio_route.dart';
@@ -352,7 +353,41 @@ class CallNotifier extends Notifier<CallState> {
   VoiceService? get voiceService => _voiceService;
 
   @override
-  CallState build() => const CallState();
+  CallState build() {
+    ref.listen(siblingCallProvider, (_, _) => _onSiblingCall());
+    return const CallState();
+  }
+
+  /// One call at a time for the identity: a sibling that just went into a call
+  /// stops a ring here. The same person means that sibling answered this very
+  /// call, a voice channel or meeting rings on that device alone (as the node
+  /// decides for a fresh invite), and a DM call with anyone else is busy.
+  void _onSiblingCall() {
+    final elsewhere = ref.read(callElsewhereProvider);
+    if (elsewhere == null ||
+        state.status != CallStatus.ringing ||
+        state.direction != CallDirection.incoming) {
+      return;
+    }
+    final peerId = state.peerId!;
+    final callId = state.callId!;
+    final links = ref.read(deviceLinkProvider);
+    if (!elsewhere.isDmCall || elsewhere.peer == links.identityOf(peerId)) {
+      _endCause = CallEndCause.answeredElsewhere;
+    } else {
+      _sendSignal(peerId, 'busy', callId);
+      _endCause = CallEndCause.ringTimeout;
+    }
+    unawaited(_cleanup());
+  }
+
+  /// Says why a call cannot start here, when another of our devices is in one.
+  bool _blockedElsewhere() {
+    final elsewhere = ref.read(callElsewhereProvider);
+    if (elsewhere == null) return false;
+    _showToast(callElsewhereReason(elsewhere));
+    return true;
+  }
 
   void _wireCallbacks() {
     // SFrame heal-lite: on sustained cryptor failure the service rebinds its
@@ -921,6 +956,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Start an outgoing call to a peer.
   Future<void> startCall(String peerId, {bool withVideo = false}) async {
+    if (state.status != CallStatus.idle || _blockedElsewhere()) return;
     // The relay socket stops backing off while a call is live, so a blip recovers
     // in about a second. Taken at the START: the invite and accept ride it too.
     RealtimeSessionFlag.acquire('dm-call');
@@ -976,6 +1012,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Accept an incoming call.
   Future<void> acceptCall() async {
+    if (_blockedElsewhere()) return;
     // Same relay back-off suppression as startCall: the accept rides that socket.
     RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.ringing ||
@@ -1645,7 +1682,9 @@ class CallNotifier extends Notifier<CallState> {
   /// or re-point someone else's call (M1).
   Future<void> handleCallSignal(
       String peerId, String signalType, String payload) async {
-    if (signalType != 'invite' && !_fromCallPeer(peerId)) {
+    if (signalType != 'invite' &&
+        signalType != 'invite_busy' &&
+        !_fromCallPeer(peerId)) {
       debugPrint('[HOLLOW-CALL] Dropped $signalType from $peerId: not the peer of the live call');
       return;
     }
@@ -1653,6 +1692,10 @@ class CallNotifier extends Notifier<CallState> {
       switch (signalType) {
         case 'invite':
           _handleInvite(peerId, payload);
+        case 'invite_busy':
+          _handleInviteBusy(peerId, payload);
+        case 'answered_elsewhere':
+          await _handleAnsweredElsewhere(peerId, payload);
         case 'accept':
           await _handleAccept(peerId, payload);
         case 'reject':
@@ -1932,6 +1975,39 @@ class CallNotifier extends Notifier<CallState> {
     final sdpPayload = jsonEncode({'call_id': callId, 'sdp': sdp});
     _sendSignal(peerId, 'sdp_offer', sdpPayload);
     CallSetupTrace.markCurrent(CallSetupTrace.kSdpSent);
+  }
+
+  /// The node answered busy for us (another of our devices is in a DM call):
+  /// it still rang, so it is a missed call from them.
+  void _handleInviteBusy(String peerId, String payload) {
+    final json = jsonDecode(payload) as Map<String, dynamic>;
+    final now = DateTime.now();
+    _callLog('[HOLLOW-CALL] Busy on another device, missed a call from $peerId');
+    saveDmCallRecord(
+      ref,
+      DmCallRecord(
+        callId: json['call_id'] as String? ?? '',
+        peer: ref.read(deviceLinkProvider).identityOf(peerId),
+        outgoing: false,
+        video: json['video'] as bool? ?? false,
+        outcome: CallOutcome.missed,
+        startedAt: now,
+        connectedAt: null,
+        endedAt: now,
+      ),
+    );
+  }
+
+  /// Another device of ours took this call first, so this one stops ringing,
+  /// or (a late accept) never connects.
+  Future<void> _handleAnsweredElsewhere(String peerId, String callId) async {
+    if (state.callId != callId || state.direction != CallDirection.incoming) {
+      return;
+    }
+    _callLog('[HOLLOW-CALL] Call $callId was answered on another device');
+    _endCause = CallEndCause.answeredElsewhere;
+    await _service.endCall();
+    await _cleanup();
   }
 
   Future<void> _handleReject(String peerId, String callId) async {
@@ -2314,7 +2390,7 @@ class CallNotifier extends Notifier<CallState> {
     final ringStartedAt = _ringStartedAt;
     final direction = state.direction;
     if (peerId == null || callId == null || ringStartedAt == null ||
-        direction == null) {
+        direction == null || _endCause == CallEndCause.answeredElsewhere) {
       return;
     }
     final outgoing = direction == CallDirection.outgoing;

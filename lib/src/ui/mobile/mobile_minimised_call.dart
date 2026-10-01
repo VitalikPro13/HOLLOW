@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -22,6 +23,7 @@ import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart'
     show inActiveConferenceCall;
 import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The mobile nav bar's height plus its top hairline.
 const double _kNavBarReserve = MobileCallMetrics.bar + 1;
@@ -240,6 +242,85 @@ class _RoomCallBar extends ConsumerWidget {
         height: MobileCallMetrics.touch,
         // Through the conference-aware path, never a bare leaveChannel (B6).
         onPressed: () => leaveVoiceRoom(context, ref),
+      ),
+    );
+  }
+}
+
+/// A DM docks this under its header while another of our devices is in the
+/// call with this person: who, the timer, and nothing to press.
+class MobileCallElsewhereBar extends ConsumerWidget {
+  final String peerMaster;
+
+  const MobileCallElsewhereBar({super.key, required this.peerMaster});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final elsewhere = ref.watch(callElsewhereProvider);
+    if (elsewhere == null ||
+        !elsewhere.isDmCall ||
+        elsewhere.peer != peerMaster) {
+      return const SizedBox.shrink();
+    }
+    final hollow = HollowTheme.of(context);
+    final startedAt = elsewhere.startedAt;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          HollowSpacing.md, HollowSpacing.xs, HollowSpacing.md, HollowSpacing.xs),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: hollow.overlay,
+          borderRadius: BorderRadius.circular(hollow.radiusXl),
+          border: Border.all(color: hollow.border),
+        ),
+        child: SizedBox(
+          height: MobileCallMetrics.bar,
+          child: Semantics(
+            container: true,
+            label: 'In a call on another device',
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+              child: Row(
+                children: [
+                  HollowAvatar(
+                      peerId: peerMaster,
+                      size: MobileCallMetrics.barAvatar,
+                      frameId: ''),
+                  const SizedBox(width: HollowSpacing.md),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('In a call on another device',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: HollowTypography.label
+                                .copyWith(color: hollow.textPrimary)),
+                        DefaultTextStyle.merge(
+                          style: HollowTypography.monoSmall.copyWith(
+                            color: startedAt != null
+                                ? hollow.success
+                                : hollow.textTertiary,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                          maxLines: 1,
+                          child: startedAt != null
+                              ? CallDurationText(startedAt: startedAt)
+                              : const Text('Connecting'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(LucideIcons.lock,
+                      size: 16,
+                      color: hollow.textTertiary,
+                      semanticLabel: 'Controls are on the other device'),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -5,6 +5,7 @@ import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/deleted_messages_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
@@ -136,7 +137,13 @@ class MessageRow extends ConsumerWidget {
         serverId == null ? null : ref.watch(serverMemberNamesProvider(serverId));
 
     final time = _clock(timestamp);
-    final reply = _buildReply(hollow, links.identityOf(localPeerId), links);
+    final replyMid = replyToMid;
+    final replyDeleted = replyMid != null &&
+        replyToText == null &&
+        ref.watch(deletedMessagesProvider.select((d) => d.contains(replyMid)));
+    final reply = replyDeleted
+        ? _deletedReply(hollow)
+        : _buildReply(hollow, links.identityOf(localPeerId), links);
 
     // A file placeholder carries no text of its own. An album shows its
     // caption whichever item carries it.
@@ -332,6 +339,26 @@ class MessageRow extends ConsumerWidget {
       ),
     );
   }
+
+  /// The quote of a reply whose original was deleted: faded, and nothing to jump to.
+  Widget _deletedReply(HollowTheme hollow) => Padding(
+        padding: const EdgeInsets.only(bottom: HollowSpacing.xxs),
+        child: Row(
+          children: [
+            Icon(LucideIcons.reply, size: 14, color: hollow.textTertiary),
+            const SizedBox(width: HollowSpacing.xs),
+            Flexible(
+              child: Text(
+                'Deleted message',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textTertiary),
+              ),
+            ),
+          ],
+        ),
+      );
 
   /// One line above the message: who it answers and what they said.
   Widget? _buildReply(HollowTheme hollow, String me, DeviceLinkState links) {

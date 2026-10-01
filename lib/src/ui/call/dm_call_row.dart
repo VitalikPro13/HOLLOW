@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/services/link_resilience.dart';
@@ -33,7 +34,9 @@ class DmCallRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final call = ref.watch(callProvider);
-    if (!isDmCallWith(ref, call, peerMaster)) return const SizedBox.shrink();
+    if (!isDmCallWith(ref, call, peerMaster)) {
+      return CallElsewhereRow(peerMaster: peerMaster);
+    }
     // An incoming ring belongs to its card, a forced or opened call to the
     // stage.
     if (call.status == CallStatus.ringing &&
@@ -250,6 +253,76 @@ class _InlineShareOffer extends StatelessWidget {
             child: const Text('Watch'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The DM's call row while another of our devices is in the call with this
+/// person: locked, with no controls, because they belong to that device.
+class CallElsewhereRow extends ConsumerWidget {
+  final String peerMaster;
+
+  const CallElsewhereRow({super.key, required this.peerMaster});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final elsewhere = ref.watch(callElsewhereProvider);
+    if (elsewhere == null ||
+        !elsewhere.isDmCall ||
+        elsewhere.peer != peerMaster) {
+      return const SizedBox.shrink();
+    }
+    final hollow = HollowTheme.of(context);
+    final startedAt = elsewhere.startedAt;
+    return Container(
+      height: kDmCallRowHeight,
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(bottom: BorderSide(color: hollow.border)),
+      ),
+      child: Semantics(
+        container: true,
+        label: 'In a call on another device',
+        child: Row(
+          children: [
+            HollowAvatar(
+                peerId: peerMaster,
+                size: CallMetrics.compactAvatar,
+                frameId: ''),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('In a call on another device',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HollowTypography.label
+                          .copyWith(color: hollow.textPrimary)),
+                  const SizedBox(height: HollowSpacing.xxs),
+                  startedAt != null
+                      ? CallDurationText(
+                          startedAt: startedAt,
+                          style: HollowTypography.monoSmall.copyWith(
+                            color: hollow.success,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        )
+                      : Text('Connecting',
+                          style: HollowTypography.caption
+                              .copyWith(color: hollow.textTertiary)),
+                ],
+              ),
+            ),
+            Icon(LucideIcons.lock,
+                size: 16,
+                color: hollow.textTertiary,
+                semanticLabel: 'Controls are on the other device'),
+          ],
+        ),
       ),
     );
   }

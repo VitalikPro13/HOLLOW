@@ -2,6 +2,7 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/message_limits.dart';
 import 'package:flutter/material.dart';
@@ -1433,6 +1434,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 IdentityDestroyedBanner(peerId: widget.peerId!),
               // The call you are in, from any chat: tap it to open the call.
               const MobileMinimisedCall(floating: false),
+              if (widget.isDm)
+                MobileCallElsewhereBar(
+                    peerMaster: ref
+                        .watch(deviceLinkProvider)
+                        .identityOf(widget.peerId!)),
               if (_searchOpen) _buildSearchBar(hollow),
               if (!widget.isDm) _buildSyncIndicator(hollow),
               if (!widget.isDm && !_canReadChannel)
@@ -3235,7 +3241,11 @@ class _DmCallButtons extends ConsumerWidget {
     final isOnline = identityIsOnline(ref, peerId);
     final inCall =
         ref.watch(callProvider.select((c) => c.status != CallStatus.idle));
-    if (inCall) return const SizedBox.shrink();
+    final elsewhere = ref.watch(callElsewhereProvider);
+    final master = ref.watch(deviceLinkProvider).identityOf(peerId);
+    if (inCall || (elsewhere != null && elsewhere.isDmCall && elsewhere.peer == master)) {
+      return const SizedBox.shrink();
+    }
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [

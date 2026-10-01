@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -139,8 +138,8 @@ class _DeviceRow extends ConsumerWidget {
       leading: _DeviceKindTile(device: device),
       subtitleWidget: Text.rich(
         TextSpan(children: [
-          // An unnamed device is titled by its id already.
-          if (device.label.isNotEmpty) ...[
+          // A device titled by its id already shows it once.
+          if (deviceTitle(device) != shortenPeerId(device.peerId)) ...[
             TextSpan(
               text: shortenPeerId(device.peerId),
               style: HollowTypography.monoSmall
@@ -203,10 +202,11 @@ class _DeviceRow extends ConsumerWidget {
   }
 }
 
-String _rosterDeviceTitle(WidgetRef ref, String id) {
-  final label = ref.watch(deviceLabelProvider)[id];
-  return label != null && label.isNotEmpty ? label : shortenPeerId(id);
-}
+String _rosterDeviceTitle(WidgetRef ref, String id) =>
+    deviceGivenName(id,
+        labels: ref.watch(deviceLabelProvider),
+        kinds: ref.watch(deviceKindProvider)) ??
+    shortenPeerId(id);
 
 /// A device restored from a backup that asks to join. It joins on its own once
 /// seven days pass with nobody refusing it.
@@ -274,24 +274,18 @@ class _WaitingDeviceRowState extends ConsumerState<_WaitingDeviceRow> {
   }
 }
 
-/// The device-kind tile. Only the running device knows its own kind; a
-/// sibling's is not carried in the device list, so it takes the generic mark.
+/// The device-kind tile: a sibling that has not said what it is yet takes the
+/// generic mark.
 class _DeviceKindTile extends StatelessWidget {
   final MyDevice device;
   const _DeviceKindTile({required this.device});
 
   @override
-  Widget build(BuildContext context) {
-    final IconData icon;
-    if (!device.isThisDevice) {
-      icon = LucideIcons.monitorSmartphone;
-    } else if (Platform.isAndroid || Platform.isIOS) {
-      icon = LucideIcons.smartphone;
-    } else {
-      icon = LucideIcons.monitor;
-    }
-    return _KindTile(icon);
-  }
+  Widget build(BuildContext context) => _KindTile(switch (device.kind) {
+        'phone' => LucideIcons.smartphone,
+        'desktop' => LucideIcons.monitor,
+        _ => LucideIcons.monitorSmartphone,
+      });
 }
 
 class _KindTile extends StatelessWidget {

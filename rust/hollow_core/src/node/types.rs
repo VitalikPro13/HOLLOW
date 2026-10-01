@@ -210,6 +210,22 @@ pub(crate) struct FriendListEntry {
     pub requested_at: i64,
 }
 
+/// What one of our devices is doing that rules out a second call for the whole
+/// identity: a DM call (`with` = the friend's master), a voice channel (`with` =
+/// the server, `channel` set) or a meeting (`with` = the conference id).
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct CallPresence {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub with: String,
+    #[serde(default)]
+    pub channel: String,
+    /// When the call connected; 0 while it still rings or connects.
+    #[serde(default)]
+    pub started_ms: i64,
+}
+
 /// One row of the personal emote set as shared between SIBLINGS. An empty
 /// `hash` is a tombstone: the name was removed at `added_at`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -444,15 +460,14 @@ pub(crate) enum NetworkEvent {
     /// not_found / expired).
     LinkCodeError { error: String, code: String },
     /// A device that typed our link code asks to be linked. `peer_id` is the device
-    /// it connects as today; `label` and `platform` are what it says it is, shown on
-    /// the confirm prompt.
+    /// it connects as today; `kind` is "desktop" or "phone" (or empty), all the
+    /// confirm prompt says about it.
     SiblingLinkAvailable {
         peer_id: String,
         their_msg_count: u32,
         their_friend_count: u32,
         their_has_profile: bool,
-        label: String,
-        platform: String,
+        kind: String,
     },
     /// Real-time progress of an inbound link snapshot transfer (drives the bar).
     LinkProgress {
@@ -508,6 +523,11 @@ pub(crate) enum NetworkEvent {
     WebRtcSendFile { peer_id: String, transfer_id: String, file_path: String, total_size: u64, kind: String, shard_index: u16, chunk_index: u32 },
     // -- Voice call events --
     CallSignal { peer_id: String, signal_type: String, payload: String },
+    /// One of our other devices entered or left a call, a voice channel or a
+    /// meeting; `active` false means it is free (or gone).
+    SiblingCallState { device: String, active: bool, kind: String, with: String, channel: String, started_ms: i64 },
+    /// A sibling told us what kind of device it is ("desktop" or "phone").
+    DeviceKindsChanged,
     // -- Voice channel events --
     /// `is_self` = this is OUR OWN join or leave, set by the emitting handler. Dart
     /// must branch on it and never compare `peer_id` against a local id: the
@@ -1011,8 +1031,8 @@ pub(crate) enum NodeCommand {
     /// (Populated device) Release the claimed link code.
     ReleaseLinkCode,
     /// (Empty device) Resolve the code's rendezvous part, then run the handshake with
-    /// the device that shows it. `label` and `platform` go on its confirm prompt.
-    ResolveLinkCode { code: String, label: String, platform: String },
+    /// the device that shows it. `kind` ("desktop" or "phone") goes on its prompt.
+    ResolveLinkCode { code: String, kind: String },
     /// (Populated device) Accept an inbound link request and push the snapshot.
     AcceptLinkPush { target_peer: String, include_vault: bool, include_files: bool },
     /// (Populated device) Decline an inbound link request.
@@ -1134,6 +1154,9 @@ pub(crate) enum NodeCommand {
     WebRtcTransferFailed { transfer_id: String, peer_id: String, error: String },
     // -- Voice call commands --
     CallSendSignal { peer_id: String, signal_type: String, payload: String },
+    /// What THIS device is in now (None = nothing): told to our siblings and
+    /// read when a friend rings.
+    SetCallPresence { presence: Option<CallPresence> },
     // -- Voice channel commands --
     VoiceChannelJoin { server_id: String, channel_id: String },
     VoiceChannelLeave { server_id: String, channel_id: String },
@@ -1409,6 +1432,7 @@ impl NodeCommand {
             Self::WebRtcSendComplete { .. } => "WebRtcSendComplete",
             Self::WebRtcTransferFailed { .. } => "WebRtcTransferFailed",
             Self::CallSendSignal { .. } => "CallSendSignal",
+            Self::SetCallPresence { .. } => "SetCallPresence",
             Self::VoiceChannelJoin { .. } => "VoiceChannelJoin",
             Self::VoiceChannelLeave { .. } => "VoiceChannelLeave",
             Self::VoiceChannelSendSignal { .. } => "VoiceChannelSendSignal",
@@ -2105,6 +2129,26 @@ pub(crate) enum HavenMessage {
         markers: Vec<ReadMarker>,
     },
 
+    /// To our own devices only: the call, voice channel or meeting this device is
+    /// in now, or `None` once it is free. Sent on every change, and with `ask` to
+    /// each sibling as it is verified, which answers with its own: a sibling that
+    /// was away learns of the call even when its return is no news to the other.
+    #[serde(rename = "sibling_call_state")]
+    SiblingCallState {
+        #[serde(default)]
+        presence: Option<CallPresence>,
+        #[serde(default)]
+        ask: bool,
+    },
+
+    /// To our own devices only: "desktop" or "phone", never a platform or a host
+    /// name, so a sibling can name this device in its Devices list.
+    #[serde(rename = "device_kind")]
+    DeviceKind {
+        #[serde(default)]
+        kind: String,
+    },
+
     /// Multi-device: one device shares personal ("Mine") emote rows with a SIBLING
     /// of the same master. A delta after an add or remove and the full set on
     /// sibling verification are the SAME message, because the receiver merges row
@@ -2523,6 +2567,15 @@ pub(crate) enum HavenMessage {
     /// key and the UI state survive and the user sees "Reconnecting", not a new ring.
     #[serde(rename = "call_media_restart")]
     CallMediaRestart { call_id: String },
+
+    /// From the caller to a callee device that rang but did not take the call:
+    /// another device of the same person answered first, so stop ringing, or
+    /// (a late accept) drop the call. Built only by the node, never by Dart.
+    #[serde(rename = "call_answered_elsewhere")]
+    CallAnsweredElsewhere {
+        #[serde(default)]
+        call_id: String,
+    },
 
     /// SDP offer for voice call WebRTC connection.
     #[serde(rename = "call_sdp_offer")]
@@ -3939,6 +3992,8 @@ impl HavenMessage {
             | Self::FriendListRequest
             | Self::SiblingStateSyncRequest
             | Self::ReadMarkers { .. }
+            | Self::SiblingCallState { .. }
+            | Self::DeviceKind { .. }
             | Self::PersonalEmoteSync { .. }
             | Self::LinkPake { .. }
             | Self::LinkPakeReply { .. }
@@ -3968,6 +4023,7 @@ impl HavenMessage {
             | Self::CallEnd { .. }
             | Self::CallBusy { .. }
             | Self::CallMediaRestart { .. }
+            | Self::CallAnsweredElsewhere { .. }
             | Self::CallSdpOffer { .. }
             | Self::CallSdpAnswer { .. }
             | Self::CallIceCandidate { .. }
@@ -4038,6 +4094,8 @@ impl HavenMessage {
             | Self::FriendListRequest
             | Self::SiblingStateSyncRequest
             | Self::ReadMarkers { .. }
+            | Self::SiblingCallState { .. }
+            | Self::DeviceKind { .. }
             | Self::PersonalEmoteSync { .. }
             | Self::SiblingServerAnnounce { .. }
             | Self::DmSiblingSyncRequest { .. }
@@ -4083,6 +4141,7 @@ impl HavenMessage {
             | Self::CallEnd { .. }
             | Self::CallBusy { .. }
             | Self::CallMediaRestart { .. }
+            | Self::CallAnsweredElsewhere { .. }
             | Self::CallSdpOffer { .. }
             | Self::CallSdpAnswer { .. }
             | Self::CallIceCandidate { .. }

@@ -647,10 +647,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   Widget _confirmPush(HollowTheme hollow, String? peerId) {
     final declining = _decliningPeer != null;
     final state = ref.watch(deviceLinkSyncProvider);
-    final platform = platformName(state.theirPlatform);
-    final who = state.theirLabel.isEmpty
-        ? aDeviceOn(state.theirPlatform)
-        : (platform.isEmpty ? state.theirLabel : '${state.theirLabel} ($platform)');
+    final who = aDeviceOfKind(state.theirKind);
     return _phase(
       title: 'Add this device?',
       subtitle: '$who typed your code. Adding it sends it your full history '

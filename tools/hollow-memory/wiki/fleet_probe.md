@@ -746,6 +746,28 @@ What is not obvious:
 - `wait_for` sees built widgets only: run the channel half with everyone in #general, then move everyone to the DM surface for the DM half, or a delivered DM reads as a failed wait.
 - The cross-platform pairs (Windows master to iOS sub-device and the reverse) were driven by hand with one `fleet_send` session per fleet, the code captured on one side and typed on the other. The script carries sim and linux branches, but no iOS to iOS run has exercised them end to end yet.
 
+## One call per identity (`calls_multidevice.json`, 2026-10-01)
+
+Attach it to the fleet `fleet_device_link.ps1 -KeepUp` leaves up (a and b one identity, c their
+friend): c rings probe-a, BOTH a and b ring, b accepts, a stops ringing, a's DM with c shows the
+locked "In a call on another device" strip and no call controls in its dock, a's call button
+answers with the reason toast, b hangs up and a's strip goes. 29 steps, 54 s, green 2026-10-01.
+
+- **Assert a call by STATE, not by widgets.** A dismissed incoming card stays built for its exit
+  animation, so `wait_for gone text:Accept` fails on a device that really stopped ringing. The
+  provider snapshot carries `callStatus` (idle / ringing / connecting / active) and
+  `callElsewhere` (what a sibling is in: call / voice / meeting, or empty): wait on those.
+- **A Data sent dialog left open covers the incoming card**: tap `text:Done` after a link before
+  anything rings, or the Accept tap reports "clipped, covered, or not hit-testable".
+- **Mixed desktop + phone identity** (driven by hand the same day, green): Windows a shows a code
+  (`type:SettingsPlace > text:Link a device`, capture with the link-code regex), the Simulator peer
+  wiped with `relaunch_sim.sh a wipe` walks Welcome > `text:Link a device` > `hint:ABC123` > `text:Link`,
+  a's prompt reads "A phone typed your code", the phone stashes and exits and `relaunch_sim.sh a`
+  imports it. Then all three devices ring, a answers, the phone's DM shows `MobileCallElsewhereBar`
+  with its call buttons hidden, and both come back when a hangs up.
+- `mobile_reply_deleted.json` (phones): a reply's quote line also contains the original's text and
+  sits first in tree order, so long-press the original with `index: 1`.
+
 ## Two relays (`-Relay`, `fleet_relay_switch.ps1`, 2026-09-10)
 
 Self-hosting means an invite is only half an address: the server id says WHAT, the relay says WHERE.

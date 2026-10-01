@@ -13,6 +13,13 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<void> openMessageStore() =>
     RustLib.instance.api.crateApiStorageOpenMessageStore();
 
+/// The ids among `message_ids` (at most 500 are read) whose message was deleted,
+/// so a reply can say so instead of looking like one to older history.
+Future<List<String>> deletedMessageIds({required List<String> messageIds}) =>
+    RustLib.instance.api.crateApiStorageDeletedMessageIds(
+      messageIds: messageIds,
+    );
+
 /// Load recent messages for a peer, oldest-first, up to `limit`.
 Future<List<StoredMessage>> loadMessages({
   required String peerId,

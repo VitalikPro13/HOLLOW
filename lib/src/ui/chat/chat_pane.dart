@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
@@ -1036,9 +1037,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final isOnline = identityIsOnline(ref, widget.peerId);
     final isInCall = ref.watch(
         callProvider.select((c) => c.status != CallStatus.idle));
+    final elsewhere = ref.watch(callElsewhereProvider);
     return HollowIconButton(
       icon: LucideIcons.phone,
       label: 'Start voice call',
+      tooltip: elsewhere == null ? null : callElsewhereReason(elsewhere),
       onPressed: isOnline && !isInCall
           ? () => startDmCallFlow(context, ref, widget.peerId)
           : null,
@@ -1049,9 +1052,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final isOnline = identityIsOnline(ref, widget.peerId);
     final isInCall = ref.watch(
         callProvider.select((c) => c.status != CallStatus.idle));
+    final elsewhere = ref.watch(callElsewhereProvider);
     return HollowIconButton(
       icon: LucideIcons.video,
       label: 'Start video call',
+      tooltip: elsewhere == null ? null : callElsewhereReason(elsewhere),
       onPressed: isOnline && !isInCall
           ? () => startDmCallFlow(context, ref, widget.peerId, withVideo: true)
           : null,

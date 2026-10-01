@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
@@ -112,7 +115,9 @@ class DeviceLabelNotifier extends Notifier<Map<String, String>> {
   @override
   Map<String, String> build() => const {};
 
+  /// Re-reads the labels and, with them, what each sibling said it is.
   Future<void> refresh() async {
+    unawaited(ref.read(deviceKindProvider.notifier).refresh());
     try {
       final rows = await network_api.getDeviceLabels();
       state = {for (final l in rows) l.devicePeerId: l.label};
@@ -138,6 +143,51 @@ final deviceLabelProvider =
   DeviceLabelNotifier.new,
 );
 
+/// What this device tells its siblings and a device it links to: never a
+/// platform, never a host name.
+String thisDeviceKind() =>
+    Platform.isAndroid || Platform.isIOS ? 'phone' : 'desktop';
+
+/// "Desktop" or "Phone", or null for a kind we were never told.
+String? deviceKindName(String kind) => switch (kind) {
+      'desktop' => 'Desktop',
+      'phone' => 'Phone',
+      _ => null,
+    };
+
+/// device_peer_id -> "desktop" | "phone", as each sibling reported itself.
+class DeviceKindNotifier extends Notifier<Map<String, String>> {
+  @override
+  Map<String, String> build() => const {};
+
+  Future<void> refresh() async {
+    try {
+      final rows = await network_api.getDeviceKinds();
+      state = {for (final k in rows) k.devicePeerId: k.label};
+    } catch (e) {
+      debugPrint('[HOLLOW] Device kind refresh failed: $e');
+    }
+  }
+}
+
+final deviceKindProvider =
+    NotifierProvider<DeviceKindNotifier, Map<String, String>>(
+  DeviceKindNotifier.new,
+);
+
+/// The name a device goes by on this one: the label it was given here, else
+/// "Desktop" or "Phone"; null when it has neither (callers show its short id).
+String? deviceGivenName(
+  String id, {
+  required Map<String, String> labels,
+  required Map<String, String> kinds,
+  bool isThisDevice = false,
+}) {
+  final label = labels[id];
+  if (label != null && label.isNotEmpty) return label;
+  return deviceKindName(isThisDevice ? thisDeviceKind() : (kinds[id] ?? ''));
+}
+
 /// One of MY OWN devices, for the Devices panel.
 class MyDevice {
   final String peerId;
@@ -145,11 +195,15 @@ class MyDevice {
   final bool online;
   final String label;
 
+  /// "desktop", "phone", or empty when the device never said.
+  final String kind;
+
   const MyDevice({
     required this.peerId,
     required this.isThisDevice,
     required this.online,
     required this.label,
+    this.kind = '',
   });
 }
 
@@ -161,6 +215,7 @@ class MyDevice {
 final myDevicesProvider = Provider<List<MyDevice>>((ref) {
   final links = ref.watch(deviceLinkProvider);
   final labels = ref.watch(deviceLabelProvider);
+  final kinds = ref.watch(deviceKindProvider);
   final peers = ref.watch(peersProvider);
   final invisible = ref.watch(invisiblePeersProvider);
   final myDeviceId = ref.watch(localDevicePeerIdProvider).valueOrNull;
@@ -188,6 +243,7 @@ final myDevicesProvider = Provider<List<MyDevice>>((ref) {
       isThisDevice: isThis,
       online: online,
       label: labels[id] ?? '',
+      kind: isThis ? thisDeviceKind() : (kinds[id] ?? ''),
     );
   }).toList()
     // This device first, then online, then by id for stability.

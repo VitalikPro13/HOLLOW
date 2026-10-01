@@ -1,0 +1,68 @@
+{
+  "_": [
+    "tmp4.txt items b and e on the phone: a replies to b's message, b deletes the",
+    "original, and the reply's quote reads 'Deleted message' (faded, nothing to",
+    "jump to) on both phones. Then Settings > Devices names this device 'Phone'.",
+    "",
+    "Needs FRESH peers (not yet friends).",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario mobile_reply_deleted -Peers a,b"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "capture", "from": "provider", "key": "peerId", "as": "PEER_A" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Friends", "index": 0 },
+    { "peer": "b", "op": "tap", "target": "text:Add friend", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Paste an ID, or type a nickname", "value": "${PEER_A}" },
+    { "peer": "b", "op": "wait_for", "target": "text:${PEER_A}", "timeout_ms": 10000 },
+    { "peer": "b", "op": "tap", "target": "text:Send request", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Friends, 1 friend request", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Friends", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 10000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Accept friend request", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:probe-a", "timeout_ms": 60000 },
+
+    { "peer": "b", "op": "tap", "target": "text:probe-a" },
+    { "peer": "b", "op": "wait_for", "target": "field", "timeout_ms": 15000 },
+    { "peer": "b", "op": "tap", "target": "field", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "field", "value": "the original ${RUN}" },
+    { "peer": "b", "op": "tap", "target": "semantics:Send message", "index": 0 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Chats", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:the original ${RUN}", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "text:probe-b" },
+    { "peer": "a", "op": "wait_for", "target": "field", "timeout_ms": 15000 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "long_press", "target": "text:the original ${RUN}", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "tap", "target": "text:Reply", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 600 },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "the reply ${RUN}" },
+    { "peer": "a", "op": "tap", "target": "semantics:Send message", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:the reply ${RUN}", "timeout_ms": 60000 },
+    { "peer": "all", "op": "wait", "ms": 1500 },
+    { "peer": "all", "op": "shot", "name": "rd-01-reply-quotes-original" },
+
+    { "peer": "b", "op": "tap_at", "x": 195, "y": 120 },
+    { "peer": "b", "op": "wait", "ms": 800 },
+    { "peer": "b", "op": "long_press", "target": "text:the original ${RUN}", "index": 1 },
+    { "peer": "b", "op": "wait", "ms": 800 },
+    { "peer": "b", "op": "tap", "target": "text:Delete message", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:Deleted message", "timeout_ms": 15000 },
+    { "peer": "a", "op": "wait_for", "target": "text:Deleted message", "timeout_ms": 60000 },
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "rd-02-original-deleted" },
+    { "peer": "a", "op": "tap", "target": "text:Deleted message", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "shot", "name": "rd-03-tap-does-nothing" },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Settings", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "tap", "target": "text:Devices", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:Phone", "timeout_ms": 10000 },
+    { "peer": "a", "op": "shot", "name": "rd-04-devices-phone" }
+  ]
+}

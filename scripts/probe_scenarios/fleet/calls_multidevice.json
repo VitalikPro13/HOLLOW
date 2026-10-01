@@ -1,0 +1,51 @@
+{
+  "_": [
+    "One call at a time per identity, on a two-device identity (tmp4.txt item c).",
+    "a and b are ONE identity (probe-a) after fleet_device_link.ps1 -KeepUp, c their friend.",
+    "c rings probe-a: BOTH a and b ring; b accepts; a stops ringing (answered elsewhere);",
+    "a's DM with c shows the locked strip 'In a call on another device' and no call",
+    "controls; a's call button says why it cannot start one; b hangs up and a's strip goes.",
+    "",
+    "run: powershell -File scripts\\fleet_device_link.ps1 -KeepUp",
+    "then: powershell -File scripts\\fleet.ps1 -Scenario calls_multidevice -Peers a,b,c -Attach"
+  ],
+  "peers": ["a", "b", "c"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "all", "op": "tap", "target": "semantics:Home", "index": 0, "allowMiss": true },
+    { "peer": "c", "op": "tap", "target": "semantics:probe-a", "index": 0 },
+    { "peer": "c", "op": "wait", "ms": 1500 },
+
+    { "peer": "c", "op": "tap", "target": "semantics:Start voice call", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:Accept", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait_for", "target": "text:Accept", "timeout_ms": 30000 },
+    { "peer": "all", "op": "hover_at", "x": 5, "y": 400 },
+    { "peer": "a", "op": "shot", "name": "md-01-a-rings" },
+    { "peer": "b", "op": "shot", "name": "md-01-b-rings" },
+
+    { "peer": "b", "op": "tap", "target": "text:Accept", "index": 0 },
+    { "peer": "a", "op": "wait_for", "provider": "callStatus", "equals": "idle", "timeout_ms": 20000 },
+    { "peer": "a", "op": "wait_for", "provider": "callElsewhere", "equals": "call", "timeout_ms": 20000 },
+    { "peer": "b", "op": "wait_for", "target": "semantics:Leave the call", "timeout_ms": 30000 },
+    { "peer": "c", "op": "wait_for", "target": "semantics:Leave the call", "timeout_ms": 30000 },
+    { "peer": "all", "op": "wait", "ms": 4000 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:probe-c", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:In a call on another device", "timeout_ms": 20000 },
+    { "peer": "a", "op": "wait_for", "gone": "semantics:Leave the call", "timeout_ms": 5000 },
+    { "peer": "all", "op": "hover_at", "x": 5, "y": 400 },
+    { "peer": "all", "op": "shot", "name": "md-02-b-in-call" },
+    { "peer": "a", "op": "dump", "name": "md-02-a-locked" },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Start voice call", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:You're in a call on another device", "timeout_ms": 5000 },
+    { "peer": "a", "op": "shot", "name": "md-03-a-says-why" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Leave the call", "index": 0 },
+    { "peer": "a", "op": "wait_for", "provider": "callElsewhere", "equals": "", "timeout_ms": 20000 },
+    { "peer": "a", "op": "wait_for", "gone": "text:In a call on another device", "timeout_ms": 20000 },
+    { "peer": "c", "op": "wait_for", "gone": "semantics:Leave the call", "timeout_ms": 20000 },
+    { "peer": "all", "op": "wait", "ms": 1500 },
+    { "peer": "all", "op": "shot", "name": "md-04-ended" }
+  ]
+}

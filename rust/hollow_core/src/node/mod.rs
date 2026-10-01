@@ -2,6 +2,7 @@ pub(crate) mod assets;
 pub(crate) mod at_rest;
 pub(crate) mod at_rest_server;
 pub(crate) mod blocklist;
+pub(crate) mod call_book;
 pub(crate) mod conference;
 pub(crate) mod crdt_store;
 pub(crate) mod crypto_handler;
@@ -57,6 +58,6 @@ pub(crate) mod webp_anim;
 mod test_harness;
 
 pub(crate) use crdt_store::CrdtStore;
-pub(crate) use types::{new_channel_id, DestroyDelegation, DestroyIdentity, LinkPreviewRef, NetworkEvent, NodeCommand, PersonalEmoteEntry, RichCard, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
+pub(crate) use types::{new_channel_id, CallPresence, DestroyDelegation, DestroyIdentity, LinkPreviewRef, NetworkEvent, NodeCommand, PersonalEmoteEntry, RichCard, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
 pub(crate) use crypto_handler::verify_message_signature;
 pub(crate) use swarm::spawn_node;

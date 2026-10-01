@@ -69,10 +69,9 @@ pub(crate) enum LinkInner {
     Hello {
         #[serde(default)]
         device: String,
+        /// "desktop" or "phone", never a platform or a host name.
         #[serde(default)]
-        label: String,
-        #[serde(default)]
-        platform: String,
+        kind: String,
         #[serde(default)]
         msg_count: u32,
         #[serde(default)]
@@ -220,8 +219,7 @@ mod tests {
     fn hello() -> LinkInner {
         LinkInner::Hello {
             device: "12D3KooWnew".into(),
-            label: "Laptop".into(),
-            platform: "linux".into(),
+            kind: "desktop".into(),
             msg_count: 0,
             friend_count: 0,
             has_profile: false,

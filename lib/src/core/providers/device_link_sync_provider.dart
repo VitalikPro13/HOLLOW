@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'connection_status_provider.dart';
+import 'device_link_provider.dart' show thisDeviceKind;
 
 /// Phases of the multi-device device-linking flow (Step 4). Honest about what is
 /// actually happening — no fabricated per-category progress.
@@ -58,9 +58,8 @@ class DeviceLinkState {
   final int theirFriendCount;
   final bool theirHasProfile;
 
-  /// What the asking device says it is: its name and its platform.
-  final String theirLabel;
-  final String theirPlatform;
+  /// What the asking device says it is: "desktop", "phone" or nothing.
+  final String theirKind;
 
   // Receiving side (empty device).
   final int bytesReceived;
@@ -81,8 +80,7 @@ class DeviceLinkState {
     this.theirMsgCount = 0,
     this.theirFriendCount = 0,
     this.theirHasProfile = false,
-    this.theirLabel = '',
-    this.theirPlatform = '',
+    this.theirKind = '',
     this.bytesReceived = 0,
     this.totalBytes = 0,
     this.msgCount = 0,
@@ -102,8 +100,7 @@ class DeviceLinkState {
     int? theirMsgCount,
     int? theirFriendCount,
     bool? theirHasProfile,
-    String? theirLabel,
-    String? theirPlatform,
+    String? theirKind,
     int? bytesReceived,
     int? totalBytes,
     int? msgCount,
@@ -119,8 +116,7 @@ class DeviceLinkState {
         theirMsgCount: theirMsgCount ?? this.theirMsgCount,
         theirFriendCount: theirFriendCount ?? this.theirFriendCount,
         theirHasProfile: theirHasProfile ?? this.theirHasProfile,
-        theirLabel: theirLabel ?? this.theirLabel,
-        theirPlatform: theirPlatform ?? this.theirPlatform,
+        theirKind: theirKind ?? this.theirKind,
         bytesReceived: bytesReceived ?? this.bytesReceived,
         totalBytes: totalBytes ?? this.totalBytes,
         msgCount: msgCount ?? this.msgCount,
@@ -151,38 +147,13 @@ String formatLinkCode(String code) => code.length <= kLinkRendezvousLength
     ? code
     : '${code.substring(0, kLinkRendezvousLength)}-${code.substring(kLinkRendezvousLength)}';
 
-/// What this device calls itself on the other device's confirm prompt: the
-/// computer's name on a desktop, nothing on a phone (which reports none worth
-/// showing), and the platform.
-({String label, String platform}) linkDeviceIdentity() {
-  final desktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
-  var label = '';
-  if (desktop) {
-    try {
-      label = Platform.localHostname;
-    } catch (_) {}
-  }
-  return (label: label, platform: Platform.operatingSystem);
-}
-
-/// The platform a linking device reported, as people name it.
-String platformName(String platform) => switch (platform) {
-      'windows' => 'Windows',
-      'macos' => 'macOS',
-      'linux' => 'Linux',
-      'android' => 'Android',
-      'ios' => 'iOS',
-      _ => platform,
+/// The confirm prompt's subject for a device of [kind]: "A desktop", "A phone",
+/// or "A device" when it said neither.
+String aDeviceOfKind(String kind) => switch (kind) {
+      'desktop' => 'A desktop',
+      'phone' => 'A phone',
+      _ => 'A device',
     };
-
-/// "A Windows device", "An iOS device": the confirm prompt's name for a device
-/// that reported no label of its own.
-String aDeviceOn(String platform) {
-  final name = platformName(platform);
-  if (name.isEmpty) return 'A device';
-  final article = RegExp(r'^[AEIOUaeiou]').hasMatch(name) ? 'An' : 'A';
-  return '$article $name device';
-}
 
 class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   Timer? _waitingTimer;
@@ -250,9 +221,8 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     final typed = code.toUpperCase(); // design-ignore: link code, data
     if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, code: typed))) return;
     final attempt = state;
-    final me = linkDeviceIdentity();
     try {
-      await network_api.resolveLinkCode(code: typed, label: me.label, platform: me.platform);
+      await network_api.resolveLinkCode(code: typed, kind: thisDeviceKind());
     } catch (_) {
       if (!_disposed && identical(state, attempt)) {
         onLinkFailed('Could not request the link. Check your connection and try again.');
@@ -315,8 +285,7 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     int theirMsgCount,
     int theirFriendCount,
     bool theirHasProfile, {
-    String label = '',
-    String platform = '',
+    String kind = '',
   }) {
     // If WE initiated a pull (empty side) this is our own offer to pull: only
     // surface Confirm when we're showing a code or idle.
@@ -327,8 +296,7 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
       theirMsgCount: theirMsgCount,
       theirFriendCount: theirFriendCount,
       theirHasProfile: theirHasProfile,
-      theirLabel: label,
-      theirPlatform: platform,
+      theirKind: kind,
     );
   }
 

@@ -16,9 +16,10 @@ import 'package:hollow/src/ui/settings/settings_shared.dart';
 bool deviceIsActive(MyDevice d) =>
     d.online || d.isThisDevice || d.label.isNotEmpty;
 
-/// The device's label, or its shortened peer id when it has none.
-String deviceTitle(MyDevice d) =>
-    d.label.isNotEmpty ? d.label : shortenPeerId(d.peerId);
+/// The device's label, else "Desktop" or "Phone", else its shortened peer id.
+String deviceTitle(MyDevice d) => d.label.isNotEmpty
+    ? d.label
+    : deviceKindName(d.kind) ?? shortenPeerId(d.peerId);
 
 /// Re-pulls the device list from the running node. Call on open: the startup
 /// warm-up races node readiness and nothing keeps the list fresh while

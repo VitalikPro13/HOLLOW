@@ -317,8 +317,8 @@ pub enum NetworkEvent {
         their_msg_count: u32,
         their_friend_count: u32,
         their_has_profile: bool,
-        label: String,
-        platform: String,
+        /// "desktop", "phone" or empty: all a linking device says about itself.
+        kind: String,
     },
     LinkProgress {
         link_id: String,
@@ -370,6 +370,12 @@ pub enum NetworkEvent {
     // -- Voice call events (Phase 5B) --
     /// Forward incoming voice call signaling message to Dart.
     CallSignal { peer_id: String, signal_type: String, payload: String },
+    /// One of our other devices entered (`active`) or left a call ("call", `with`
+    /// = the friend's master), a voice channel ("voice", `with` = the server) or a
+    /// meeting ("meeting", `with` = the conference). `started_ms` 0 = not connected yet.
+    SiblingCallState { device: String, active: bool, kind: String, with: String, channel: String, started_ms: i64 },
+    /// A sibling told us whether it is a desktop or a phone: re-read the kinds.
+    DeviceKindsChanged,
     // -- Voice channel events (Phase 5C) --
     /// `is_self` = our own join/leave, decided by the Rust handler that knows. Dart
     /// branches on this flag, never on comparing peer_id to a local id: peer_id is the
@@ -1078,8 +1084,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::LinkCodeError { error, code } => {
             NetworkEvent::LinkCodeError { error, code }
         }
-        node::NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile, label, platform } => {
-            NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile, label, platform }
+        node::NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile, kind } => {
+            NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile, kind }
         }
         node::NetworkEvent::LinkProgress { link_id, bytes_received, total_bytes } => {
             NetworkEvent::LinkProgress { link_id, bytes_received, total_bytes }
@@ -1162,6 +1168,10 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::CallSignal { peer_id, signal_type, payload } => {
             NetworkEvent::CallSignal { peer_id, signal_type, payload }
         }
+        node::NetworkEvent::SiblingCallState { device, active, kind, with, channel, started_ms } => {
+            NetworkEvent::SiblingCallState { device, active, kind, with, channel, started_ms }
+        }
+        node::NetworkEvent::DeviceKindsChanged => NetworkEvent::DeviceKindsChanged,
         // -- Voice channel events (Phase 5C) --
         node::NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id, is_self } => {
             NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id, is_self }
@@ -1758,6 +1768,16 @@ pub fn set_device_label(device_peer_id: String, label: String) -> Result<(), Str
 pub fn get_device_labels() -> Result<Vec<DeviceLabel>, String> {
     Ok(open_local_store()?
         .get_all_device_labels()?
+        .into_iter()
+        .map(|(device_peer_id, label)| DeviceLabel { device_peer_id, label })
+        .collect())
+}
+
+/// What each sibling said it is, "desktop" or "phone", in the `label` field.
+#[frb]
+pub fn get_device_kinds() -> Result<Vec<DeviceLabel>, String> {
+    Ok(open_local_store()?
+        .get_all_device_kinds()?
         .into_iter()
         .map(|(device_peer_id, label)| DeviceLabel { device_peer_id, label })
         .collect())
@@ -2440,10 +2460,10 @@ pub fn release_link_code() -> Result<(), String> {
 }
 
 /// (Empty device) Link to the device that shows `code` (ten characters, dashes and
-/// case ignored). `label` and `platform` are shown on its confirm prompt.
+/// case ignored). `kind` ("desktop" or "phone") is all its confirm prompt is told.
 #[frb]
-pub fn resolve_link_code(code: String, label: String, platform: String) -> Result<(), String> {
-    send_node_command(node::NodeCommand::ResolveLinkCode { code, label, platform })
+pub fn resolve_link_code(code: String, kind: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::ResolveLinkCode { code, kind })
 }
 
 /// (Populated device) Accept an inbound link request and push the snapshot to the
@@ -3922,6 +3942,16 @@ pub fn webrtc_transfer_failed(
 }
 
 /// Send a voice call signaling message to a peer (Phase 5B).
+/// What this device is in now, for our siblings and for a friend who rings:
+/// `kind` "call" (`with` = the friend's master), "voice" (`with` = the server,
+/// `channel` set) or "meeting" (`with` = the conference id); an empty `kind`
+/// means nothing. `started_ms` is when it connected, 0 before.
+#[frb]
+pub fn set_call_presence(kind: String, with: String, channel: String, started_ms: i64) -> Result<(), String> {
+    let presence = (!kind.is_empty()).then_some(node::CallPresence { kind, with, channel, started_ms });
+    send_node_command(node::NodeCommand::SetCallPresence { presence })
+}
+
 #[frb]
 pub fn call_send_signal(
     peer_id: String,

@@ -277,6 +277,7 @@ fn on_verified_sibling(
     db_path: &str,
     db_passphrase: &str,
     peer_id: &str,
+    own_call: Option<&CallPresence>,
 ) {
     if !super::resolver::same_identity(peer_id, local_peer_str) || super::resolver::is_revoked(peer_id) {
         hollow_log!("[HOLLOW-ROSTER] {peer_id} is not one of this identity's devices: no sibling state");
@@ -331,6 +332,38 @@ fn on_verified_sibling(
             .count()
     );
 
+    // Both ways: ours goes with the ask, and the sibling answers with its own, so
+    // a device back from an unclean drop hears of a call the other is in.
+    let kind = super::call_book::own_device_kind().to_string();
+    super::olm_lane::carry(ws_cmd_tx, peer_id, None, &HavenMessage::DeviceKind { kind }, super::olm_lane::NoSession::Queue);
+    super::olm_lane::carry(
+        ws_cmd_tx, peer_id, None,
+        &HavenMessage::SiblingCallState { presence: own_call.cloned(), ask: true },
+        super::olm_lane::NoSession::Queue,
+    );
+}
+
+/// A sibling that went offline no longer holds the identity's one call.
+async fn sibling_left_its_call(
+    call_book: &mut super::call_book::CallBook,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    device: &str,
+) {
+    if call_book.sibling_gone(device) {
+        emit_sibling_call(event_tx, device, None).await;
+    }
+}
+
+async fn emit_sibling_call(event_tx: &mpsc::Sender<NetworkEvent>, device: &str, presence: Option<CallPresence>) {
+    let p = presence.unwrap_or_default();
+    let _ = event_tx.send(NetworkEvent::SiblingCallState {
+        device: device.to_string(),
+        active: !p.kind.is_empty(),
+        kind: p.kind,
+        with: p.with,
+        channel: p.channel,
+        started_ms: p.started_ms,
+    }).await;
 }
 
 /// Converge with each sibling an ingest just admitted that sits in our inbox now.
@@ -346,13 +379,14 @@ fn converge_new_siblings(
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
+    own_call: Option<&CallPresence>,
 ) {
     let own_inbox = format!("inbox:{local_peer_str}");
     let Some(present) = ws_room_peers.get(&own_inbox) else { return };
     for device in added.iter().filter(|d| d.as_str() != device_peer_id && present.contains(*d)) {
         on_verified_sibling(
             ws_cmd_tx, ws_room_peers, master_keypair, local_peer_str,
-            server_states, is_invisible, db_path, db_passphrase, device,
+            server_states, is_invisible, db_path, db_passphrase, device, own_call,
         );
     }
 }
@@ -757,6 +791,7 @@ async fn run_event_loop(
     // -- Voice channel participant tracking --
     // Key: "server_id:channel_id", Value: set of peer_ids in the voice channel.
     let mut voice_channel_participants: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut call_book = super::call_book::CallBook::default();
     // Track the current voice mode per channel: true = gossip, false = mesh.
     let mut voice_channel_gossip_mode: HashMap<String, bool> = HashMap::new();
 
@@ -2258,8 +2293,8 @@ async fn run_event_loop(
                     NodeCommand::ReleaseLinkCode => {
                         link_handler::release(&mut link, &ws_cmd_tx);
                     }
-                    NodeCommand::ResolveLinkCode { code, label, platform } => {
-                        if let Err(error) = link_handler::resolve(&mut link, &ws_cmd_tx, &code, &label, &platform) {
+                    NodeCommand::ResolveLinkCode { code, kind } => {
+                        if let Err(error) = link_handler::resolve(&mut link, &ws_cmd_tx, &code, &kind) {
                             let _ = event_tx.send(NetworkEvent::LinkFailed { link_id: String::new(), error }).await;
                         }
                     }
@@ -2337,6 +2372,18 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &ws_room_peers, &mut mls,
                                 &server_states, &bundle_keypair, &crypto_store,
                                 &local_peer_str, server_id, channel_id,
+                            );
+                        }
+                    }
+
+                    NodeCommand::SetCallPresence { presence } => {
+                        if call_book.set_own(presence) {
+                            let presence = call_book.own().cloned();
+                            hollow_log!("[HOLLOW-CALL] This device is now in {:?}", presence.as_ref().map(|p| p.kind.as_str()));
+                            super::olm_lane::carry_to_own_siblings(
+                                &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id,
+                                &HavenMessage::SiblingCallState { presence, ask: false },
+                                super::olm_lane::NoSession::Queue,
                             );
                         }
                     }
@@ -2716,7 +2763,7 @@ async fn run_event_loop(
                     NodeCommand::CallSendSignal { peer_id, signal_type, payload } => {
                         last_message_traffic = std::time::Instant::now();
                         voice_handler::handle_call_send_signal(
-                            peer_id, signal_type, payload,
+                            peer_id, signal_type, payload, &mut call_book,
                             &mut olm, &crypto_store, &event_tx,
                             &ws_cmd_tx, &ws_room_peers,
                             &mut key_request_in_flight,
@@ -3038,6 +3085,7 @@ async fn run_event_loop(
                                 &mut gossip_overlays,
                                 &mut voice_channel_participants,
                                 &mut voice_channel_gossip_mode,
+                                &mut call_book,
                                 &mut conference_host,
                                 &mut vc_signal_rate_tokens,
                                 &mut mls_dirty,
@@ -3364,6 +3412,8 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         synced_peers.clear();
+                        // A sibling's call is unknown until it re-announces on reconnect.
+                        call_book.clear_siblings();
                         // Asset pulls OUTLIVE the socket — only the record of
                         // who was asked over the dead connection is dropped,
                         // because a new socket means a fresh set of holders.
@@ -3695,7 +3745,7 @@ async fn run_event_loop(
                                         if super::resolver::same_identity(&peer_id, &local_peer_str) {
                                             on_verified_sibling(
                                                 &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
-                                                is_invisible, &db_path, &db_passphrase, &peer_id,
+                                                is_invisible, &db_path, &db_passphrase, &peer_id, call_book.own(),
                                             );
                                         } else {
                                             offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, &peer_id, &db_path, &db_passphrase);
@@ -3971,6 +4021,7 @@ async fn run_event_loop(
                             .collect();
                         if still_rooms.is_empty() {
                             synced_peers.remove(&peer_id);
+                            sibling_left_its_call(&mut call_book, &event_tx, &peer_id).await;
                             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                                 peer_id: peer_id.clone(),
                             }).await;
@@ -4060,6 +4111,7 @@ async fn run_event_loop(
                             if !still_ws {
                                 hollow_log!("[HOLLOW-WS] Stale peer {gone} purged via RoomMembers refresh of {room} — emitting disconnect");
                                 synced_peers.remove(&gone);
+                                sibling_left_its_call(&mut call_book, &event_tx, &gone).await;
                                 let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                                     peer_id: gone,
                                 }).await;
@@ -4336,7 +4388,7 @@ async fn run_event_loop(
                                             if super::resolver::same_identity(pid_str, &local_peer_str) {
                                                 on_verified_sibling(
                                                     &ws_cmd_tx, &ws_room_peers, &master_keypair, &local_peer_str, &server_states,
-                                                    is_invisible, &db_path, &db_passphrase, pid_str,
+                                                    is_invisible, &db_path, &db_passphrase, pid_str, call_book.own(),
                                                 );
                                             } else {
                                                 offer_roster(&ws_cmd_tx, &ws_room_peers, &local_peer_str, pid_str, &db_path, &db_passphrase);
@@ -4627,6 +4679,7 @@ async fn run_event_loop(
                                 &mut gossip_overlays,
                                 &mut voice_channel_participants,
                                 &mut voice_channel_gossip_mode,
+                                &mut call_book,
                                 &mut conference_host,
                                 &mut vc_signal_rate_tokens,
                                 &mut mls_dirty,
@@ -5184,6 +5237,7 @@ async fn run_event_loop(
                                             &mut gossip_overlays,
                                             &mut voice_channel_participants,
                                             &mut voice_channel_gossip_mode,
+                                            &mut call_book,
                                             &mut conference_host,
                                             &mut vc_signal_rate_tokens,
                                             &mut mls_dirty,
@@ -7002,6 +7056,7 @@ async fn handle_incoming_request(
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    call_book: &mut super::call_book::CallBook,
     conference_host: &mut HashMap<String, super::conference::ConferenceHostState>,
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
     mls_dirty: &mut bool,
@@ -8836,7 +8891,8 @@ async fn handle_incoming_request(
                 // sender is authenticated; the plaintext Call* arms below reject instead.
                 Ok(MessageEnvelope::CallSignal { signal }) => {
                     voice_handler::handle_call_signal_message(
-                        peer_str, master_peer_str, *signal, event_tx, db_path, db_passphrase,
+                        peer_str, master_peer_str, *signal, call_book, ws_cmd_tx, ws_room_peers,
+                        event_tx, db_path, db_passphrase,
                     ).await;
                 }
 
@@ -12167,6 +12223,43 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::ReadMarkersReceived { markers }).await;
         }
 
+        HavenMessage::SiblingCallState { presence, ask } => {
+            if !super::resolver::same_identity(peer_str, local_peer_str)
+                || peer_str == device_peer_id
+                || super::resolver::is_revoked(peer_str)
+            {
+                hollow_log!("[HOLLOW-CALL] Dropped SiblingCallState from non-sibling {peer_str}");
+                return;
+            }
+            if let Some(changed) = call_book.set_sibling(peer_str, presence) {
+                hollow_log!("[HOLLOW-CALL] Sibling {peer_str} is now in {:?}", changed.as_ref().map(|p| p.kind.as_str()));
+                emit_sibling_call(event_tx, peer_str, changed).await;
+            }
+            if ask {
+                super::olm_lane::carry(
+                    ws_cmd_tx, peer_str, None,
+                    &HavenMessage::SiblingCallState { presence: call_book.own().cloned(), ask: false },
+                    super::olm_lane::NoSession::Queue,
+                );
+            }
+        }
+
+        HavenMessage::DeviceKind { kind } => {
+            if !super::resolver::same_identity(peer_str, local_peer_str) || peer_str == device_peer_id {
+                hollow_log!("[HOLLOW-ROSTER] Dropped DeviceKind from non-sibling {peer_str}");
+                return;
+            }
+            let kind = super::call_book::device_kind(&kind);
+            if kind.is_empty() { return; }
+            let (db, pass, device, tx) = (db_path.to_string(), db_passphrase.to_string(), peer_str.to_string(), event_tx.clone());
+            tokio::task::spawn_blocking(move || {
+                let stored = crate::storage::MessageStore::open(&db, &pass).and_then(|s| s.set_device_kind(&device, kind));
+                if let Ok(true) = stored {
+                    let _ = tx.blocking_send(NetworkEvent::DeviceKindsChanged);
+                }
+            });
+        }
+
         HavenMessage::SiblingStateSyncRequest => {
             // Multi-device MANUAL state sync: our OWN other device (the user tapped
             // "Sync from this device" on it, choosing US as the source) wants our
@@ -12791,7 +12884,7 @@ async fn handle_incoming_request(
             let our_devices_grew = ingest_outcome.our_devices_grew;
             converge_new_siblings(
                 &ingest_outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,
-                local_peer_str, server_states, is_invisible, db_path, db_passphrase,
+                local_peer_str, server_states, is_invisible, db_path, db_passphrase, call_book.own(),
             );
             // Step 7: enforce any device revocations learned from this list — drop
             // Olm sessions + (coordinator) remove the revoked leaf from shared servers.
@@ -13370,6 +13463,7 @@ async fn handle_incoming_request(
         | HavenMessage::CallEnd { .. }
         | HavenMessage::CallBusy { .. }
         | HavenMessage::CallMediaRestart { .. }
+        | HavenMessage::CallAnsweredElsewhere { .. }
         | HavenMessage::CallSdpOffer { .. }
         | HavenMessage::CallSdpAnswer { .. }
         | HavenMessage::CallIceCandidate { .. }
@@ -13481,7 +13575,7 @@ async fn handle_incoming_request(
             }
             converge_new_siblings(
                 &outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,
-                local_peer_str, server_states, is_invisible, db_path, db_passphrase,
+                local_peer_str, server_states, is_invisible, db_path, db_passphrase, call_book.own(),
             );
             enforce_device_revocations(
                 &outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
@@ -13706,7 +13800,7 @@ mod tests {
         for outsider in [&removed, &never_admitted] {
             on_verified_sibling(
                 &ws_cmd_tx, &rooms, &master, &master_id, &HashMap::new(),
-                false, &db, &pass, outsider,
+                false, &db, &pass, outsider, None,
             );
             assert_ne!(
                 super::super::resolver::resolve(outsider),

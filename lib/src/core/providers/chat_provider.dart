@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/deleted_messages_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -194,6 +195,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 
   /// Remove a message from in-memory state (from network event or own deletion).
   void applyDelete(String peerId, String messageId, int deletedAtMs) {
+    ref.read(deletedMessagesProvider.notifier).markDeleted(messageId);
     final current = state[peerId];
     if (current == null) return;
 
@@ -312,6 +314,10 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
           .where((m) => m.messageId != null)
           .map((m) => m.messageId!)
           .toList();
+      ref
+          .read(deletedMessagesProvider.notifier)
+          .resolveReplyTargets(stored.map((m) => m.replyToMid), messageIds)
+          .catchError((_) {});
 
       Map<String, Map<String, List<String>>> reactionsMap = {};
       if (messageIds.isNotEmpty) {

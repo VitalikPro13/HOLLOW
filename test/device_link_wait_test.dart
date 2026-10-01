@@ -8,12 +8,14 @@ import 'package:hollow/src/rust/frb_generated.dart';
 
 class _LinkApi implements RustLibApi {
   int requests = 0;
+  String? kind;
   Completer<void>? pending;
 
   @override
-  Future<void> crateApiNetworkResolveLinkCode({required String code,
-      required String label, required String platform}) async {
+  Future<void> crateApiNetworkResolveLinkCode(
+      {required String code, required String kind}) async {
     requests++;
+    this.kind = kind;
     await pending?.future;
   }
 
@@ -52,6 +54,13 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect(c.read(deviceLinkSyncProvider).phase, LinkPhase.failed);
     expect(c.read(deviceLinkSyncProvider).error, contains('fresh code'));
+  });
+
+  test('the request says only what kind of device this is', () async {
+    final c = container(OverallConnection.connected);
+    await c.read(deviceLinkSyncProvider.notifier).enterCode('ABC234');
+    expect(api.kind, 'desktop');
+    c.read(deviceLinkSyncProvider.notifier).reset();
   });
 
   testWidgets('progress cancels the waiting timeout', (tester) async {

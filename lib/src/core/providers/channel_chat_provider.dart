@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/deleted_messages_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
@@ -216,6 +217,7 @@ class ChannelChatNotifier
   /// Remove a message from in-memory state (from network event or own deletion).
   void applyDelete(String serverId, String channelId, String messageId,
       int deletedAtMs) {
+    ref.read(deletedMessagesProvider.notifier).markDeleted(messageId);
     final key = _key(serverId, channelId);
     final current = state[key];
     if (current == null) return;
@@ -342,6 +344,10 @@ class ChannelChatNotifier
             .where((m) => m.messageId != null)
             .map((m) => m.messageId!)
             .toList();
+        ref
+            .read(deletedMessagesProvider.notifier)
+            .resolveReplyTargets(stored.map((m) => m.replyToMid), messageIds)
+            .catchError((_) {});
 
         Map<String, Map<String, List<String>>> reactionsMap = {};
         if (messageIds.isNotEmpty) {
@@ -497,6 +503,10 @@ class ChannelChatNotifier
           .where((m) => m.messageId != null)
           .map((m) => m.messageId!)
           .toList();
+      ref
+          .read(deletedMessagesProvider.notifier)
+          .resolveReplyTargets(stored.map((m) => m.replyToMid), messageIds)
+          .catchError((_) {});
       Map<String, Map<String, List<String>>> reactionsMap = {};
       if (messageIds.isNotEmpty) {
         try {

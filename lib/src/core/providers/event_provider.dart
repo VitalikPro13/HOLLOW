@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -225,6 +226,7 @@ class EventStreamNotifier extends Notifier<bool> {
       },
     );
     state = true;
+    ref.read(callPresenceSyncProvider);
     // Warm the device->identity map from the node's resolver so attribution is
     // correct before the first profile sync. The event stream can start BEFORE
     // the node hydrates its resolver, and nothing retries until a sibling
@@ -1065,16 +1067,14 @@ class EventStreamNotifier extends Notifier<bool> {
           :final theirMsgCount,
           :final theirFriendCount,
           :final theirHasProfile,
-          :final label,
-          :final platform,
+          :final kind,
         ):
         ref.read(deviceLinkSyncProvider.notifier).onSiblingLinkAvailable(
               peerId,
               theirMsgCount,
               theirFriendCount,
               theirHasProfile,
-              label: label,
-              platform: platform,
+              kind: kind,
             );
 
       case NetworkEvent_LinkProgress(:final bytesReceived, :final totalBytes):
@@ -1103,6 +1103,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(deviceLinkSyncProvider.notifier).onPushComplete();
 
       case NetworkEvent_RelayDisconnected():
+        ref.read(siblingCallProvider.notifier).clear();
         ref.read(temporaryNicknameProvider.notifier).onDisconnected();
         ref.read(deviceLinkSyncProvider.notifier).onDisconnected();
         ref
@@ -1413,6 +1414,26 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(webRtcProvider.notifier).handleSendFile(
               peerId, transferId, filePath, totalSize.toInt(), kind, shardIndex,
               chunkIndex: chunkIndex);
+
+      case NetworkEvent_SiblingCallState(
+            :final device,
+            :final active,
+            :final kind,
+            :final with_,
+            :final channel,
+            :final startedMs,
+          ):
+        ref.read(siblingCallProvider.notifier).apply(
+              device: device,
+              active: active,
+              kind: kind,
+              peer: with_,
+              channel: channel,
+              startedMs: startedMs.toInt(),
+            );
+
+      case NetworkEvent_DeviceKindsChanged():
+        ref.read(deviceKindProvider.notifier).refresh();
 
       case NetworkEvent_CallSignal(
             :final peerId, :final signalType, :final payload):

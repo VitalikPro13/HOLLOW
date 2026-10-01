@@ -741,8 +741,21 @@ gates live at provider chokepoints, so new UI entry points inherit them:
   (hollow.warning, cached alongside the other exit-animation display info)
   while ringing in a VC; the DM-header call buttons (chat_pane
   `_confirmLeaveVoiceForCall`, mobile_chat_route `startAndOpen`) confirm
-  with a "Start Call?" HollowDialog before starting. An incoming invite
-  while in a VC still RINGS (only an active DM call replies `busy`).
+  with a "Start Call?" HollowDialog before starting. An incoming invite while
+  in a VC still RINGS on that device with the warning; since 2026-10-01 the
+  node keeps our OTHER devices silent for it (one call per identity, below).
+- **Across the identity (2026-10-01):** `sibling_call_provider.dart` holds what
+  our OTHER devices are in (`SiblingCallState` from the node) and
+  `callPresenceSyncProvider` tells the node what THIS device is in (DM call from
+  ringing out or pick-up, voice channel, meeting). `startCall`/`acceptCall`,
+  `startDmCallFlow`, `joinChannel` and the conference start/knock all refuse with
+  `callElsewhereReason` while `callElsewhereProvider` is set; a sibling going into
+  a call stops an incoming ring here (`CallNotifier._onSiblingCall`: a room or
+  the same person = silent stop, a DM call with someone else = busy). The node's
+  `invite_verdict` decides a fresh invite the same way. Node-side signals
+  `answered_elsewhere` (silent cleanup, no call record) and `invite_busy` (a
+  missed-call record, only while a sibling is in a DM call) arrive through
+  `handleCallSignal`.
 - `VoiceChannelNotifier.startScreenShare()` checks `callProvider.isScreenSharing` and blocks if already sharing in a DM call.
 
 ### FileTransferProvider <-> ShareTabProvider

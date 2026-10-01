@@ -1150,6 +1150,13 @@ impl MessageStore {
                 label          TEXT NOT NULL DEFAULT ''
             )")?;
 
+        // What each of our siblings says it is: "desktop" or "phone", never more.
+        ddl(conn, "device_kinds table",
+            "CREATE TABLE IF NOT EXISTS device_kinds (
+                device_peer_id TEXT PRIMARY KEY,
+                kind           TEXT NOT NULL
+            )")?;
+
         // A join whose members were ALL offline is not a failure: the request is persisted
         // here and deposited into the server room's `~join` ring, so it outlives the app
         // closing. `state` is 'pending' or 'rejected' (the row survives so the tile can say
@@ -1403,6 +1410,30 @@ impl MessageStore {
                 |_| Ok(()),
             )
             .is_ok()
+    }
+
+    /// The ids in `message_ids` that name a deleted DM or channel message. An id
+    /// we never held is NOT deleted: a reply to it may simply predate our history.
+    pub fn deleted_message_ids(&self, message_ids: &[String]) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT 1 FROM message_deletions WHERE message_id = ?1
+                 UNION ALL SELECT 1 FROM messages WHERE message_id = ?1 AND hidden_at IS NOT NULL
+                 UNION ALL SELECT 1 FROM channel_messages WHERE message_id = ?1 AND hidden_at IS NOT NULL
+                 LIMIT 1",
+            )
+            .map_err(|e| format!("Failed to prepare deleted-id query: {e}"))?;
+        let mut out = Vec::new();
+        for id in message_ids {
+            let hit = stmt
+                .exists(params![id])
+                .map_err(|e| format!("Failed to query deleted ids: {e}"))?;
+            if hit {
+                out.push(id.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// Insert a message. Returns the row ID.
@@ -3039,6 +3070,31 @@ impl MessageStore {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query device_labels: {e}"))?;
         collect_rows(rows, "device_labels")
+    }
+
+    /// Record a sibling's device kind. True when it changed.
+    pub fn set_device_kind(&self, device_peer_id: &str, kind: &str) -> Result<bool, String> {
+        let n = self
+            .conn
+            .execute(
+                "INSERT INTO device_kinds (device_peer_id, kind) VALUES (?1, ?2)
+                 ON CONFLICT(device_peer_id) DO UPDATE SET kind = excluded.kind WHERE kind != excluded.kind",
+                params![device_peer_id, kind],
+            )
+            .map_err(|e| format!("Failed to save device kind: {e}"))?;
+        Ok(n > 0)
+    }
+
+    /// Every known sibling's kind (device_peer_id, kind).
+    pub fn get_all_device_kinds(&self) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT device_peer_id, kind FROM device_kinds")
+            .map_err(|e| format!("Failed to prepare device_kinds query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to query device_kinds: {e}"))?;
+        collect_rows(rows, "device_kinds")
     }
 
     // ── User Profile Persistence (Phase 3.5) ──
@@ -6570,6 +6626,34 @@ mod tests {
         assert_eq!(both.len(), 6, "peer-fallback serve must return both directions");
         assert_eq!(both.iter().filter(|m| m.is_mine).count(), 3);
         assert_eq!(both.iter().filter(|m| !m.is_mine).count(), 3);
+    }
+
+    /// A kind is stored once and reported as a change only when it differs.
+    #[test]
+    fn device_kind_upsert_reports_only_real_changes() {
+        let store = mem_store();
+        assert!(store.set_device_kind("d1", "phone").unwrap());
+        assert!(!store.set_device_kind("d1", "phone").unwrap());
+        assert!(store.set_device_kind("d1", "desktop").unwrap());
+        assert_eq!(store.get_all_device_kinds().unwrap(), vec![("d1".to_string(), "desktop".to_string())]);
+    }
+
+    /// A reply's original reads as deleted only when we held it and it was hidden
+    /// (a local delete or a bare sync hide, DM or channel), never when we never had it.
+    #[test]
+    fn deleted_message_ids_names_only_hidden_rows() {
+        let store = mem_store();
+        store.insert("friend", "dm kept", false, 100, None, None, Some("dk"), None, None, None, None).unwrap();
+        store.insert("friend", "dm gone", false, 101, None, None, Some("dg"), None, None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer", "ch gone", false, 102, None, None, Some("cg"), None, None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer", "ch synced", false, 103, None, None, Some("cs"), None, None, None, None).unwrap();
+        store.hide_dm_message("dg", 200, None, None).unwrap();
+        store.hide_channel_message("cg", 201, None, None).unwrap();
+        store.set_channel_message_hidden("cs", 202).unwrap();
+
+        let asked: Vec<String> =
+            ["dk", "dg", "cg", "cs", "never-held"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(store.deleted_message_ids(&asked).unwrap(), vec!["dg", "cg", "cs"]);
     }
 
     /// `load_deletion_proof` returns only a SIGNED evidence row, and the verified sync

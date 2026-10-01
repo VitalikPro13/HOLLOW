@@ -172,7 +172,7 @@ fn pick_online_device(
 
 // ── CallSendSignal ───────────────────────────────────────────────────
 
-/// Send one 1:1 call signal to the callee, Olm-encrypted.
+/// Send one 1:1 call signal, Olm-encrypted, to the device(s) it belongs to.
 ///
 /// SECURITY (TRANSPORT-1): a bare `HavenMessage::Call*` frame let the relay read
 /// the call's AES-128-GCM SFrame media key out of the invite, read every SDP and
@@ -186,6 +186,7 @@ pub(crate) async fn handle_call_send_signal(
     peer_id: String,
     signal_type: String,
     payload: String,
+    call_book: &mut super::call_book::CallBook,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -199,41 +200,138 @@ pub(crate) async fn handle_call_send_signal(
     local_master: &str,
 ) {
     let Some(msg) = build_call_signal(&signal_type, payload) else { return; };
-    // Multi-device: `peer_id` is the friend's MASTER (the call UI keys on the
-    // friend), which no socket authenticates as, so every call signal addressed to
-    // it is silently dropped. Target ONE concrete online device, deterministically,
-    // so both sides converge on the SAME target for the `call_id`-keyed
-    // negotiation, and NOT a fan-out (ringing every device, competing answers).
-    let target = pick_online_device(ws_room_peers, &peer_id);
+    let targets = call_targets(call_book, ws_room_peers, &peer_id, &msg);
+    if targets.is_empty() {
+        hollow_log!("[HOLLOW-CALL] {signal_type} for {peer_id} not sent: nobody has taken the call yet");
+    }
+    for target in targets {
+        send_call_signal_to(
+            &target, &signal_type, &peer_id, &msg, olm, crypto_store, event_tx, ws_cmd_tx,
+            ws_room_peers, key_request_in_flight, device_keypair, device_peer_id, local_master,
+        ).await;
+    }
+}
+
+/// The devices one of our call signals goes to. The UI addresses an outgoing
+/// call by the friend's MASTER, which no socket authenticates as: the invite
+/// rings EVERY online device of theirs, and once one accepts, everything else
+/// about that call goes to it alone. A signal already addressed to a live device
+/// (an answer back to the caller) goes there unchanged.
+fn call_targets(
+    book: &mut super::call_book::CallBook,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_id: &str,
+    msg: &HavenMessage,
+) -> Vec<String> {
+    if let HavenMessage::CallInvite { call_id, .. } = msg {
+        let mut devices = super::crypto_handler::online_devices_for(ws_room_peers, peer_id);
+        if devices.is_empty() {
+            return vec![peer_id.to_string()];
+        }
+        devices.sort();
+        book.start_ring(call_id, &super::resolver::resolve(peer_id), &devices);
+        return devices;
+    }
+    if ws_room_peers.values().any(|peers| peers.contains(peer_id)) {
+        return vec![peer_id.to_string()];
+    }
+    let hangup = matches!(msg, HavenMessage::CallEnd { .. });
+    if let Some(call_id) = call_id_of(msg).filter(|c| book.is_ring(c)) {
+        let targets = match book.answered_device(call_id) {
+            Some(device) => vec![device.to_string()],
+            None if hangup => book.rung_devices(call_id),
+            None => Vec::new(),
+        };
+        if hangup {
+            book.forget(call_id);
+        }
+        return targets;
+    }
+    if let Some(call_id) = call_id_of(msg)
+        && let Some(caller) = book.caller_device(call_id).map(str::to_string)
+    {
+        if matches!(msg, HavenMessage::CallEnd { .. } | HavenMessage::CallReject { .. } | HavenMessage::CallBusy { .. }) {
+            book.forget_incoming(call_id);
+        }
+        return vec![caller];
+    }
+    if let Some(device) = book.answered_device_for_master(&super::resolver::resolve(peer_id)) {
+        return vec![device.to_string()];
+    }
+    vec![pick_online_device(ws_room_peers, peer_id)]
+}
+
+/// The call a signal is about, when it names one.
+fn call_id_of(msg: &HavenMessage) -> Option<&str> {
+    let id = match msg {
+        HavenMessage::CallInvite { call_id, .. }
+        | HavenMessage::CallAccept { call_id, .. }
+        | HavenMessage::CallReject { call_id }
+        | HavenMessage::CallEnd { call_id }
+        | HavenMessage::CallBusy { call_id }
+        | HavenMessage::CallMediaRestart { call_id }
+        | HavenMessage::CallAnsweredElsewhere { call_id }
+        | HavenMessage::CallSdpOffer { call_id, .. }
+        | HavenMessage::CallSdpAnswer { call_id, .. }
+        | HavenMessage::CallIceCandidate { call_id, .. }
+        | HavenMessage::CallVideoState { call_id, .. }
+        | HavenMessage::CallAudioState { call_id, .. }
+        | HavenMessage::CallScreenState { call_id, .. }
+        | HavenMessage::CallScreenOffer { call_id, .. }
+        | HavenMessage::CallScreenAnswer { call_id, .. }
+        | HavenMessage::CallScreenIce { call_id, .. }
+        | HavenMessage::CallScreenWatch { call_id, .. }
+        | HavenMessage::CallRecordingState { call_id, .. } => call_id,
+        _ => return None,
+    };
+    (!id.is_empty()).then_some(id.as_str())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_call_signal_to(
+    target: &str,
+    signal_type: &str,
+    addressed: &str,
+    msg: &HavenMessage,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_keypair: &NativeKeypair,
+    device_peer_id: &str,
+    local_master: &str,
+) {
     // Observability: the outgoing call path used to be fully silent, so an invite
     // aimed at a stale-presence peer vanished with no trace anywhere. Log the
     // resolved target for LOW-VOLUME control signals; sdp/ice floods stay quiet.
-    let reachable = ws_room_peers.values().any(|ps| ps.contains(&target));
+    let reachable = ws_room_peers.values().any(|ps| ps.contains(target));
     let control = matches!(
-        signal_type.as_str(),
+        signal_type,
         "invite" | "accept" | "reject" | "end" | "busy" | "media_restart"
             | "recording_start" | "recording_stop"
     );
     if control || !reachable {
         hollow_log!(
-            "[HOLLOW-CALL] Send {signal_type} for {peer_id} -> device {target} ({})",
+            "[HOLLOW-CALL] Send {signal_type} for {addressed} -> device {target} ({})",
             if reachable { "in-room" } else { "UNREACHABLE — will be dropped" }
         );
     }
 
-    if !olm.has_session(&target) {
+    if !olm.has_session(target) {
         // NO plaintext fallback — the whole point of the fix.
         hollow_log!(
             "[HOLLOW-CALL] No Olm session with {target} — call signal {signal_type} DROPPED, requesting key bundle"
         );
         request_key_bundle_throttled(
             ws_cmd_tx, ws_room_peers, key_request_in_flight,
-            device_keypair, device_peer_id, &target, reachable,
+            device_keypair, device_peer_id, target, reachable,
         );
         return;
     }
 
-    let envelope = MessageEnvelope::CallSignal { signal: Box::new(msg) };
+    let envelope = MessageEnvelope::CallSignal { signal: Box::new(msg.clone()) };
     let Ok(json) = serde_json::to_string(&envelope) else {
         hollow_log!("[HOLLOW-CALL] Failed to serialize {signal_type} envelope — dropped");
         return;
@@ -242,11 +340,11 @@ pub(crate) async fn handle_call_send_signal(
     // Route into the DETERMINISTIC DM room, not a first-match lookup: the callee
     // device is typically co-present in several rooms, and picking one it has since
     // left buffers the frame against a room it never rejoins. Both sides are in it.
-    let dm_room = dm_room_code(local_master, &super::resolver::resolve(&target));
-    let in_dm_room = ws_room_peers.get(&dm_room).is_some_and(|p| p.contains(&target));
+    let dm_room = dm_room_code(local_master, &super::resolver::resolve(target));
+    let in_dm_room = ws_room_peers.get(&dm_room).is_some_and(|p| p.contains(target));
     if in_dm_room {
         send_encrypted_message_in_room(
-            olm, crypto_store, &target, &dm_room, &json, event_tx, ws_cmd_tx,
+            olm, crypto_store, target, &dm_room, &json, event_tx, ws_cmd_tx,
         ).await;
     } else {
         // Not in the DM room (a conference guest, a forwarder-only peer, a
@@ -256,9 +354,24 @@ pub(crate) async fn handle_call_send_signal(
             "[HOLLOW-CALL] {target} not in DM room {dm_room} — falling back to first-match room"
         );
         send_encrypted_message(
-            olm, crypto_store, &target, &json, event_tx, ws_cmd_tx, ws_room_peers,
+            olm, crypto_store, target, &json, event_tx, ws_cmd_tx, ws_room_peers,
         ).await;
     }
+}
+
+/// A call signal the NODE decides to send (busy, answered elsewhere, the end of a
+/// ring another device declined), queued on the Olm lane in program order.
+fn carry_call_signal(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_master: &str,
+    device: &str,
+    msg: HavenMessage,
+) {
+    let Ok(json) = serde_json::to_string(&MessageEnvelope::CallSignal { signal: Box::new(msg) }) else { return };
+    let dm_room = dm_room_code(local_master, &super::resolver::resolve(device));
+    let room = ws_room_peers.get(&dm_room).is_some_and(|p| p.contains(device)).then_some(dm_room);
+    super::olm_lane::carry_json(ws_cmd_tx, device, room.as_deref(), json, super::olm_lane::NoSession::Drop);
 }
 
 /// Ask `target` for a fresh key bundle, at most once per `KEY_REQUEST_THROTTLE`.
@@ -432,14 +545,21 @@ fn call_invite_allowed(local_master: &str, peer: &str, db_path: &str, db_passphr
         == Some("accepted")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_call_signal_message(
     peer_str: &str,
     master_peer_str: &str,
     signal: HavenMessage,
+    call_book: &mut super::call_book::CallBook,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     db_path: &str,
     db_passphrase: &str,
 ) {
+    if !call_signal_admitted(&signal, peer_str, master_peer_str, call_book, ws_cmd_tx, ws_room_peers) {
+        return;
+    }
     // One emit helper so every arm below is just its payload shape.
     macro_rules! emit {
         ($kind:expr, $payload:expr) => {{
@@ -460,6 +580,22 @@ pub(crate) async fn handle_call_signal_message(
                 hollow_log!("[HOLLOW-CALL] Dropped CallInvite from {peer_str}: not a friend");
                 return;
             }
+            // One call at a time for the whole identity.
+            match call_book.invite_verdict(&super::resolver::resolve(peer_str)) {
+                super::call_book::InviteVerdict::Ring => {}
+                super::call_book::InviteVerdict::LeaveToSibling => {
+                    hollow_log!("[HOLLOW-CALL] CallInvite from {peer_str} call={call_id} left to our device in a call or room");
+                    return;
+                }
+                super::call_book::InviteVerdict::Busy => {
+                    hollow_log!("[HOLLOW-CALL] Busy elsewhere, answering CallInvite from {peer_str} call={call_id} busy");
+                    carry_call_signal(ws_cmd_tx, ws_room_peers, master_peer_str, peer_str,
+                        HavenMessage::CallBusy { call_id: call_id.clone() });
+                    emit!("invite_busy", serde_json::json!({ "call_id": call_id, "video": video }).to_string());
+                    return;
+                }
+            }
+            call_book.note_incoming(&call_id, peer_str);
             // SECURITY (Phase 6.25): Don't log sframe_key length/presence.
             hollow_log!("[HOLLOW-CALL] CallInvite from {peer_str} call={call_id} video={video} key_len={}", sframe_key.len());
             emit!("invite", serde_json::json!({
@@ -490,6 +626,10 @@ pub(crate) async fn handle_call_signal_message(
         HavenMessage::CallMediaRestart { call_id } => {
             hollow_log!("[HOLLOW-CALL] CallMediaRestart from {peer_str} call={call_id}");
             emit!("media_restart", call_id);
+        }
+        HavenMessage::CallAnsweredElsewhere { call_id } => {
+            hollow_log!("[HOLLOW-CALL] CallAnsweredElsewhere from {peer_str} call={call_id}");
+            emit!("answered_elsewhere", call_id);
         }
         HavenMessage::CallSdpOffer { call_id, sdp } => {
             // SECURITY (Phase 6.25): SDP size limit.
@@ -609,6 +749,73 @@ pub(crate) async fn handle_call_signal_message(
             hollow_log!("[HOLLOW-SECURITY] REJECTED non-call message {kind} smuggled inside a call signal envelope from {peer_str}");
         }
     }
+}
+
+/// The caller's half of ringing every device: the first accept takes the call
+/// and the others are told; a later accept, or anything else from a device that
+/// did not take it, is answered or dropped here so one call never gets two peer
+/// connections. A decline or busy from any rung device ends the ring for all.
+fn call_signal_admitted(
+    signal: &HavenMessage,
+    peer_str: &str,
+    local_master: &str,
+    book: &mut super::call_book::CallBook,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> bool {
+    use super::call_book::{AcceptVerdict, EndVerdict};
+    let Some(call_id) = call_id_of(signal).map(str::to_string) else { return true };
+    let tell = |device: &str, msg: HavenMessage| carry_call_signal(ws_cmd_tx, ws_room_peers, local_master, device, msg);
+    match signal {
+        HavenMessage::CallAccept { .. } => match book.accept(&call_id, peer_str) {
+            AcceptVerdict::Won { others } => {
+                for device in &others {
+                    tell(device, HavenMessage::CallAnsweredElsewhere { call_id: call_id.clone() });
+                }
+                true
+            }
+            AcceptVerdict::Late => {
+                hollow_log!("[HOLLOW-CALL] Refused a late accept from {peer_str} call={call_id}: another device answered");
+                tell(peer_str, HavenMessage::CallAnsweredElsewhere { call_id });
+                false
+            }
+            AcceptVerdict::Again | AcceptVerdict::Unknown => true,
+        },
+        HavenMessage::CallReject { .. } | HavenMessage::CallBusy { .. } | HavenMessage::CallEnd { .. } => {
+            match book.ended_by(&call_id, peer_str) {
+                EndVerdict::Ends { others } => {
+                    for device in &others {
+                        tell(device, HavenMessage::CallEnd { call_id: call_id.clone() });
+                    }
+                    true
+                }
+                EndVerdict::Ignored => {
+                    hollow_log!("[HOLLOW-CALL] Ignored {} from {peer_str} call={call_id}: not the device in the call", signal.wire_kind());
+                    false
+                }
+                EndVerdict::Unknown => forget_if_ours(book, &call_id, peer_str),
+            }
+        }
+        HavenMessage::CallAnsweredElsewhere { .. } => forget_if_ours(book, &call_id, peer_str),
+        HavenMessage::CallInvite { .. } => true,
+        _ => {
+            let ok = book.is_call_device(&call_id, peer_str);
+            if !ok {
+                hollow_log!("[HOLLOW-CALL] Dropped {} from {peer_str} call={call_id}: another device took the call", signal.wire_kind());
+            }
+            ok
+        }
+    }
+}
+
+/// An end of a call that rang us counts only from the device that rang, and
+/// closes that call's routing.
+fn forget_if_ours(book: &mut super::call_book::CallBook, call_id: &str, peer_str: &str) -> bool {
+    let ours = book.is_call_device(call_id, peer_str);
+    if ours {
+        book.forget_incoming(call_id);
+    }
+    ours
 }
 
 // ── VoiceChannelJoin ─────────────────────────────────────────────────
@@ -2137,10 +2344,14 @@ mod tests {
         let invite = || HavenMessage::CallInvite {
             call_id: "c1".into(), video: false, sframe_key: "k".into(),
         };
-        let mut rings = |from: &'static str| {
+        let rings = |from: &'static str| {
             let (tx, db, pass) = (tx.clone(), db.clone(), pass.clone());
             async move {
-                handle_call_signal_message(from, me, invite(), &tx, &db, &pass).await;
+                let (ws_cmd_tx, _ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut book = super::super::call_book::CallBook::default();
+                handle_call_signal_message(
+                    from, me, invite(), &mut book, &ws_cmd_tx, &HashMap::new(), &tx, &db, &pass,
+                ).await;
             }
         };
         rings(stranger).await;

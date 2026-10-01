@@ -26,8 +26,6 @@ use super::ws_client::WsCommand;
 use super::ws_stream_transfer::{ws_stream_send_bytes, StreamKind};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
-/// The longest device name a confirm prompt shows.
-const MAX_LABEL_BYTES: usize = 48;
 
 /// The link in flight on this node, at most one per side. Owned by the event loop:
 /// harness nodes share a process, so none of it may be a static.
@@ -40,7 +38,7 @@ pub(crate) struct LinkState {
 /// What the joiner told us about itself.
 struct Hello {
     device: String,
-    label: String,
+    kind: &'static str,
 }
 
 struct Presenter {
@@ -61,19 +59,12 @@ struct Joiner {
     keys: Option<LinkKeys>,
     /// The device key this install runs as once the snapshot is imported.
     device: NativeKeypair,
-    label: String,
-    platform: String,
+    kind: &'static str,
 }
 
 /// Deterministic rendezvous room for a code's rendezvous part.
 pub(crate) fn link_room(rendezvous: &str) -> String {
     format!("link:{}", rendezvous.to_uppercase())
-}
-
-/// A shown name, as the confirm prompt may print it.
-fn clean_label(label: &str) -> String {
-    let printable: String = label.chars().filter(|c| !c.is_control()).collect();
-    super::crypto_handler::clip_bytes(printable.trim(), MAX_LABEL_BYTES).to_string()
 }
 
 /// (Presenter) Claim the code's rendezvous part on the relay and wait in its room.
@@ -114,8 +105,7 @@ pub(crate) fn resolve(
     link: &mut LinkState,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     code: &str,
-    label: &str,
-    platform: &str,
+    kind: &str,
 ) -> Result<(), String> {
     let (rendezvous, secret) = link_pake::split_code(code)
         .ok_or_else(|| "That code is not complete. Check it and try again.".to_string())?;
@@ -134,8 +124,7 @@ pub(crate) fn resolve(
         opening: Vec::new(),
         keys: None,
         device: NativeKeypair::from_secret_bytes(&seed),
-        label: clean_label(label),
-        platform: clean_label(platform),
+        kind: super::call_book::device_kind(kind),
     });
     hollow_log!("[HOLLOW-LINK] Resolving a link code");
     Ok(())
@@ -242,8 +231,7 @@ pub(crate) async fn on_pake_reply(
     let (msg_count, friend_count, _, has_profile) = crate::api::storage::snapshot_state_summary();
     let hello = LinkInner::Hello {
         device: j.device.peer_id(),
-        label: j.label.clone(),
-        platform: j.platform.clone(),
+        kind: j.kind.to_string(),
         msg_count,
         friend_count,
         has_profile,
@@ -280,21 +268,21 @@ pub(crate) async fn on_sealed(
             .and_then(|p| p.keys.as_ref())
             .map(|k| k.open(Direction::ToPresenter, &sealed));
         let hello = match opened {
-            Some(Ok(LinkInner::Hello { device, label, platform, msg_count, friend_count, has_profile }))
+            Some(Ok(LinkInner::Hello { device, kind, msg_count, friend_count, has_profile }))
                 if crate::crypto::safety_number::pubkey_from_peer_id(&device).is_some() =>
             {
-                Some((device, clean_label(&label), clean_label(&platform), msg_count, friend_count, has_profile))
+                Some((device, super::call_book::device_kind(&kind), msg_count, friend_count, has_profile))
             }
             _ => None,
         };
-        let Some((device, label, platform, msg_count, friend_count, has_profile)) = hello else {
+        let Some((device, kind, msg_count, friend_count, has_profile)) = hello else {
             hollow_log!("[HOLLOW-SECURITY] A link hello from {sender} did not open: the code was wrong or guessed");
             release(link, ws_cmd_tx);
             fail(event_tx, "The code didn't match on the other device. Show a new code and try again.").await;
             return;
         };
         if let Some(p) = link.presenter.as_mut() {
-            p.hello = Some(Hello { device, label: label.clone() });
+            p.hello = Some(Hello { device, kind });
         }
         hollow_log!("[HOLLOW-LINK] {sender} asks to be linked");
         let _ = event_tx
@@ -303,8 +291,7 @@ pub(crate) async fn on_sealed(
                 their_msg_count: msg_count,
                 their_friend_count: friend_count,
                 their_has_profile: has_profile,
-                label,
-                platform,
+                kind: kind.to_string(),
             })
             .await;
         return;
@@ -369,10 +356,10 @@ pub(crate) async fn accept(
     let ready = link.presenter.as_ref().and_then(|p| {
         let (keys, hello) = (p.keys.as_ref()?, p.hello.as_ref()?);
         (p.peer.as_deref() == Some(target_peer) && key_ok).then(|| {
-            (link_room(&p.rendezvous), hello.device.clone(), hello.label.clone(), keys.seal(Direction::ToJoiner, &offer))
+            (link_room(&p.rendezvous), hello.device.clone(), hello.kind, keys.seal(Direction::ToJoiner, &offer))
         })
     });
-    let Some((room, device, label, Ok(sealed))) = ready else {
+    let Some((room, device, kind, Ok(sealed))) = ready else {
         hollow_log!("[HOLLOW-SECURITY] Refused to send a snapshot to {target_peer}: no finished handshake with it");
         release(link, ws_cmd_tx);
         fail(event_tx, "The link expired. Show a new code and try again.").await;
@@ -385,10 +372,10 @@ pub(crate) async fn accept(
         fail(event_tx, &e).await;
         return;
     }
-    if !label.is_empty()
+    if !kind.is_empty()
         && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase)
     {
-        let _ = store.set_device_label(&device, &label);
+        let _ = store.set_device_kind(&device, kind);
     }
     let blob = match crate::api::storage::export_backup_bytes(&key_hex, include_vault, include_files) {
         Ok(b) => b,

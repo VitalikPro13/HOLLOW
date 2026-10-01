@@ -129,7 +129,12 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
     if (removed) {
       // A bare id names nothing a removed device can look up, so only a label is said.
       final label = labels[gate.removedBy];
-      final who = label == null || label.isEmpty ? 'Another of your devices' : 'Your device $label';
+      final kind = deviceKindName(ref.watch(deviceKindProvider)[gate.removedBy] ?? '');
+      final who = label != null && label.isNotEmpty
+          ? 'Your device $label'
+          : kind != null
+              ? 'Your ${kind.toLowerCase()}' // design-ignore: a kind inside a sentence, not a label
+              : 'Another of your devices';
       final when = gate.wipeAt == null ? 'soon' : 'on ${rosterDateLabel(context, gate.wipeAt!)}';
       title = 'This device was removed';
       body = '$who removed it from your identity, so it gets none of your '
@@ -216,8 +221,9 @@ Future<void> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String
   final asks = ref.read(pendingDeviceAsksProvider.notifier);
   final waiting = await roster_api.rosterStatus().then((s) => rosterStillWaiting(s, device), onError: (_) => true);
   if (!waiting || !context.mounted) return asks.answered(device);
-  final labels = ref.read(deviceLabelProvider);
-  final name = labels[device]?.isNotEmpty == true ? labels[device]! : shortenPeerId(device);
+  final name = deviceGivenName(device,
+          labels: ref.read(deviceLabelProvider), kinds: ref.read(deviceKindProvider)) ??
+      shortenPeerId(device);
   await showHollowDialog<void>(
     context: context,
     barrierDismissible: false,

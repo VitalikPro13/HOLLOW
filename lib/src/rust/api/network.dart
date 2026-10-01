@@ -145,6 +145,10 @@ Future<void> setDeviceLabel({
 Future<List<DeviceLabel>> getDeviceLabels() =>
     RustLib.instance.api.crateApiNetworkGetDeviceLabels();
 
+/// What each sibling said it is, "desktop" or "phone", in the `label` field.
+Future<List<DeviceLabel>> getDeviceKinds() =>
+    RustLib.instance.api.crateApiNetworkGetDeviceKinds();
+
 /// Verify an Ed25519 message signature against a canonical payload.
 ///
 /// Used by the Message Proof dialog to show live VERIFIED / INVALID status. Pure
@@ -418,16 +422,9 @@ Future<void> releaseLinkCode() =>
     RustLib.instance.api.crateApiNetworkReleaseLinkCode();
 
 /// (Empty device) Link to the device that shows `code` (ten characters, dashes and
-/// case ignored). `label` and `platform` are shown on its confirm prompt.
-Future<void> resolveLinkCode({
-  required String code,
-  required String label,
-  required String platform,
-}) => RustLib.instance.api.crateApiNetworkResolveLinkCode(
-  code: code,
-  label: label,
-  platform: platform,
-);
+/// case ignored). `kind` ("desktop" or "phone") is all its confirm prompt is told.
+Future<void> resolveLinkCode({required String code, required String kind}) =>
+    RustLib.instance.api.crateApiNetworkResolveLinkCode(code: code, kind: kind);
 
 /// (Populated device) Accept an inbound link request and push the snapshot to the
 /// target device. Build scope is chosen here (files/vault).
@@ -913,6 +910,22 @@ Future<void> webrtcTransferFailed({
 );
 
 /// Send a voice call signaling message to a peer (Phase 5B).
+/// What this device is in now, for our siblings and for a friend who rings:
+/// `kind` "call" (`with` = the friend's master), "voice" (`with` = the server,
+/// `channel` set) or "meeting" (`with` = the conference id); an empty `kind`
+/// means nothing. `started_ms` is when it connected, 0 before.
+Future<void> setCallPresence({
+  required String kind,
+  required String with_,
+  required String channel,
+  required PlatformInt64 startedMs,
+}) => RustLib.instance.api.crateApiNetworkSetCallPresence(
+  kind: kind,
+  with_: with_,
+  channel: channel,
+  startedMs: startedMs,
+);
+
 Future<void> callSendSignal({
   required String peerId,
   required String signalType,
@@ -2039,8 +2052,9 @@ sealed class NetworkEvent with _$NetworkEvent {
     required int theirMsgCount,
     required int theirFriendCount,
     required bool theirHasProfile,
-    required String label,
-    required String platform,
+
+    /// "desktop", "phone" or empty: all a linking device says about itself.
+    required String kind,
   }) = NetworkEvent_SiblingLinkAvailable;
   const factory NetworkEvent.linkProgress({
     required String linkId,
@@ -2176,6 +2190,22 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String signalType,
     required String payload,
   }) = NetworkEvent_CallSignal;
+
+  /// One of our other devices entered (`active`) or left a call ("call", `with`
+  /// = the friend's master), a voice channel ("voice", `with` = the server) or a
+  /// meeting ("meeting", `with` = the conference). `started_ms` 0 = not connected yet.
+  const factory NetworkEvent.siblingCallState({
+    required String device,
+    required bool active,
+    required String kind,
+    required String with_,
+    required String channel,
+    required PlatformInt64 startedMs,
+  }) = NetworkEvent_SiblingCallState;
+
+  /// A sibling told us whether it is a desktop or a phone: re-read the kinds.
+  const factory NetworkEvent.deviceKindsChanged() =
+      NetworkEvent_DeviceKindsChanged;
 
   /// `is_self` = our own join/leave, decided by the Rust handler that knows. Dart
   /// branches on this flag, never on comparing peer_id to a local id: peer_id is the

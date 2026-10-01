@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
@@ -62,6 +63,12 @@ Future<void> startDmCallFlow(
   bool withVideo = false,
   VoidCallback? beforeCall,
 }) async {
+  final elsewhere = ref.read(callElsewhereProvider);
+  if (elsewhere != null) {
+    HollowToast.show(context, callElsewhereReason(elsewhere),
+        type: HollowToastType.info);
+    return;
+  }
   if (!await ensureTurnForCall(context, ref)) return;
   if (!context.mounted) return;
   final vc = ref.read(voiceChannelProvider);

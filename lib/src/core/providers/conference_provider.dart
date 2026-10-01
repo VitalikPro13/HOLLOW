@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -316,6 +317,11 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       _toast('Leave your call first', HollowToastType.error);
       return;
     }
+    final elsewhere = ref.read(callElsewhereProvider);
+    if (elsewhere != null) {
+      _toast(callElsewhereReason(elsewhere), HollowToastType.info);
+      return;
+    }
     if (state.activeConfId == room.confId &&
         (state.lobbyStatus == ConferenceLobbyStatus.inCall ||
             state.lobbyStatus == ConferenceLobbyStatus.admitted)) {
@@ -439,6 +445,11 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       {String? linkKey, String? accessCode}) async {
     if (ref.read(callProvider).status != CallStatus.idle) {
       _toast('Leave your call first', HollowToastType.error);
+      return;
+    }
+    final elsewhere = ref.read(callElsewhereProvider);
+    if (elsewhere != null) {
+      _toast(callElsewhereReason(elsewhere), HollowToastType.info);
       return;
     }
     final key = linkKey ??

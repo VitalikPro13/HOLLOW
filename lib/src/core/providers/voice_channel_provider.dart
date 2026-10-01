@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -624,7 +625,25 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
   }
 
+  void _showInfoToast(String message) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        final overlay = hollowNavigatorKey.currentState?.overlay;
+        if (overlay == null) return;
+        HollowToast.show(overlay.context, message,
+            type: HollowToastType.info, overlayState: overlay);
+      } catch (e) {
+        debugPrint('[HOLLOW-VC] toast failed: $e');
+      }
+    });
+  }
+
   Future<void> joinChannel(String serverId, String channelId) async {
+    final elsewhere = ref.read(callElsewhereProvider);
+    if (elsewhere != null) {
+      _showInfoToast(callElsewhereReason(elsewhere));
+      return;
+    }
     if (!await ensureTurnForCallFromRef(ref)) return;
     _noTurnWarned = false;
     // While a voice session is live the relay socket retries every second
@@ -635,20 +654,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final callState = ref.read(callProvider);
     if (callState.status != CallStatus.idle) {
       debugPrint('[HOLLOW-VC] Cannot join voice channel — in a call');
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        try {
-          final overlay = hollowNavigatorKey.currentState?.overlay;
-          if (overlay == null) return;
-          HollowToast.show(
-            overlay.context,
-            "You're in a call. Hang up to join a voice channel.",
-            type: HollowToastType.info,
-            overlayState: overlay,
-          );
-        } catch (e) {
-          debugPrint('[HOLLOW-VC] in-call toast failed: $e');
-        }
-      });
+      _showInfoToast("You're in a call. Hang up to join a voice channel.");
       return;
     }
 

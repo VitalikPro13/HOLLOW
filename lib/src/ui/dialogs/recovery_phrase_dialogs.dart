@@ -169,7 +169,9 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
   @override
   Widget build(BuildContext context) {
     final labels = ref.watch(deviceLabelProvider);
-    String name(String id) => labels[id]?.isNotEmpty == true ? labels[id]! : shortenPeerId(id);
+    final kinds = ref.watch(deviceKindProvider);
+    String name(String id) =>
+        deviceGivenName(id, labels: labels, kinds: kinds) ?? shortenPeerId(id);
     final filled = _phrase.text.trim().isNotEmpty;
     return HollowDialog(
       title: widget.title,

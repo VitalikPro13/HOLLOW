@@ -961,10 +961,11 @@ try {
         Say '4/7 a confirms the push'
         Step a @{ op = 'wait_for'; target = 'text:Add this device?'; timeout_ms = 60000 }
         Step a @{ op = 'shot'; name = "link-$runTag-a-confirm" }
-        # The prompt names the joiner by the label and platform it sent inside
-        # the sealed hello (the host name on a desktop).
-        $named = Invoke-SoftStep a @{ op = 'expect_text'; value = "$($env:COMPUTERNAME)" }
-        if (-not $named.ok) { Add-Note "a's prompt did not name b's host $($env:COMPUTERNAME)" }
+        # The sealed hello carries only the device's kind, never its host name.
+        $named = Invoke-SoftStep a @{ op = 'expect_text'; value = 'A desktop typed your code' }
+        if (-not $named.ok) { Add-Note "a's prompt did not say 'A desktop typed your code'" }
+        $leaked = Invoke-SoftStep a @{ op = 'expect_text'; value = "$($env:COMPUTERNAME)" }
+        if ($leaked.ok) { Add-Note "a's prompt named b's host $($env:COMPUTERNAME)" }
         Step a @{ op = 'tap'; target = 'text:Add device'; index = 0 }
         Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
         Step a @{ op = 'shot'; name = "link-$runTag-a-sent" }

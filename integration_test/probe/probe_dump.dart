@@ -13,6 +13,8 @@ import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -421,6 +423,15 @@ class ProbeDump {
     // that says whether a relay switch actually took.
     final relayDomain = read(relayDomainProvider);
     if (relayDomain != null) out['relayDomain'] = relayDomain;
+
+    // The call by state, not by widgets: a dismissed incoming card stays built
+    // for its exit, so "Accept gone" cannot say a ring stopped.
+    final call = read(callProvider);
+    if (call != null) out['callStatus'] = call.status.name;
+    final elsewhere = read(siblingCallProvider);
+    if (elsewhere != null) {
+      out['callElsewhere'] = elsewhere.values.firstOrNull?.kind ?? '';
+    }
 
     final friends = read(friendsProvider);
     if (friends != null) {

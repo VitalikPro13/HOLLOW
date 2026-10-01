@@ -109,6 +109,17 @@ pub fn open_message_store() -> Result<(), String> {
 // could write a row no peer will accept through sync and the mid-based dedup
 // cannot reconcile. Message rows are written by the node's own signing paths.
 
+/// The ids among `message_ids` (at most 500 are read) whose message was deleted,
+/// so a reply can say so instead of looking like one to older history.
+#[frb]
+pub fn deleted_message_ids(message_ids: Vec<String>) -> Result<Vec<String>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    let capped = &message_ids[..message_ids.len().min(500)];
+    ms.deleted_message_ids(capped)
+}
+
 /// Load recent messages for a peer, oldest-first, up to `limit`.
 #[frb]
 pub fn load_messages(peer_id: String, limit: i32) -> Result<Vec<StoredMessage>, String> {

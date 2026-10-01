@@ -14,6 +14,9 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   filled, `.danger` ONLY for destructive, yes/no = `showHollowConfirm`, actions run
   INSIDE (`onConfirm`/`onSubmit`, never pop-then-await), errors via `friendlyError`;
   selection = chips. `feedback_hover_state_patterns`.
+- A `HollowDialog` action row is `HollowDialogActionRow`: one line when everything fits, else
+  every button full width in list order (leading first, primary last). Never a `Wrap` (it
+  strands one button on a line of its own). `hollow_dialog_action_row_test`.
 - `showHollowDialog` pads by `viewInsets`; NEVER add them inside a builder (double pad).
   `feedback_dialog_keyboard_insets`.
 - A wrapper that comes and goes with a flag (`if (busy) child = PopScope(...)`) REMOUNTS the
