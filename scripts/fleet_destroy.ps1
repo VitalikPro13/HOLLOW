@@ -695,7 +695,8 @@ function Invoke-DeviceLink($peer, $masterA) {
 # what tells us it is in view, not a wait_for.
 function Open-DestroyDialog($peer) {
     for ($i = 0; $i -lt 14; $i++) {
-        $tap = Invoke-SoftStep $peer @{ op = 'tap'; target = 'text:Destroy my identity everywhere'; index = 0 }
+        # The row's title is only a label; its trailing button opens the dialog.
+        $tap = Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:SettingsPlace > text:Destroy identity'; index = 0 }
         if ($tap.ok) {
             $dialog = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'dialog > text:Destroy your data'; timeout_ms = 10000 }
             if ($dialog.ok) { return $true }
@@ -747,6 +748,11 @@ $deviceA = ''
 $deviceB = ''
 $deviceD = ''
 $dKeysBefore = @{}
+# The peers that held the identity in THIS run: a from the start, b and d once
+# their link began. A peer never launched keeps an earlier run's data root,
+# which is not this journey's leftover.
+$identityPeers = New-Object System.Collections.ArrayList
+[void]$identityPeers.Add('a')
 
 try {
     foreach ($peer in $fixturePeers) { Wait-ForConnected $peer }
@@ -788,6 +794,7 @@ try {
 
     # ---- G1: b becomes a second device ------------------------------------
     Say '2/7 b boots EMPTY and is linked as a second device'
+    [void]$identityPeers.Add('b')
     $deviceB = Invoke-DeviceLink 'b' $masterA
     if (-not $deviceB) { throw 'b came back linked but never reported a device id' }
     if ($deviceB -eq $deviceA) { throw "b reports a's device id ($deviceA), so it is not a second device" }
@@ -802,16 +809,16 @@ try {
     # ---- G2: c verifies the contact ---------------------------------------
     Say '3/7 c verifies the contact'
     Open-Dm c 'probe-a'
-    Step c @{ op = 'tap'; target = 'text:Verify contact'; index = 0 }
+    Step c @{ op = 'tap'; target = 'type:_Verification > text:Verify'; index = 0 }
     Step c @{ op = 'wait_for'; target = 'dialog > text:Mark verified'; timeout_ms = 20000 }
     Step c @{ op = 'tap'; target = 'dialog > text:Mark verified'; index = 0 }
     Step c @{ op = 'wait_for'; target = 'dialog > contains:You verified'; timeout_ms = 20000 }
     Step c @{ op = 'shot'; name = "destroy-$runTag-c-verified" }
     Step c @{ op = 'tap'; target = 'dialog > semantics:Close'; index = 0 }
     Step c @{ op = 'wait_for'; gone = 'type:HollowDialog'; timeout_ms = 10000 }
-    # The DM's own button is the standing mark, and it is what has to go away
-    # when the identity behind it is destroyed.
-    Step c @{ op = 'wait_for'; target = 'text:Verified: view number'; timeout_ms = 20000 }
+    # The DM panel's verification line is the standing mark, and it is what has
+    # to go away when the identity behind it is destroyed.
+    Step c @{ op = 'wait_for'; target = 'type:_Verification > text:Verified'; timeout_ms = 20000 }
     Step c @{ op = 'dump'; name = 'g2_c' }
     $cFriends = @(Get-DumpFriendRows c 'g2_c')
     Say "c's friends: $(Format-FriendRows $cFriends)" 'DarkCyan'
@@ -824,6 +831,7 @@ try {
 
     # ---- G3: d becomes a third device, then leaves ------------------------
     Say '4/7 d boots EMPTY, is linked as a third device, then closes'
+    [void]$identityPeers.Add('d')
     $deviceD = Invoke-DeviceLink 'd' $masterA
     if (-not $deviceD) { throw 'd came back linked but never reported a device id' }
     if ($deviceD -eq $deviceA -or $deviceD -eq $deviceB) {
@@ -954,8 +962,8 @@ try {
     # ---- G5: what the friend sees -----------------------------------------
     Say '6/7 c banners the destroyed identity'
     $banner = Invoke-SoftStep c @{ op = 'wait_for'; target = 'contains:This identity was destroyed'; timeout_ms = 120000 }
-    $markGone = Invoke-SoftStep c @{ op = 'wait_for'; gone = 'text:Verified: view number'; timeout_ms = 60000 }
-    $backToUnverified = Invoke-SoftStep c @{ op = 'wait_for'; target = 'text:Verify contact'; timeout_ms = 30000 }
+    $markGone = Invoke-SoftStep c @{ op = 'wait_for'; gone = 'type:_Verification > text:Verified'; timeout_ms = 60000 }
+    $backToUnverified = Invoke-SoftStep c @{ op = 'wait_for'; target = 'type:_Verification > text:Not verified yet'; timeout_ms = 30000 }
     Step c @{ op = 'shot'; name = "destroy-$runTag-c-banner" }
     Step c @{ op = 'dump'; name = 'g5_c' }
     $cAnnounce = @(Get-PeerLogContains 'c' "[HOLLOW-DESTROY] Friend identity $masterA reported destroyed")
@@ -1090,15 +1098,15 @@ try {
 # friendship between two throwaway identities, one of which no longer exists.
 # --------------------------------------------------------------------------
 $leftovers = @()
-foreach ($peer in $journeyPeers) {
+foreach ($peer in $identityPeers) {
     $remnants = @(Get-IdentityRemnants $peer $true)
-    if ($remnants.Count -gt 0 -and @('a', 'b', 'd') -contains $peer) {
+    if ($remnants.Count -gt 0) {
         $leftovers += "$peer : $($remnants -join ', ')"
     }
 }
 if ($leftovers.Count -eq 0) {
     Set-Gate 'C  cleanup: nothing of this journey is left on the relay' 'PASS'
-    Add-Note 'no server was ever created; the destroyed identity is gone from all three of its devices'
+    Add-Note "no server was ever created; the destroyed identity is gone from its devices ($($identityPeers -join ', '))"
 } else {
     Set-Gate 'C  cleanup: nothing of this journey is left on the relay' 'FAIL'
     foreach ($line in $leftovers) { Add-Note "left behind: $line" }

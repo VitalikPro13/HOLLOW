@@ -14,6 +14,10 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
 - Share-backed large files (>34 MB): `FileHeader.share_ref` bypasses the size checks in 3
   places; skip `PendingFileStream` when `share_ref.is_some()`; >34 MB prompts
   `confirmLargeFileShare`. `feedback_share_backed_files`.
+  DM headers carry it too (`DmFileMsg.share_ref`; a share-backed DM file sends the caption
+  and a metadata-only header, never bytes): until 2026-10-01 `build_dm_file_header` dropped it,
+  so a DM file over 34 MB was refused for its size. Harness
+  `a_share_backed_dm_file_reaches_the_friend_as_a_share`; fleet `regress_media`.
 - Sender stream temps (`.stream_send_*.tmp`) are deleted after WS-relay sends unless
   `pending_webrtc_sends` owns them; a boot-time sweep mops orphans.
   `feedback_stream_send_temp_cleanup`.

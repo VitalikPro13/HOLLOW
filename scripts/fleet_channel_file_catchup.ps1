@@ -270,7 +270,9 @@ function Get-PeerLogLines($peer, $pattern) {
     $path = Join-Path $script:FleetStageRoot "$peer\hollow_debug.log"
     if (-not (Test-Path $path)) { return @() }
     try {
-        return @(Get-Content $path -ErrorAction Stop | Where-Object { $_ -like "*$pattern*" })
+        # .Contains, not -like: the patterns carry brackets, which -like reads as
+        # a character class that matches nearly every line.
+        return @(Get-Content $path -Encoding UTF8 -ErrorAction Stop | Where-Object { $_.Contains($pattern) })
     } catch {
         Add-Note "could not read $peer's hollow_debug.log ($($_.Exception.Message))"
         return @()
@@ -531,8 +533,9 @@ try {
     Step a @{ op = 'tap'; target = 'semantics:general. Open its settings'; index = 0 }
     Step a @{ op = 'wait_for'; target = 'semantics:Public'; timeout_ms = 15000 }
     Step a @{ op = 'tap'; target = 'semantics:Public'; index = 0 }
-    # "Public" is the switch's title, and once more in the row's summary.
-    Step a @{ op = 'wait_for'; target = 'text:Public'; count = 2; timeout_ms = 30000 }
+    # The row's summary is one Text.rich with the name, so its semantics label
+    # is what says the switch landed.
+    Step a @{ op = 'wait_for'; target = 'semantics:general, Public. Close its settings'; timeout_ms = 30000 }
     # Server settings is a full page, not a dialog: one escape leaves the tab
     # and the pane is only back once the server and channel are re-opened.
     Step a @{ op = 'key'; value = 'escape' }

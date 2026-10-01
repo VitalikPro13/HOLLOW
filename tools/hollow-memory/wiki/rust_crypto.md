@@ -204,6 +204,8 @@ leaf" branch drops the stale one sharing our credential in the SAME commit.
 
 **KeyPackage handler exception:** When processing an incoming KeyPackage, the sender is excluded from coordinator election (they sent it because they lost their group). The handler builds a custom candidate list filtering out `peer_str` instead of using `is_mls_coordinator()`. Without this, the lowest-peer-ID member losing their group creates a permanent recovery deadlock.
 
+**A new device's leaf (session 24, fleet `device_link` G7).** The sender is ALSO excluded by the master certified in its KeyPackage (`sender_leaf.master`): a just-linked device's KeyPackage rides the Relay lane and outruns its roster, which rides Olm, so the receiver's resolver could not yet tie it to the owner, kept the owner (the sender's own identity) as the preferred committer and skipped the KeyPackage; the owner never saw it. Nothing asked again without channel traffic, so the new device stayed leafless: friends' posts reached it only as hints and its own posts took the Olm fallback, which skipped its own siblings. Three fixes: batch-tick phase 0b re-asks for any server group a CRDT member does not hold once `MLS_BOOTSTRAP_TIMEOUT` lapses (`request_server_leaf`: the owner, our own siblings when the owner is our identity, they re-add a sibling, else the lowest online member); the receiver exclusion above; `olm_fanout_channel_envelope` no longer skips our own identity (our device is never in `ws_room_peers`). Harness `a_new_device_whose_first_leaf_ask_is_lost_asks_again`, `a_leafless_devices_post_reaches_its_sibling`, `the_owners_new_device_gets_its_leaf_and_every_post`.
+
 ### Unit Tests
 
 Four tests verify coordinator election:

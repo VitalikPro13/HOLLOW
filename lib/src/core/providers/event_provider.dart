@@ -89,6 +89,19 @@ import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart'
     show handleNicknameLookupFailed, handleNicknameResolved;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
+/// The auto-download setting a share-backed file header is judged by, or null while
+/// its server's catch-up is still running. A DM has no catch-up to wait out: its sync
+/// never completes a server's, so waiting would block every large DM file for good.
+@visibleForTesting
+String? shareAutoDownloadScope({
+  required String serverId,
+  required String senderIdentity,
+  required bool serverSyncDone,
+}) {
+  if (serverId.isEmpty) return 'dm:$senderIdentity';
+  return serverSyncDone ? 'server:$serverId' : null;
+}
+
 /// Listens to the Rust event stream and dispatches to the right providers.
 class EventStreamNotifier extends Notifier<bool> {
   StreamSubscription<NetworkEvent>? _subscription;
@@ -1182,7 +1195,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_FileHeaderReceived(
             :final fileId, :final fileName, :final sizeBytes,
             :final isImage, :final width, :final height,
-            :final messageId, senderId: _,
+            :final messageId, :final senderId,
             :final serverId, :final channelId,
             :final videoThumb,
             :final shareRootHash, :final shareKeyHex, :final thumbB64):
@@ -1228,12 +1241,16 @@ class EventStreamNotifier extends Notifier<bool> {
         _reloadChatForFile(fileId);
 
         if (shareRootHash != null && shareKeyHex != null) {
-          if (!_serverSyncDone.contains(serverId)) {
+          final scope = shareAutoDownloadScope(
+            serverId: serverId,
+            senderIdentity: ref.read(deviceLinkProvider).identityOf(senderId),
+            serverSyncDone: _serverSyncDone.contains(serverId),
+          );
+          if (scope == null) {
             debugPrint('[HOLLOW] Share-backed file during sync — skipping auto-download for $fileId');
           } else {
           // Per-conversation override then global threshold; 0 = off (#41).
-          final thresholdMb =
-              effectiveAutoDownloadMbRead(ref, 'server:$serverId');
+          final thresholdMb = effectiveAutoDownloadMbRead(ref, scope);
           final autoDownloadThreshold = thresholdMb * 1024 * 1024;
           final autoDownload =
               thresholdMb > 0 && sizeBytes.toInt() <= autoDownloadThreshold;

@@ -93,7 +93,7 @@ $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
 
 $runTag = $script:FleetVars.RUN
-$runRoot = Join-Path $env:TEMP 'hollow_fleet\run'
+$runRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'hollow_fleet\run'
 $server = "fleet-link-$runTag"
 $journeyPeers = if ($EdgeGates) { @('a', 'b') } else { @('a', 'b', 'c') }
 # G8's picked image: a 16x16 PNG carried inline so every backend has it, and
@@ -522,8 +522,13 @@ function Show-FriendsTab($peer, $tab) {
 
 $script:DmComposer = @{}
 function Open-Dm($peer, $friendName) {
-    Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
-    Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
+    # The friends-bar chip, scoped: inside a server the member row carries the
+    # same name, and while the DM has unread messages the chip reads
+    # "<name>, 1 unread", so the bare label hits the member row and opens a
+    # profile card instead of the DM.
+    $chip = if (Test-SimBackend) { "semantics:$friendName" } else { "type:_FriendChip > semantics:$friendName" }
+    Step $peer @{ op = 'wait_for'; target = $chip; timeout_ms = 60000 }
+    Step $peer @{ op = 'tap'; target = $chip }
     Step $peer @{ op = 'wait'; ms = 1500 }
     # The composer is named for whoever the DM is with.
     $script:DmComposer[$peer] = "hint:Message $friendName"
@@ -555,9 +560,13 @@ function Send-Dm($peer, $body) {
 # The emoji picker is an OverlayEntry on desktop and a bottom sheet on the
 # mobile shell; the tab and upload labels inside are the same on both.
 function Open-MineTab($peer) {
-    $button = if (Test-SimBackend) { 'semantics:Emoji' } else { 'semantics:Insert emoji' }
+    $button = 'semantics:Emoji, GIFs and stickers'
     Step $peer @{ op = 'wait_for'; target = $button; timeout_ms = 30000 }
-    Step $peer @{ op = 'tap'; target = $button }
+    Step $peer @{ op = 'tap'; target = $button; index = 0 }
+    # The panel reopens on its last tab, so the Emoji tab is picked explicitly
+    # (exact label first, so it never falls through to the composer button).
+    $emojiTab = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'semantics:Emoji'; timeout_ms = 10000 }
+    if ($emojiTab.ok) { Step $peer @{ op = 'tap'; target = 'semantics:Emoji'; index = 0 } }
     Step $peer @{ op = 'wait_for'; target = 'semantics:Mine emotes tab'; timeout_ms = 15000 }
     Step $peer @{ op = 'tap'; target = 'semantics:Mine emotes tab' }
     Step $peer @{ op = 'wait'; ms = 500 }
@@ -1304,6 +1313,8 @@ if (-not $serverCreated) {
         if (-not (Get-PeerProcess 'a')) { Restart-Peer a }
         Wait-ForConnected a
         Close-Settings a
+        # A failed gate can leave a card or menu over the server rail.
+        if (-not (Test-SimBackend)) { Invoke-SoftStep a @{ op = 'key'; value = 'escape' } | Out-Null }
         Remove-Server a $server
         $serverDeleted = $true
         foreach ($peer in @('b', 'c')) {

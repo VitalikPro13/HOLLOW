@@ -164,8 +164,10 @@ function Send-Gif($peer, $caption, $cell = 0) {
     #
     # `contains`, never `text`: a caption plus a token is one Text.rich whose
     # plain text carries the token's placeholder character, so an exact match
-    # can never hit it (this cost one run).
-    Step $peer @{ op = 'wait_for'; target = "contains:$caption"; timeout_ms = 60000 }
+    # can never hit it (this cost one run). Scoped to a MessageRow: the
+    # composer still holds the caption until the pick sends, and an unscoped
+    # match on it let gate 4 close a before an uncached GIF was sent.
+    Step $peer @{ op = 'wait_for'; target = "type:MessageRow > contains:$caption"; timeout_ms = 90000 }
     # The picker is an OverlayEntry with a full-screen dismiss barrier, NOT a
     # route, so escape does nothing to it. Tapping through the barrier is what
     # closes it, and allowMiss is honest here: the barrier IS what we mean to
@@ -259,7 +261,7 @@ try {
     Restart-Peer b
     Step b @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     Open-Dm b 'probe-a'
-    Step b @{ op = 'wait_for'; target = 'contains:gif one ${RUN}'; timeout_ms = 120000 }
+    Step b @{ op = 'wait_for'; target = 'type:MessageRow > contains:gif one ${RUN}'; timeout_ms = 120000 }
     Step b @{ op = 'wait_for'; target = 'semantics:GIF'; timeout_ms = 120000 }
     Step b @{ op = 'shot'; name = 'asset_offline_gate3_rendered' }
     Say 'PASS gate 3: the row arrived from the ring and the picture followed' 'Green'
@@ -274,12 +276,16 @@ try {
     # first one and still inside the panel, while index 3 is under the fold
     # and cannot be clicked.
     Send-Gif a 'gif two ${RUN}' 1
+    # The row is optimistic and no widget says the send has left the process,
+    # so the row is re-checked and the send given a moment before a goes.
+    Step a @{ op = 'wait_for'; target = 'type:MessageRow > contains:gif two ${RUN}'; timeout_ms = 30000 }
+    Step a @{ op = 'wait'; ms = 3000 }
     Stop-Peer a
 
     Restart-Peer b
     Step b @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     Open-Dm b 'probe-a'
-    Step b @{ op = 'wait_for'; target = 'contains:gif two ${RUN}'; timeout_ms = 120000 }
+    Step b @{ op = 'wait_for'; target = 'type:MessageRow > contains:gif two ${RUN}'; timeout_ms = 120000 }
     # The row is here and the picture cannot be: nobody online holds the bytes.
     Step b @{ op = 'wait_for'; target = 'semantics:GIF loading'; timeout_ms = 60000 }
     Step b @{ op = 'wait'; ms = 15000 }

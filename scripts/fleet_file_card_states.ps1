@@ -27,8 +27,8 @@
 #   G2 state 2 in a DM. b is closed, a attaches a file, a closes. b comes back
 #      ALONE and the card names the offline sender. a comes back and the bytes
 #      arrive with NO further action on b: the queued ask retried itself.
-#   G2b the hover bar mirrors the card. The queued ask can be DROPPED by hand
-#      (the bar's Download becomes a stop action) and REBUILT by hand, so what
+#   G2b the row's action menu mirrors the card. The queued ask can be DROPPED by
+#      hand (the menu's Download becomes a stop action) and REBUILT by hand, so what
 #      G2 then watches self-heal is a re-queued ask, not the original one.
 #   G3 state 3 in a DM. a attaches a second file and its OWN copy is deleted
 #      from disk while it is closed, so when it returns it is a holder that no
@@ -92,8 +92,9 @@
 # unchanged.
 #
 # A received file is stored as `{file_id}.{ext}` (`file_transfer.rs`
-# `final_file_path`), NOT under the name the card shows, so a copy on disk is
-# identified by its CONTENT (length, then SHA-256) rather than by its name.
+# `final_file_path`), NOT under the name the card shows, and as HFE1 at-rest
+# ciphertext, so a copy on disk is identified by its PLAINTEXT (length, then
+# SHA-256 of the app's own export) rather than by its name or raw bytes.
 #
 # Windows PowerShell 5.1 is what is installed here: no pwsh-only syntax, and
 # `pwsh` is not a thing on this machine - run it with `powershell -File`.
@@ -301,20 +302,61 @@ function Get-PeerFilesDir($peer) {
     return (Join-Path (Join-Path $runRoot $peer) 'files')
 }
 
-# Files land as `{file_id}.{ext}` (file_transfer.rs `final_file_path`), so the
-# name on disk is NOT the name on the card and a stem match would find nothing.
-# Identity is the CONTENT: length first (cheap), then SHA-256 (exact). That also
-# rules out the sender's `.stream_send_*.tmp` ciphertext copies, which are the
-# right size and the wrong bytes.
+$exportRoot = Join-Path $env:TEMP "hollow_fleet\fcs_export_$runTag"
+
+# Plaintext length of a stored file: HFE1 at-rest ciphertext (node/at_rest.rs,
+# a 32-byte header, then chunks each carrying a 16-byte tag) or legacy plaintext.
+# Returns @{ length; encrypted }, or $null when the file cannot be read.
+function Get-StoredPlainInfo($path) {
+    try {
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = [int64]$stream.Length
+            $buf = New-Object byte[] 32
+            $read = if ($len -ge 32) { $stream.Read($buf, 0, 32) } else { 0 }
+        } finally { $stream.Dispose() }
+    } catch { return $null }
+    if ($read -lt 32 -or [System.Text.Encoding]::ASCII.GetString($buf, 0, 4) -ne 'HFE1' -or $buf[4] -ne 1) {
+        return @{ length = $len; encrypted = $false }
+    }
+    $chunk = [int64][BitConverter]::ToUInt32($buf, 5)
+    if ($chunk -eq 0) { return @{ length = $len; encrypted = $false } }
+    $body = $len - 32
+    $chunks = [int64][math]::Ceiling($body / ($chunk + 16))
+    return @{ length = ($body - $chunks * 16); encrypted = $true }
+}
+
+# Files land as `{file_id}.{ext}` (file_transfer.rs `final_file_path`) and are
+# HFE1 ciphertext at rest, so neither the name nor the raw bytes identify a copy.
+# Identity is the PLAINTEXT: length from the header first, then SHA-256 of what
+# the app's own export path (`export_attachment` with an explicit path) decrypts.
+# In-flight dotfiles (`.stream_send_*`, `.ws_recv_*`) are never a copy. A peer
+# that is closed cannot decrypt, so it is matched on plaintext length alone; the
+# journey's three files differ in size for exactly that reason.
 function Find-PeerFile($peer, $sourcePath) {
     $dir = Get-PeerFilesDir $peer
     if (-not (Test-Path $dir)) { return $null }
     if (-not (Test-Path $sourcePath)) { throw "the source file $sourcePath is gone, so nothing can be matched against it" }
     $want = Get-Item $sourcePath
     $wantHash = (Get-FileHash -Path $sourcePath -Algorithm SHA256).Hash
+    $live = [bool](Get-PeerProcess $peer)
     foreach ($candidate in @(Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue)) {
-        if ($candidate.Length -ne $want.Length) { continue }
-        try { $hash = (Get-FileHash -Path $candidate.FullName -Algorithm SHA256).Hash } catch { continue }
+        if ($candidate.Name.StartsWith('.')) { continue }
+        $info = Get-StoredPlainInfo $candidate.FullName
+        if (-not $info -or $info.length -ne $want.Length) { continue }
+        if (-not $info.encrypted) {
+            try { $hash = (Get-FileHash -Path $candidate.FullName -Algorithm SHA256).Hash } catch { continue }
+            if ($hash -eq $wantHash) { return $candidate }
+            continue
+        }
+        if (-not $live) { return $candidate }
+        New-Item -ItemType Directory -Path $exportRoot -Force | Out-Null
+        $dest = Join-Path $exportRoot "$peer-$($candidate.Name)"
+        if (Test-Path $dest) { Remove-Item $dest -Force }
+        $answer = Send-FleetStep $peer ([pscustomobject]@{ op = 'export_attachment'; path = $candidate.FullName; dest = $dest }) 120
+        if (-not $answer.ok -or -not (Test-Path $dest)) { continue }
+        try { $hash = (Get-FileHash -Path $dest -Algorithm SHA256).Hash } catch { continue }
+        Remove-Item $dest -Force -ErrorAction SilentlyContinue
         if ($hash -eq $wantHash) { return $candidate }
     }
     return $null
@@ -354,7 +396,9 @@ function Get-PeerLogLines($peer, $pattern) {
     $path = Join-Path $script:FleetStageRoot "$peer\hollow_debug.log"
     if (-not (Test-Path $path)) { return @() }
     try {
-        return @(Get-Content $path -ErrorAction Stop | Where-Object { $_ -like "*$pattern*" })
+        # .Contains, not -like: the patterns carry brackets, which -like reads as
+        # a character class that matches nearly every line.
+        return @(Get-Content $path -Encoding UTF8 -ErrorAction Stop | Where-Object { $_.Contains($pattern) })
     } catch {
         Add-Note "could not read $peer's hollow_debug.log ($($_.Exception.Message))"
         return @()
@@ -592,30 +636,33 @@ try {
     }
 
     # ---- G2b: drop the queued ask by hand, then rebuild it ------------------
-    # The hover bar mirrors the card: while the ask is queued its Download
-    # becomes a stop action. `hover` PARKS the mouse and deliberately leaves it
-    # there (probe_runner `_hover`), and `tap` sends its own touch-like pointer,
-    # so the bar survives the wait, the screenshot and the tap. It hides 60ms
-    # after BOTH it and the row lose the mouse, which is why the pointer is
-    # parked somewhere harmless before the card's own button is tapped: the bar
-    # is an overlay and can otherwise sit over it.
-    Say '    G2b: stop the queued ask from the hover bar, then ask again'
+    # The row's action menu mirrors the card: while the ask is queued its
+    # Download becomes a stop action. The menu opens from the hover bar's
+    # More button. `hover` PARKS the mouse and deliberately leaves it there
+    # (probe_runner `_hover`), and `tap` sends its own touch-like pointer, so
+    # the bar survives the wait and the tap. It hides 60ms after BOTH it and
+    # the row lose the mouse, which is why the pointer is parked somewhere
+    # harmless before the card's own button is tapped: the bar is an overlay
+    # and can otherwise sit over it.
+    Say '    G2b: stop the queued ask from the row menu, then ask again'
     $g2b = 'G2b DM state 2: stop waiting returns the card to Download, asking again re-queues'
     # index 0 on both hovers: `hover` resolves the target and then takes its
     # CENTRE, and getCenter throws outright when a target matched twice - which
     # a `text:` target does often enough (a run log has "text:probe-b ... 2
     # matches"). An index makes the pointer land somewhere definite.
     Step b @{ op = 'hover'; target = "text:$nameOne"; index = 0 }
-    $stopControl = Invoke-SoftStep b @{ op = 'wait_for'; target = 'semantics:Stop waiting for this file'; timeout_ms = 30000 }
-    Step b @{ op = 'shot'; name = "fcs-$runTag-b-hover-stop" }
+    $more = Invoke-SoftStep b @{ op = 'wait_for'; target = 'semantics:More message actions'; timeout_ms = 15000 }
+    if ($more.ok) { Step b @{ op = 'tap'; target = 'semantics:More message actions'; index = 0 } }
+    $stopControl = Invoke-SoftStep b @{ op = 'wait_for'; target = 'menu > text:Stop waiting for this file'; timeout_ms = 30000 }
+    Step b @{ op = 'shot'; name = "fcs-$runTag-b-menu-stop" }
     if (-not $stopControl.ok) {
         Set-Gate $g2b 'FAIL'
-        Add-Note "G2b: the hover bar never offered 'Stop waiting for this file' for $nameOne"
+        Add-Note "G2b: the row menu never offered 'Stop waiting for this file' for $nameOne"
         Invoke-SoftStep b @{ op = 'look'; max = 60 } | Out-Null
         Write-Evidence 'G2b'
-        throw 'G2b failed: no stop action on the hover bar'
+        throw 'G2b failed: no stop action in the row menu'
     }
-    Step b @{ op = 'tap'; target = 'semantics:Stop waiting for this file'; index = 0 }
+    Step b @{ op = 'tap'; target = 'menu > text:Stop waiting for this file'; index = 0 }
     $stopped = Invoke-SoftStep b @{ op = 'wait_for'; gone = "text:$dmOfflineCaption"; timeout_ms = 30000 }
     Step b @{ op = 'hover'; target = 'type:ChatComposerRow > type:EditableText'; index = 0 }
     $backToDownload = Invoke-SoftStep b @{ op = 'wait_for'; target = "semantics:Download $nameOne"; timeout_ms = 30000 }
@@ -664,17 +711,20 @@ try {
     # holder that never held is not the case under test. So the copy is waited
     # for while a is still up, and found again once a is closed and the file
     # handle is certainly gone.
-    if (-not (Wait-ForPeerFile a $fileTwo "a's own copy of file two" 60)) {
+    $aLiveTwo = Wait-ForPeerFile a $fileTwo "a's own copy of file two" 60
+    if (-not $aLiveTwo) {
         throw "a sent file two but never wrote its own copy, so state 3 cannot be produced"
     }
     Stop-Peer a
     Start-Sleep -Seconds 3
 
-    $aCopyTwo = Find-PeerFile a $fileTwo
-    if (-not $aCopyTwo) { throw "a has no copy of file two to delete, so state 3 cannot be produced" }
-    Say "deleting a's own copy of file two ($($aCopyTwo.FullName))" 'Yellow'
-    Remove-Item $aCopyTwo.FullName -Force
-    if (Find-PeerFile a $fileTwo) { throw "a's copy of file two is still on disk after the delete" }
+    # Deleting the ciphertext is how the holder loses it; the path is the one
+    # whose plaintext matched while a could still decrypt it.
+    if (-not (Test-Path -LiteralPath $aLiveTwo.FullName)) { throw "a has no copy of file two to delete, so state 3 cannot be produced" }
+    Say "deleting a's own copy of file two ($($aLiveTwo.FullName))" 'Yellow'
+    Remove-Item -LiteralPath $aLiveTwo.FullName -Force
+    $leftover = Find-PeerFile a $fileTwo
+    if ($leftover) { throw "a still holds a copy of file two after the delete ($($leftover.FullName))" }
 
     # a's boot-time reset_stale_files clears the row's disk path, so a comes
     # back as a peer that is online and does NOT have the bytes.
@@ -833,8 +883,8 @@ if ($serverCreated -and -not $KeepServer) {
     Add-Note 'no server was ever created, so there was nothing to delete'
 }
 
-foreach ($path in @($fileOne, $fileTwo, $fileThree)) {
-    if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+foreach ($path in @($fileOne, $fileTwo, $fileThree, $exportRoot)) {
+    if (Test-Path $path) { Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # --------------------------------------------------------------------------

@@ -197,6 +197,13 @@ function Stop-Fleet {
     if ($running) {
         Write-Step "stopping $(@($running).Count) fleet instance(s)" 'Yellow'
         $running | Stop-Process -Force
+        # Waited out, not a flat sleep: a killed instance can take seconds to go,
+        # and until it has, messages.db is open and a data-dir reset throws.
+        $deadline = (Get-Date).AddSeconds(30)
+        foreach ($proc in @($running)) {
+            $left = [int]($deadline - (Get-Date)).TotalMilliseconds
+            if ($left -gt 0) { try { [void]$proc.WaitForExit($left) } catch { } }
+        }
         # The lock file and the SQLCipher WAL are released on exit; give the
         # handles time to drop before anything copies the directory.
         Start-Sleep -Milliseconds 1200

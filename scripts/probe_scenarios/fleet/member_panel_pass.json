@@ -40,10 +40,10 @@
     { "peer": "all", "op": "shot", "name": "m-01-members" },
     { "peer": "a", "op": "dump", "name": "m-01-members" },
 
-    { "peer": "a", "op": "tap", "target": "semantics:Collapse Online, 1 members", "index": 0, "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Collapse Online, 1 member", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 600 },
     { "peer": "a", "op": "shot", "name": "m-02-folded" },
-    { "peer": "a", "op": "tap", "target": "semantics:Expand Online, 1 members", "index": 0, "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Expand Online, 1 member", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 600 },
 
     { "peer": "a", "op": "theme", "value": "light", "soft": true },

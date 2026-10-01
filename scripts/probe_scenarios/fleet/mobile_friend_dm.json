@@ -29,8 +29,9 @@
     { "peer": "b", "op": "wait_for", "target": "text:${PEER_A}", "timeout_ms": 10000 },
     { "peer": "b", "op": "tap", "target": "text:Send request", "index": 0 },
 
-    { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 60000 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Friends, 1 friend request", "timeout_ms": 60000 },
     { "peer": "a", "op": "tap", "target": "semantics:Friends", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 10000 },
     { "peer": "a", "op": "tap", "target": "semantics:Accept friend request", "index": 0 },
 
     { "peer": "a", "op": "log", "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table" },
@@ -44,8 +45,8 @@
     { "peer": "b", "op": "tap", "target": "semantics:Send message", "index": 0 },
     { "peer": "b", "op": "wait_for", "target": "text:dm from b ${RUN}", "timeout_ms": 15000 },
 
-    { "peer": "a", "op": "wait_for", "target": "text:dm from b ${RUN}", "timeout_ms": 60000 },
     { "peer": "a", "op": "tap", "target": "semantics:Chats", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:dm from b ${RUN}", "timeout_ms": 60000 },
     { "peer": "a", "op": "tap", "target": "text:probe-b" },
     { "peer": "a", "op": "wait_for", "target": "field", "timeout_ms": 15000 },
     { "peer": "a", "op": "tap", "target": "field", "index": 0 },

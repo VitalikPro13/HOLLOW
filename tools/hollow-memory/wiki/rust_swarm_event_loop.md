@@ -89,7 +89,7 @@ The loop owns ~40 mutable state variables. They are NOT consolidated into a stru
 - `pending_friend_requests: HashMap<String, i64>` — queued friend requests for offline peers.
 
 ### Rate Limiting
-- `peer_rate_tokens: HashMap<String, (u32, Instant)>` — per-peer token bucket (100 burst, 20/sec refill).
+- `peer_rate_tokens: HashMap<String, (u32, Instant)>` — per-peer token bucket (100 burst, 20/sec refill). Our OWN devices are exempt (session 24): a new sibling's first sync bursts far past the bucket (friend lists, read markers, DM sync, signals) and every dropped frame was state the new device never got; harness `a_siblings_burst_is_never_rate_limited` (160 sibling copies, 67 lost without the exemption). A removed device no longer resolves to us, so it is limited like anyone.
 - `vc_signal_rate_tokens: HashMap<String, (u32, Instant)>` — tighter sub-limiter for VC signaling (30 burst, 10/sec).
 
 ## Main Loop Structure
@@ -256,7 +256,7 @@ Fires when we join a room — provides the full member list. This is the relay's
 ### WsEvent::Message / DirectMessage { room, from, data }
 The main incoming message path:
 1. Parses JSON as `HavenMessage`.
-2. Rate limiting: token bucket check (100 burst, 20/sec per peer). Drop if rate-limited.
+2. Rate limiting: token bucket check (100 burst, 20/sec per peer; our own devices exempt). Drop if rate-limited.
 3. **Recovery interception:** if message is a Recovery* variant, handle inline and `continue`.
 4. **Share interception:** if message is a Share* variant, dispatch to `share_handler::handle_envelope_share_*()` and `continue`.
 5. Otherwise: passes to `handle_incoming_request()`.

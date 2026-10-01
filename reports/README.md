@@ -30,6 +30,7 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/relay-and-sync/ANTI_CENSORSHIP_TRANSPORT_2026.md` | relay-and-sync | VLESS + REALITY transport decision; desktop shipped 2026-07-05, REMOVED from the app and the relay 2026-09-30 (it never worked in the field test). |
 | `shipped/security/DEPENDENCY_SECURITY_AUDIT_2026-06.md` | security | Crate and package audit against advisories, June 2026. |
 | `shipped/security/SECURITY_AUDIT_2026_09.md` | security | Internal white-box audit of the app, relay and shop backend at commit e0be717. |
+| `shipped/security/REGRESSION_PASS_0.12.md` | security | The fleet and harness regression pass after the security audit, before 0.12: the checklist, the bugs it found (all fixed with tests), the refusal lines explained, and what it did not cover. 2026-10-01. |
 | `shipped/performance/QA_REPORT.md` | performance | May 2026 five-domain quality audit and the tiered fix list. |
 | `shipped/performance/PERFORMANCE_REPORT.md` | performance | Windows GPU and CPU optimisation pass, May 2026. |
 | `shipped/performance/backend_report.md` | performance | Rust backend hot-path audit, May 2026 (the `MessageStore::open` finding). |

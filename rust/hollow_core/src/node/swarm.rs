@@ -20,6 +20,46 @@ pub(crate) const JOIN_SERVE_RETRY_WINDOW: Duration = Duration::from_secs(12);
 /// message, so a dropped KeyRequest would otherwise strand the flag forever.
 const OLM_KEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long before a co-member device we still cannot place is introduced to again.
+const CO_MEMBER_INTRO_RETRY: Duration = Duration::from_secs(300);
+
+/// At most this many introductions per sweep, so a big server's reconnect spreads
+/// them out.
+const CO_MEMBER_INTRO_BATCH: usize = 8;
+
+/// How often the batch tick looks for co-members to introduce ourselves to: every
+/// leaf of every server group is walked.
+const CO_MEMBER_SWEEP_EVERY: Duration = Duration::from_secs(10);
+
+/// Every leaf our server groups certify for a co-member: bound to a master who is a
+/// member of that server, and neither ours, revoked, disowned nor blocked. Paired
+/// with the server it sits in.
+fn certified_co_member_leaves(
+    mls: &MlsManager,
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+) -> Vec<(String, crate::crypto::LeafIdentity)> {
+    let mut out = Vec::new();
+    for server_id in mls.group_ids() {
+        if server_id.contains('#') || super::conference::is_conference_sid(&server_id) {
+            continue;
+        }
+        let Some(state) = server_states.get(&server_id) else { continue };
+        for leaf in mls.group_leaves(&server_id) {
+            let crate::crypto::LeafView::Bound(leaf) = leaf else { continue };
+            if leaf.master != local_master
+                && state.members.contains_key(&leaf.master)
+                && !super::resolver::is_revoked(&leaf.device)
+                && !super::resolver::disowns(&leaf.master, &leaf.device)
+                && !super::blocklist::is_blocked(&leaf.master)
+            {
+                out.push((server_id.clone(), leaf));
+            }
+        }
+    }
+    out
+}
+
 /// True when a KeyRequest to `peer` is still within `OLM_KEY_REQUEST_TIMEOUT`;
 /// a stale or absent entry returns false so the caller may resend.
 fn key_request_is_fresh(
@@ -1108,6 +1148,11 @@ async fn run_event_loop(
     // seeing the removal mints a KeyPackage the next tick turns into another
     // remove + re-add. Swept at the top of the tick, cleared by the Welcome.
     let mut mls_welcome_grace: HashMap<String, std::time::Instant> = HashMap::new();
+
+    // Co-member devices we introduced ourselves to, so the batch tick asks each once
+    // per window rather than every two seconds.
+    let mut co_member_introductions: HashMap<String, std::time::Instant> = HashMap::new();
+    let mut co_member_swept = std::time::Instant::now();
 
     // Per-(group, peer) cooldowns for MLS epoch-hint service and self-probes
     // (join-order SFrame race fix). Key: "{group_key}|{master}" for serving,
@@ -4767,8 +4812,11 @@ async fn run_event_loop(
                                 hollow_log!("[HOLLOW-SWARM] Inbound WS frame from {from} ({frame_len} B) failed HavenMessage parse — dropped: {e}");
                             }
                             if let Ok(msg) = parsed {
-                                    // Rate limiting (same as libp2p path).
-                                    let rate_ok = {
+                                    // Rate limiting (same as libp2p path). Not for our own
+                                    // devices: a new sibling's first sync is a legitimate
+                                    // burst far past the bucket, and every frame lost there
+                                    // is state the new device never gets.
+                                    let rate_ok = super::resolver::same_identity(&from, &local_peer_str) || {
                                         let (tokens, last_refill) = peer_rate_tokens
                                             .entry(from.clone())
                                             .or_insert((RATE_LIMIT_BURST, std::time::Instant::now()));
@@ -5235,6 +5283,32 @@ async fn run_event_loop(
                         }
                     }
 
+                    // Phase 0b: a member with no copy of its server group asks again once
+                    // the throttle lapses. A first ask can be lost (it outruns the roster
+                    // that lets its receiver place us), and with no channel traffic nothing
+                    // else would ever ask, leaving a new device unable to read the server.
+                    let leafless: Vec<String> = server_states.iter()
+                        .filter(|(sid, state)| {
+                            !state.is_deleted()
+                                && !super::conference::is_conference_sid(sid)
+                                && state.members.contains_key(&local_peer_str)
+                                && !mls_mgr.has_group(sid)
+                                && !pending_server_joins.contains_key(*sid)
+                                && !mls_welcome_grace.contains_key(*sid)
+                                && mls_bootstrap_requested.get(*sid).is_none_or(|t| t.elapsed() >= MLS_BOOTSTRAP_TIMEOUT)
+                        })
+                        .map(|(sid, _)| sid.clone())
+                        .collect();
+                    for sid in leafless {
+                        let Some(state) = server_states.get(&sid) else { continue };
+                        if crate::node::crypto_handler::request_server_leaf(
+                            mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers, state, &sid,
+                            &local_peer_str, &device_peer_id,
+                        ) {
+                            mls_bootstrap_requested.insert(sid, std::time::Instant::now());
+                        }
+                    }
+
                     // Phase 1: our own leaves that predate binding. Before any commit of
                     // ours, since receivers refuse commits from an unbound leaf.
                     crate::node::crypto_handler::rebind_unbound_leaves(
@@ -5435,6 +5509,44 @@ async fn run_event_loop(
                             Some(Err(e)) => hollow_log!("[HOLLOW-MLS] Held Welcome for {group_key} failed to install: {e}"),
                             Some(Ok(crate::crypto::Verdict::Hold(_))) | None => {}
                         }
+                    }
+
+                    // Phase 4: co-members who never met (a join one of us slept through)
+                    // place each other here. Our group certifies the device, the CRDT
+                    // the master; the leaf, the ops and the presence land in any order.
+                    let mut candidates: Vec<(String, String)> = Vec::new();
+                    let sweep_due = co_member_swept.elapsed() >= CO_MEMBER_SWEEP_EVERY;
+                    if sweep_due {
+                        co_member_swept = std::time::Instant::now();
+                        co_member_introductions.retain(|_, t| t.elapsed() < CO_MEMBER_INTRO_RETRY);
+                    }
+                    let leaves = if sweep_due {
+                        certified_co_member_leaves(mls_mgr, &server_states, &local_peer_str)
+                    } else {
+                        Vec::new()
+                    };
+                    for (server_id, leaf) in leaves {
+                        if candidates.len() >= CO_MEMBER_INTRO_BATCH {
+                            break;
+                        }
+                        let here = ws_room_peers.get(&server_id).is_some_and(|room| room.contains(&leaf.device));
+                        let recent = co_member_introductions
+                            .get(&leaf.device)
+                            .is_some_and(|t| t.elapsed() < CO_MEMBER_INTRO_RETRY);
+                        if !here || recent {
+                            continue;
+                        }
+                        co_member_introductions.insert(leaf.device.clone(), std::time::Instant::now());
+                        candidates.push((leaf.device, leaf.master));
+                    }
+                    if !candidates.is_empty() {
+                        let (tx, kp, me) = (ws_cmd_tx.clone(), master_keypair.clone(), local_peer_str.clone());
+                        let (path, pass, invisible) = (db_path.clone(), db_passphrase.clone(), is_invisible);
+                        tokio::task::spawn_blocking(move || {
+                            for device in social::co_members_to_introduce(candidates, &path, &pass) {
+                                social::introduce_to_co_member(&tx, &kp, &me, &device, invisible, &path, &pass);
+                            }
+                        });
                     }
 
                     // Adaptive batch interval: scale up when queue is large, reset when empty.
@@ -11047,12 +11159,16 @@ async fn handle_incoming_request(
             // Distributed committer: the lowest online MLS member by MASTER identity
             // processes KeyPackages. The sender's IDENTITY is excluded from the
             // election, because they sent the KeyPackage precisely because they or a
-            // sibling lost their group.
+            // sibling lost their group. By its certified master as well: a new device's
+            // KeyPackage can arrive before the roster that would let us resolve it.
             if !sibling_readd { if let Some(mls_mgr) = mls.as_ref() {
                 if mls_mgr.has_group(&group_key) {
                     let members: Vec<String> = mls_mgr.group_members(&group_key)
                         .into_iter()
-                        .filter(|p| !super::resolver::same_identity(p, peer_str))
+                        .filter(|p| {
+                            !super::resolver::same_identity(p, peer_str)
+                                && !super::resolver::same_identity(p, &sender_leaf.master)
+                        })
                         .collect();
                     // Server group: prefer the OWNER as the single authoritative
                     // committer, which keeps epochs linear and avoids the
@@ -11079,7 +11195,7 @@ async fn handle_incoming_request(
                     let coordinator = server_states.get(&server_id).and_then(|s| {
                         let mut masters: Vec<String> = s.members.keys()
                             .filter(|m| s.can_see_channel(m, cid))
-                            .filter(|m| !super::resolver::same_identity(peer_str, m))
+                            .filter(|m| !super::resolver::same_identity(peer_str, m) && **m != sender_leaf.master)
                             .filter(|m| m.as_str() == local_peer_str || peer_is_reachable(&ws_room_peers, m))
                             .cloned()
                             .collect();
@@ -13298,7 +13414,19 @@ async fn handle_incoming_request(
         // -- Profile request --
         HavenMessage::ProfileRequest => {
             if social::profile_audience(server_states, master_peer_str, peer_str, db_path, db_passphrase) == social::Audience::None {
-                hollow_log!("[HOLLOW-SECURITY] Ignored a ProfileRequest from {peer_str}: no relationship");
+                // A co-member's device our resolver cannot place yet still gets the
+                // pull half, on the strength of its leaf in our server group.
+                let certified = mls.as_ref().is_some_and(|m| {
+                    certified_co_member_leaves(m, server_states, master_peer_str).iter().any(|(_, l)| l.device == peer_str)
+                });
+                if certified {
+                    hollow_log!("[HOLLOW-PROFILE] ProfileRequest from co-member device {peer_str} — sending our profile");
+                    social::send_own_profile_to_co_member(
+                        ws_cmd_tx, master_keypair, local_peer_str, peer_str, is_invisible, true, db_path, db_passphrase,
+                    );
+                } else {
+                    hollow_log!("[HOLLOW-SECURITY] Ignored a ProfileRequest from {peer_str}: no relationship");
+                }
                 return;
             }
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");

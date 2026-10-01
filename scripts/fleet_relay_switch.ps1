@@ -417,20 +417,21 @@ function Close-Settings($peer) {
     Step $peer @{ op = 'wait_for'; gone = 'type:SettingsPlace'; timeout_ms = 10000 }
 }
 
-# The remove control is an icon button on the friend row, addressed by its
-# purpose label; there is no context menu and no confirmation. Returns whether
-# the friendship is actually gone, because a cleanup that cannot tell is a
-# cleanup that leaks.
+# The friend row's "More for <name>" menu holds Remove friend, which asks to
+# confirm. Returns whether the friendship is actually gone, because a cleanup
+# that cannot tell is a cleanup that leaks.
 function Remove-Friendship($peer, $friendName) {
     Close-Settings $peer
     Open-Friends $peer
     Invoke-SoftStep $peer @{ op = 'tap'; target = 'type:_FriendsManager > type:_TabBar > semantics:Friends'; index = 0 } | Out-Null
-    if (-not (Test-Target $peer 'semantics:Remove friend' 10000)) {
-        Add-Note "$peer's Friends tab shows no Remove friend control for $friendName"
+    if (-not (Test-Target $peer "semantics:More for $friendName" 10000)) {
+        Add-Note "$peer's Friends tab shows no row for $friendName"
         Close-Friends $peer
         return $false
     }
-    Step $peer @{ op = 'tap'; target = 'semantics:Remove friend'; index = 0 }
+    Step $peer @{ op = 'tap'; target = "semantics:More for $friendName"; index = 0 }
+    Step $peer @{ op = 'tap'; target = 'menu > text:Remove friend'; index = 0 }
+    Step $peer @{ op = 'tap'; target = 'dialog > text:Remove friend'; index = 0 }
     # The sidebar's friends bar prints this too, so it is the same signal
     # whichever surface happens to be showing.
     $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'text:No friends yet'; timeout_ms = 30000 }

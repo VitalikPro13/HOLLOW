@@ -1148,7 +1148,7 @@ async fn broadcast_channel_envelope(
                 let envelope_json = serde_json::to_string(envelope).unwrap_or_default();
                 olm_fanout_channel_envelope(
                     olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-                    server, local_peer_str, channel_id, use_subgroup, &envelope_json,
+                    server, channel_id, use_subgroup, &envelope_json,
                 ).await;
             }
         }
@@ -1168,14 +1168,15 @@ async fn broadcast_channel_envelope(
     let envelope_json = serde_json::to_string(envelope).unwrap_or_default();
     olm_fanout_channel_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-        server, local_peer_str, channel_id, use_subgroup, &envelope_json,
+        server, channel_id, use_subgroup, &envelope_json,
     ).await;
     None
 }
 
 /// Olm fan-out of one channel envelope JSON to every qualifying server member.
-/// Olm is per-device: encrypt to EACH online device of the member. Subgroup
-/// channels only fan to members who can see the channel.
+/// Olm is per-device: encrypt to EACH online device of the member, our own siblings
+/// included (our device is never in `ws_room_peers`). Subgroup channels only fan to
+/// members who can see the channel.
 #[allow(clippy::too_many_arguments)]
 async fn olm_fanout_channel_envelope(
     olm: &mut OlmManager,
@@ -1184,13 +1185,11 @@ async fn olm_fanout_channel_envelope(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     server: &ServerState,
-    local_peer_str: &str,
     channel_id: &str,
     use_subgroup: bool,
     envelope_json: &str,
 ) {
     for member_peer_str in server.members.keys() {
-        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
         // Subgroup: only fan to members who qualify for the channel.
         if use_subgroup && !server.can_see_channel(member_peer_str, channel_id) { continue; }
         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {

@@ -510,8 +510,39 @@ the staged exe (`build\fleet\<peer>`), not in the data dir. Opt-in only (`-Only`
 `fleet_relay_restart` (restarts PRODUCTION), `fleet_relay_switch` (needs a self-hosted
 relay), `fleet_at_rest` (seeds from an older build). Items take `args` (`-Keep`, `-Attach`)
 and `keepUp` so `calls_after_vc` attaches to `calls_after`'s fleet. About 75 minutes for all.
-Gap (session 23): each item rotates the staged `hollow_debug.log`, so after a full run only the
-LAST item's app log survives; copy each peer's log into `all\` per item before relying on it.
+Since session 24 each item also writes `all\<item>-<peer>.log` (that peer's app lines stamped
+after the item began; the app never rotates to `.log.1`, it trims `hollow_debug.log` to its
+last 2 MB at launch once it passes 10 MB), `-Build` stages a,b,c,d (fleet_destroy's d), and
+an item with `fresh = $true` gets `-Onboard -Fresh` of its own peers first: the relay replays
+an earlier item's friend requests to a restored fixture for three days, so a journey that
+needs "no contacts yet" cannot share fixtures with friend_dm. `Stop-Fleet` waits up to 30 s
+for killed instances to exit (a still-locked `messages.db` broke the next reset once).
+
+**The regression scenarios (session 24, `fleet/regress_*.json`).** `regress_channels` (a,b,c:
+rename and delete reaching members, edit/react/reply/delete in a channel, pin, @mention marker,
+public channel), `regress_social` (fresh: profile audience while a request is pending, nickname
+claim + lookup, block/unblock), `regress_media` (fresh, `-StepTimeoutSeconds 300`: video,
+auto-download gate at Off, a 40 MB share-backed file, a `Voice message.ogg` attachment that
+goes out as a voice note), `regress_voice3` (three in a voice channel, one leaves, screen-share
+watch opt-in). Fixtures: `python scripts/make_regress_fixtures.py` (needs an ffmpeg with
+libx264 and libopus; `C:/ffmpeg/bin` has both). `regress_app_lock` is NOT in fleet_all and
+must not run on Vitalik's Windows account: the app lock's unlock secret lives in
+`%APPDATA%\com.anonlisten\hollow\flutter_secure_storage.dat`, ONE file shared by every Hollow
+exe on the account (fleet copies and his installed app), and turning the lock off deletes it.
+Run it on the Win10 VM, or copy that file aside and back.
+
+Selectors that moved again (session 24): removing a friend is `semantics:More for <name>` >
+`menu > text:Remove friend` > `dialog > text:Remove friend` (the confirm's title is
+`Remove <name>?`); the voice channel's leave control is `semantics:Leave the room`; "Stop
+waiting for this file" lives in the hover bar's `More message actions` menu; a friend chip
+with unread messages reads `<name>, 1 unread`, so open a DM by
+`type:_FriendChip > semantics:<name>`, never a bare `semantics:<name>` (it hit the member
+panel row and opened a profile card); on a phone, a tab that is not showing is Offstage and
+its widgets no longer count for `wait_for`, so open the tab first (mobile_friend_dm waited for
+b's DM on the Friends tab); a settings row below the fold is not built at all, so `reveal`
+cannot find it: `scroll type:Scrollable` then `wait_for`. Files on disk are HFE1 ciphertext:
+match a copy by the plaintext length in the HFE1 header or SHA-256 via `export_attachment`.
+`fleet_owner_offline.ps1` is Windows-only (`$env:TEMP`).
 
 **Trap: never link a fleet FIXTURE identity to another device.** Linking Windows `a` to a
 phone left the phone with a newer roster; every later scenario restored the older fixture,

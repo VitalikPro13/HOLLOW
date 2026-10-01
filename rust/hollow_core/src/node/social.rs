@@ -1683,6 +1683,67 @@ fn send_tombstone_if_revoked(
     true
 }
 
+/// Co-members' devices we cannot place yet, out of `(device, master)` pairs whose
+/// leaves our server group certifies: no stored link from the device to its master,
+/// or no profile for the master.
+pub(crate) fn co_members_to_introduce(
+    candidates: Vec<(String, String)>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Vec<String> {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|(device, master)| {
+            !store.device_links_for(master).is_ok_and(|links| links.contains(device))
+                || !store.load_profile_light(master).is_ok_and(|p| p.is_some())
+        })
+        .map(|(device, _)| device)
+        .collect()
+}
+
+/// Our profile and roster to a co-member's device that our resolver cannot place.
+/// The caller vouches for the device with its certified leaf in our server group;
+/// `include_blobs` only when answering its ProfileRequest.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_own_profile_to_co_member(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_master: &str,
+    device: &str,
+    is_invisible: bool,
+    include_blobs: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if let Some(msg) = own_profile_update(master_keypair, local_master, is_invisible, include_blobs, None, db_path, db_passphrase) {
+        super::olm_lane::carry(ws_cmd_tx, device, None, &msg, super::olm_lane::NoSession::Queue);
+    }
+}
+
+/// Our light profile to a co-member's device that met us as a stranger, then a
+/// request for theirs.
+///
+/// Members who were offline while somebody joined never saw the join request that
+/// carried the joiner's roster, and the joiner's Welcome found them away, so neither
+/// side can place the other's device and every audience gate stays shut. Our roster
+/// arrives first, so the answer to our request finds us placed.
+pub(crate) fn introduce_to_co_member(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_master: &str,
+    device: &str,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    hollow_log!("[HOLLOW-PROFILE] Introducing ourselves to co-member device {device}");
+    send_own_profile_to_co_member(ws_cmd_tx, master_keypair, local_master, device, is_invisible, false, db_path, db_passphrase);
+    super::olm_lane::carry(ws_cmd_tx, device, None, &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
+}
+
 /// Our profile as stored, with every field signed now. Our own blobs are the
 /// authority, so the hashes describe exactly what we hold; `include_blobs` adds the
 /// bytes for a pull. A profile-less node still announces its device list, which is

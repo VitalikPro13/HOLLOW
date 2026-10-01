@@ -938,6 +938,7 @@ pub(crate) async fn finish_send_file(
             vthumb: &vthumb,
             thumb: &thumb,
             voice,
+            share_ref: &share_ref,
             message_text: &message_text,
             local_peer_str,
             sha256: &sha256,
@@ -1102,6 +1103,9 @@ struct DmFileMsg<'a> {
     thumb: &'a Option<String>,
     /// Recorded voice message — exempt from all auto-download gating.
     voice: bool,
+    /// The Hollow Share that carries a file over the direct cap: its header goes
+    /// out alone, with no key and no bytes.
+    share_ref: &'a Option<super::types::ShareRef>,
     message_text: &'a str,
     local_peer_str: &'a str,
     /// Plaintext SHA-256 the file id commits to.
@@ -1114,8 +1118,8 @@ struct DmFileMsg<'a> {
 }
 
 /// Shared DM FileHeader builder — every DM header uses chunks=0 (streamed),
-/// sid/cid=None, target=None, share_ref=None; the varying fields (signature,
-/// AES material, inline bytes) are parameterized per branch.
+/// sid/cid=None, target=None; the varying fields (signature, AES material, inline
+/// bytes) are parameterized per branch.
 fn build_dm_file_header(
     msg: &DmFileMsg<'_>,
     sig: Option<String>,
@@ -1145,7 +1149,7 @@ fn build_dm_file_header(
             aes_nonce,
             target: None,
             vthumb: msg.vthumb.clone(),
-            share_ref: None,
+            share_ref: msg.share_ref.clone(),
             order_us: Some(msg.order_us),
             album: msg.album.map(str::to_owned),
             inline_bytes,
@@ -1357,14 +1361,15 @@ async fn send_dm_file_to_device(
 
         // Only send file data if peer is reachable right now.
         // If offline, the file_id is in the message — sync will request it later.
-        if reachable && receiver_pref_declines(peer_auto_dl, peer_str, msg) {
+        if reachable && (msg.share_ref.is_some() || receiver_pref_declines(peer_auto_dl, peer_str, msg)) {
             // Sender-side pre-negotiation: this device ADVERTISED a threshold this
             // push would violate, so its gate would decline the header and discard
             // every byte. The metadata-only header renders the card with a manual
-            // Download button, and the explicit FileRequest pull still works.
+            // Download button, and the explicit FileRequest pull still works. A
+            // share-backed file goes the same way: the Share delivers its bytes.
             hollow_log!(
-                "[HOLLOW-FILE] Receiver pref gates {} ({} bytes) for {peer_str} — sending metadata-only header, no bytes",
-                msg.file_id, msg.file_size
+                "[HOLLOW-FILE] Metadata-only header for {} ({} bytes, share {}) to {peer_str}, no bytes",
+                msg.file_id, msg.file_size, msg.share_ref.is_some()
             );
             let header = build_dm_file_header(
                 msg, msg.sig.clone(), msg.pk.clone(),
@@ -1381,7 +1386,7 @@ async fn send_dm_file_to_device(
                 peer_str, msg, olm, crypto_store, event_tx,
                 ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
             ).await;
-        } else if msg.is_image {
+        } else if msg.is_image && msg.share_ref.is_none() {
             if receiver_pref_declines(peer_auto_dl, peer_str, msg) {
                 // Pre-negotiation, offline-image variant: the device advertised a
                 // gating threshold before it went offline, so do not inline bytes

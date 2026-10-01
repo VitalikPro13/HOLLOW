@@ -1759,6 +1759,61 @@ pub(crate) fn request_server_group_bootstrap(
     sent > 0
 }
 
+/// Ask for a leaf in a server group we hold no copy of: the owner when online, our
+/// own siblings when the owner is our identity (they re-add a sibling), else the
+/// lowest online member. True when a KeyPackage reached a device.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn request_server_leaf(
+    mls: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_master: &str,
+    local_device: &str,
+) -> bool {
+    let owner_is_us = server.members.keys().any(|m| {
+        super::resolver::same_identity(m, local_master)
+            && server.roles.get(m).is_some_and(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+    });
+    let targets: Vec<String> = if owner_is_us {
+        online_devices_for(ws_room_peers, local_master).into_iter().filter(|d| d != local_device).collect()
+    } else {
+        server_bootstrap_target(server, local_master, ws_room_peers)
+            .filter(|t| !super::resolver::same_identity(t, local_master))
+            .map(|t| online_devices_for(ws_room_peers, &t))
+            .unwrap_or_default()
+    };
+    if targets.is_empty() {
+        return false;
+    }
+    let kp_bytes = match mint_key_package(mls, crypto_store) {
+        Ok(kp) => kp,
+        Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
+    };
+    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        server_id: server_id.to_string(),
+        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+        channel_id: None,
+    }).unwrap_or_default();
+    let mut sent = 0;
+    for dev in &targets {
+        if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: room,
+                target_peer: dev.clone(),
+                data: data.clone(),
+            });
+            sent += 1;
+        }
+    }
+    if sent > 0 {
+        hollow_log!("[HOLLOW-MLS] Asked {targets:?} for a leaf in {server_id}");
+    }
+    sent > 0
+}
+
 /// Reconcile per-channel MLS subgroup membership against the CRDT after a
 /// lifecycle event (role or visibility change, channel create/delete, kick, ban,
 /// leave), for every restricted channel or just `only_channel`.

@@ -652,6 +652,19 @@
   },
   {
    "peer": "a",
+   "op": "scroll",
+   "target": "type:Scrollable",
+   "dy": -600,
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:About",
+   "timeout_ms": 5000
+  },
+  {
+   "peer": "a",
    "op": "tap",
    "target": "text:About",
    "index": 0,

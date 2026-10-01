@@ -24,6 +24,8 @@
 #      probe bailed and the member holding the newer epoch would not serve it.
 #      The tell is the LAST assertion: a message sent after the owner is back
 #      has to arrive, at an epoch the owner never committed.
+#   3. The owner deletes the server while the joiner is CLOSED, and the joiner
+#      loses it on its return (the cleanup is that check).
 #
 # The Rust harness proves the ops converge, at five nodes and in seconds. This
 # proves the app does it, in the widgets, over the real relay. Keep protocol
@@ -109,7 +111,7 @@ function Stop-Peer($peer) {
     # time to drop before anything else touches that directory.
     Start-Sleep -Milliseconds 1500
     if (Get-PeerProcess $peer) { throw "peer $peer did not stop" }
-    Say "$peer is closed - the owner is now OFFLINE" 'Yellow'
+    Say "$peer is closed" 'Yellow'
 }
 
 $live = Get-LivePeers
@@ -215,22 +217,46 @@ try {
 }
 
 # Cleanup runs whatever happened. Leaving a fleet server alive is worse than a
-# noisy log: these are real identities on the real relay.
+# noisy log: these are real identities on the real relay. It doubles as the
+# last check: c is CLOSED while the owner deletes, and must lose the server
+# when it comes back, from the relay's rings alone.
+$offlineDelete = $null
 if (-not $KeepServer) {
-    Say 'cleanup: deleting the server as its owner'
+    Say 'cleanup: deleting the server as its owner, with c closed'
     try {
         if (-not (Get-PeerProcess 'a')) { Restart-Peer a }
+        $cClosed = $false
+        if (-not $failure -and (Get-PeerProcess 'c')) { Stop-Peer c; $cClosed = $true }
         Step a @{ op = 'wait_for'; target = "server:$server"; timeout_ms = 60000 }
         Step a @{ op = 'right_click'; target = "server:$server" }
         Step a @{ op = 'tap'; target = 'menu > text:Server settings' }
         Step a @{ op = 'reveal'; target = 'text:Delete server'; index = 0 }
         Step a @{ op = 'tap'; target = 'text:Delete server'; index = 0 }
-        # index 1: index 0 is the dialog's TITLE, and tapping a title silently
-        # does nothing and PASSES.
+        # Inside the dialog, index 0 is the confirm button: its title reads
+        # "Delete <name>?".
         Step a @{ op = 'tap'; target = 'dialog > text:Delete server'; index = 0 }
         Step a @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 60000 }
         Step b @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 120000 }
-        Step c @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 120000 }
+        if ($cClosed) {
+            Restart-Peer c
+            Step c @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
+            # c's own server list: the capture throws until it has loaded, so an
+            # absent server here is a deletion that landed, never an empty screen.
+            $offlineDelete = $false
+            $deadline = (Get-Date).AddSeconds(120)
+            while ((Get-Date) -lt $deadline) {
+                Start-Sleep -Seconds 5
+                $answer = Send-FleetStep c ([pscustomobject]@{ op = 'capture'; from = 'provider'; key = 'servers'; as = 'C_SERVERS' }) 60
+                if ($answer.ok -and $answer.captured -and -not "$($answer.captured.C_SERVERS)".Contains($server)) {
+                    $offlineDelete = $true
+                    break
+                }
+            }
+            if ($offlineDelete) { Say 'c, closed during the delete, lost the server on its return' 'Green' }
+            else { Say "c, closed during the delete, still holds $server" 'Red' }
+        } else {
+            Step c @{ op = 'wait_for'; gone = "server:$server"; timeout_ms = 120000 }
+        }
         Say 'cleanup done' 'Green'
     } catch {
         Say "cleanup failed (the server may still exist): $($_.Exception.Message)" 'Red'
@@ -238,4 +264,5 @@ if (-not $KeepServer) {
 }
 
 if ($failure) { throw $failure }
+if ($offlineDelete -eq $false) { throw "a member closed during the delete kept the server" }
 Say 'PASS' 'Green'
