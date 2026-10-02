@@ -292,7 +292,10 @@ into possible holes, so this file itself belongs on the security branch.
   (`ACCEPT_DEVICE_LIST_INBOX_PROOF`, never for a protected or removed device). Rust
   1195/1195, Flutter 1805, relay tests plain and under ASan/UBSan, clippy clean on new
   lines; mutation pass 13/14 rules killed, the last an equivalent mutant (two tests added
-  and a redundant standing cap removed after the first run, relay redeployed).
+  and a redundant standing cap removed after the first run, relay redeployed). Desktop fleet
+  against the deployed relay: friend_dm, regress_social, friend offline/decline/re-add,
+  device link and destroy all PASS. Owed for session 26: the new toggle on screen (desktop
+  and the Mac mini's phones) and a phone's inbox against the new relay.
 - **NEXT:** the program's remaining phases (section 4, C to G); Vitalik sets the order.
   **On release day** add `ACCEPT_DEVICE_LIST_INBOX_PROOF` to the switches turned off.
 - **Before session 20 (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood
