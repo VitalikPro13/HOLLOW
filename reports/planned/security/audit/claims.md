@@ -27,7 +27,7 @@ Columns:
 | C-01 | Only a current device of mine or my recovery phrase adds or removes my devices; the master key alone admits nothing. No message from any other identity changes which devices count as mine, or which devices count as someone else's. | P-01, all peers, P-08, P-09 | WP 3.2, 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1, 2026-10-01), retest at release |
 | C-02 | Nothing another identity sends can wipe, lock or destroy data on my devices. Only my recovery phrase (or a permission it signed for one device) orders my devices destroyed remotely; my own duress secret typed on a device wipes that device. | P-01, all peers, P-08 | WP 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1), retest at release |
 | C-03 | A removed device stops getting anything at once: everyone who has seen the removal stops sending it DMs, server messages and media keys, and its old sessions are dropped. It locks, and erases itself after three days unless the recovery phrase is typed on it. | P-01, P-08 | WP 3.6 | Fixed on local main (HOL-SEC-077, design ID-1; note 1), retest at release |
-| C-04 | A replayed older roster never brings back a removed device. | P-01, all peers | WP 3.2 | Believed (removals are a plain union inside a base; only a newer recovery, signed by the phrase, starts a new one) |
+| C-04 | A replayed older roster never brings back a removed device. | P-01, all peers | WP 3.2 | Fixed on local main (HOL-SEC-079: a flood of anyone's statements pushed removals out; HOL-SEC-080: a removed device's own vouchee kept itself; the relay holds removals too, HOL-SEC-078), retest at release |
 | C-05 | Linking a new device hands my identity only to that device, and only after I confirm on a device I already hold. The relay never holds a secret that opens a link transfer; a relay that answers the code gets one guess. | P-01, P-02, all peers | WP 3.4 | Fixed on local main (HOL-SEC-002, reworded 2026-10-01), retest at release |
 | C-06 | A copy of my identity file is useless without my machine (keychain mode) or my password (password mode). | P-09 | WP 2.3, 23.1 | Believed; "no protection" mode excluded by design |
 | C-07 | Typing the duress secret destroys local data and shows nothing, and checking it costs the same as checking the real secret. | P-09 | WP 23.1 | Believed |
@@ -142,3 +142,6 @@ adds):
    friend lists or join requests. Meeting knocks, lobby frames, the host's other
    frames and the meeting Welcome ride sealed under the key the meeting link
    carries (HOL-SEC-072, 2026-09-29), so it reads no meeting name or host either.
+   ID-1R (2026-10-02): the relay keeps each identity's roster in RAM to decide who
+   reads its inbox. Rosters already rode in the clear as roster notices, so it
+   learns nothing it could not read before.

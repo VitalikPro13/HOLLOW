@@ -1,6 +1,6 @@
 //! Every identity's roster as this node holds it (design ID-1): storage, the fold on
-//! this node's own clock, our own roster's upkeep and changes, ingest, and the inbox
-//! proof the relay still reads.
+//! this node's own clock, our own roster's upkeep and changes, ingest, and showing our
+//! roster to the relay, which folds it to decide who reads our inbox (ID-1R).
 //!
 //! The resolver holds members only. A device that holds the master key but is pending,
 //! removed or unknown to the roster resolves to itself, so it is never "one of us".
@@ -13,10 +13,9 @@ use crate::identity::native_identity::NativeKeypair;
 use crate::identity::roster::{self, Roster, RosterState};
 use crate::storage::MessageStore;
 
-use super::types::{NetworkEvent, SignedDeviceList};
+use super::types::NetworkEvent;
 
-/// A roster bigger than this on the wire is dropped whole.
-pub(crate) const MAX_ROSTER_BYTES: usize = 256 * 1024;
+pub(crate) use crate::identity::roster::MAX_ROSTER_BYTES;
 /// Statements the node imports at its next start, written where the database is not
 /// open yet (a new identity, a phrase typed before the node runs).
 pub(crate) const BOOTSTRAP_FILE: &str = "roster_bootstrap.json";
@@ -63,7 +62,7 @@ fn save(
 ) -> Result<(), String> {
     let json = serde_json::to_string(roster).map_err(|e| format!("roster json: {e}"))?;
     let members: Vec<String> = state.members.iter().cloned().collect();
-    store.save_device_list(&roster.master, &json, inbox_version(roster, state), &members, now_ms())?;
+    store.save_device_list(&roster.master, &json, 0, &members, now_ms())?;
     for d in super::resolver::devices_for(&roster.master) {
         if !state.members.contains(&d) {
             super::resolver::forget(&d);
@@ -110,48 +109,22 @@ pub(crate) fn merge_for_test(store: &MessageStore, roster: &Roster, local_master
     save(store, &merged, &state, local_master, local_device).expect("save roster");
 }
 
-/// A version the relay's inbox marks accept from every device of one identity alike:
-/// it grows with the roster (a newer base, or more statements in the same base) and
-/// two devices holding the same roster produce the same number.
-fn inbox_version(roster: &Roster, state: &RosterState) -> u64 {
-    let count = (roster.consents.len()
-        + roster.vouches.len()
-        + roster.pendings.len()
-        + roster.legacy.len()
-        + roster.removals.len()
-        + roster.phrase_admits.len())
-    .min(999) as u64;
-    let base_at = if state.protected {
-        roster.recoveries.iter().map(|r| r.at_ms).max().unwrap_or(0).max(0) as u64
-    } else {
-        0
-    };
-    if base_at > 0 {
-        base_at.saturating_mul(1000).saturating_add(count)
-    } else {
-        1_000_000_000 + count
-    }
-}
-
-/// The master-signed list of our members the relay reads to let this device into our
-/// own inbox (until ID-1R teaches the relay rosters).
-pub(crate) fn inbox_proof(
-    master: &NativeKeypair,
+/// Show the relay our roster: it folds every roster shown for our master into one and
+/// lets a device into our inbox only while that fold counts it, so what we show
+/// teaches it our removals and recoveries at once. A waiting device shows it too,
+/// which starts the relay's seven days.
+pub(crate) fn show_relay(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
     db_path: &str,
     db_passphrase: &str,
-) -> Option<SignedDeviceList> {
-    let store = MessageStore::open(db_path, db_passphrase).ok()?;
-    let roster = load(&store, &master.peer_id())?;
-    let state = fold(&store, &roster);
-    if state.members.is_empty() {
-        return None;
+) {
+    if let Some(roster) = own_roster(local_master, db_path, db_passphrase) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinInbox {
+            room_code: format!("inbox:{local_master}"),
+            roster,
+        });
     }
-    Some(super::crypto_handler::build_signed_device_list(
-        master,
-        inbox_version(&roster, &state),
-        state.members.iter().cloned().collect(),
-        state.removed.keys().cloned().collect(),
-    ))
 }
 
 // -- Our own roster --
@@ -359,16 +332,19 @@ pub(crate) fn remove_self(
     let mut roster = load(&store, &own)?;
     let state = fold(&store, &roster);
     let me = device.peer_id();
-    roster.add_removal(roster::sign_removal(device, &own, &state.base, &me, &[]));
+    let keep = roster.vouched_members_of(&me, &state);
+    roster.add_removal(roster::sign_removal(device, &own, &state.base, &me, &keep));
     Some(roster.verified(now_ms()))
 }
 
-/// The phrase starts a new base keeping `keep` and this device.
+/// The phrase starts a new base keeping `keep` and this device. `no_wait` decides
+/// whether a restored backup may still join the new base by seven quiet days.
 pub(crate) fn recover(
     master: &NativeKeypair,
     recovery: &NativeKeypair,
     device: &NativeKeypair,
     keep: &[String],
+    no_wait: bool,
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
@@ -377,10 +353,13 @@ pub(crate) fn recover(
         keep.push(device.peer_id());
         keep.sort();
         keep.dedup();
+        if keep.len() > roster::MAX_KEEP {
+            return Err(format!("A recovery can keep at most {} devices.", roster::MAX_KEEP));
+        }
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let rec = roster::sign_recovery(master, recovery, now_ms(), &keep);
+        let rec = roster::sign_recovery(master, recovery, now_ms(), &keep, no_wait);
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
     })
 }
@@ -1008,7 +987,7 @@ mod tests {
             "the owner's device must learn it was removed",
         );
 
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], &me.db, &me.pass).unwrap();
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass).unwrap();
         assert!(state.is_member(&me.device.peer_id()));
         assert!(!state.is_member(&thief.peer_id()), "the thief survived the recovery");
         let mut late = roster.clone();
@@ -1103,35 +1082,41 @@ mod tests {
         );
     }
 
-    /// The relay's inbox proof names our members only, at a version every device of
-    /// ours computes alike from the same roster, and a recovery outranks legacy.
+    /// The relay sees our whole roster, the waiting device's own ask included, so it
+    /// folds the same answer every contact does.
     #[test]
-    fn the_inbox_proof_names_members_at_a_shared_version() {
+    fn the_relay_is_shown_the_whole_roster() {
         let _g = guard();
         let me = Observer::new(0x01, 0x02);
         let (roster, _) = me.own();
-        let sibling = Observer::new(0x01, 0x07);
-        let mut theirs = roster.clone();
-        theirs.add_consent(sign_consent(&sibling.device, &me.master.peer_id()));
-        theirs.add_legacy(sign_legacy(&me.master, &sibling.device.peer_id()));
-        merge_for_test(&me.store(), &theirs, &me.master.peer_id(), &me.device.peer_id());
-        merge_for_test(&sibling.store(), &theirs, &me.master.peer_id(), &sibling.device.peer_id());
-        let asking = kp(0x08);
-        let mut with_pending = theirs.clone();
-        with_pending.add_consent(sign_consent(&asking, &me.master.peer_id()));
-        with_pending.add_pending(sign_pending(&me.master, LEGACY_BASE, &asking.peer_id()));
-        merge_for_test(&me.store(), &with_pending, &me.master.peer_id(), &me.device.peer_id());
-        merge_for_test(&sibling.store(), &with_pending, &me.master.peer_id(), &sibling.device.peer_id());
-        let a = inbox_proof(&me.master, &me.db, &me.pass).unwrap();
-        let b = inbox_proof(&me.master, &sibling.db, &sibling.pass).unwrap();
-        assert!(super::super::crypto_handler::verify_device_list(&a));
-        assert_eq!(a.version, b.version);
-        assert_eq!(a.devices.len(), 2);
-        assert!(!a.devices.contains(&asking.peer_id()), "a device that only asks is no owner of the inbox");
-        let (_, state) = recover(&me.master, &kp(0x03), &me.device, &[], &me.db, &me.pass).unwrap();
-        assert!(state.protected);
-        let c = inbox_proof(&me.master, &me.db, &me.pass).unwrap();
-        assert!(c.version > a.version, "a recovery must outrank every legacy proof at the relay");
+        let (ws, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        show_relay(&ws, &me.master.peer_id(), &me.db, &me.pass);
+        match rx.try_recv() {
+            Ok(super::super::ws_client::WsCommand::JoinInbox { room_code, roster: shown }) => {
+                assert_eq!(room_code, format!("inbox:{}", me.master.peer_id()));
+                assert_eq!(shown, roster);
+            }
+            _ => panic!("no inbox join with the roster"),
+        }
+    }
+
+    /// Destroying this device (scope (b)) keeps the devices it linked: the phone a
+    /// laptop was linked from takes nothing with it.
+    #[test]
+    fn removing_itself_keeps_the_devices_it_linked() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms())).unwrap();
+        me.own();
+        let laptop = kp(0x07);
+        vouch(&me.master, &me.device, &laptop.peer_id(), &me.db, &me.pass).unwrap();
+        let (mut roster, _) = own(&me.master.peer_id(), &me.db, &me.pass).unwrap();
+        roster.add_consent(sign_consent(&laptop, &me.master.peer_id()));
+        merge_for_test(&me.store(), &roster, &me.master.peer_id(), &me.device.peer_id());
+        let signed = remove_self(&me.master, &me.device, &me.db, &me.pass).unwrap();
+        let s = signed.fold(|_| None, now_ms());
+        assert!(!s.is_member(&me.device.peer_id()));
+        assert!(s.is_member(&laptop.peer_id()), "the laptop left with the phone it was linked from");
     }
 
     /// The first recovery key an identity shows is the one it keeps.
@@ -1140,9 +1125,9 @@ mod tests {
         let _g = guard();
         let me = Observer::new(0x01, 0x02);
         me.own();
-        recover(&me.master, &kp(0x03), &me.device, &[], &me.db, &me.pass).unwrap();
+        recover(&me.master, &kp(0x03), &me.device, &[], false, &me.db, &me.pass).unwrap();
         assert!(
-            recover(&me.master, &kp(0x04), &me.device, &[], &me.db, &me.pass).is_err(),
+            recover(&me.master, &kp(0x04), &me.device, &[], false, &me.db, &me.pass).is_err(),
             "a second recovery key replaced the pinned one",
         );
     }

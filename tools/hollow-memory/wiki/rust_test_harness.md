@@ -206,6 +206,21 @@ one-shot resolve, release, `taken`/`not_found`); a hostile relay is a `raw_socke
 export reads them. Tests `authz_*` of ID-1 and `link_*`; the mutation script for these rules is
 the untracked `tmp_id1_mutate.py` (repo root).
 
+
+## The mock relay's inbox (ID-1R, 2026-10-02)
+
+`WsCommand::JoinInbox { room_code, roster }` runs `RelayInner::show_roster`, the Rust twin of
+`relay-uws/src/roster_book.h`: every roster shown for a master is folded into the one held in
+`inbox_rosters` (with the relay's first sight of each pending join), the socket owns the inbox
+only while its device is a member, a shown roster decides on its own, and a change drops every
+owner it stops counting (`drop_inbox_owners`, `PeerLeft` to the owners left). The 0.11
+master-signed list path is relay-only (the mock models 0.12). `relay.inbox_owners(master)`
+reads who owns it; `relay.age_inbox_wait(master, device, ms)` moves the relay's first sight
+back. To prove a device's OWN report reaches the relay, make the device it removes deaf to it
+(`swallow_direct` + `set_broadcast_deaf`), or the removed device reports its removal itself.
+Tests: `mailbox_requires_a_roster_that_counts_the_device`,
+`authz_the_master_key_alone_never_owns_a_protected_inbox`,
+`authz_a_removed_device_loses_the_inbox_at_once`; mutation script `tmp_id1r_mutate.py`.
 ## Waits that a duplicate or an earlier frame can satisfy (session 22, 2026-10-01)
 
 Three load-only flakes in one session had one shape: the wait matched SOME event or frame,

@@ -24,11 +24,21 @@ pub(crate) const PENDING_MATURITY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub(crate) const REMOVAL_GRACE_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// How far past our clock a phrase statement may be dated.
 const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
-/// Per-kind ceilings on what one roster carries. Only a member can mint vouches and
-/// removals, and a flood ends with the next recovery, which drops them all.
-const MAX_DEVICE_STATEMENTS: usize = 256;
-const MAX_PENDING: usize = 16;
-const MAX_KEEP: usize = 64;
+/// A roster bigger than this on the wire is dropped whole.
+pub(crate) const MAX_ROSTER_BYTES: usize = 256 * 1024;
+/// Ceilings that keep the largest roster under `MAX_ROSTER_BYTES`. Vouches and removals
+/// count only from a signer with standing and give way by the signer's distance from
+/// the phrase, so a flood pushes out only what sits as deep as its signer or deeper.
+/// The relay mirrors every one of these (`relay-uws/src/roster.h`).
+pub(crate) const MAX_VOUCHES: usize = 128;
+pub(crate) const MAX_REMOVALS: usize = 96;
+pub(crate) const MAX_REMOVAL_KEEP: usize = 16;
+pub(crate) const MAX_KEEP: usize = 64;
+const MAX_RECOVERY_TIES: usize = 4;
+const MAX_PHRASE_ADMITS: usize = 64;
+const MAX_LEGACY: usize = 64;
+pub(crate) const MAX_PENDING: usize = 16;
+const MAX_CONSENTS: usize = 96;
 const MAX_UNNAMED_CONSENTS: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,12 +75,15 @@ pub(crate) struct Consent {
 }
 
 /// The phrase starts a new base keeping exactly `keep`. Signed by R and by M.
+/// `no_wait`: in this base a restored backup never joins by waiting seven days.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct Recovery {
     #[serde(default)]
     pub at_ms: i64,
     #[serde(default)]
     pub keep: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_wait: bool,
     #[serde(default)]
     pub sig_r: String,
     #[serde(default)]
@@ -146,6 +159,8 @@ pub(crate) struct RosterState {
     pub base: String,
     /// A recovery exists: the phrase, not the master key, is the root.
     pub protected: bool,
+    /// The phrase turned off joining by seven quiet days in this base.
+    pub no_wait: bool,
     pub members: BTreeSet<String>,
     /// Removed device -> the device that removed it.
     pub removed: BTreeMap<String, String>,
@@ -172,8 +187,9 @@ pub(crate) fn consent_payload(master: &str, device: &str) -> String {
     format!("hollow-id1-join:{master}:{device}")
 }
 
-pub(crate) fn recovery_payload(master: &str, r_pub: &str, at_ms: i64, keep: &[String]) -> String {
-    format!("hollow-id1-recovery:{master}:{r_pub}:{at_ms}:{}", sorted(keep).join(","))
+pub(crate) fn recovery_payload(master: &str, r_pub: &str, at_ms: i64, keep: &[String], no_wait: bool) -> String {
+    let flag = if no_wait { ":nowait" } else { "" };
+    format!("hollow-id1-recovery:{master}:{r_pub}:{at_ms}:{}{flag}", sorted(keep).join(","))
 }
 
 pub(crate) fn phrase_admit_payload(master: &str, r_pub: &str, at_ms: i64, device: &str) -> String {
@@ -201,7 +217,7 @@ pub(crate) fn removal_payload(master: &str, base: &str, device: &str, keep_vouch
 
 /// The id device statements use to name a recovery's base.
 pub(crate) fn base_id(master: &str, r_pub: &str, rec: &Recovery) -> String {
-    let payload = recovery_payload(master, r_pub, rec.at_ms, &rec.keep);
+    let payload = recovery_payload(master, r_pub, rec.at_ms, &rec.keep, rec.no_wait);
     hex::encode(&Sha256::digest(payload.as_bytes())[..16])
 }
 
@@ -247,11 +263,13 @@ pub(crate) fn sign_recovery(
     recovery: &NativeKeypair,
     at_ms: i64,
     keep: &[String],
+    no_wait: bool,
 ) -> Recovery {
-    let payload = recovery_payload(&master.peer_id(), &r_pub_of(recovery), at_ms, keep);
+    let payload = recovery_payload(&master.peer_id(), &r_pub_of(recovery), at_ms, keep, no_wait);
     Recovery {
         at_ms,
         keep: sorted(keep),
+        no_wait,
         sig_r: sign(recovery, &payload),
         sig_m: sign(master, &payload),
     }
@@ -320,6 +338,22 @@ fn push_unique<T: Ord + Clone>(into: &mut Vec<T>, from: &[T]) {
     into.dedup();
 }
 
+fn sort_cap<T: Ord>(v: &mut Vec<T>, cap: usize) {
+    v.sort();
+    v.dedup();
+    v.truncate(cap);
+}
+
+/// A standing device's place: tier, depth, then its id.
+type Rank = (u8, u32, String);
+
+struct Current {
+    base: String,
+    at: i64,
+    keep: BTreeSet<String>,
+    no_wait: bool,
+}
+
 impl Roster {
     pub(crate) fn new(master: &str) -> Self {
         Roster { master: master.to_string(), ..Default::default() }
@@ -335,7 +369,7 @@ impl Roster {
         let mut r = Roster::new(&master.peer_id());
         r.r_pub = r_pub_of(recovery);
         r.consents.push(sign_consent(device, &r.master));
-        r.recoveries.push(sign_recovery(master, recovery, now_ms, &[device.peer_id()]));
+        r.recoveries.push(sign_recovery(master, recovery, now_ms, &[device.peer_id()], false));
         r
     }
 
@@ -371,7 +405,7 @@ impl Roster {
                         && keep.len() <= MAX_KEEP
                         && keep.iter().all(|d| id_ok(d))
                         && {
-                            let p = recovery_payload(m, r_pub, rec.at_ms, &keep);
+                            let p = recovery_payload(m, r_pub, rec.at_ms, &keep, rec.no_wait);
                             verify(&rk, &p, &rec.sig_r) && verify(&mk, &p, &rec.sig_m)
                         }
                 })
@@ -433,7 +467,7 @@ impl Roster {
                 is_base_shape(&r.base)
                     && id_ok(&r.device)
                     && keep == r.keep_vouched
-                    && keep.len() <= MAX_KEEP
+                    && keep.len() <= MAX_REMOVAL_KEEP
                     && keep.iter().all(|d| id_ok(d))
                     && verify_by(&r.by, &removal_payload(m, &r.base, &r.device, &keep), &r.sig)
             })
@@ -465,38 +499,109 @@ impl Roster {
         out.compacted()
     }
 
-    /// The newest recovery (ties: the lowest base id) with the union of the keep sets
-    /// that share its time, and its base id.
-    fn current_recovery(&self) -> Option<(String, i64, BTreeSet<String>)> {
-        let newest = self.recoveries.iter().map(|r| r.at_ms).max()?;
-        let ties: Vec<&Recovery> = self.recoveries.iter().filter(|r| r.at_ms == newest).collect();
-        let base = ties
-            .iter()
-            .map(|r| base_id(&self.master, &self.r_pub, r))
-            .min()?;
+    /// The newest recovery: its base id (ties: the lowest), its time, the union of the
+    /// keep sets that share it, and whether any of them turned off joining by waiting.
+    fn current_recovery(&self) -> Option<Current> {
+        let at = self.recoveries.iter().map(|r| r.at_ms).max()?;
+        let ties: Vec<&Recovery> = self.recoveries.iter().filter(|r| r.at_ms == at).collect();
+        let base = ties.iter().map(|r| base_id(&self.master, &self.r_pub, r)).min()?;
         let keep = ties.iter().flat_map(|r| r.keep.iter().cloned()).collect();
-        Some((base, newest, keep))
+        let no_wait = ties.iter().any(|r| r.no_wait);
+        Some(Current { base, at, keep, no_wait })
+    }
+
+    /// Whether every kind fits its ceiling, as any compacted roster does. The relay
+    /// verifies nothing from a roster that does not.
+    pub(crate) fn within_caps(&self) -> bool {
+        self.recoveries.len() <= MAX_RECOVERY_TIES
+            && self.phrase_admits.len() <= MAX_PHRASE_ADMITS
+            && self.consents.len() <= MAX_CONSENTS
+            && self.vouches.len() <= MAX_VOUCHES
+            && self.pendings.len() <= MAX_PENDING
+            && self.legacy.len() <= MAX_LEGACY
+            && self.removals.len() <= MAX_REMOVALS
     }
 
     /// The base every new device statement must name.
     pub(crate) fn base(&self) -> String {
         self.current_recovery()
-            .map(|(b, _, _)| b)
+            .map(|c| c.base)
             .unwrap_or_else(|| LEGACY_BASE.to_string())
     }
 
+    /// The current base, and the devices the phrase (or, in a legacy base, the master)
+    /// roots in it, consent not yet checked.
+    fn base_roots(&self) -> (Option<Current>, BTreeSet<String>) {
+        match self.current_recovery() {
+            Some(c) => {
+                let mut roots = c.keep.clone();
+                roots.extend(self.phrase_admits.iter().filter(|p| p.at_ms > c.at).map(|p| p.device.clone()));
+                (Some(c), roots)
+            }
+            None => {
+                let mut roots: BTreeSet<String> = self.legacy.iter().map(|l| l.device.clone()).collect();
+                roots.extend(self.phrase_admits.iter().map(|p| p.device.clone()));
+                (None, roots)
+            }
+        }
+    }
+
+    /// Every device with an admission path in the current base, removals ignored and
+    /// every pending join counted, ranked by (tier, depth, id): tier 0 grows from the
+    /// roots, tier 1 from pending joins, depth counts vouches from a root. A device
+    /// always ranks below its best voucher.
+    fn standing(&self) -> BTreeMap<String, Rank> {
+        let consented: BTreeSet<&str> = self.consents.iter().map(|c| c.device.as_str()).collect();
+        let (_, roots) = self.base_roots();
+        let mut vouchees: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for v in self.vouches.iter().filter(|v| consented.contains(v.device.as_str())) {
+            vouchees.entry(v.by.as_str()).or_default().insert(v.device.as_str());
+        }
+        let seeds: [(u8, BTreeSet<&str>); 2] = [
+            (0, roots.iter().map(String::as_str).filter(|d| consented.contains(d)).collect()),
+            (1, self.pendings.iter().map(|p| p.device.as_str()).filter(|d| consented.contains(d)).collect()),
+        ];
+        let mut rank: BTreeMap<&str, (u8, u32)> = BTreeMap::new();
+        for (tier, seed) in seeds {
+            let mut frontier: BTreeSet<&str> = seed.into_iter().filter(|d| !rank.contains_key(d)).collect();
+            let mut depth = 0u32;
+            while !frontier.is_empty() {
+                for d in &frontier {
+                    rank.insert(*d, (tier, depth));
+                }
+                let next: BTreeSet<&str> = frontier
+                    .iter()
+                    .filter_map(|by| vouchees.get(by))
+                    .flatten()
+                    .copied()
+                    .filter(|d| !rank.contains_key(d))
+                    .collect();
+                frontier = next;
+                depth += 1;
+            }
+        }
+        let mut ranked: Vec<Rank> = rank.into_iter().map(|(d, (tier, depth))| (tier, depth, d.to_string())).collect();
+        ranked.sort();
+        ranked.into_iter().map(|r| (r.2.clone(), r)).collect()
+    }
+
     /// Everything superseded by the current base dropped, statements sorted, and the
-    /// per-kind ceilings applied.
+    /// ceilings applied. A vouch or removal stays only when its signer stands, ordered
+    /// by its signer's rank, whatever it names: a vouch may precede its device's
+    /// consent, and a removal may precede the device's claim. Each standing device's
+    /// best vouch stays first, so a compacted roster ranks the same when compacted again.
     fn compacted(mut self) -> Roster {
-        let current = self.current_recovery();
-        match &current {
-            Some((base, at, _)) => {
-                self.recoveries.retain(|r| r.at_ms == *at);
-                self.phrase_admits.retain(|p| p.at_ms > *at);
+        if let Some(at) = self.recoveries.iter().map(|r| r.at_ms).max() {
+            self.recoveries.retain(|r| r.at_ms == at);
+        }
+        sort_cap(&mut self.recoveries, MAX_RECOVERY_TIES);
+        match self.current_recovery() {
+            Some(c) => {
+                self.phrase_admits.retain(|p| p.at_ms > c.at);
                 self.legacy.clear();
-                self.vouches.retain(|v| &v.base == base);
-                self.pendings.retain(|p| &p.base == base);
-                self.removals.retain(|r| &r.base == base);
+                self.vouches.retain(|v| v.base == c.base);
+                self.pendings.retain(|p| p.base == c.base);
+                self.removals.retain(|r| r.base == c.base);
             }
             None => {
                 self.vouches.retain(|v| v.base == LEGACY_BASE);
@@ -504,44 +609,72 @@ impl Roster {
                 self.removals.retain(|r| r.base == LEGACY_BASE);
             }
         }
-        self.vouches.sort();
-        self.vouches.dedup();
-        self.vouches.truncate(MAX_DEVICE_STATEMENTS);
-        self.removals.sort();
-        self.removals.dedup();
-        self.removals.truncate(MAX_DEVICE_STATEMENTS);
-        self.pendings.sort();
-        self.pendings.dedup();
-        self.pendings.truncate(MAX_PENDING);
-        self.legacy.sort();
-        self.legacy.dedup();
-        self.legacy.truncate(MAX_DEVICE_STATEMENTS);
-        self.phrase_admits.sort();
-        self.phrase_admits.dedup();
-        self.phrase_admits.truncate(MAX_DEVICE_STATEMENTS);
-        self.recoveries.sort();
-        self.recoveries.dedup();
+        sort_cap(&mut self.phrase_admits, MAX_PHRASE_ADMITS);
+        sort_cap(&mut self.legacy, MAX_LEGACY);
+        sort_cap(&mut self.pendings, MAX_PENDING);
+        self.consents.sort();
+        self.consents.dedup_by(|a, b| a.device == b.device);
 
+        let standing = self.standing();
+        let rank = |d: &str| standing.get(d).cloned();
+
+        let mut vouches: Vec<Vouch> = std::mem::take(&mut self.vouches)
+            .into_iter()
+            .filter(|v| standing.contains_key(&v.by))
+            .collect();
+        vouches.sort();
+        vouches.dedup();
+        vouches.sort_by_cached_key(|v| (rank(&v.by), v.clone()));
+        let mut best: BTreeSet<&str> = BTreeSet::new();
+        let (tree, rest): (Vec<&Vouch>, Vec<&Vouch>) = vouches
+            .iter()
+            .partition(|v| standing.contains_key(&v.device) && best.insert(v.device.as_str()));
+        let mut kept: Vec<Vouch> = tree.into_iter().chain(rest).take(MAX_VOUCHES).cloned().collect();
+        kept.sort();
+        self.vouches = kept;
+
+        let mut removals: Vec<Removal> = std::mem::take(&mut self.removals)
+            .into_iter()
+            .filter(|r| standing.contains_key(&r.by))
+            .collect();
+        removals.sort();
+        removals.dedup();
+        removals.sort_by_cached_key(|r| (rank(&r.by), r.clone()));
+        removals.truncate(MAX_REMOVALS);
+        removals.sort();
+        self.removals = removals;
+
+        // Standing devices first by rank, then devices a statement names, then a few
+        // that nothing names yet (a consent can arrive ahead of its statement, and
+        // anyone can mint one).
         let mentioned: BTreeSet<&str> = self
             .recoveries
             .iter()
             .flat_map(|r| r.keep.iter().map(String::as_str))
             .chain(self.phrase_admits.iter().map(|p| p.device.as_str()))
-            .chain(self.vouches.iter().flat_map(|v| [v.device.as_str(), v.by.as_str()]))
             .chain(self.pendings.iter().map(|p| p.device.as_str()))
             .chain(self.legacy.iter().map(|l| l.device.as_str()))
-            .chain(self.removals.iter().flat_map(|r| [r.device.as_str(), r.by.as_str()]))
+            .chain(self.vouches.iter().map(|v| v.device.as_str()))
+            .chain(self.removals.iter().map(|r| r.device.as_str()))
             .collect();
-        let mentioned: BTreeSet<String> = mentioned.into_iter().map(str::to_string).collect();
-        // A consent may arrive ahead of the statement that names its device, so a few
-        // unnamed ones stay; anyone can mint them, so only a few.
-        self.consents.sort();
-        self.consents.dedup_by(|a, b| a.device == b.device);
-        let (named, unnamed): (Vec<Consent>, Vec<Consent>) =
-            std::mem::take(&mut self.consents).into_iter().partition(|c| mentioned.contains(&c.device));
-        self.consents = named;
-        self.consents.extend(unnamed.into_iter().take(MAX_UNNAMED_CONSENTS));
-        self.consents.sort();
+        let class = |c: &Consent| match rank(&c.device) {
+            Some(r) => (0u8, Some(r)),
+            None if mentioned.contains(c.device.as_str()) => (1, None),
+            None => (2, None),
+        };
+        let mut consents = std::mem::take(&mut self.consents);
+        consents.sort_by_cached_key(|c| (class(c), c.clone()));
+        let mut unnamed = 0;
+        consents.retain(|c| {
+            if class(c).0 < 2 {
+                return true;
+            }
+            unnamed += 1;
+            unnamed <= MAX_UNNAMED_CONSENTS
+        });
+        consents.truncate(MAX_CONSENTS);
+        consents.sort();
+        self.consents = consents;
         self
     }
 
@@ -550,20 +683,9 @@ impl Roster {
     /// The roster must already be `verified`.
     pub(crate) fn fold(&self, first_seen: impl Fn(&str) -> Option<i64>, now_ms: i64) -> RosterState {
         let consented: BTreeSet<&str> = self.consents.iter().map(|c| c.device.as_str()).collect();
-        let (base, protected, mut roots): (String, bool, BTreeSet<String>) =
-            match self.current_recovery() {
-                Some((base, at, keep)) => {
-                    let mut roots = keep;
-                    roots.extend(self.phrase_admits.iter().filter(|p| p.at_ms > at).map(|p| p.device.clone()));
-                    (base, true, roots)
-                }
-                None => {
-                    let mut roots: BTreeSet<String> =
-                        self.legacy.iter().map(|l| l.device.clone()).collect();
-                    roots.extend(self.phrase_admits.iter().map(|p| p.device.clone()));
-                    (LEGACY_BASE.to_string(), false, roots)
-                }
-            };
+        let (current, mut roots) = self.base_roots();
+        let base = current.as_ref().map_or_else(|| LEGACY_BASE.to_string(), |c| c.base.clone());
+        let no_wait = current.as_ref().is_some_and(|c| c.no_wait);
         roots.retain(|d| consented.contains(d.as_str()));
 
         let vouches: Vec<&Vouch> = self
@@ -579,8 +701,9 @@ impl Roster {
         let matured: BTreeSet<String> = pendings
             .iter()
             .filter(|p| {
-                first_seen(&p.device)
-                    .is_some_and(|seen| seen.saturating_add(PENDING_MATURITY_MS) <= now_ms)
+                !no_wait
+                    && first_seen(&p.device)
+                        .is_some_and(|seen| seen.saturating_add(PENDING_MATURITY_MS) <= now_ms)
             })
             .map(|p| p.device.clone())
             .collect();
@@ -599,6 +722,8 @@ impl Roster {
             }
         }
 
+        // A removed device keeps only the vouchees EVERY removal of it keeps: a device
+        // it vouched cannot keep itself by removing it too.
         let asked: BTreeSet<&str> = pendings.iter().map(|p| p.device.as_str()).collect();
         let mut removed: BTreeMap<String, String> = BTreeMap::new();
         let mut kept_by: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -607,13 +732,14 @@ impl Roster {
                 continue;
             }
             removed.entry(r.device.clone()).or_insert_with(|| r.by.clone());
+            let keep: BTreeSet<&str> = r.keep_vouched.iter().map(String::as_str).collect();
             kept_by
                 .entry(r.device.as_str())
-                .or_default()
-                .extend(r.keep_vouched.iter().map(String::as_str));
+                .and_modify(|k| k.retain(|d| keep.contains(d)))
+                .or_insert(keep);
         }
 
-        // A removed voucher's vouches count only where its remover kept them.
+        // A removed voucher's vouches count only where its removers kept them.
         let mut valid: BTreeSet<String> = roots.union(&matured).cloned().collect();
         loop {
             let before = valid.len();
@@ -641,7 +767,7 @@ impl Roster {
             .filter(|d| !valid.contains(**d) && !removed.contains_key(**d))
             .map(|d| d.to_string())
             .collect();
-        RosterState { base, protected, members, removed, pending }
+        RosterState { base, protected: current.is_some(), no_wait, members, removed, pending }
     }
 
     /// Current members that `device` vouched for, the set an honest remover keeps.
@@ -651,6 +777,7 @@ impl Roster {
             .iter()
             .filter(|v| &v.base == base && v.by == device && state.members.contains(&v.device))
             .map(|v| v.device.clone())
+            .take(MAX_REMOVAL_KEEP)
             .collect()
     }
 
@@ -862,7 +989,7 @@ mod tests {
         let s = fold_now(&r);
         assert!(s.members.is_empty());
 
-        let rec = sign_recovery(&id.m, &id.r, NOW, &[owner.peer_id()]);
+        let rec = sign_recovery(&id.m, &id.r, NOW, &[owner.peer_id()], false);
         r.add_phrase_statement(&r_pub_of(&id.r), Some(rec), None).unwrap();
         let s = fold_now(&r);
         assert_eq!(s.members, BTreeSet::from([owner.peer_id()]));
@@ -915,7 +1042,7 @@ mod tests {
         assert!(!s.protected);
         assert_eq!(s.members.len(), 2);
 
-        let rec = sign_recovery(&id.m, &id.r, NOW, &[d1.peer_id()]);
+        let rec = sign_recovery(&id.m, &id.r, NOW, &[d1.peer_id()], false);
         r.add_phrase_statement(&r_pub_of(&id.r), Some(rec), None).unwrap();
         r.add_legacy(sign_legacy(&id.m, &d2.peer_id()));
         let s = fold_now(&r);
@@ -958,6 +1085,294 @@ mod tests {
         let v = r.verified(NOW);
         assert!(v.recoveries.is_empty());
         assert!(v.consents.is_empty());
+    }
+
+    fn junk_kp(i: u32) -> NativeKeypair {
+        let mut seed = [0x5au8; 32];
+        seed[..4].copy_from_slice(&i.to_le_bytes());
+        NativeKeypair::from_secret_bytes(&seed)
+    }
+
+    /// HOL-SEC-078. A statement whose signer has no standing in the roster is dropped,
+    /// so a stranger who copies a roster and floods it pushes no removal and no
+    /// member's vouch out of the ceilings.
+    #[test]
+    fn authz_a_strangers_flood_pushes_no_statement_out() {
+        let id = Id::new();
+        let (owner, laptop, thief, stranger) = (kp(10), kp(11), kp(66), kp(70));
+        let mut r = Roster::genesis(&id.m, &id.r, &owner, NOW);
+        let base = r.base();
+        for d in [&laptop, &thief] {
+            with_consent(&mut r, d);
+            r.add_vouch(sign_vouch(&owner, &id.master(), &base, &d.peer_id()));
+        }
+        r.add_removal(sign_removal(&owner, &id.master(), &base, &thief.peer_id(), &[]));
+        let mut flood = r.clone();
+        for i in 0..400 {
+            let j = junk_kp(i);
+            flood.consents.push(sign_consent(&j, &id.master()));
+            flood.vouches.push(sign_vouch(&stranger, &id.master(), &base, &j.peer_id()));
+            flood.removals.push(sign_removal(&stranger, &id.master(), &base, &j.peer_id(), &[]));
+        }
+        let merged = r.verified(NOW).merged(&flood.verified(NOW));
+        let s = fold_now(&merged);
+        assert!(!s.is_member(&thief.peer_id()), "a stranger's flood took a removal back");
+        assert!(s.is_member(&laptop.peer_id()), "a stranger's flood pushed a linked device out");
+        assert!(merged.vouches.iter().chain(flood.verified(NOW).vouches.iter()).all(|v| v.by != stranger.peer_id()));
+        assert!(merged.removals.iter().all(|r| r.by != stranger.peer_id()));
+    }
+
+    /// HOL-SEC-078. A device with standing that floods gives way to every signer closer
+    /// to the phrase: the owner's removal of it stays, and the owner's linked device too.
+    #[test]
+    fn authz_a_members_flood_never_displaces_a_signer_closer_to_the_phrase() {
+        let id = Id::new();
+        let (owner, laptop, thief) = (kp(10), kp(11), kp(66));
+        let r = members_flood(&id, &owner, &laptop, &thief);
+        let v = r.verified(NOW);
+        let owners_removal = sign_removal(&owner, &id.master(), &v.base(), &thief.peer_id(), &[]);
+        assert!(v.removals.contains(&owners_removal), "the owner's removal was pushed out");
+        let s = fold_now(&v);
+        assert_eq!(s.members, BTreeSet::from([owner.peer_id(), laptop.peer_id()]));
+        assert!(v.vouches.len() <= MAX_VOUCHES && v.removals.len() <= MAX_REMOVALS);
+    }
+
+    /// The owner links a laptop and the thief's phone; the thief signs a deep tree of
+    /// its own devices that vouch and remove, then the owner removes the thief.
+    fn members_flood(id: &Id, owner: &NativeKeypair, laptop: &NativeKeypair, thief: &NativeKeypair) -> Roster {
+        let mut r = Roster::genesis(&id.m, &id.r, owner, NOW);
+        let base = r.base();
+        for d in [laptop, thief] {
+            with_consent(&mut r, d);
+            r.add_vouch(sign_vouch(owner, &id.master(), &base, &d.peer_id()));
+        }
+        for i in 0..150 {
+            let (j, k) = (junk_kp(i), junk_kp(10_000 + i));
+            r.consents.push(sign_consent(&j, &id.master()));
+            r.consents.push(sign_consent(&k, &id.master()));
+            r.vouches.push(sign_vouch(thief, &id.master(), &base, &j.peer_id()));
+            r.removals.push(sign_removal(thief, &id.master(), &base, &j.peer_id(), &[]));
+            r.vouches.push(sign_vouch(&j, &id.master(), &base, &k.peer_id()));
+            r.removals.push(sign_removal(&j, &id.master(), &base, &thief.peer_id(), &[k.peer_id()]));
+        }
+        r.add_removal(sign_removal(owner, &id.master(), &base, &thief.peer_id(), &[]));
+        r
+    }
+
+    /// Keys ordered by peer id, so a test can make statement order disagree with rank.
+    fn by_id() -> Vec<NativeKeypair> {
+        let mut ks: Vec<NativeKeypair> = (10..250u8).map(kp).collect();
+        ks.sort_by_key(|k| k.peer_id());
+        ks
+    }
+
+    /// HOL-SEC-079. A full roster keeps statements by their signer's rank, never by
+    /// their own order: the owner's removal of a flooding device and the owner's vouch
+    /// for the laptop survive, though both would sort after the flood.
+    #[test]
+    fn authz_signer_rank_decides_what_a_full_roster_keeps() {
+        let id = Id::new();
+        let ks = by_id();
+        let n = ks.len();
+        let (laptop, thief, owner) = (&ks[n - 3], &ks[n - 2], &ks[n - 1]);
+        let mut r = Roster::genesis(&id.m, &id.r, owner, NOW);
+        let base = r.base();
+        for d in [laptop, thief] {
+            with_consent(&mut r, d);
+            r.add_vouch(sign_vouch(owner, &id.master(), &base, &d.peer_id()));
+        }
+        r.add_vouch(sign_vouch(thief, &id.master(), &base, &laptop.peer_id()));
+        for i in 0..150 {
+            let j = junk_kp(i);
+            r.consents.push(sign_consent(&j, &id.master()));
+            r.vouches.push(sign_vouch(thief, &id.master(), &base, &j.peer_id()));
+            r.removals.push(sign_removal(thief, &id.master(), &base, &j.peer_id(), &[]));
+        }
+        let owners_removal = sign_removal(owner, &id.master(), &base, &thief.peer_id(), &[]);
+        r.add_removal(owners_removal.clone());
+        let v = r.verified(NOW);
+        assert!(v.removals.contains(&owners_removal), "the owner's removal was pushed out");
+        let s = fold_now(&v);
+        assert!(!s.is_member(&thief.peer_id()));
+        assert!(s.is_member(&laptop.peer_id()), "the owner's vouch for the laptop was pushed out");
+    }
+
+    /// Each standing device's best vouch is kept before any other, so a sibling that
+    /// repeats vouches the owner already made cannot push out a deeper device's only one.
+    #[test]
+    fn a_deep_device_keeps_its_only_vouch_in_a_full_roster() {
+        let id = Id::new();
+        let ks = by_id();
+        let (busy, owner, desk, tablet) = (&ks[0], &ks[1], &ks[ks.len() - 1], &ks[2]);
+        let mut r = Roster::genesis(&id.m, &id.r, owner, NOW);
+        let base = r.base();
+        for d in [busy, desk, tablet] {
+            with_consent(&mut r, d);
+        }
+        r.add_vouch(sign_vouch(owner, &id.master(), &base, &busy.peer_id()));
+        r.add_vouch(sign_vouch(owner, &id.master(), &base, &desk.peer_id()));
+        r.add_vouch(sign_vouch(desk, &id.master(), &base, &tablet.peer_id()));
+        for i in 0..70 {
+            let j = junk_kp(i);
+            r.consents.push(sign_consent(&j, &id.master()));
+            if i < 60 {
+                r.vouches.push(sign_vouch(owner, &id.master(), &base, &j.peer_id()));
+            }
+            r.vouches.push(sign_vouch(busy, &id.master(), &base, &j.peer_id()));
+        }
+        let v = r.verified(NOW);
+        assert!(fold_now(&v).is_member(&tablet.peer_id()), "the tablet's only vouch was pushed out");
+        assert_eq!(v.verified(NOW), v);
+    }
+
+    /// Pending joins (anyone holding the master key signs one) and what grows from them
+    /// rank after every device the phrase roots, so they push none of those out.
+    #[test]
+    fn authz_pending_joins_never_displace_the_phrases_devices() {
+        let id = Id::new();
+        let legit: Vec<NativeKeypair> = (0..6u8).map(|t| kp(20 + t)).collect();
+        let mut r = Roster::genesis(&id.m, &id.r, &legit[0], NOW);
+        let base = r.base();
+        for w in legit.windows(2) {
+            with_consent(&mut r, &w[1]);
+            r.add_vouch(sign_vouch(&w[0], &id.master(), &base, &w[1].peer_id()));
+        }
+        for i in 0..40u32 {
+            let p = junk_kp(i);
+            r.consents.push(sign_consent(&p, &id.master()));
+            r.pendings.push(sign_pending(&id.m, &base, &p.peer_id()));
+            for k in 0..8u32 {
+                let q = junk_kp(1_000 + i * 100 + k);
+                r.consents.push(sign_consent(&q, &id.master()));
+                r.vouches.push(sign_vouch(&p, &id.master(), &base, &q.peer_id()));
+            }
+        }
+        let v = r.verified(NOW);
+        let everyone_waited = v.fold(|_| Some(NOW - PENDING_MATURITY_MS), NOW);
+        for d in &legit {
+            assert!(everyone_waited.is_member(&d.peer_id()), "pending joins pushed out {}", d.peer_id());
+        }
+        assert!(v.pendings.len() <= MAX_PENDING);
+    }
+
+    /// HOL-SEC-079. A device the removed one vouched cannot keep itself by removing it
+    /// too: a removed device keeps only the vouchees that every removal of it keeps.
+    #[test]
+    fn authz_a_removed_device_cannot_bring_a_device_back_through_its_own_removal() {
+        let id = Id::new();
+        let (owner, thief, j) = (kp(10), kp(66), kp(67));
+        let mut r = Roster::genesis(&id.m, &id.r, &owner, NOW);
+        let base = r.base();
+        with_consent(&mut r, &thief);
+        with_consent(&mut r, &j);
+        r.add_vouch(sign_vouch(&owner, &id.master(), &base, &thief.peer_id()));
+        r.add_removal(sign_removal(&owner, &id.master(), &base, &thief.peer_id(), &[]));
+        r.add_vouch(sign_vouch(&thief, &id.master(), &base, &j.peer_id()));
+        r.add_removal(sign_removal(&j, &id.master(), &base, &thief.peer_id(), &[j.peer_id()]));
+        let s = fold_now(&r);
+        assert!(!s.is_member(&j.peer_id()), "HOL-SEC-079: the removed device's vouchee kept itself");
+        assert!(!s.is_member(&thief.peer_id()));
+    }
+
+    #[test]
+    fn a_removed_device_keeps_only_what_every_removal_keeps() {
+        let id = Id::new();
+        let (owner, desk, old, a, b) = (kp(10), kp(11), kp(12), kp(13), kp(14));
+        let mut r = Roster::genesis(&id.m, &id.r, &owner, NOW);
+        let base = r.base();
+        for d in [&desk, &old, &a, &b] {
+            with_consent(&mut r, d);
+        }
+        r.add_vouch(sign_vouch(&owner, &id.master(), &base, &desk.peer_id()));
+        r.add_vouch(sign_vouch(&owner, &id.master(), &base, &old.peer_id()));
+        r.add_vouch(sign_vouch(&old, &id.master(), &base, &a.peer_id()));
+        r.add_vouch(sign_vouch(&old, &id.master(), &base, &b.peer_id()));
+        r.add_removal(sign_removal(&owner, &id.master(), &base, &old.peer_id(), &[a.peer_id(), b.peer_id()]));
+        assert!(fold_now(&r).members.is_superset(&BTreeSet::from([a.peer_id(), b.peer_id()])));
+        r.add_removal(sign_removal(&desk, &id.master(), &base, &old.peer_id(), &[a.peer_id()]));
+        let s = fold_now(&r);
+        assert!(s.is_member(&a.peer_id()));
+        assert!(!s.is_member(&b.peer_id()), "one removal kept a device another one did not");
+    }
+
+    /// The phrase can turn joining by seven quiet days off for its base. The flag sits
+    /// inside the phrase's signature, so nobody else can strip it, and a later recovery
+    /// without it turns waiting back on.
+    #[test]
+    fn the_phrase_can_turn_off_joining_by_waiting() {
+        let id = Id::new();
+        let (d1, b) = (kp(10), kp(12));
+        let mut r = Roster::new(&id.master());
+        with_consent(&mut r, &d1);
+        with_consent(&mut r, &b);
+        let strict = sign_recovery(&id.m, &id.r, NOW - 5, &[d1.peer_id()], true);
+        r.add_phrase_statement(&r_pub_of(&id.r), Some(strict), None).unwrap();
+        let base = r.base();
+        r.add_pending(sign_pending(&id.m, &base, &b.peer_id()));
+        let waited = |r: &Roster| r.verified(NOW).fold(|_| Some(NOW - PENDING_MATURITY_MS), NOW);
+        let s = waited(&r);
+        assert!(s.no_wait && !s.is_member(&b.peer_id()) && s.pending.contains(&b.peer_id()));
+
+        let mut stripped = r.clone();
+        stripped.recoveries[0].no_wait = false;
+        assert!(stripped.verified(NOW).recoveries.is_empty(), "the flag came off without the phrase");
+
+        let open = sign_recovery(&id.m, &id.r, NOW, &[d1.peer_id()], false);
+        r.add_phrase_statement(&r_pub_of(&id.r), Some(open), None).unwrap();
+        let base = r.base();
+        r.add_pending(sign_pending(&id.m, &base, &b.peer_id()));
+        let s = waited(&r);
+        assert!(!s.no_wait && s.is_member(&b.peer_id()));
+    }
+
+    /// Compacting a compacted roster changes nothing, flood or not, so every observer
+    /// that holds the same statements holds the same roster.
+    #[test]
+    fn compaction_is_stable() {
+        let id = Id::new();
+        let v = members_flood(&id, &kp(10), &kp(11), &kp(66)).verified(NOW);
+        assert_eq!(v.verified(NOW), v);
+        assert_eq!(v.merged(&v), v);
+        let mut legacy = Roster::legacy_for_test(&id.m, &[&kp(10), &kp(11)]);
+        legacy.add_removal(sign_removal(&kp(10), &id.master(), LEGACY_BASE, &kp(12).peer_id(), &[]));
+        let v = legacy.verified(NOW);
+        assert_eq!(v.verified(NOW), v);
+    }
+
+    /// Every ceiling filled with the longest statements still fits the wire limit, so a
+    /// roster that compacts is never dropped whole for its size.
+    #[test]
+    fn the_largest_roster_fits_on_the_wire() {
+        let id = Id::new();
+        let devs: Vec<NativeKeypair> = (0..140).map(junk_kp).collect();
+        let ids: Vec<String> = devs.iter().map(|d| d.peer_id()).collect();
+        let mut r = Roster::new(&id.master());
+        for d in &devs {
+            r.consents.push(sign_consent(d, &id.master()));
+        }
+        r.r_pub = r_pub_of(&id.r);
+        for t in 0..6 {
+            let keep: Vec<String> = ids.iter().skip(t * 10).take(MAX_KEEP).cloned().collect();
+            r.recoveries.push(sign_recovery(&id.m, &id.r, NOW - 100, &keep, t % 2 == 0));
+        }
+        let base = r.verified(NOW).base();
+        for (i, d) in devs.iter().enumerate().take(80) {
+            r.phrase_admits.push(sign_phrase_admit(&id.m, &id.r, NOW - 50 + i as i64, &d.peer_id()));
+            r.pendings.push(sign_pending(&id.m, &base, &ids[139 - i]));
+        }
+        for (i, by) in devs.iter().enumerate() {
+            for k in 0..3 {
+                let target = &ids[(i + k + 1) % ids.len()];
+                r.vouches.push(sign_vouch(by, &id.master(), &base, target));
+                let keep: Vec<String> = ids.iter().skip(i + k).take(MAX_REMOVAL_KEEP).cloned().collect();
+                r.removals.push(sign_removal(by, &id.master(), &base, target, &keep));
+            }
+        }
+        let v = r.verified(NOW);
+        assert_eq!(v.vouches.len(), MAX_VOUCHES);
+        assert_eq!(v.removals.len(), MAX_REMOVALS);
+        let bytes = serde_json::to_vec(&v).unwrap().len();
+        assert!(bytes <= MAX_ROSTER_BYTES, "the largest roster is {bytes} bytes");
     }
 
     #[test]

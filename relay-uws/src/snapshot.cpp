@@ -30,6 +30,12 @@ static Clock::time_point at_from_age(uint32_t age, Clock::time_point now) {
     return now - std::chrono::seconds(age);
 }
 
+// Pending joins are timed on the wall clock, which the roster fold compares with.
+static int64_t wall_ms() {
+    return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
 // Keys of `ledger` least recently used first, the order a restore puts them back in.
 template <typename Map>
 static std::vector<const std::string*> by_last_use(const Map& map, const FairShare<std::string>& ledger) {
@@ -88,6 +94,17 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
     for (const auto* key : by_last_use(st.join_locks.records, st.join_locks.ledger)) {
         d.locks.push_back({*key, join_lock::links_to_json(st.join_locks.records.at(*key)).dump(),
                            st.join_locks.ledger.share_of(*key).value_or(snapshot::NO_SHARE)});
+    }
+    const int64_t wall = wall_ms();
+    for (const auto* master : by_last_use(st.roster_book.records, st.roster_book.ledger)) {
+        const auto& held = st.roster_book.records.at(*master);
+        snapshot::Roster r{*master, roster::to_json(held.roster).dump(),
+                           st.roster_book.ledger.share_of(*master).value_or(snapshot::NO_SHARE), {}};
+        for (const auto& [device, seen] : held.seen_ms) {
+            int64_t age = (wall - seen) / 1000;
+            r.seen.push_back({device, static_cast<uint32_t>(std::clamp<int64_t>(age, 0, UINT32_MAX))});
+        }
+        d.rosters.push_back(std::move(r));
     }
     {
         std::vector<std::pair<uint64_t, std::string>> order;
@@ -161,6 +178,15 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
     for (auto& l : d.locks) {
         const nlohmann::json j = nlohmann::json::parse(l.links_json, nullptr, /*allow_exceptions=*/false);
         if (auto links = join_lock::links_from_json(j)) st.join_locks.restore(l.key, std::move(*links), share(l.share));
+    }
+    const int64_t wall = wall_ms();
+    for (auto& r : d.rosters) {
+        const nlohmann::json j = nlohmann::json::parse(r.json, nullptr, /*allow_exceptions=*/false);
+        auto held = roster::from_json(j);
+        if (!held) continue;
+        std::unordered_map<std::string, int64_t> seen;
+        for (const auto& s : r.seen) seen[s.device] = wall - static_cast<int64_t>(s.age_secs) * 1000;
+        st.roster_book.restore(r.master, std::move(*held), std::move(seen), share(r.share));
     }
 
     // The eviction index must see every frame in the order the old process
@@ -246,11 +272,11 @@ void snapshot_to_fdstore(RelayState& st) {
     // Counts only: no key, room or peer id is ever printed.
     fprintf(stderr,
             "[snapshot] %s: %zu DM frames in %zu queues, %zu topic frames in %zu rings, "
-            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu kill entries, %zu bytes\n",
+            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu kill entries, %zu rosters, %zu bytes\n",
             ok ? "handed to the fd store" : "fd store REFUSED (buffers end with this process)",
             d.dm_frames(), d.dm.size(), d.topic_frames(), d.topics.size(),
             d.optin.size(), d.push_tokens.size(), d.push_prefs.size(), d.kills.size(),
-            bytes.size());
+            d.rosters.size(), bytes.size());
 }
 
 void restore_from_fdstore(RelayState& st) {
@@ -292,7 +318,7 @@ void restore_from_fdstore(RelayState& st) {
     size_t dm_frames = d.dm_frames(), dm_queues = d.dm.size();
     size_t topic_frames = d.topic_frames(), rings = d.topics.size();
     size_t optins = d.optin.size(), tokens = d.push_tokens.size(), prefs = d.push_prefs.size();
-    size_t kills = d.kills.size();
+    size_t kills = d.kills.size(), rosters = d.rosters.size();
     apply(st, std::move(d), Clock::now());
     // Whatever aged out while the service was down, and whatever a smaller
     // budget in this build no longer admits.
@@ -301,8 +327,8 @@ void restore_from_fdstore(RelayState& st) {
     st.kill_list.sweep(Clock::now());
     fprintf(stderr,
             "[snapshot] restored %zu DM frames in %zu queues, %zu topic frames in %zu rings, "
-            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu kill entries; "
+            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu kill entries, %zu rosters; "
             "%zu frames live after expiry, %zu kill entries live\n",
-            dm_frames, dm_queues, topic_frames, rings, optins, tokens, prefs, kills,
+            dm_frames, dm_queues, topic_frames, rings, optins, tokens, prefs, kills, rosters,
             st.buffer_index.live(), st.kill_list.size());
 }

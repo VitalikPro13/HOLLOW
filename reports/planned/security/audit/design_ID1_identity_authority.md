@@ -89,7 +89,12 @@ join, and now:
    A removal counts even when its signer is itself removed (see 5).
 5. **Members** = the least set containing the roots and the matured pending joins, and
    every device vouched by a member that is not removed, or by a removed device whose
-   removal lists it in `keep_vouched`; minus Removed. Every member must have consent.
+   removals ALL list it in `keep_vouched` (an intersection since ID-1R, HOL-SEC-080);
+   minus Removed. Every member must have consent.
+
+Since ID-1R (`design_ID1R_relay_rosters.md`) compaction keeps a vouch or removal only from
+a signer with standing and orders what stays by the signer's distance from the phrase
+(HOL-SEC-079), and a recovery may turn joining by seven quiet days off (`no_wait`).
 
 Rules that fall out, and why:
 
@@ -371,6 +376,9 @@ joining with the phrase, refused, and erased.
 2. **The relay's inbox check** is its own item, ID-1R, next session (plan STATE OF PLAY).
 3. **The duress "everywhere" scope stays** through a phrase-signed permission for that one
    device, stored inside the duress slot; it dies when the device is removed.
+4. **(2026-10-02, ID-1R) The seven-day wait stays the default, and the phrase can turn it
+   off** (`no_wait` in the recovery statement; Settings > Security > Advanced). The relay
+   counts the seven days too.
 
 Mine, recorded: the ten-character code with the relay unchanged; SPAKE2 from RustCrypto;
 the mnemonic link path deleted rather than fixed (nothing reaches it); roster removals as a
@@ -386,6 +394,7 @@ plain union (a stolen phone can force the phrase, never win against it).
   conflict.
 - **A phrase holder is the identity.** Whoever else learns the phrase can recover too; the
   newest recovery wins, and so does whoever types it last.
-- **Until ID-1R** a master-key holder can read the identity's inbox mailbox at the relay.
+- **The inbox** (closed by ID-1R, HOL-SEC-078) keeps one residual: after the relay box
+  reboots, the first roster shown sets the identity's recovery key at that relay.
 - **Author time (AR-11)** is untouched: device co-signatures order device statements, not
   server ops.

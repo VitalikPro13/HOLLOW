@@ -43,9 +43,65 @@ bool verify_ed25519(const std::string& pubkey_b64,
     ) == 0;
 }
 
+bool verify_ed25519_raw(const unsigned char* pubkey32,
+                        const std::string& sig_b64,
+                        const std::string& message) {
+    unsigned char sig_bytes[64];
+    size_t sig_len = 0;
+    if (sodium_base642bin(sig_bytes, sizeof(sig_bytes),
+                          sig_b64.c_str(), sig_b64.size(),
+                          nullptr, &sig_len, nullptr,
+                          sodium_base64_VARIANT_ORIGINAL) != 0 || sig_len != 64) {
+        return false;
+    }
+    return crypto_sign_verify_detached(
+        sig_bytes,
+        reinterpret_cast<const unsigned char*>(message.c_str()),
+        message.size(),
+        pubkey32
+    ) == 0;
+}
+
 // Bitcoin base58 alphabet (no 0, O, I, l).
 static const char* B58_ALPHABET =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+// Standard base58btc decode; each leading '1' is one zero byte. False on any
+// character outside the alphabet.
+static bool base58_decode(const std::string& s, std::vector<unsigned char>& out) {
+    size_t zeros = 0;
+    while (zeros < s.size() && s[zeros] == '1') zeros++;
+    // log(58)/log(256) ~= 0.732.
+    std::vector<unsigned char> b256((s.size() - zeros) * 733 / 1000 + 1, 0);
+    for (size_t i = zeros; i < s.size(); i++) {
+        const char* p = strchr(B58_ALPHABET, s[i]);
+        if (s[i] == '\0' || p == nullptr) return false;
+        int carry = static_cast<int>(p - B58_ALPHABET);
+        for (size_t j = b256.size(); j-- > 0;) {
+            carry += 58 * b256[j];
+            b256[j] = static_cast<unsigned char>(carry % 256);
+            carry /= 256;
+        }
+        if (carry != 0) return false;
+    }
+    size_t it = 0;
+    while (it < b256.size() && b256[it] == 0) it++;
+    out.assign(zeros, 0);
+    out.insert(out.end(), b256.begin() + static_cast<std::ptrdiff_t>(it), b256.end());
+    return true;
+}
+
+bool peer_id_key(const std::string& peer_id, unsigned char out[32]) {
+    // A 38-byte value takes at most 53 characters; anything longer names no key, and
+    // the decode below is quadratic in the length.
+    if (peer_id.size() > 64) return false;
+    std::vector<unsigned char> d;
+    if (!base58_decode(peer_id, d)) return false;
+    static const unsigned char prefix[6] = {0x00, 0x24, 0x08, 0x01, 0x12, 0x20};
+    if (d.size() != 38 || memcmp(d.data(), prefix, sizeof(prefix)) != 0) return false;
+    memcpy(out, d.data() + 6, 32);
+    return true;
+}
 
 // Standard base58btc encode. Each leading zero byte maps to a literal '1'.
 static std::string base58_encode(const unsigned char* data, size_t len) {

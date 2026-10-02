@@ -18,16 +18,34 @@ Binary name: `hollow-relay`
 - **Fetch sockets**: rooms in `PerSocketData::fetch_rooms`, never over a full socket's
   slot, no roster/presence, never in `discover_peers`; `leave` passes the socket as
   `expected_ws`; close leaves only its own slots.
-- **Inbox rooms**: `WsRoom::owners` = sockets that proved the master-signed device list
-  (`inbox_owner_proved`); `receives_in_room` limits every fan-out, roster, presence,
-  discovery and check_peers co-membership to owners; a deposit for the master also goes
-  live to the owners.
+- **Inbox rooms**: `WsRoom::owners` = sockets whose device the held roster counts a
+  member; `receives_in_room` limits every fan-out, roster, presence, discovery and
+  check_peers co-membership to owners; a deposit for the master also goes live to the
+  owners.
+- **Rosters (design ID-1R, 2026-10-02, HOL-SEC-078)**: an inbox join may carry
+  `inbox_roster` (the device's own roster, serde JSON). `inbox_owner_by_roster` parses it
+  (`roster::from_json`, strict like serde), refuses one over 256 KiB, past a ceiling or
+  for another master, and hands it to `RosterBook::show` (`roster_book.h`): verify (a
+  statement the held roster already has skips its signature check), merge into the one
+  roster held per master, stamp first sights of pending joins (wall clock), fold, judge.
+  `roster.h` mirrors `identity/roster.rs` rule for rule; `test/test_roster.cpp` replays
+  the vectors the Rust test `roster_vectors_are_current` writes to
+  `test/roster_vectors.json` (regenerate with `HOLLOW_WRITE_ROSTER_VECTORS=1`; change
+  both or neither). A shown roster decides its socket's ownership on its own; a plain
+  re-join keeps an owner. A change drops every owner the fold stops counting
+  (`drop_inbox_owners`, peer_left to the owners left). Registry: `FairShare`, 128 MB,
+  charged to the member who last showed it; snapshot codec v7 (JSON + first-sight ages);
+  restore takes it as held, unverified. The 0.11 master-signed list (`inbox_proof`,
+  `inbox_owner_proved`, version marks) is read only while
+  `ACCEPT_DEVICE_LIST_INBOX_PROOF` (off once 0.12 ships) and never for an identity whose
+  held roster is protected or for a device it removed. Crypto: `roster_crypto.h`
+  (`peer_id_key` = base58 decode, refuses ids over 64 chars; `verify_ed25519_raw`).
 - **Rings** (`ring_auth.h`, `ring_evict.h`): control signed by the change key of the
   newest join-lock link (`hollow-ring1`), legacy rooms' topics carry the owner (below),
   unsigned = refresh only once `ACCEPT_UNSIGNED_RING_CONTROL` is off; eviction by the
   address share holding the most bytes, `MAX_RING_FRAME_BYTES` 256 KB, 512 rings per
   server, the heaviest share's least recently used ring at the global cap, per-frame
-  retention; snapshot codec v6.
+  retention; snapshot codec v7 (v6 shares, v7 rosters).
 - **Fair shares (HOL-SEC-069/070, session 18)**: every table a stranger can fill charges
   each entry to the writer's address share (`share_block`: v4 address or v6 /48, hashed
   by `share_id` = BLAKE2b under `RelayState::share_key`, replaced hourly, never
@@ -47,6 +65,9 @@ Binary name: `hollow-relay`
 - **Nicknames**: `nickname_proof` holds the master's signature (`nickname_claim_message`
   in validate.h); resolve returns it; unsigned claims only while
   `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.
+- **Release day**: four switches go off once 0.12 ships: `ACCEPT_AUTH_V1`,
+  `ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`,
+  `ACCEPT_DEVICE_LIST_INBOX_PROOF`.
 
 ## config.h — Configuration
 

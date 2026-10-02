@@ -19,10 +19,11 @@ namespace snapshot {
 // that keep a revoked device out of its master's mailbox (`marks`), 4 the join
 // lock chains (`locks`), 5 each ring's owner binding and each ring frame's
 // retention (`ring_meta`), 6 the address share every entry is charged to
-// (`shares`, fair_share.h) and dropped the owner binding. An older snapshot still
-// decodes, without the newer fields, so a relay coming up on this build keeps the
-// buffers the previous one handed over.
-static constexpr uint32_t VERSION = 6;
+// (`shares`, fair_share.h) and dropped the owner binding, 7 every identity's
+// roster with when the relay first saw each pending join (`rosters`, design
+// ID-1R). An older snapshot still decodes, without the newer fields, so a relay
+// coming up on this build keeps the buffers the previous one handed over.
+static constexpr uint32_t VERSION = 7;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -107,6 +108,18 @@ struct Lock {
     std::string links_json;
     uint64_t share = NO_SHARE;  // v6
 };
+// One identity's roster as the relay holds it (v7), and how long ago the relay first
+// saw each pending join in it.
+struct RosterSeen {
+    std::string device;
+    uint32_t age_secs = 0;
+};
+struct Roster {
+    std::string master;
+    std::string json;
+    uint64_t share = NO_SHARE;
+    std::vector<RosterSeen> seen;
+};
 
 struct Data {
     std::vector<DmQueue> dm;
@@ -118,6 +131,7 @@ struct Data {
     std::vector<Mark> marks;  // least recently used first, the eviction order
     std::vector<Lock> locks;  // least recently used first, the eviction order
     std::vector<Registration> registrations;  // v6; least recently used first
+    std::vector<Roster> rosters;  // v7; least recently used first
 
     size_t dm_frames() const {
         size_t n = 0;
@@ -323,6 +337,18 @@ inline std::string encode(const Data& d) {
         w.u64(r.share);
     }
 
+    w.count(d.rosters.size());
+    for (const auto& r : d.rosters) {
+        w.str(r.master);
+        w.str(r.json);
+        w.u64(r.share);
+        w.count(r.seen.size());
+        for (const auto& s : r.seen) {
+            w.str(s.device);
+            w.u32(s.age_secs);
+        }
+    }
+
     w.out.append("HRSE", 4);
     return w.out;
 }
@@ -465,6 +491,21 @@ inline bool decode(std::string_view bytes, Data& out) {
             Registration g;
             if (!r.str(g.peer) || !r.u64(g.share)) return false;
             d.registrations.push_back(std::move(g));
+        }
+    }
+
+    if (version >= 7) {
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            Roster ro;
+            uint32_t m = 0;
+            if (!r.str(ro.master) || !r.str(ro.json) || !r.u64(ro.share) || !r.count(m)) return false;
+            for (uint32_t j = 0; j < m; j++) {
+                RosterSeen s;
+                if (!r.str(s.device) || !r.u32(s.age_secs)) return false;
+                ro.seen.push_back(std::move(s));
+            }
+            d.rosters.push_back(std::move(ro));
         }
     }
 

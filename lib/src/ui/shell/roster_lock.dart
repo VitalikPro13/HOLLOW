@@ -264,6 +264,7 @@ class _PendingDeviceDialogState extends ConsumerState<_PendingDeviceDialog> with
         Navigator.of(context).pop();
       }
     });
+    final waits = ref.watch(rosterStatusProvider).valueOrNull?.backupWait ?? true;
     return HollowDialog(
       title: 'A device wants to join',
       width: 420,
@@ -272,7 +273,8 @@ class _PendingDeviceDialogState extends ConsumerState<_PendingDeviceDialog> with
       content: HollowDialogText(
         'Device ${widget.name} was restored from a backup of your identity and '
         "asks to join. If it's yours, approve it. If you don't know it, refuse "
-        'it and it never gets your messages. With no answer it joins in seven days.',
+        'it and it never gets your messages.'
+        '${waits ? ' With no answer it joins in seven days.' : ''}',
       ),
       leadingActions: [
         HollowButton.ghost(

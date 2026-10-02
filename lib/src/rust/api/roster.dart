@@ -24,6 +24,15 @@ Future<void> recoverWithPhrase({
   keep: keep,
 );
 
+/// Type the phrase to choose whether a device restored from a backup may join by
+/// nobody refusing it for seven days. Signs a recovery that keeps every current
+/// device, so devices still waiting to join ask again.
+Future<void> setBackupWait({required String phrase, required bool allowed}) =>
+    RustLib.instance.api.crateApiRosterSetBackupWait(
+      phrase: phrase,
+      allowed: allowed,
+    );
+
 /// Type the phrase on a device waiting to join: it joins at once, and nothing else
 /// changes.
 Future<void> joinWithPhrase({required String phrase}) =>
@@ -92,6 +101,10 @@ class RosterStatus {
   /// The recovery phrase is the root (a recovery exists).
   final bool protected;
 
+  /// A device restored from a backup may join by nobody refusing it for seven days.
+  /// Only the phrase changes it.
+  final bool backupWait;
+
   /// This device asked to join and waits: when it becomes a member without anyone
   /// answering, on this device's clock.
   final PlatformInt64? joinsAtMs;
@@ -104,6 +117,7 @@ class RosterStatus {
   const RosterStatus({
     required this.member,
     required this.protected,
+    required this.backupWait,
     this.joinsAtMs,
     this.removedBy,
     this.wipeAtMs,
@@ -114,6 +128,7 @@ class RosterStatus {
   int get hashCode =>
       member.hashCode ^
       protected.hashCode ^
+      backupWait.hashCode ^
       joinsAtMs.hashCode ^
       removedBy.hashCode ^
       wipeAtMs.hashCode ^
@@ -126,6 +141,7 @@ class RosterStatus {
           runtimeType == other.runtimeType &&
           member == other.member &&
           protected == other.protected &&
+          backupWait == other.backupWait &&
           joinsAtMs == other.joinsAtMs &&
           removedBy == other.removedBy &&
           wipeAtMs == other.wipeAtMs &&

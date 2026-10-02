@@ -2006,6 +2006,8 @@ pub(crate) fn announce_roster_change(
             );
         }
     }
+    // The relay hears it too, so a device this change removed loses our inbox now.
+    super::roster_book::show_relay(ws_cmd_tx, local_peer_str, db_path, db_passphrase);
     let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
     let mut told: std::collections::HashSet<String> = std::collections::HashSet::new();
     for pid in peers {

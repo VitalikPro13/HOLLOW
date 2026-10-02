@@ -73,7 +73,12 @@ class _DevicesCategoryViewState extends ConsumerState<DevicesCategoryView> {
                       _showAll ? 'Hide old devices' : 'Show all ($ghosts offline)'),
                 ),
               ),
-            for (final d in waiting) _WaitingDeviceRow(key: ValueKey('waiting-${d.devicePeerId}'), device: d),
+            for (final d in waiting)
+              _WaitingDeviceRow(
+                key: ValueKey('waiting-${d.devicePeerId}'),
+                device: d,
+                joinsByWaiting: roster?.backupWait ?? true,
+              ),
             SettingsRow(
               title: 'Link another device',
               subtitle: "Show a code here, type it on the new device. Keep both "
@@ -208,11 +213,16 @@ String _rosterDeviceTitle(WidgetRef ref, String id) =>
         kinds: ref.watch(deviceKindProvider)) ??
     shortenPeerId(id);
 
-/// A device restored from a backup that asks to join. It joins on its own once
-/// seven days pass with nobody refusing it.
+/// A device restored from a backup that asks to join. Unless the phrase turned
+/// it off, it joins on its own once seven days pass with nobody refusing it.
 class _WaitingDeviceRow extends ConsumerStatefulWidget {
   final roster_api.RosterDevice device;
-  const _WaitingDeviceRow({super.key, required this.device});
+  final bool joinsByWaiting;
+  const _WaitingDeviceRow({
+    super.key,
+    required this.device,
+    required this.joinsByWaiting,
+  });
 
   @override
   ConsumerState<_WaitingDeviceRow> createState() => _WaitingDeviceRowState();
@@ -241,7 +251,7 @@ class _WaitingDeviceRowState extends ConsumerState<_WaitingDeviceRow> {
   @override
   Widget build(BuildContext context) {
     final seen = widget.device.firstSeenMs;
-    final joins = seen == null
+    final joins = seen == null || !widget.joinsByWaiting
         ? null
         : DateTime.fromMillisecondsSinceEpoch(seen.toInt()).add(const Duration(days: 7));
     return SettingsRow(

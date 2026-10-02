@@ -7,6 +7,16 @@ bool verify_ed25519(const std::string& pubkey_b64,
                     const std::string& sig_b64,
                     const std::string& message);
 
+// Ed25519 over `message` by a raw 32-byte public key.
+bool verify_ed25519_raw(const unsigned char* pubkey32,
+                        const std::string& sig_b64,
+                        const std::string& message);
+
+// The raw Ed25519 key a peer id names, matching the client's
+// `safety_number::pubkey_from_peer_id`: base58btc of
+// [0x00, 0x24, 0x08, 0x01, 0x12, 0x20] || key. False when it names none.
+bool peer_id_key(const std::string& peer_id, unsigned char out[32]);
+
 // Derive the canonical peer_id from a base64 protobuf-encoded Ed25519 public
 // key, matching the client's `NativeKeypair::peer_id()` exactly:
 //   bs58btc( [0x00, 0x24] || [0x08, 0x01, 0x12, 0x20] || pubkey32 )

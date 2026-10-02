@@ -49,7 +49,9 @@ pub enum WsCommand {
     /// checks the signature, the pubkey-to-master derivation, that OUR device is
     /// an un-revoked member of it, and that the room really is that master's.
     /// Someone ELSE's inbox is a plain `JoinRoom`.
-    JoinInbox { room_code: String, proof: super::types::SignedDeviceList },
+    /// Join our own `inbox:` room showing our roster, from which the relay decides
+    /// whether this device is one of the identity's (design ID-1R).
+    JoinInbox { room_code: String, roster: crate::identity::roster::Roster },
     LeaveRoom { room_code: String },
     /// Broadcast an encrypted message to all peers in a room.
     SendToRoom { room_code: String, data: Vec<u8> },
@@ -284,11 +286,10 @@ enum ClientMsg {
     },
     Join {
         room: String,
-        /// Async friending: the joiner's master-signed device list, proving it
-        /// owns `inbox:{master}`. Skipped when absent, so an old relay simply
-        /// ignores an unknown field and an old client never sends one.
+        /// The joiner's own roster, for an `inbox:{master}` room: the relay folds it
+        /// into what it holds for the master and lets in only a member.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        inbox_proof: Option<super::types::SignedDeviceList>,
+        inbox_roster: Option<crate::identity::roster::Roster>,
     },
     Leave { room: String },
 }
@@ -363,10 +364,9 @@ struct WsClientState {
     /// relay registry is RAM-per-relay-lifetime, so replay it on every
     /// reconnect like subscriptions. None = never set this session.
     offline_optin: Arc<RwLock<Option<(bool, i64)>>>,
-    /// Ownership proofs for `inbox:` rooms joined via [`WsCommand::JoinInbox`],
-    /// keyed by room. The reconnect replay re-sends every joined room as a plain
-    /// `Join`, which on a NEW socket would silently drop the mailbox replay.
-    inbox_proofs: Arc<RwLock<std::collections::HashMap<String, super::types::SignedDeviceList>>>,
+    /// The roster each `inbox:` room was joined with via [`WsCommand::JoinInbox`]. The
+    /// reconnect replay re-sends it: a plain `Join` on a NEW socket owns nothing.
+    inbox_rosters: Arc<RwLock<std::collections::HashMap<String, crate::identity::roster::Roster>>>,
     /// The host we dialled; TURN URIs naming any other host are dropped.
     relay_host: String,
 }
@@ -433,7 +433,7 @@ async fn ws_client_loop(
         last_join_attempt: Arc::new(RwLock::new(None)),
         subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         offline_optin: Arc::new(RwLock::new(None)),
-        inbox_proofs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
         relay_host: relay_auth_domain(&relay_url).unwrap_or_default(),
     };
 
@@ -457,11 +457,11 @@ async fn ws_client_loop(
                 let (mut ws_write, mut ws_read) = ws_stream.split();
                 {
                     let rooms = state.joined_rooms.read().await;
-                    let proofs = state.inbox_proofs.read().await;
+                    let rosters = state.inbox_rosters.read().await;
                     for room in rooms.iter() {
                         let join_msg = serde_json::to_string(&ClientMsg::Join {
                             room: room.clone(),
-                            inbox_proof: proofs.get(room).cloned(),
+                            inbox_roster: rosters.get(room).cloned(),
                         })
                             .unwrap_or_default();
                         let _ = bounded_send(&mut ws_write, Message::Text(join_msg.into())).await;
@@ -1288,13 +1288,13 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         WsCommand::JoinRoom { room_code } => {
             serde_json::to_string(&ClientMsg::Join {
                 room: room_code.clone(),
-                inbox_proof: None,
+                inbox_roster: None,
             })
         }
-        WsCommand::JoinInbox { room_code, proof } => {
+        WsCommand::JoinInbox { room_code, roster } => {
             serde_json::to_string(&ClientMsg::Join {
                 room: room_code.clone(),
-                inbox_proof: Some(proof.clone()),
+                inbox_roster: Some(roster.clone()),
             })
         }
         WsCommand::LeaveRoom { room_code } => {
@@ -1320,13 +1320,13 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
             rooms.insert(room_code.clone());
             rooms.len() as u32
         }
-        WsCommand::JoinInbox { room_code, proof } => {
+        WsCommand::JoinInbox { room_code, roster } => {
             *state.last_join_attempt.write().await = Some(room_code.clone());
             state
-                .inbox_proofs
+                .inbox_rosters
                 .write()
                 .await
-                .insert(room_code.clone(), proof.clone());
+                .insert(room_code.clone(), roster.clone());
             let mut rooms = state.joined_rooms.write().await;
             rooms.insert(room_code.clone());
             rooms.len() as u32
@@ -1335,7 +1335,7 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
             let mut rooms = state.joined_rooms.write().await;
             rooms.remove(room_code);
             state.subscriptions.write().await.remove(room_code);
-            state.inbox_proofs.write().await.remove(room_code);
+            state.inbox_rosters.write().await.remove(room_code);
             // Confirm our own leave to the swarm so it purges the room from
             // `ws_room_peers` — see WsEvent::LeftRoom.
             let _ = event_tx.send(WsEvent::LeftRoom { room: room_code.clone() });
@@ -1606,31 +1606,28 @@ mod tests {
 
     #[test]
     fn test_join_message_format() {
-        let msg = ClientMsg::Join { room: "server123".into(), inbox_proof: None };
+        let msg = ClientMsg::Join { room: "server123".into(), inbox_roster: None };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains("\"room\":\"server123\""));
-        // A plain join must stay byte-identical to what it always was, so an old
-        // relay parsing it never sees a field it does not know.
-        assert!(!json.contains("inbox_proof"), "the proof is skipped when absent");
+        assert!(!json.contains("inbox_roster"), "a plain join carries no roster");
     }
 
-    /// The inbox join carries the ownership proof the relay checks before it
-    /// replays a master-keyed mailbox (async friending).
+    /// The inbox join carries the roster the relay folds before it lets a device read
+    /// the master's mailbox (design ID-1R), in the shape `relay-uws/src/roster.h` reads.
     #[test]
-    fn test_join_message_carries_inbox_proof() {
-        let master = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x7a; 32]);
-        let proof = super::super::crypto_handler::build_signed_device_list(
-            &master, 1, vec!["device-1".to_string()], Vec::new(),
-        );
-        let room = format!("inbox:{}", proof.master_peer_id);
-        let msg = ClientMsg::Join { room: room.clone(), inbox_proof: Some(proof) };
+    fn test_join_message_carries_the_roster() {
+        let k = |t: u8| crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[t; 32]);
+        let roster = crate::identity::roster::Roster::genesis(&k(0x7a), &k(0x7b), &k(0x7c), 1_000);
+        let room = format!("inbox:{}", roster.master);
+        let msg = ClientMsg::Join { room: room.clone(), inbox_roster: Some(roster) };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains(&format!("\"room\":\"{room}\"")));
-        assert!(json.contains("\"inbox_proof\""));
-        assert!(json.contains("\"master_pubkey_b64\""));
-        assert!(json.contains("\"sig_b64\""));
+        for field in ["\"inbox_roster\"", "\"master\"", "\"r_pub\"", "\"recoveries\"", "\"consents\"", "\"sig_r\""] {
+            assert!(json.contains(field), "{field} missing from {json}");
+        }
+        assert!(!json.contains("inbox_proof"));
     }
 
     #[test]

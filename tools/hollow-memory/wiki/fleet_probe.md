@@ -546,8 +546,10 @@ match a copy by the plaintext length in the HFE1 header or SHA-256 via `export_a
 
 **Trap: never link a fleet FIXTURE identity to another device.** Linking Windows `a` to a
 phone left the phone with a newer roster; every later scenario restored the older fixture,
-whose inbox proof the relay now refuses (version mark), so friend requests deposited for
-that identity never reached the Windows copy (`friend_dm` "No requests waiting"). Use
+whose inbox proof the relay then refused (version mark), so friend requests deposited for
+that identity never reached the Windows copy (`friend_dm` "No requests waiting"). Since
+ID-1R (2026-10-02) the relay folds rosters instead, so an older roster no longer loses the
+inbox, but the relay keeps what the linked device showed (a removal sticks there too). Use
 throwaway copies for cross-platform links, or onboard fresh afterwards.
 
 `fleet/moderation.json` (a, b, c): #staff for moderators and up, promote c, a's post reaches

@@ -408,24 +408,6 @@ fn offer_roster(
     }
 }
 
-/// Show the relay the inbox proof our roster makes now. It keeps the newest proof
-/// any of our devices has shown, so a device whose roster was behind when it
-/// connected owns nothing in its inbox (no mailbox, no siblings in view) until then.
-fn reprove_own_inbox(
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    master_keypair: &crate::identity::native_identity::NativeKeypair,
-    local_peer_str: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) {
-    if let Some(proof) = super::roster_book::inbox_proof(master_keypair, db_path, db_passphrase) {
-        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinInbox {
-            room_code: format!("inbox:{local_peer_str}"),
-            proof,
-        });
-    }
-}
-
 use crate::crdt::hlc::Hlc;
 use crate::crdt::operations::{CrdtPayload};
 use crate::crdt::server_state::ServerState;
@@ -3270,18 +3252,18 @@ async fn run_event_loop(
                         // (media legs survive the signaling blip).
                         #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                         embedded_fwd.on_ws_connected(&ws_cmd_tx);
-                        // Join the personal inbox room, carrying an ownership PROOF: a request for an
-                        // offline stranger is addressed to their MASTER, which no socket authenticates
-                        // as, so the relay buffers it under the master and only replays it to a device
-                        // that proves it owns that inbox. Without the proof the join still works, it
-                        // just collects nothing from the mailbox.
+                        // Join the personal inbox room showing our roster: a request for an offline
+                        // stranger is addressed to their MASTER, which no socket authenticates as, so
+                        // the relay buffers it under the master and replays it only to a device its
+                        // fold of the master's rosters counts as a member. A waiting device shows it
+                        // too, which starts the relay's seven days.
                         {
                             let inbox_room = format!("inbox:{}", local_peer_str);
-                            match super::roster_book::inbox_proof(&master_keypair, &db_path, &db_passphrase) {
-                                Some(proof) => {
+                            match super::roster_book::own_roster(&local_peer_str, &db_path, &db_passphrase) {
+                                Some(roster) => {
                                     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinInbox {
                                         room_code: inbox_room,
-                                        proof,
+                                        roster,
                                     });
                                 }
                                 None => {
@@ -12896,7 +12878,7 @@ async fn handle_incoming_request(
             // with, our other devices included, so everyone converges now rather than
             // when each next meets the device that changed it.
             if our_devices_grew {
-                reprove_own_inbox(ws_cmd_tx, master_keypair, local_peer_str, db_path, db_passphrase);
+                super::roster_book::show_relay(ws_cmd_tx, local_peer_str, db_path, db_passphrase);
                 let peers: Vec<String> = ws_room_peers.values()
                     .flat_map(|p| p.iter().cloned())
                     .collect();
@@ -13571,7 +13553,7 @@ async fn handle_incoming_request(
                 Some(roster), db_path, db_passphrase,
             ).await;
             if outcome.our_devices_grew {
-                reprove_own_inbox(ws_cmd_tx, master_keypair, local_peer_str, db_path, db_passphrase);
+                super::roster_book::show_relay(ws_cmd_tx, local_peer_str, db_path, db_passphrase);
             }
             converge_new_siblings(
                 &outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,

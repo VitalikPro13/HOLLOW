@@ -77,6 +77,9 @@ static snapshot::Data sample() {
     d.locks.push_back({"8ef8bc89d3891dca86ff72c6783e396351aed5ba", "[]", 111});
     d.registrations.push_back({"12D3KooWTargetOne", 112});
     d.registrations.push_back({"12D3KooWTargetTwo", 113});
+    d.rosters.push_back({"12D3KooWMasterOne", R"({"master":"12D3KooWMasterOne","r_pub":""})", 114, {}});
+    d.rosters.push_back({"12D3KooWMasterTwo", std::string(3000, 'r'), 1ull << 62,
+                         {{"12D3KooWWaiting", 604800}, {"12D3KooWJustAsked", 0}}});
     return d;
 }
 
@@ -252,6 +255,17 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
         if (a.registrations[i].peer != b.registrations[i].peer ||
             a.registrations[i].share != b.registrations[i].share) return false;
     }
+    if (a.rosters.size() != b.rosters.size()) return false;
+    for (size_t i = 0; i < a.rosters.size(); i++) {
+        const auto& x = a.rosters[i];
+        const auto& y = b.rosters[i];
+        if (x.master != y.master || x.json != y.json || x.share != y.share || x.seen.size() != y.seen.size()) {
+            return false;
+        }
+        for (size_t j = 0; j < x.seen.size(); j++) {
+            if (x.seen[j].device != y.seen[j].device || x.seen[j].age_secs != y.seen[j].age_secs) return false;
+        }
+    }
     return true;
 }
 
@@ -271,8 +285,25 @@ static size_t shares_bytes(const snapshot::Data& d) {
     return n;
 }
 
-// `d` without what v6 added, as a v5 build held it.
+// The bytes of the v7 `rosters` section.
+static size_t rosters_bytes(const snapshot::Data& d) {
+    size_t n = 4;
+    for (const auto& r : d.rosters) {
+        n += 4 + r.master.size() + 4 + r.json.size() + 8 + 4;
+        for (const auto& s : r.seen) n += 4 + s.device.size() + 4;
+    }
+    return n;
+}
+
+// `d` without what v7 added, as a v6 build held it.
+static snapshot::Data without_rosters(snapshot::Data d) {
+    d.rosters.clear();
+    return d;
+}
+
+// `d` without what v6 and v7 added, as a v5 build held it.
 static snapshot::Data without_shares(snapshot::Data d) {
+    d = without_rosters(std::move(d));
     for (auto& q : d.dm) {
         for (auto& f : q.frames) f.share = snapshot::NO_SHARE;
     }
@@ -301,7 +332,7 @@ static snapshot::Data without_ring_meta(snapshot::Data d) {
 static std::string as_v5(const snapshot::Data& d, const std::string& owner) {
     std::string bytes = snapshot::encode(d);
     snapshot::detail::Writer w;
-    w.out = bytes.substr(0, bytes.size() - 4 - shares_bytes(d) - ring_meta_bytes(d));
+    w.out = bytes.substr(0, bytes.size() - 4 - rosters_bytes(d) - shares_bytes(d) - ring_meta_bytes(d));
     w.out[4] = 5;
     w.count(d.topics.size());
     for (const auto& t : d.topics) {
@@ -341,8 +372,25 @@ int main() {
         check("every entry keeps its share", out.dm[1].frames[0].share == (1ull << 63) &&
                                              out.topics[0].share == 105 && out.kills[1].share == 107 &&
                                              out.marks[1].share == 109 && out.locks[1].share == 111 &&
-                                             out.registrations[1].share == 113);
+                                             out.registrations[1].share == 113 &&
+                                             out.rosters[1].share == (1ull << 62));
+        check("rosters survive with their first sights, in order",
+              out.rosters.size() == 2 && out.rosters[0].master == "12D3KooWMasterOne" &&
+              out.rosters[1].json.size() == 3000 && out.rosters[1].seen.size() == 2 &&
+              out.rosters[1].seen[0].age_secs == 604800);
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
+    }
+
+    // The relay that holds rosters takes back what the v6 build running before it
+    // handed over: the same bytes, less the rosters, under version 6.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        std::string v6 = bytes.substr(0, bytes.size() - 4 - rosters_bytes(in)) + bytes.substr(bytes.size() - 4);
+        v6[4] = 6;
+        snapshot::Data out;
+        check("a v6 snapshot decodes under this reader", snapshot::decode(v6, out));
+        check("and carries no rosters", out.rosters.empty() && same(without_rosters(in), out));
     }
 
     // The relay that charges entries to shares takes back what the v5 build
@@ -360,7 +408,7 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in);
         std::string v4 = bytes.substr(0, bytes.size() - 4 - meta) + bytes.substr(bytes.size() - 4);
         v4[4] = 4;
         snapshot::Data out;
@@ -374,7 +422,7 @@ int main() {
         snapshot::Data in = sample();
         in.locks.clear();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in);
         std::string v3 = bytes.substr(0, bytes.size() - 8 - meta) + bytes.substr(bytes.size() - 4);
         v3[4] = 3;
         snapshot::Data out;
@@ -386,7 +434,7 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in);
         std::string bad = bytes;
         bad[bytes.size() - 4 - meta] = 3;  // claims three rings where there are two
         snapshot::Data out;

@@ -11,9 +11,10 @@ import '../helpers/test_app.dart';
 
 const _asker = '12D3KooWAskerAskerAskerAskerAskerAskerAskerAsker';
 
-roster_api.RosterStatus _status(String askerState) => roster_api.RosterStatus(
+roster_api.RosterStatus _status(String askerState, {bool backupWait = true}) => roster_api.RosterStatus(
       member: true,
       protected: true,
+      backupWait: backupWait,
       devices: [
         const roster_api.RosterDevice(devicePeerId: 'me', state: 'member', thisDevice: true),
         roster_api.RosterDevice(devicePeerId: _asker, state: askerState, thisDevice: false),
@@ -100,6 +101,21 @@ void main() {
     expect(api.refusals, 0);
     expect(container.read(pendingDeviceAsksProvider), isEmpty);
   });
+
+  // The ask promises seven days only while waiting can still let a device in.
+  for (final waits in [true, false]) {
+    testWidgets('the ask ${waits ? 'mentions' : 'does not mention'} the seven days', (tester) async {
+      await pumpHost(tester, extra: [
+        rosterStatusProvider.overrideWith((ref) async => _status('pending', backupWait: waits)),
+      ]);
+      final shown = showPendingDeviceDialog(host, hostRef, _asker);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('it joins in seven days'), waits ? findsOneWidget : findsNothing);
+      await tester.tap(find.text('Later'));
+      await tester.pumpAndSettle();
+      await shown;
+    });
+  }
 
   testWidgets('a waiting device is asked about and can be refused', (tester) async {
     await pumpHost(tester);

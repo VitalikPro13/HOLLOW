@@ -36,6 +36,7 @@ class SecuritySettingsPage extends StatelessWidget {
         ),
         SettingsAdvanced(
           children: [
+            const BackupWaitToggle(),
             SettingsRow(
               title: 'Check a message proof',
               subtitle: 'Paste a proof to confirm who signed a message',

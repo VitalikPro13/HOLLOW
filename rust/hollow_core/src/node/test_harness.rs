@@ -44,12 +44,12 @@ struct RelayInner {
     conns: HashMap<String, Conn>,
     /// room_code -> set of device_peer_ids currently in the room.
     rooms: HashMap<String, HashSet<String>>,
-    /// `inbox:{master}` room -> the devices that proved on join that they are that
-    /// master's. Only they see each other and receive there, as on the relay.
+    /// `inbox:{master}` room -> the devices the relay's fold counts as that master's.
+    /// Only they see each other and receive there, as on the relay.
     inbox_owners: HashMap<String, HashSet<String>>,
-    /// master -> the highest inbox proof version shown for it. A lower one never
-    /// proves ownership again, as on the relay (`device_list_max_version`).
-    inbox_marks: HashMap<String, u64>,
+    /// master -> every roster shown for it folded into one, with when the relay first
+    /// saw each pending join, as on the relay (`relay-uws/src/roster_book.h`).
+    inbox_rosters: HashMap<String, InboxRoster>,
     /// target device_peer_id -> buffered (room, frame-kind, from, data) for
     /// replay when the target next joins that room. Mirrors the relay's
     /// offline buffer (the load-bearing peer-fallback path).
@@ -385,10 +385,19 @@ impl MockRelay {
         inner.rooms.get(room).cloned().unwrap_or_default()
     }
 
-    /// The devices that proved they own `master`'s inbox.
+    /// The devices that own `master`'s inbox.
     pub(crate) fn inbox_owners(&self, master: &str) -> std::collections::HashSet<String> {
         let inner = self.inner.lock().unwrap();
         inner.inbox_owners.get(&format!("inbox:{master}")).cloned().unwrap_or_default()
+    }
+
+    /// Move the relay's first sight of `device`'s pending join for `master` back by
+    /// `by_ms`, as if that much time had passed at the relay.
+    pub(crate) fn age_inbox_wait(&self, master: &str, device: &str, by_ms: i64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(seen) = inner.inbox_rosters.get_mut(master).and_then(|h| h.seen.get_mut(device)) {
+            *seen -= by_ms;
+        }
     }
 
     /// Frames currently buffered for `peer`. The relay buffers a direct frame under
@@ -776,29 +785,17 @@ impl MockRelay {
             WsCommand::JoinRoom { room_code } => {
                 inner.join(from, &room_code, false);
             }
-            WsCommand::JoinInbox { room_code, proof } => {
-                // OWNERSHIP CHECK, every clause exactly as the real relay must: the device list
-                // verifies under its own master pubkey, that pubkey derives to the claimed master
-                // (`verify_device_list` folds both), THIS authenticated socket is a live
-                // un-revoked member of it, and the room really is that master's inbox. Any
-                // failure is a plain join that shows and replays nothing.
-                let verified = super::crypto_handler::verify_device_list(&proof)
-                    && room_code == format!("inbox:{}", proof.master_peer_id);
-                // Any verifying list raises the mark, whoever carries it.
-                let current = verified && {
-                    let mark = inner.inbox_marks.entry(proof.master_peer_id.clone()).or_insert(0);
-                    let fresh = proof.version >= *mark;
-                    if fresh {
-                        *mark = proof.version;
-                    }
-                    fresh
-                };
-                let owner_ok = current
-                    && proof.devices.iter().any(|d| d == from)
-                    && !proof.revoked.iter().any(|r| r == from);
+            WsCommand::JoinInbox { room_code, roster } => {
+                // A shown roster decides on its own, so a socket the fold no longer
+                // counts loses the inbox here even if it owned it before.
+                let owner_ok = inner.show_roster(from, &room_code, roster);
+                if !owner_ok && let Some(owners) = inner.inbox_owners.get_mut(&room_code) {
+                    owners.remove(from);
+                }
                 inner.join(from, &room_code, owner_ok);
-                if owner_ok {
-                    inner.replay_mailbox(from, &proof.master_peer_id);
+                if let Some(master) = room_code.strip_prefix("inbox:").filter(|_| owner_ok) {
+                    let master = master.to_string();
+                    inner.replay_mailbox(from, &master);
                 }
             }
             WsCommand::LeaveRoom { room_code } => {
@@ -1100,7 +1097,61 @@ impl MockRelay {
     }
 }
 
+/// What the relay holds for one master: every roster shown for it, folded, and when it
+/// first saw each pending join.
+struct InboxRoster {
+    roster: crate::identity::roster::Roster,
+    seen: HashMap<String, i64>,
+}
+
 impl RelayInner {
+    /// Fold a roster shown on an `inbox:` join into the one held for its master and
+    /// say whether `from` is a member of the result, as the relay does: anyone's shown
+    /// statements are kept (each verifies alone), the relay's own clock times pending
+    /// joins, and a change that drops a member drops its inbox at once.
+    fn show_roster(&mut self, from: &str, room: &str, shown: crate::identity::roster::Roster) -> bool {
+        let Some(master) = room.strip_prefix("inbox:").map(str::to_string) else { return false };
+        let too_big = serde_json::to_vec(&shown).map_or(true, |b| b.len() > crate::identity::roster::MAX_ROSTER_BYTES);
+        if shown.master != master || too_big || !shown.within_caps() {
+            return false;
+        }
+        let now = super::roster_book::now_ms();
+        let held = self.inbox_rosters.entry(master.clone()).or_insert_with(|| InboxRoster {
+            roster: crate::identity::roster::Roster::new(&master),
+            seen: HashMap::new(),
+        });
+        let merged = held.roster.merged(&shown.verified(now));
+        let seen: HashMap<String, i64> = merged
+            .pendings
+            .iter()
+            .map(|p| (p.device.clone(), held.seen.get(&p.device).copied().unwrap_or(now)))
+            .collect();
+        let changed = merged != held.roster || seen != held.seen;
+        held.roster = merged;
+        held.seen = seen;
+        let state = held.roster.fold(|d| held.seen.get(d).copied(), now);
+        if changed {
+            self.drop_inbox_owners(room, &state.members);
+        }
+        state.is_member(from)
+    }
+
+    /// Owners of `room` the fold stopped counting lose the inbox now; the others see
+    /// them leave.
+    fn drop_inbox_owners(&mut self, room: &str, members: &std::collections::BTreeSet<String>) {
+        let gone: Vec<String> = self
+            .inbox_owners
+            .get(room)
+            .map(|o| o.iter().filter(|d| !members.contains(*d)).cloned().collect())
+            .unwrap_or_default();
+        for d in gone {
+            if let Some(owners) = self.inbox_owners.get_mut(room) {
+                owners.remove(&d);
+            }
+            self.broadcast_except(room, &d, WsEvent::PeerLeft { room: room.to_string(), peer_id: d.clone() });
+        }
+    }
+
     /// Whether `peer` sees and receives in `room`: everywhere, except that an inbox
     /// shows only its owners.
     fn receives(&self, room: &str, peer: &str) -> bool {
@@ -18740,20 +18791,19 @@ async fn authz_an_inbox_shows_its_devices_only_to_each_other() {
 
     let m_kp = NativeKeypair::from_secret_bytes(&seed_bytes(91));
     let m = m_kp.peer_id();
-    let dev1 = NativeKeypair::from_secret_bytes(&seed_bytes(92)).peer_id();
-    let dev2 = NativeKeypair::from_secret_bytes(&seed_bytes(93)).peer_id();
+    let dev1_kp = NativeKeypair::from_secret_bytes(&seed_bytes(92));
+    let dev2_kp = NativeKeypair::from_secret_bytes(&seed_bytes(93));
+    let (dev1, dev2) = (dev1_kp.peer_id(), dev2_kp.peer_id());
     let asker_a = NativeKeypair::from_secret_bytes(&seed_bytes(94)).peer_id();
     let asker_b = NativeKeypair::from_secret_bytes(&seed_bytes(95)).peer_id();
     let inbox = format!("inbox:{m}");
-    let list = super::crypto_handler::build_signed_device_list(
-        &m_kp, 1, vec![dev1.clone(), dev2.clone()], Vec::new(),
-    );
+    let roster = crate::identity::roster::Roster::legacy_for_test(&m_kp, &[&dev1_kp, &dev2_kp]);
 
     let mut one = raw_socket(&relay, &dev1);
-    one.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), proof: list.clone() }).unwrap();
+    one.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: roster.clone() }).unwrap();
     let _ = one.events(300).await;
     let mut two = raw_socket(&relay, &dev2);
-    two.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), proof: list }).unwrap();
+    two.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster }).unwrap();
     let rosters = |evs: &[WsEvent]| -> Vec<Vec<String>> {
         evs.iter()
             .filter_map(|e| match e {
@@ -18824,7 +18874,7 @@ async fn authz_an_inbox_shows_its_devices_only_to_each_other() {
     }
     assert_eq!(relay.buffered_count(&m), 1, "and the mailbox keeps it");
 
-    // The client refreshes rooms with a plain join, no proof: a proven socket stays an
+    // The client refreshes rooms with a plain join, no roster: an owner socket stays an
     // owner through it, and a stranger's plain join proves nothing.
     one.cmd_tx.send(WsCommand::JoinRoom { room_code: inbox.clone() }).unwrap();
     let refreshed = one.events(300).await;
@@ -18843,20 +18893,24 @@ async fn authz_an_inbox_shows_its_devices_only_to_each_other() {
 }
 
 // The mailbox is only as safe as its gate: a master's inbox room name is public, so
-// without the ownership proof anyone could join it and read every request the victim
-// has not collected yet.
+// without the gate anyone could join it and read every request the victim has not
+// collected yet. The relay folds the rosters shown to it and lets in only a member.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
-async fn mailbox_requires_ownership_proof() {
+async fn mailbox_requires_a_roster_that_counts_the_device() {
+    use crate::identity::roster::{sign_removal, Roster, LEGACY_BASE};
     let _g = test_guard();
     let relay = MockRelay::new();
 
     let b_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(81));
     let b_master = b_master_kp.peer_id();
-    let b_dev2 = NativeKeypair::from_secret_bytes(&seed_bytes(82)).peer_id();
+    let b_dev1_kp = NativeKeypair::from_secret_bytes(&seed_bytes(85));
+    let b_dev2_kp = NativeKeypair::from_secret_bytes(&seed_bytes(82));
+    let b_dev2 = b_dev2_kp.peer_id();
     let stranger_master = NativeKeypair::from_secret_bytes(&seed_bytes(83));
-    let stranger_dev = NativeKeypair::from_secret_bytes(&seed_bytes(84)).peer_id();
+    let stranger_kp = NativeKeypair::from_secret_bytes(&seed_bytes(84));
+    let stranger_dev = stranger_kp.peer_id();
     let inbox = format!("inbox:{b_master}");
 
     // A depositor drops one frame addressed at B's MASTER. B is absent, so the
@@ -18873,106 +18927,115 @@ async fn mailbox_requires_ownership_proof() {
         "precondition: the frame is buffered under the master",
     );
 
-    // 1. A stranger joins the inbox with NO proof. The join succeeds (the room is
-    //    not a secret) and hands over nothing.
+    // 1. A plain join: the room is no secret, and it hands over nothing.
     let mut stranger = raw_socket(&relay, &stranger_dev);
     stranger.cmd_tx.send(WsCommand::JoinRoom { room_code: inbox.clone() }).unwrap();
-    assert!(
-        stranger.direct_payloads(600).await.is_empty(),
-        "an unproven join must collect NOTHING from the mailbox",
-    );
+    assert!(stranger.direct_payloads(600).await.is_empty(), "a plain join collected the mailbox");
 
-    // 2. The same stranger with a proof it can genuinely sign: its OWN master's
-    //    device list. The signature is real, the master is wrong, and the room
-    //    check is what refuses it.
-    let own_list = super::crypto_handler::build_signed_device_list(
-        &stranger_master, 1, vec![stranger_dev.clone()], Vec::new(),
-    );
-    stranger.cmd_tx.send(WsCommand::JoinInbox {
-        room_code: inbox.clone(),
-        proof: own_list,
-    }).unwrap();
-    assert!(
-        stranger.direct_payloads(600).await.is_empty(),
-        "a valid list for the WRONG master must not open this mailbox",
-    );
+    // 2. The stranger's own genuine roster, for the wrong master.
+    let own = Roster::legacy_for_test(&stranger_master, &[&stranger_kp]);
+    stranger.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: own.clone() }).unwrap();
+    assert!(stranger.direct_payloads(600).await.is_empty(), "another master's roster opened this mailbox");
 
-    // 3. A FORGED proof: B's real master id, signed by nobody holding B's key.
-    //    This is the attack the signature exists to stop.
-    let mut forged = super::crypto_handler::build_signed_device_list(
-        &stranger_master, 9, vec![stranger_dev.clone()], Vec::new(),
-    );
-    forged.master_peer_id = b_master.clone();
-    forged.devices = vec![stranger_dev.clone()];
-    stranger.cmd_tx.send(WsCommand::JoinInbox {
-        room_code: inbox.clone(),
-        proof: forged,
-    }).unwrap();
-    assert!(
-        stranger.direct_payloads(600).await.is_empty(),
-        "a forged proof must collect NOTHING",
-    );
+    // 3. That roster relabelled with B's master: none of its statements verify for B.
+    let mut forged = own;
+    forged.master = b_master.clone();
+    stranger.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: forged }).unwrap();
+    assert!(stranger.direct_payloads(600).await.is_empty(), "a forged roster collected the mailbox");
 
-    // 4. A genuine list of B's, but naming a device that is NOT this socket.
-    //    Holding someone's real device list is not owning their inbox.
-    let not_us = super::crypto_handler::build_signed_device_list(
-        &b_master_kp, 1, vec![b_dev2.clone()], Vec::new(),
-    );
-    stranger.cmd_tx.send(WsCommand::JoinInbox {
-        room_code: inbox.clone(),
-        proof: not_us,
-    }).unwrap();
-    assert!(
-        stranger.direct_payloads(600).await.is_empty(),
-        "a list that does not name THIS socket must not open the mailbox",
-    );
+    // 4. B's genuine roster, which does not count this socket's device.
+    let b_roster = Roster::legacy_for_test(&b_master_kp, &[&b_dev1_kp, &b_dev2_kp]);
+    stranger.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: b_roster.clone() }).unwrap();
+    assert!(stranger.direct_payloads(600).await.is_empty(), "someone else's roster opened the mailbox");
 
-    // 5. B's own second device, with a valid proof naming itself. THIS collects.
+    // 5. B's own device with that roster collects.
     let mut b2 = raw_socket(&relay, &b_dev2);
-    let good = super::crypto_handler::build_signed_device_list(
-        &b_master_kp, 2, vec![b_dev2.clone()], Vec::new(),
-    );
-    b2.cmd_tx.send(WsCommand::JoinInbox {
-        room_code: inbox.clone(),
-        proof: good.clone(),
-    }).unwrap();
-    assert_eq!(
-        b2.direct_payloads(1500).await,
-        vec![b"the-request".to_vec()],
-        "a proven owner collects the mailbox",
-    );
+    b2.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: b_roster.clone() }).unwrap();
+    assert_eq!(b2.direct_payloads(1500).await, vec![b"the-request".to_vec()], "a member collects the mailbox");
 
-    // 6. TTL-only, NOT delete-on-replay. Every sibling device has to be able to
-    //    collect the same request on its own next boot, so reading can never
-    //    consume it. The receiver's friends-row dedup is what makes the repeat
-    //    harmless — do NOT "fix" this by tracking per-socket delivery.
-    assert_eq!(
-        relay.buffered_count(&b_master), 1,
-        "the mailbox must survive being read",
-    );
-    b2.cmd_tx.send(WsCommand::JoinInbox {
-        room_code: inbox.clone(),
-        proof: good,
-    }).unwrap();
-    assert_eq!(
-        b2.direct_payloads(1500).await,
-        vec![b"the-request".to_vec()],
-        "a rejoin re-collects it",
-    );
+    // 6. TTL-only, NOT delete-on-replay: every sibling collects the same request on its
+    //    own next boot, so a read never consumes it.
+    assert_eq!(relay.buffered_count(&b_master), 1, "the mailbox must survive being read");
+    b2.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: b_roster.clone() }).unwrap();
+    assert_eq!(b2.direct_payloads(1500).await, vec![b"the-request".to_vec()], "a rejoin re-collects it");
 
-    // 7. A device the master has REVOKED is not an owner any more.
-    let revoked_list = super::crypto_handler::build_signed_device_list(
-        &b_master_kp, 3, vec![b_dev2.clone()], vec![b_dev2.clone()],
-    );
-    let mut b2_revoked = raw_socket(&relay, &b_dev2);
-    b2_revoked.cmd_tx.send(WsCommand::JoinInbox {
-        room_code: inbox.clone(),
-        proof: revoked_list,
-    }).unwrap();
+    // 7. B's other device removes it. Whoever shows the relay that removal, the removed
+    //    device loses the inbox at once, and showing its older roster gets nothing back.
+    let mut removing = b_roster.clone();
+    removing.add_removal(sign_removal(&b_dev1_kp, &b_master, LEGACY_BASE, &b_dev2, &[]));
+    stranger.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: removing }).unwrap();
     assert!(
-        b2_revoked.direct_payloads(600).await.is_empty(),
-        "a revoked device must not open the mailbox",
+        wait_until(5, async || !relay.inbox_owners(&b_master).contains(&b_dev2)).await,
+        "the removed device kept the inbox",
     );
+    b2.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: b_roster }).unwrap();
+    assert!(b2.direct_payloads(600).await.is_empty(), "an older roster took a removal back at the relay");
+}
+
+/// Design ID-1R. Once the phrase is the root, holding the master key owns nothing at
+/// the relay: a restored backup's claims, its own vouch and a recovery key it minted
+/// are folded and refused, and the owner's device keeps its inbox throughout. The seven
+/// quiet days count at the relay too, unless the phrase turned them off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_the_master_key_alone_never_owns_a_protected_inbox() {
+    use crate::identity::roster::{
+        r_pub_of, sign_consent, sign_legacy, sign_pending, sign_recovery, sign_vouch, Roster, PENDING_MATURITY_MS,
+    };
+    let _g = test_guard();
+    let relay = MockRelay::new();
+    let now = super::roster_book::now_ms();
+    let (m, owner, thief) = (tag_kp(171), tag_kp(172), tag_kp(173));
+    let master = m.peer_id();
+    let inbox = format!("inbox:{master}");
+    let genuine = protected_roster(171, &[172], now - 60_000);
+
+    let o = raw_socket(&relay, &owner.peer_id());
+    o.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: genuine.clone() }).unwrap();
+    assert!(wait_until(5, async || relay.inbox_owners(&master).contains(&owner.peer_id())).await);
+
+    let base = genuine.base();
+    let mut stolen = genuine.clone();
+    stolen.add_consent(sign_consent(&thief, &master));
+    stolen.add_legacy(sign_legacy(&m, &thief.peer_id()));
+    stolen.add_pending(sign_pending(&m, &base, &thief.peer_id()));
+    stolen.add_vouch(sign_vouch(&thief, &master, &base, &thief.peer_id()));
+    let forged = Roster::genesis(&m, &tag_kp(174), &thief, now);
+    let mut t = raw_socket(&relay, &thief.peer_id());
+    for shown in [stolen.clone(), forged] {
+        t.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: shown }).unwrap();
+        let _ = t.events(300).await;
+        assert!(!relay.inbox_owners(&master).contains(&thief.peer_id()), "the master key alone owned the inbox");
+        assert!(relay.inbox_owners(&master).contains(&owner.peer_id()), "the owner was locked out of its inbox");
+    }
+
+    // Nobody refused it for seven days at the relay: it is one of the identity's now.
+    relay.age_inbox_wait(&master, &thief.peer_id(), PENDING_MATURITY_MS);
+    t.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: stolen }).unwrap();
+    assert!(wait_until(5, async || relay.inbox_owners(&master).contains(&thief.peer_id())).await);
+
+    // The phrase turns the wait off: the waiting device is out at once and asking
+    // again in the new base never lets it in by waiting.
+    let recovery = recovery_kp(171);
+    let mut strict = genuine.clone();
+    strict
+        .add_phrase_statement(&r_pub_of(&recovery), Some(sign_recovery(&m, &recovery, now, &[owner.peer_id()], true)), None)
+        .unwrap();
+    o.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: strict.clone() }).unwrap();
+    assert!(
+        wait_until(5, async || !relay.inbox_owners(&master).contains(&thief.peer_id())).await,
+        "a new base kept a device it does not keep",
+    );
+    let mut asks_again = strict.clone();
+    asks_again.add_consent(sign_consent(&thief, &master));
+    asks_again.add_pending(sign_pending(&m, &strict.base(), &thief.peer_id()));
+    t.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: asks_again.clone() }).unwrap();
+    let _ = t.events(300).await;
+    relay.age_inbox_wait(&master, &thief.peer_id(), PENDING_MATURITY_MS);
+    t.cmd_tx.send(WsCommand::JoinInbox { room_code: inbox.clone(), roster: asks_again }).unwrap();
+    let _ = t.events(300).await;
+    assert!(!relay.inbox_owners(&master).contains(&thief.peer_id()), "waiting got in after the phrase turned it off");
+    assert!(relay.inbox_owners(&master).contains(&owner.peer_id()));
 }
 
 // The two freshness rules are independent, and that is the point: the carried rule
@@ -29722,7 +29785,7 @@ fn protected_roster(master_tag: u8, device_tags: &[u8], at_ms: i64) -> crate::id
     }
     r.add_phrase_statement(
         &roster::r_pub_of(&recovery),
-        Some(roster::sign_recovery(&master, &recovery, at_ms, &keep)),
+        Some(roster::sign_recovery(&master, &recovery, at_ms, &keep, false)),
         None,
     )
     .expect("a fresh roster takes any recovery key");
@@ -30520,13 +30583,13 @@ async fn a_share_backed_dm_file_reaches_the_friend_as_a_share() {
     drop((a, b));
 }
 
-/// The relay keeps the newest inbox proof any of our devices has shown it. A device
-/// that connects with a roster that changed while it was away owns nothing there;
-/// once a sibling brings it up to date it proves again, rather than going without
-/// its mailbox until its next reconnect.
+/// Design ID-1R. The relay folds every roster our devices show it, so a device whose
+/// roster fell behind while it was away still owns its inbox the moment it is back,
+/// and a removal one device makes takes the removed device's inbox at once, without
+/// waiting for anyone to reconnect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn a_device_behind_on_its_roster_proves_its_inbox_once_it_catches_up() {
+async fn authz_a_removed_device_loses_the_inbox_at_once() {
     let _g = test_guard();
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -30537,49 +30600,45 @@ async fn a_device_behind_on_its_roster_proves_its_inbox_once_it_catches_up() {
     const D2: u8 = 163;
     const D3: u8 = 164;
     let o_master = tag_kp(O_MASTER).peer_id();
-    let d3 = tag_kp(D3).peer_id();
     let roster = protected_roster(O_MASTER, &[D1, D2, D3], super::roster_book::now_ms() - 60_000);
 
     let d1 = spawn_node_seeded(&relay, O_MASTER, D1, &[], Some(roster.clone())).await;
-    let d2 = spawn_node_seeded(&relay, O_MASTER, D2, &[], Some(roster)).await;
-    let both = [d1.device_id.clone(), d2.device_id.clone()];
+    let d2 = spawn_node_seeded(&relay, O_MASTER, D2, &[], Some(roster.clone())).await;
+    let d3 = spawn_node_seeded(&relay, O_MASTER, D3, &[], Some(roster)).await;
+    let all = [d1.device_id.clone(), d2.device_id.clone(), d3.device_id.clone()];
     assert!(
-        wait_until(20, async || both.iter().all(|d| relay.inbox_owners(&o_master).contains(d))).await,
-        "both devices own the inbox at first",
+        wait_until(20, async || all.iter().all(|d| relay.inbox_owners(&o_master).contains(d))).await,
+        "every device owns the inbox at first",
     );
 
     relay.set_online(&d2.device_id, false);
     assert!(wait_until(10, async || !relay.online_devices().contains(&d2.device_id)).await);
-    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d3.clone() }).await.unwrap();
+    // The removed device hears nothing of it, so only the remover can tell the relay.
+    relay.swallow_direct(&d1.device_id, &d3.device_id);
+    relay.set_broadcast_deaf(&d3.device_id, true);
+    d1.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: d3.device_id.clone() }).await.unwrap();
     assert!(
-        wait_until(20, async || {
-            super::roster_book::own(&o_master, &d1.db_path, &d1.passphrase)
-                .is_some_and(|(_, state)| state.removed.contains_key(&d3))
-        })
-        .await,
-        "the removal lands on the device that made it",
+        wait_until(20, async || !relay.inbox_owners(&o_master).contains(&d3.device_id)).await,
+        "the removed device kept the inbox until it reconnected",
     );
-    // Its next connect shows the relay the newer roster.
-    relay.set_online(&d1.device_id, false);
-    assert!(wait_until(10, async || !relay.online_devices().contains(&d1.device_id)).await);
-    relay.set_online(&d1.device_id, true);
-    assert!(wait_until(20, async || relay.inbox_owners(&o_master).contains(&d1.device_id)).await);
+    relay.set_broadcast_deaf(&d3.device_id, false);
+    assert!(relay.inbox_owners(&o_master).contains(&d1.device_id));
 
     relay.set_online(&d2.device_id, true);
     assert!(
-        wait_until(20, async || {
-            super::roster_book::own(&o_master, &d2.db_path, &d2.passphrase)
-                .is_some_and(|(_, state)| state.removed.contains_key(&d3))
-        })
-        .await,
-        "the device that was away learns the removal from its sibling",
-    );
-    assert!(
         wait_until(20, async || relay.inbox_owners(&o_master).contains(&d2.device_id)).await,
-        "and then owns its inbox again without a reconnect",
+        "a device behind on its roster owns its inbox again on its return",
+    );
+    relay.set_online(&d3.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d3.device_id)).await);
+    relay.set_online(&d3.device_id, true);
+    let _ = wait_until(5, async || relay.online_devices().contains(&d3.device_id)).await;
+    assert!(
+        !wait_until(5, async || relay.inbox_owners(&o_master).contains(&d3.device_id)).await,
+        "the removed device got the inbox back by reconnecting",
     );
 
-    drop((d1, d2));
+    drop((d1, d2, d3));
 }
 
 /// A stolen MEMBER device removes the owner's device; the owner types the phrase on
@@ -30635,7 +30694,7 @@ async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
 
     // The owner types the phrase on the removed device and keeps only it.
     let (before, _) = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).map(|(_, s)| (s.members, ())).unwrap();
-    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[], &o.db_path, &o.passphrase)
+    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[], false, &o.db_path, &o.passphrase)
         .expect("the phrase recovers");
     let after = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().1.members;
     assert_eq!(after.iter().cloned().collect::<Vec<_>>(), vec![o_dev.clone()]);

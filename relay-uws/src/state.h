@@ -14,6 +14,7 @@
 #include "fair_share.h"
 #include "offline_index.h"
 #include "reports.h"
+#include "roster_book.h"
 
 // No soft backpressure — let uWebSockets buffer handle delivery.
 // Hard limit (.maxBackpressure = 64MB) catches truly dead connections.
@@ -403,6 +404,10 @@ struct RelayState {
     // after every deploy.
     std::unordered_map<std::string, uint64_t> device_list_max_version;
     FairShare<std::string> mark_ledger;
+
+    // Every identity's roster, folded from the rosters shown on its inbox joins
+    // (design ID-1R): who owns each inbox, removals no later roster takes back.
+    RosterBook roster_book;
 
     // The key share ids are hashed under, replaced every hour and never persisted,
     // so what the relay keeps past a connection names no address once its hour

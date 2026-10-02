@@ -106,6 +106,7 @@ void main() {
           rosterStatusProvider.overrideWith((ref) async => roster_api.RosterStatus(
                 member: true,
                 protected: phraseIsRoot,
+                backupWait: true,
                 devices: const [],
               )),
         ]),

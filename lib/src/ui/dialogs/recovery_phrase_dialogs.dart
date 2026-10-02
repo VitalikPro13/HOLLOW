@@ -91,6 +91,31 @@ Future<bool> showRecoverWithPhraseDialog(
   return ok ?? false;
 }
 
+/// Type the phrase to choose whether a device restored from a backup may join by
+/// nobody refusing it for seven days. True when the choice was made.
+Future<bool> showBackupWaitDialog(BuildContext context, {required bool allowed}) async {
+  final ok = await showHollowDialog<bool>(
+    context: context,
+    builder: (_) => _PhraseDialog(
+      title: allowed ? 'Let backups join on their own' : 'Stop backups joining on their own',
+      body: allowed
+          ? 'A device restored from a backup joins after seven days if none of '
+              'your devices refuses it. Someone who steals a backup and its '
+              "password can get in the same way if you're away for a week. A "
+              "device that's waiting to join right now has to ask again."
+          : 'A device restored from a backup then joins only when one of your '
+              'devices approves it, or when your recovery phrase is typed on it. '
+              'If you ever lose every device and the phrase, a backup can\'t '
+              "bring this identity back. A device that's waiting to join right "
+              'now has to ask again.',
+      confirmLabel: allowed ? 'Turn on' : 'Turn off',
+      onSubmit: (phrase, _) =>
+          roster_api.setBackupWait(phrase: phrase, allowed: allowed),
+    ),
+  );
+  return ok ?? false;
+}
+
 /// Type the phrase on a device waiting to join: it joins at once.
 Future<bool> showJoinWithPhraseDialog(BuildContext context) async {
   final ok = await showHollowDialog<bool>(

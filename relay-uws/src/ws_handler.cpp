@@ -4,6 +4,7 @@
 #include "ring_auth.h"
 #include "crypto.h"
 #include "device_list.h"
+#include "roster_crypto.h"
 #include "validate.h"
 #include "turn_uris.h"
 #include "push_queue.h"
@@ -407,15 +408,26 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
 //
 // A friend request addressed to a STRANGER is addressed to their MASTER id, and
 // no socket ever authenticates as a master — so the frame lands in
-// offline_buffer[master] and, until now, nobody was ever replayed it. The
-// mailbox closes that gap: a socket may PROVE it owns `inbox:{M}` by carrying
-// M's master-signed device list on the join, and only then is M's mailbox
-// replayed to it.
-//
-// Nothing new is stored and nothing new is logged. The relay never learns who
-// deposited or read what: the proof is verified, used, and dropped on the
-// stack. See feedback_relay_rules (no metadata logging).
+// offline_buffer[master]. A socket owns `inbox:{M}`, and is replayed M's mailbox,
+// only while the relay's fold of every roster shown for M counts its device a
+// member (design ID-1R, roster_book.h). The relay logs nothing about who
+// deposited or read what (feedback_relay_rules).
 static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
+
+// 0.11 clients prove an inbox with a master-signed device list, which anyone
+// holding the master key can sign. Turn this off once 0.12 is out; until then
+// such a list opens only an inbox whose roster the phrase does not yet root.
+static constexpr bool ACCEPT_DEVICE_LIST_INBOX_PROOF = true;
+
+static const RosterCrypto& relay_roster_crypto() {
+    static const RosterCrypto c = roster_crypto();
+    return c;
+}
+
+static int64_t wall_now_ms() {
+    return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
 
 // Parse the optional `inbox_proof` object carried on a join into a
 // SignedDeviceList. Strict: every field must be present and the right shape.
@@ -523,13 +535,19 @@ static bool is_inbox_room(const std::string& room) {
 static bool inbox_owner_proved(PerSocketData* data, const std::string& room,
                                const json& proof_json, RelayState& state) {
     // Guests never own an identity, so they can never own a mailbox.
-    if (data->is_guest) return false;
+    if (!ACCEPT_DEVICE_LIST_INBOX_PROOF || data->is_guest) return false;
     if (!is_inbox_room(room)) return false;
 
     SignedDeviceList dl;
     if (!parse_inbox_proof(proof_json, dl)) return false;
     if (!verify_signed_device_list(dl)) return false;                       // a + b
     if (room != std::string(INBOX_ROOM_PREFIX) + dl.master_peer_id) return false;  // d
+    // Once the phrase roots the identity's roster, the master key proves nothing,
+    // and a device the roster removed never comes back through an old list.
+    if (const auto* held = state.roster_book.get(dl.master_peer_id)) {
+        auto st = state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto());
+        if (st.is_protected || st.removed.count(data->peer_id)) return false;
+    }
 
     // (e) — before (c), so a current list raises the mark even when the socket
     // carrying it turns out not to be one of its devices. No log line: a
@@ -569,11 +587,49 @@ static bool receives_in_room(const WsRoom& room, const std::string& room_name,
     return !is_inbox_room(room_name) || room.owners.count(receiver) != 0;
 }
 
-// `inbox_proof` is optional and may be null: a plain JoinRoom carries none, and
-// an old client never sends one. It is only consulted for an `inbox:` room.
+// Owners of `room` that `state` (the held roster's fold) no longer counts lose the
+// inbox at once; the owners left see them go.
+static void drop_inbox_owners(RelayState& state, const std::string& room, const roster::State& st) {
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return;
+    WsRoom& r = rit->second;
+    std::vector<std::string> gone;
+    for (const auto& owner : r.owners) {
+        if (!st.is_member(owner)) gone.push_back(owner);
+    }
+    for (const auto& peer : gone) {
+        r.owners.erase(peer);
+        std::string left = json{{"type", "peer_left"}, {"room", room}, {"peer_id", peer}}.dump();
+        for (auto& [pid, sock] : r.peers) {
+            if (pid != peer && !sock->getUserData()->is_guest && receives_in_room(r, room, pid)) {
+                send_to_peer(sock, left, uWS::OpCode::TEXT);
+            }
+        }
+    }
+}
+
+// Ownership of an `inbox:{M}` join that shows a roster (design ID-1R): the roster is
+// folded into the one held for M and this socket owns the inbox only if its device
+// is a member of the result. A roster that does not parse, is too big or names
+// another master proves nothing, silently, like a plain join.
+static bool inbox_owner_by_roster(PerSocketData* data, const std::string& room,
+                                  const json& roster_json, RelayState& state) {
+    if (data->is_guest || !is_inbox_room(room)) return false;
+    std::optional<roster::Roster> shown = roster::from_json(roster_json);
+    if (!shown || roster_json.dump().size() > roster::MAX_ROSTER_BYTES) return false;
+    const std::string master = room.substr(sizeof(INBOX_ROOM_PREFIX) - 1);
+    RosterBook::Shown r = state.roster_book.show(master, *shown, data->peer_id, socket_share(state, data),
+                                                 wall_now_ms(), relay_roster_crypto());
+    if (r.changed) drop_inbox_owners(state, room, r.state);
+    return r.member;
+}
+
+// `inbox_roster` (0.12) or `inbox_proof` (0.11) may be null: a plain JoinRoom
+// carries neither. They are only consulted for an `inbox:` room.
 static void handle_join(SSLWebSocket* ws, PerSocketData* data,
                          const std::string& room, RelayState& state,
-                         const json* inbox_proof = nullptr) {
+                         const json* inbox_proof = nullptr,
+                         const json* inbox_roster = nullptr) {
     if (!is_valid_room_code(room)) {
         send_json(ws, {{"type", "error"}, {"error", "Invalid room code"}});
         return;
@@ -587,6 +643,11 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         send_json(ws, {{"type", "error"}, {"error", data->is_guest ? "Guest room limit reached" : "Too many rooms"}});
         return;
     }
+
+    // A shown roster decides on its own; only a plain re-join keeps an owner an owner.
+    const bool shown = inbox_roster != nullptr;
+    const bool proved = shown ? inbox_owner_by_roster(data, room, *inbox_roster, state)
+                              : (inbox_proof && inbox_owner_proved(data, room, *inbox_proof, state));
 
     auto& ws_room = state.ws_rooms[room];
 
@@ -603,7 +664,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
             data->fetch_rooms.insert(room);
             replay_buffered_msgs(ws, data->peer_id, room, /*full_node=*/false, state);
         }
-        if (inbox_proof && inbox_owner_proved(data, room, *inbox_proof, state)) {
+        if (proved) {
             replay_mailbox_no_delete(ws, room.substr(sizeof(INBOX_ROOM_PREFIX) - 1), room, state);
         }
         return;
@@ -613,10 +674,9 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // A socket that proved it once stays an owner through a plain re-join (the
     // client refreshes rooms without the proof); a new socket proves again.
     auto held_slot = ws_room.peers.find(data->peer_id);
-    const bool already_owner = inbox && held_slot != ws_room.peers.end() && held_slot->second == ws &&
+    const bool already_owner = inbox && !shown && held_slot != ws_room.peers.end() && held_slot->second == ws &&
                                ws_room.owners.count(data->peer_id) != 0;
-    const bool owner = inbox && (already_owner ||
-                                 (inbox_proof && inbox_owner_proved(data, room, *inbox_proof, state)));
+    const bool owner = inbox && (already_owner || proved);
 
     // Collect existing non-guest peer IDs before adding. In an inbox room a
     // non-owner sees nobody and an owner sees only the other owners.
@@ -2425,13 +2485,15 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     std::string type = j.value("type", "");
 
     if (type == "join") {
-        // Optional ownership proof for an `inbox:{master}` join. Absent on every
-        // ordinary join (and on every old client), in which case handle_join
-        // behaves exactly as before.
+        // An `inbox:{master}` join may show the device's roster (0.12) or a
+        // master-signed list (0.11); an ordinary join shows neither.
         auto pit = j.find("inbox_proof");
         const json* inbox_proof =
             (pit != j.end() && pit->is_object()) ? &(*pit) : nullptr;
-        handle_join(ws, data, j.value("room", ""), state, inbox_proof);
+        auto rit = j.find("inbox_roster");
+        const json* inbox_roster =
+            (rit != j.end() && rit->is_object()) ? &(*rit) : nullptr;
+        handle_join(ws, data, j.value("room", ""), state, inbox_proof, inbox_roster);
     } else if (type == "leave") {
         // Only this socket's own slot: a fetch socket's leave must not unjoin the
         // device's full node.

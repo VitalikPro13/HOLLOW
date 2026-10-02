@@ -866,6 +866,39 @@ class _SecurityAppLockSectionState
       ];
 }
 
+/// Whether a device restored from a backup may join by nobody refusing it for
+/// seven days. It sits in every observer's roster, so only the phrase changes it,
+/// either way; a device that is not a member shows nothing.
+class BackupWaitToggle extends ConsumerWidget {
+  const BackupWaitToggle({super.key});
+
+  Future<void> _change(BuildContext context, WidgetRef ref, bool allowed) async {
+    if (!await showBackupWaitDialog(context, allowed: allowed)) return;
+    ref.invalidate(rosterStatusProvider);
+    if (!context.mounted) return;
+    HollowToast.show(
+      context,
+      allowed
+          ? 'Restored backups can join on their own again.'
+          : 'Restored backups now need your approval or your phrase.',
+      type: HollowToastType.success,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(rosterStatusProvider).valueOrNull;
+    if (status == null || !status.member) return const SizedBox.shrink();
+    return SettingsSwitchRow(
+      title: 'Let restored backups join on their own',
+      subtitle: 'A device restored from a backup joins after seven days if none '
+          'of your devices refuses it. Changing this needs your recovery phrase.',
+      value: status.backupWait,
+      onChanged: (allowed) => _change(context, ref, allowed),
+    );
+  }
+}
+
 /// The "Recovery" section. The phrase is never stored (design ID-1), so it is
 /// checked, never revealed; it also takes the identity back from every other
 /// device. The backup file sits here too.

@@ -25,6 +25,9 @@ pub struct RosterStatus {
     pub member: bool,
     /// The recovery phrase is the root (a recovery exists).
     pub protected: bool,
+    /// A device restored from a backup may join by nobody refusing it for seven days.
+    /// Only the phrase changes it.
+    pub backup_wait: bool,
     /// This device asked to join and waits: when it becomes a member without anyone
     /// answering, on this device's clock.
     pub joins_at_ms: Option<i64>,
@@ -68,6 +71,7 @@ pub fn roster_status() -> Result<RosterStatus, String> {
         return Ok(RosterStatus {
             member: false,
             protected: false,
+            backup_wait: true,
             joins_at_ms: None,
             removed_by: None,
             wipe_at_ms: None,
@@ -99,9 +103,8 @@ pub fn roster_status() -> Result<RosterStatus, String> {
     Ok(RosterStatus {
         member: state.is_member(&me),
         protected: state.protected,
-        joins_at_ms: state
-            .pending
-            .contains(&me)
+        backup_wait: !state.no_wait,
+        joins_at_ms: (state.pending.contains(&me) && !state.no_wait)
             .then(|| seen.get(&me).map(|s| s + crate::identity::roster::PENDING_MATURITY_MS))
             .flatten(),
         removed_by: state.removed.get(&me).cloned().or_else(|| removal.as_ref().map(|r| r.0.clone())),
@@ -144,8 +147,29 @@ fn erase_stored_phrase(db_path: &str, db_passphrase: &str) {
 pub fn recover_with_phrase(phrase: String, keep: Vec<String>) -> Result<(), String> {
     let c = ctx()?;
     let (master, recovery) = crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase)?;
+    let no_wait = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
+        .is_some_and(|(_, s)| s.no_wait);
     changed(&c, |c| {
-        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, &c.db_path, &c.db_passphrase)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)
+            .map(|_| ())
+    })
+}
+
+/// Type the phrase to choose whether a device restored from a backup may join by
+/// nobody refusing it for seven days. Signs a recovery that keeps every current
+/// device, so devices still waiting to join ask again.
+#[frb]
+pub fn set_backup_wait(phrase: String, allowed: bool) -> Result<(), String> {
+    let c = ctx()?;
+    let (master, recovery) = crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase)?;
+    let (_, state) = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
+        .ok_or("Your devices could not be read.")?;
+    if !state.is_member(&c.device.peer_id()) {
+        return Err("Only a device that belongs to your identity can change this.".into());
+    }
+    let keep: Vec<String> = state.members.into_iter().collect();
+    changed(&c, |c| {
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, !allowed, &c.db_path, &c.db_passphrase)
             .map(|_| ())
     })
 }

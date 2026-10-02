@@ -268,23 +268,38 @@ into possible holes, so this file itself belongs on the security branch.
   then a regression pass over the whole app on throwaway fleet peers** (messaging, sync,
   files and media, calls, servers, multi-device, the key UI), so that the audit's fixes are
   proven to break nothing and to let every honest flow through. Plan: tmp4.txt, session 23.
-- **AFTER THAT: ID-1R, the relay learns rosters.** Today the relay lets a socket
-  read an identity's inbox (the mailbox that holds friend requests, and the presence of
-  its other devices) when it shows a MASTER-signed device list naming it, so anyone
-  holding only the master key (a leaked backup, a removed thief's phone) still passes, and
-  can also win the version race that locks the owner's devices out of their own inbox.
-  The fix: the inbox proof becomes the device's roster; the relay verifies the statements
-  (consent, vouch, phrase admission, recovery, removals), pins each identity's first
-  recovery key, and keeps the removals it has seen so an old roster cannot drop them (a
-  fair-share bounded registry, snapshot codec bump). Pending joins never own an inbox at
-  the relay. Legacy identities keep the master-signed proof until their first recovery.
-  Deploy the relay BEFORE the 0.12 client, old proof accepted until release day like the
-  other `ACCEPT_*` switches.
+- **Sessions 23 and 24 (2026-10-01): the regression pass DONE** (fleet 28/28, phones
+  9/9, twelve bugs fixed, `reports/shipped/security/REGRESSION_PASS_0.12.md`), then the
+  decided UX items (one call per identity, device kind names, deleted reply targets).
+- **Session 25 (2026-10-02): ID-1R DONE, the relay learns rosters**
+  (`audit/design_ID1R_relay_rosters.md`). **HOL-SEC-078** (Medium: a master-key holder
+  read a protected identity's inbox and could lock its devices out with a high list
+  version): the inbox join carries the device's roster, the relay folds every roster shown
+  for an identity into one (`relay-uws/src/roster.h`, a rule-for-rule mirror checked
+  against 117 vectors the Rust code writes), owns the inbox only for a member, drops an
+  owner the moment a change stops counting it, pins the first recovery key, counts the
+  seven days on its own clock; fair-share registry, snapshot codec v7. Mirroring the fold
+  found three gaps in ID-1: **HOL-SEC-079** (High: anyone's statements pushed a removal or
+  a vouch past the per-kind ceilings, so a removed device came back at every contact;
+  statements now need a signer with standing and give way by its distance from the
+  phrase), **HOL-SEC-080** (Medium: a removed device kept a fresh device of its own
+  through that device's removal of it; kept vouchees are an intersection),
+  **HOL-SEC-081** (Low: destroying a device dropped the devices it had linked). Vitalik's
+  decision: the seven-day wait stays the default and the phrase can turn it off
+  (`no_wait` in the recovery statement, Settings > Security > Advanced). Relay DEPLOYED the
+  same day after a canary on port 8443 (live probe 19/19 there and on production; the v6
+  handover restored every buffer); the 0.11 list stays readable until release day
+  (`ACCEPT_DEVICE_LIST_INBOX_PROOF`, never for a protected or removed device). Rust
+  1195/1195, Flutter 1805, relay tests plain and under ASan/UBSan, clippy clean on new
+  lines; mutation pass 13/14 rules killed, the last an equivalent mutant (two tests added
+  and a redundant standing cap removed after the first run, relay redeployed).
+- **NEXT:** the program's remaining phases (section 4, C to G); Vitalik sets the order.
+  **On release day** add `ACCEPT_DEVICE_LIST_INBOX_PROOF` to the switches turned off.
 - **Before session 20 (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood
   limits wait for phase G. Fuzzing and flood limits wait for phase G. **On release day:** the
   relay (deployed 2026-09-29) must still precede any 0.12 client on self-hosted relays,
-  and once 0.12 is out it goes again with `ACCEPT_AUTH_V1`, `ACCEPT_UNSIGNED_RING_CONTROL` and
-  `ACCEPT_UNSIGNED_NICKNAME_CLAIMS` turned off (ws_handler.cpp); the website join page
+  and once 0.12 is out it goes again with `ACCEPT_AUTH_V1`, `ACCEPT_UNSIGNED_RING_CONTROL`,
+  `ACCEPT_UNSIGNED_NICKNAME_CLAIMS` and `ACCEPT_DEVICE_LIST_INBOX_PROOF` turned off (ws_handler.cpp); the website join page
   (`owner=` and `key=`) and the web viewer deploy with 0.12; the pre-push hook comes off
   only then. Older note follows.
 - **Before session 10:** the two remaining DESIGN sessions, each at xhigh with harness tests:

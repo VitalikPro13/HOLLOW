@@ -834,6 +834,8 @@ pub(crate) fn verify_carried_bundle(
 /// The trailing revoked segment is present even when empty, so one signature
 /// covers adds AND removes under one version; a pre-Step-7 4-segment signature
 /// will not verify here, which is safe because lists are verified on receipt.
+/// Kept for the 0.11 lists the upgrade reads and the relay's pinned vector.
+#[cfg(test)]
 pub(crate) fn device_list_signing_payload(
     master_peer_id: &str,
     version: u64,
@@ -850,6 +852,7 @@ pub(crate) fn device_list_signing_payload(
 /// Build a master-signed [`SignedDeviceList`]. Both arrays are sorted and deduped
 /// internally so the signed payload is canonical, and any id in `revoked` is
 /// removed from `devices`: a revoked id can never coexist as an active device.
+#[cfg(test)]
 pub(crate) fn build_signed_device_list(
     master: &crate::identity::native_identity::NativeKeypair,
     version: u64,
