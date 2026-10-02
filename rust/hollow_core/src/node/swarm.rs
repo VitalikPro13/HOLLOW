@@ -343,6 +343,28 @@ fn on_verified_sibling(
     );
 }
 
+/// Room presence after the resolver moved (G1): a master id that turned bare leaves it,
+/// and if one left out earlier is a device now, every room is asked for its members.
+async fn settle_bare_presence(
+    bare_presence: &mut super::roster_book::BarePresence,
+    ws_room_peers: &mut HashMap<String, std::collections::HashSet<String>>,
+    synced_peers: &mut std::collections::HashSet<String>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) {
+    let (bare, admitted) = bare_presence.settle(ws_room_peers);
+    for peer_id in bare {
+        hollow_log!("[HOLLOW-SECURITY] {peer_id} is a master id its roster no longer counts: out of room presence");
+        synced_peers.remove(&peer_id);
+        let _ = event_tx.send(NetworkEvent::PeerDisconnected { peer_id }).await;
+    }
+    if admitted {
+        for room_code in ws_room_peers.keys().cloned() {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code });
+        }
+    }
+}
+
 /// A sibling that went offline no longer holds the identity's one call.
 async fn sibling_left_its_call(
     call_book: &mut super::call_book::CallBook,
@@ -637,6 +659,7 @@ async fn run_event_loop(
     // -- WebSocket relay peer tracking --
     // Tracks which peers are in which WS rooms. Key: room_code, Value: set of peer_id strings.
     let mut ws_room_peers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut bare_presence = super::roster_book::BarePresence::default();
 
     // Embedded peer forwarder: this desktop can serve as a blind packet
     // forwarder for screen shares it watches. Desktop-only and feature-gated.
@@ -1305,6 +1328,9 @@ async fn run_event_loop(
     loop {
         if let Some((arm, name, t0)) = arm_started.take() {
             loop_stall.check(arm, name, t0);
+        }
+        if bare_presence.stale() {
+            Box::pin(settle_bare_presence(&mut bare_presence, &mut ws_room_peers, &mut synced_peers, &event_tx, &ws_cmd_tx)).await;
         }
         tokio::select! {
             Some((carry, done)) = carry_rx.recv() => {
@@ -2721,7 +2747,6 @@ async fn run_event_loop(
                                 &mut pending_file_streams, &mut pending_shard_streams,
                                 &mut pending_vault_downloads, &mut early_file_streams,
                                 &bundle_keypair, &event_tx,
-                                &mut gossip_overlays, &webrtc_peers,
                                 &ws_cmd_tx, &ws_room_peers,
                                 &db_path, &db_passphrase,
                             ).await;
@@ -3455,11 +3480,14 @@ async fn run_event_loop(
                             overlay.known_peers.clear();
                             overlay.neighbors.clear();
                             overlay.peer_scores.clear();
-                            overlay.pending_relays.clear();
                         }
                     }
                     WsEvent::PeerJoined { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} joined room {room}");
+                        if !bare_presence.admits(&peer_id) {
+                            hollow_log!("[HOLLOW-SECURITY] {peer_id} joined {room} as a master id its roster does not count: not a device");
+                            continue;
+                        }
                         ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
 
                         // A holder we could not reach earlier just turned up:
@@ -4022,6 +4050,7 @@ async fn run_event_loop(
                     }
                     WsEvent::RoomMembers { room, peers } => {
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
+                        let peers: Vec<String> = peers.into_iter().filter(|p| bare_presence.admits(p)).collect();
                         let local_peer = local_peer_str.to_string();
                         // Exclude BOTH our master (local_peer) and our DEVICE id: the relay lists us
                         // by our device id, so without this a node keeps its own presence in
@@ -4526,6 +4555,10 @@ async fn run_event_loop(
                         let now_ms = super::frame_auth::now_ms();
                         let delivery = super::frame_auth::Delivery::Direct { device: &device_peer_id, master: &local_peer_str };
                         let data = match super::frame_auth::open(&data, &from, &room, delivery, now_ms) {
+                            Ok(_) if super::resolver::is_bare_master(&from) => {
+                                hollow_log!("[HOLLOW-SECURITY] Dropped a stream chunk from {from}: a master id its roster does not count is no device");
+                                continue;
+                            }
                             Ok(opened) if from != device_peer_id && !super::frame_auth::is_stale(opened.ts_ms, now_ms) => {
                                 opened.body.to_vec()
                             }
@@ -4847,6 +4880,10 @@ async fn run_event_loop(
                                 hollow_log!("[HOLLOW-SWARM] Inbound WS frame from {from} ({frame_len} B) failed HavenMessage parse — dropped: {e}");
                             }
                             if let Ok(msg) = parsed {
+                                    if !super::roster_book::heard_from(&from, &msg) {
+                                        hollow_log!("[HOLLOW-SECURITY] Dropped a {} from {from}: a master id its roster does not count is no device", msg.wire_kind());
+                                        continue;
+                                    }
                                     // Rate limiting (same as libp2p path). Not for our own
                                     // devices: a new sibling's first sync is a legitimate
                                     // burst far past the bucket, and every frame lost there
@@ -8905,8 +8942,7 @@ async fn handle_incoming_request(
                 | Ok(MessageEnvelope::VoiceChannelAudioState { .. })
                 | Ok(MessageEnvelope::VoiceChannelScreenState { .. })
                 | Ok(MessageEnvelope::VoiceChannelCameraState { .. })
-                | Ok(MessageEnvelope::VoiceChannelRecordingState { .. })
-                | Ok(MessageEnvelope::BroadcastMeta { .. }) => {
+                | Ok(MessageEnvelope::VoiceChannelRecordingState { .. }) => {
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
                 }
 
@@ -10262,6 +10298,10 @@ async fn handle_incoming_request(
 
         HavenMessage::DmSyncRequest { since_timestamp, both_directions, gap } => {
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp} (both_directions={both_directions}, gap={})", gap.is_some());
+            if super::blocklist::is_blocked(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a DmSyncRequest from blocked {peer_str}");
+                return;
+            }
 
             // Multi-device: the requester sends its DEVICE id, but our DM rows for
             // that person are keyed by their MASTER id. A multi-device requester
@@ -10993,14 +11033,6 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            // -- Gossip relay tree --
-                            MessageEnvelope::BroadcastMeta { broadcast_id, origin, sid, cid, file_id, ttl } => {
-                                file_handler::handle_envelope_broadcast_meta(
-                                    gossip_overlays, local_peer_str, &sender_peer_id,
-                                    broadcast_id, origin, sid, cid, file_id, ttl,
-                                ).await;
-                            }
-
                             // DM-only envelopes should never arrive via MLS.
                             MessageEnvelope::DirectMessage { .. }
                             | MessageEnvelope::DmSyncBatch { .. }
@@ -11067,7 +11099,8 @@ async fn handle_incoming_request(
                                             .cloned()
                                             .unwrap_or_default(),
                                     };
-                                    for cid in &sync_cids {
+                                    let state = server_states.get(&server_id);
+                                    for cid in sync_cids.iter().filter(|c| crate::node::crypto_handler::sync_partner(state, peer_str, Some(c))) {
                                         super::olm_lane::carry(
                                             ws_cmd_tx, peer_str, None,
                                             &super::sync_handler::channel_sync_request(&store, &server_id, cid, true),
@@ -11084,7 +11117,9 @@ async fn handle_incoming_request(
                         // is ahead and may have broadcast ops we cannot decrypt (a fresh
                         // channel, a visibility change) that per-channel sync can never
                         // recover. A 1s dedup lets back-to-back ops each trigger a delta.
-                        if msg_channel_id.is_none() {
+                        if msg_channel_id.is_none()
+                            && crate::node::crypto_handler::sync_partner(server_states.get(&server_id), peer_str, None)
+                        {
                             let op_dedup = format!("mls_fail_opsync:{group_key}:{peer_str}");
                             if !channel_sync_sent.get(&op_dedup).is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
                                 channel_sync_sent.insert(op_dedup, std::time::Instant::now());

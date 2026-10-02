@@ -631,9 +631,9 @@ pub(crate) fn verify_key_exchange(
 /// allowed through: first contact, where `sender_device` IS the out-of-band
 /// master. Rests on [`device_list_binds_sender`] for a set attackers cannot write.
 pub(crate) fn key_exchange_device_unauthorized(sender_device: &str) -> bool {
-    // A revoked device resolves to itself once forgotten, which would read as
-    // first contact.
-    if super::resolver::is_revoked(sender_device) {
+    // A revoked device resolves to itself once forgotten, and a master id always
+    // does: either would read as first contact.
+    if super::resolver::is_revoked(sender_device) || super::resolver::is_bare_master(sender_device) {
         return true;
     }
     let master = super::resolver::resolve(sender_device);
@@ -1505,6 +1505,19 @@ pub(crate) fn channel_backfill_allowed_from(
         hollow_log!("[HOLLOW-SECURITY] REJECTED channel backfill for {channel_id} from {sender_peer_id}: not a member who can read it");
     }
     allowed
+}
+
+/// Whether `peer` may be asked to sync what we hold of a server, one channel of it or
+/// its op log: a device of a current member who can read that channel. Our request
+/// names what we hold, and a frame that fails to decrypt can come from anyone in the room.
+pub(crate) fn sync_partner(
+    state: Option<&crate::crdt::server_state::ServerState>,
+    peer: &str,
+    channel: Option<&str>,
+) -> bool {
+    let master = super::resolver::resolve(peer);
+    !super::resolver::is_revoked(peer)
+        && state.is_some_and(|s| s.is_member(&master) && channel.is_none_or(|c| s.can_see_channel(&master, c)))
 }
 
 /// E4: backfill never brings in a post whose author (master) was not a member when

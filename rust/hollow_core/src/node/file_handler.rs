@@ -10,7 +10,7 @@ use crate::node::file_transfer;
 use crate::node::image_convert;
 use super::crypto_handler::{
     peer_is_reachable, ws_room_for_peer,
-    send_mls_broadcast, send_mls_broadcast_topic, send_encrypted_message,
+    send_mls_broadcast_topic, send_encrypted_message,
     send_message_to_peer,
 };
 use super::gossip;
@@ -1775,11 +1775,9 @@ async fn send_channel_file(
             hollow_log!("[HOLLOW-FILE] Share-backed file {file_id} — skipping binary streaming");
         } else if use_vault_only {
             hollow_log!("[HOLLOW-FILE] Erasure coding active ({member_count} members) — skipping full-file streaming, vault handles shard distribution");
-        } else if let Some(overlay) = gossip_overlays.get_mut(sid) {
-            gossip_broadcast_channel_file(
-                overlay, mls, crypto_store, ws_cmd_tx, webrtc_peers, event_tx,
-                sid, cid, file_id, local_peer, &temp_path, ct_size,
-            ).await;
+        } else if gossip_overlays.contains_key(sid) {
+            // Members of a server this size pull the bytes from whoever holds them.
+            let _ = tokio::fs::remove_file(&temp_path).await;
         } else {
             replicate_channel_file_full(
                 state, ws_cmd_tx, ws_room_peers, webrtc_peers,
@@ -1941,50 +1939,6 @@ async fn olm_fallback_channel_file_header(
             ).await;
         }
     }
-}
-
-/// Gossip broadcast: MLS-announce BroadcastMeta so all peers know this file
-/// is coming, then send to gossip neighbors only (they relay further).
-#[allow(clippy::too_many_arguments)]
-async fn gossip_broadcast_channel_file(
-    overlay: &mut gossip::GossipOverlay,
-    mls: &mut Option<MlsManager>,
-    crypto_store: &CryptoStore,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    webrtc_peers: &std::collections::HashSet<String>,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    sid: &str,
-    cid: &str,
-    file_id: &str,
-    local_peer: &str,
-    temp_path: &std::path::Path,
-    ct_size: u64,
-) {
-    let broadcast_id = gossip::generate_broadcast_id();
-    overlay.mark_broadcast_seen(&broadcast_id);
-
-    let meta_envelope = MessageEnvelope::BroadcastMeta {
-        broadcast_id: broadcast_id.clone(),
-        origin: local_peer.to_string(),
-        sid: sid.to_string(),
-        cid: cid.to_string(),
-        file_id: file_id.to_string(),
-        ttl: gossip::DEFAULT_BROADCAST_TTL,
-    };
-    if let Some(mls_mgr) = mls {
-        if mls_mgr.has_group(sid) {
-            let _ = send_mls_broadcast(mls_mgr, ws_cmd_tx, sid, &meta_envelope, crypto_store);
-        }
-    }
-
-    broadcast_to_gossip_neighbors(
-        overlay, webrtc_peers, event_tx,
-        &broadcast_id, gossip::DEFAULT_BROADCAST_TTL,
-        local_peer, &temp_path.to_string_lossy(),
-        ct_size, "file", 0, None, cid,
-    ).await;
-
-    hollow_log!("[HOLLOW-GOSSIP] File {file_id} broadcast initiated (bid={broadcast_id})");
 }
 
 /// Small server (<6 members, no gossip overlay): full replication to each ONLINE
@@ -2195,8 +2149,6 @@ pub(crate) async fn handle_webrtc_transfer_complete(
     early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
-    webrtc_peers: &std::collections::HashSet<String>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
@@ -2234,28 +2186,6 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         db_passphrase,
     ).await;
 
-    // Gossip relay: if this file has a pending relay, forward to neighbors.
-    if kind == "file" {
-        for overlay in gossip_overlays.values_mut() {
-            if let Some(relay) = overlay.take_pending_relay(&transfer_id) {
-                if relay.ttl > 0 {
-                    hollow_log!(
-                        "[HOLLOW-GOSSIP] Relaying file {transfer_id} (bid={}, ttl={}) to neighbors",
-                        relay.broadcast_id, relay.ttl
-                    );
-                    broadcast_to_gossip_neighbors(
-                        overlay, webrtc_peers, event_tx,
-                        &relay.broadcast_id, relay.ttl.saturating_sub(1),
-                        &relay.origin, &temp_path,
-                        file_size, "file", 0,
-                        Some(&relay.sender_peer_id),
-                        &relay.channel_id,
-                    ).await;
-                }
-                break;
-            }
-        }
-    }
 }
 
 /// Handle NodeCommand::WebRtcSendComplete — completed send.
@@ -2904,50 +2834,6 @@ pub(crate) async fn stream_to_peer_bytes(
     }
 }
 
-/// Broadcast a file to all gossip neighbors for a server (minus an optional exclude peer).
-/// Used for gossip relay tree file distribution.
-pub(crate) async fn broadcast_to_gossip_neighbors(
-    gossip_overlay: &gossip::GossipOverlay,
-    webrtc_peers: &std::collections::HashSet<String>,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    broadcast_id: &str,
-    ttl: u8,
-    origin_peer_id: &str,
-    file_path: &str,
-    total_size: u64,
-    kind: &str,
-    shard_index: u16,
-    exclude_peer: Option<&str>,
-    channel_id: &str,
-) {
-    let targets = gossip_overlay.get_relay_targets(exclude_peer);
-    let target_count = targets.len();
-    hollow_log!(
-        "[HOLLOW-GOSSIP] Broadcasting {broadcast_id} (ttl={ttl}) to {target_count} neighbors (server={})",
-        gossip_overlay.server_id
-    );
-
-    for peer_id in targets {
-        if webrtc_peers.contains(&peer_id) {
-            // Emit GossipRelayFile event — Dart will send via data channel with broadcast header.
-            let _ = event_tx.send(NetworkEvent::GossipRelayFile {
-                broadcast_id: broadcast_id.to_string(),
-                ttl,
-                origin_peer_id: origin_peer_id.to_string(),
-                file_path: file_path.to_string(),
-                total_size,
-                kind: kind.to_string(),
-                shard_index,
-                exclude_peer_id: exclude_peer.unwrap_or("").to_string(),
-                server_id: gossip_overlay.server_id.clone(),
-                channel_id: channel_id.to_string(),
-            }).await;
-        } else {
-            hollow_log!("[HOLLOW-GOSSIP] Neighbor {peer_id} has no data channel — skipping");
-        }
-    }
-}
-
 /// Handle `MessageEnvelope::FileHeader` — register pending stream + emit FileHeaderReceived.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_file_header(
@@ -3245,39 +3131,19 @@ async fn register_pending_file_stream_and_reprocess(
     }
 }
 
-/// Handle `MessageEnvelope::BroadcastMeta` — gossip relay tree dedup + pending relay registration.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_envelope_broadcast_meta(
-    gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
-    local_peer_str: &str,
-    sender_peer_id: &str,
-    broadcast_id: String,
-    origin: String,
-    sid: String,
-    cid: String,
-    file_id: String,
-    ttl: u8,
-) {
-    // SECURITY (Phase 6.25): Validate TTL from wire, cap at MAX_BROADCAST_TTL.
-    let effective_ttl = ttl.min(MAX_BROADCAST_TTL);
-    hollow_log!("[HOLLOW-GOSSIP] BroadcastMeta: bid={broadcast_id} origin={origin} fid={file_id} server={sid} ch={cid} ttl={effective_ttl}");
-    if effective_ttl == 0 {
-        hollow_log!("[HOLLOW-GOSSIP] BroadcastMeta TTL=0, not relaying");
-    } else if let Some(overlay) = gossip_overlays.get_mut(&sid) {
-        overlay.mark_broadcast_seen(&broadcast_id);
-        if origin != local_peer_str {
-            overlay.add_pending_relay(
-                &file_id, &broadcast_id,
-                effective_ttl.saturating_sub(1),
-                &origin, &cid, sender_peer_id,
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gossip file relay is gone: any MLS member could arm it for any file id with a
+    /// BroadcastMeta, and our next transfer carrying that id went on to that server's
+    /// gossip neighbours. Honest gossip transfers never carried the file id, so the
+    /// envelope served only that.
+    #[test]
+    fn a_broadcast_meta_envelope_arms_nothing() {
+        let json = r#"{"t":"broadcast_meta","broadcast_id":"b","origin":"o","sid":"s","cid":"c","file_id":"f","ttl":3}"#;
+        assert!(serde_json::from_str::<MessageEnvelope>(json).is_err(), "a BroadcastMeta envelope still parses");
+    }
 
     /// One MLS FileHeader for `fid` in `srv`'s #general from `sender`, answering an
     /// explicit pull so the auto-download setting plays no part.

@@ -156,8 +156,19 @@ impl ServerState {
     }
 
     /// The one entry point for remotely authored ops, live frames and sync batches
-    /// alike: the stateless checks, dedup, then the fold.
+    /// alike: the stateless checks, dedup, then the fold. Only what it admits moves our
+    /// clock, so a refused op cannot date our next writes.
     pub fn ingest_remote(&mut self, ops: &[CrdtOp]) -> Ingested {
+        let out = self.fold_remote(ops);
+        if let Some(hlc) = &mut self.hlc {
+            for op in &out.admitted {
+                hlc.witness(&op.hlc);
+            }
+        }
+        out
+    }
+
+    fn fold_remote(&mut self, ops: &[CrdtOp]) -> Ingested {
         let mut out = Ingested::default();
         self.ensure_dedup();
         self.held.retain(|(_, at)| at.elapsed() < HELD_TTL);
@@ -176,9 +187,6 @@ impl ServerState {
                 || !seen.insert(key)
             {
                 continue;
-            }
-            if let Some(hlc) = &mut self.hlc {
-                hlc.witness(&op.hlc);
             }
             fresh.push(op.clone());
         }
@@ -444,6 +452,28 @@ mod tests {
             assert_eq!(s.get_role(&id(2)), MemberRole::Member);
         }
         assert_eq!(in_order.op_log.len(), shuffled.op_log.len());
+    }
+
+    /// D7: only an op the fold admits moves our clock. A stranger's correctly signed op,
+    /// dated just inside the drift bound, is refused and leaves the clock where it was;
+    /// a member's op dated the same moves it.
+    #[test]
+    fn authz_only_an_admitted_op_moves_our_clock() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[founding, op_at(1, &sid, t + 1, add(2))]);
+        let wall = crate::crdt::hlc::wall_clock_ms();
+        let ahead = wall + crate::crdt::hlc::MAX_DRIFT_MS - 30_000;
+
+        let stranger = r.ingest_remote(&[op_at(7, &sid, ahead, P::ServerRenamed { new_name: "x".into() })]);
+        assert!(stranger.admitted.is_empty());
+        assert!(r.hlc.as_ref().unwrap().physical_ms() < wall + 60_000, "a refused op moved our clock");
+
+        let member = r.ingest_remote(&[op_at(2, &sid, ahead, P::NicknameChanged { peer_id: id(2), nickname: "n".into() })]);
+        assert_eq!(member.admitted.len(), 1);
+        assert!(r.hlc.as_ref().unwrap().physical_ms() >= ahead, "an admitted op is witnessed");
     }
 
     /// E3, E15: an old op replayed after far more than the old 1000-op window changes

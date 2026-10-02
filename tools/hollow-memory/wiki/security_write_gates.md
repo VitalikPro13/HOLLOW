@@ -572,6 +572,24 @@ HOL-SEC-078..081. Relay DEPLOYED 2026-10-02.
 | When the relay hears our roster | `roster_book::show_relay` | On every connect, after every ingest that changes our roster, and after every change this device makes (`announce_roster_change`), so a removal locks the removed device out at once even when it hears nothing |
 
 
+## 23. Phase B re-check leftovers (session 27, 2026-10-02)
+
+Source: `reports/planned/security/audit/phase_b_recheck/`; findings HOL-SEC-083..090.
+
+| Write | Where | Gate |
+|---|---|---|
+| Anything a frame from a master id says (G1) | swarm frame ingress `roster_book::heard_from`, stream chunks, `fetch.rs` frames | A master id is a device only when the roster we hold for it counts it (`resolver::is_bare_master` = held roster in `ROSTERED`, no `M -> M` link). A bare master id is heard only for `RosterNotice`. `seed_self` never maps the master to itself; `roster_book::save` forgets a master id that left the roster. HOL-SEC-083. Harness `authz_the_master_key_alone_never_speaks_as_the_bare_master_id`; units `authz_a_master_id_is_a_device_only_while_its_roster_counts_it`, `bare_master_gates_stay_wired` |
+| Room presence (`ws_room_peers`, PeerDiscovered) | `PeerJoined`, `RoomMembers`, the loop head (`settle_bare_presence`) | `BarePresence::admits` leaves a bare master id out; `settle` (on a resolver epoch change) takes out ids that turned bare and re-asks every room when one is admitted again. Unit `room_presence_follows_whether_a_master_id_is_a_device` |
+| Olm session with a bare master id | `key_exchange_device_unauthorized` | Refused like a revoked device |
+| MLS seat or commit of a bare, removed or disowned leaf | `mls_authority::refused`, `commit_verdict` (committer + rebind target) | `disowns(M, M)` = bare; a held roster judges every leaf; a refused committer commits nothing. HOL-SEC-083, HOL-SEC-084. Unit `a_removed_disowned_or_bare_master_leaf_neither_commits_nor_is_added` |
+| Attribution of a carried roster's sender | `roster_book::carried_master` | Strict link (`resolver::is_device_of`), never `resolve`: a master id resolves to itself whether or not the roster counts it |
+| Gossip file relay | deleted | `BroadcastMeta`, pending relays and the gossip byte push are gone; 6+ member servers pull. HOL-SEC-085. Unit `a_broadcast_meta_envelope_arms_nothing` |
+| Which DM room a push wake joins | `fetch::dm_wake_room` (live nudge `nudge_live_dm_fetch` and `run_fetch`) | Own identity or an accepted, unblocked friend only. HOL-SEC-086. Units `a_dm_wake_from_a_stranger_joins_nothing`, `a_dm_wake_names_only_ourselves_or_a_friend` |
+| DM history served to a peer | `HavenMessage::DmSyncRequest` | Refused for a blocked identity. HOL-SEC-087. Harness `authz_a_blocked_friend_pulls_no_dm_history` |
+| Our HLC | `ServerState::ingest_remote` | Witnesses only `Ingested.admitted`. HOL-SEC-088. Unit `authz_only_an_admitted_op_moves_our_clock` |
+| Sync requests after a stale MLS decrypt | swarm `DecryptFail::Stale` arm | Only to `crypto_handler::sync_partner` (member device, channel readable). The held-commit sync stays: a commit comes from a real leaf. HOL-SEC-089. Harness `authz_a_frame_that_fails_to_decrypt_asks_only_a_member_to_sync` |
+| Voice presence and state of a restricted channel | `voice_handler::send_vc_mls`, `carry_to_viewers` | MLS copy under the channel's subgroup; Olm copy only to members who can see it. HOL-SEC-090. Unit `restricted_voice_presence_reaches_only_its_viewers` |
+
 ---
 
 ## Related

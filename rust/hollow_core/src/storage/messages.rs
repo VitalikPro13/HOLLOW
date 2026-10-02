@@ -3012,6 +3012,18 @@ impl MessageStore {
         collect_rows(rows, "device_link")
     }
 
+    /// Every master whose stored row is a roster, not a 0.11 list.
+    pub fn rostered_masters(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT master_peer_id FROM device_lists WHERE json_extract(json, '$.master') IS NOT NULL")
+            .map_err(|e| format!("Failed to prepare rostered_masters: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query rostered_masters: {e}"))?;
+        collect_rows(rows, "rostered_master")
+    }
+
     /// Forget the revocation of devices a recovery signed with the phrase brought back:
     /// only the phrase can do that.
     pub fn clear_revoked_devices(&self, devices: &[String]) -> Result<(), String> {

@@ -222,6 +222,27 @@ back. To prove a device's OWN report reaches the relay, make the device it remov
 Tests: `mailbox_requires_a_roster_that_counts_the_device`,
 `authz_the_master_key_alone_never_owns_a_protected_inbox`,
 `authz_a_removed_device_loses_the_inbox_at_once`; mutation script `tmp_id1r_mutate.py`.
+## Hostile shapes from the phase B re-check (session 27, 2026-10-02)
+
+- **The bare master id.** A node spawned with `device_tag == master_tag` logs in AS its master
+  id; seeded with a protected owner's roster (`spawn_node_seeded(.., O_MASTER, O_MASTER, ..,
+  Some(stolen))`) it is a master-key holder its roster does not count. Its honest code alone
+  pulled the owner's sibling state before HOL-SEC-083.
+- **A cold node is two things now.** The resolver keeps links AND the set of masters whose
+  roster it holds, both process-global. A test that fakes "this member never met X" calls
+  `resolver::forget_for_test(id)` (link + roster mark), never bare `forget`: a legacy joiner
+  whose roster mark survived looks like a bare master id and is dropped.
+- **A frame that decrypts as stale.** A flipped ciphertext byte decrypts as `Replay` (its key
+  generation was used up); bump the PLAINTEXT epoch of a recorded member frame instead
+  (MLSMessage: version, wire format, group id with a QUIC-style length, then the epoch u64).
+  `set_recording` + `recorded_frames` + `frame_auth::unchecked_body` capture it.
+- **A pull, not a push.** The DM online branch keeps recent DMs and re-sends them on the
+  next `PeerJoined`, so a test that wants "only the peer's sync can bring it back" restarts the
+  sender (`restart_node`) after the peer loses its copy (raw SQL delete in its DB).
+- **What a node carried.** `TestNode::carried_to(device)` lists every Olm-lane message aimed at
+  a device, delivered or not: the absence check for "we never told the stranger".
+- The mutation script for these rules is the untracked `tmp_s27_mutate.py` (repo root).
+
 ## Waits that a duplicate or an earlier frame can satisfy (session 22, 2026-10-01)
 
 Three load-only flakes in one session had one shape: the wait matched SOME event or frame,

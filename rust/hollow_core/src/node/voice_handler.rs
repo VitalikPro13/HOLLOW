@@ -866,7 +866,7 @@ pub(crate) async fn handle_voice_channel_join(
     };
     broadcast_vc_presence(
         mls, ws_cmd_tx, ws_room_peers, server_states, crypto_store,
-        &server_id, local_peer_str, &envelope, &plain,
+        &server_id, &channel_id, local_peer_str, &envelope, &plain,
     );
     // Track participant. SELF is keyed by our ROUTABLE DEVICE id, exactly like
     // every remote entry: a master-form self-entry is the self-ghost bug, where
@@ -893,17 +893,45 @@ pub(crate) async fn handle_voice_channel_join(
 }
 
 /// Carry a `HavenMessage` inside Olm to every online device of every server member
-/// except ourselves.
-fn carry_to_members(
+/// who can see `channel_id`, except ourselves (D4: who sits in a restricted voice
+/// channel is for its viewers only).
+fn carry_to_viewers(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     state: &ServerState,
+    channel_id: &str,
     local_peer_str: &str,
     msg: &HavenMessage,
     no_session: super::olm_lane::NoSession,
 ) {
     if let Some(json) = super::olm_lane::carried_json(msg) {
-        super::olm_lane::carry_to_identities(ws_cmd_tx, ws_room_peers, state.members.keys(), local_peer_str, &json, no_session);
+        let viewers = state.members.keys().filter(|m| state.can_see_channel(m, channel_id));
+        super::olm_lane::carry_to_identities(ws_cmd_tx, ws_room_peers, viewers, local_peer_str, &json, no_session);
+    }
+}
+
+/// The MLS copy of a voice signal: a restricted channel's rides its own subgroup, which
+/// only its viewers hold, never the server-wide group. Nothing when we hold no such group.
+fn send_vc_mls(
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_states: &HashMap<String, ServerState>,
+    crypto_store: &CryptoStore,
+    server_id: &str,
+    channel_id: &str,
+    envelope: &MessageEnvelope,
+) {
+    let Some(mgr) = mls.as_mut() else { return };
+    let restricted = server_states
+        .get(server_id)
+        .is_some_and(|s| s.channel_uses_subgroup(channel_id))
+        .then_some(channel_id);
+    let group = match restricted {
+        Some(cid) => crate::crypto::subgroup_id(server_id, cid),
+        None => server_id.to_string(),
+    };
+    if mgr.has_group(&group) {
+        let _ = super::crypto_handler::send_mls_broadcast_in(mgr, ws_cmd_tx, server_id, restricted, envelope, crypto_store);
     }
 }
 
@@ -922,16 +950,14 @@ fn broadcast_vc_presence(
     server_states: &HashMap<String, ServerState>,
     crypto_store: &CryptoStore,
     server_id: &str,
+    channel_id: &str,
     local_peer_str: &str,
     envelope: &MessageEnvelope,
     plain: &HavenMessage,
 ) {
-    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(server_id));
-    if mls_ok {
-        let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store);
-    }
+    send_vc_mls(mls, ws_cmd_tx, server_states, crypto_store, server_id, channel_id, envelope);
     if let Some(state) = server_states.get(server_id) {
-        carry_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, plain, super::olm_lane::NoSession::Queue);
+        carry_to_viewers(ws_cmd_tx, ws_room_peers, state, channel_id, local_peer_str, plain, super::olm_lane::NoSession::Queue);
     }
 }
 
@@ -1206,7 +1232,7 @@ pub(crate) async fn handle_voice_channel_leave(
     };
     broadcast_vc_presence(
         mls, ws_cmd_tx, ws_room_peers, server_states, crypto_store,
-        &server_id, local_peer_str, &envelope, &plain,
+        &server_id, &channel_id, local_peer_str, &envelope, &plain,
     );
     // Untrack participant (self entry is DEVICE-keyed; the master remove is a
     // belt against any legacy master-form entry surviving in RAM).
@@ -1522,16 +1548,13 @@ fn broadcast_vc_state_signal(
     channel_id: &str,
     local_peer_str: &str,
 ) {
-    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(server_id));
-    if mls_ok {
-        let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store);
-    }
+    send_vc_mls(mls, ws_cmd_tx, server_states, crypto_store, server_id, channel_id, envelope);
     // UNCONDITIONAL Olm twin, exactly like `broadcast_vc_presence`. A state that
     // cannot go now is stale by the time a session exists.
     if let Some(msg) = build_vc_state_twin(signal_type, server_id, channel_id, payload)
         && let Some(state) = server_states.get(server_id)
     {
-        carry_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg, super::olm_lane::NoSession::Drop);
+        carry_to_viewers(ws_cmd_tx, ws_room_peers, state, channel_id, local_peer_str, &msg, super::olm_lane::NoSession::Drop);
     }
 }
 
@@ -2317,6 +2340,66 @@ mod tests {
         let dial = send.find("pub(crate) fn handle_webrtc_send_signal(").unwrap();
         assert!(send[dial..dial + 1200].contains("data_channel_peer_allowed("), "an outbound dial skips the gate");
         super::super::blocklist::clear_for_test();
+        super::super::resolver::clear_all();
+    }
+
+    /// D4: who sits in a restricted voice channel, and their mute state, reaches only
+    /// the members who can see it: the Olm twin goes to them alone, and the MLS copy
+    /// rides the channel's own subgroup, never the server-wide group.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn restricted_voice_presence_reaches_only_its_viewers() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::hlc::HlcTimestamp;
+        use crate::crdt::operations::MemberRole;
+        let _g = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let (me, admin, member) = ("me", "admin", "member");
+        let mut state = ServerState::new("srv".into(), "s".into(), me.into());
+        let cid = state.channels.keys().next().unwrap().clone();
+        state.channels.get_mut(&cid).unwrap().visibility = crate::crdt::server_state::ChannelVisibility::AdminPlus;
+        for id in [admin, member] {
+            state.members.insert(id.into(), crate::crdt::server_state::MemberInfo { peer_id: id.into(), display_name: id.into() });
+        }
+        state.roles.insert(admin.into(), AdminLwwReg::new(MemberRole::Admin, HlcTimestamp::zero(me), 3));
+        let states = HashMap::from([("srv".to_string(), state)]);
+        let rooms = HashMap::from([("srv".to_string(), std::collections::HashSet::from([admin.to_string(), member.to_string()]))]);
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("d4.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let crypto_store = CryptoStore::open(db, pass).unwrap();
+        let (dev, master) = (NativeKeypair::from_secret_bytes(&[0x41; 32]), NativeKeypair::from_secret_bytes(&[0x42; 32]));
+        let mut mgr = MlsManager::new(&dev, &master).unwrap();
+        mgr.create_group("srv").unwrap();
+        mgr.create_group(&crate::crypto::subgroup_id("srv", &cid)).unwrap();
+        let mut mls = Some(mgr);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let join = MessageEnvelope::VoiceChannelJoin { sid: "srv".into(), cid: cid.clone() };
+        let plain = HavenMessage::VoiceChannelJoin { server_id: "srv".into(), channel_id: cid.clone() };
+        broadcast_vc_presence(&mut mls, &tx, &rooms, &states, &crypto_store, "srv", &cid, me, &join, &plain);
+        let muted = MessageEnvelope::VoiceChannelAudioState { sid: "srv".into(), cid: cid.clone(), muted: true, deafened: false, target: None };
+        broadcast_vc_state_signal(
+            "audio_state", r#"{"muted":true,"deafened":false}"#, &muted, &mut mls, &crypto_store, &tx, &rooms, &states,
+            "srv", &cid, me,
+        );
+
+        let (mut carried, mut groups) = (Vec::new(), Vec::new());
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                super::super::ws_client::WsCommand::Carry { device, .. } => carried.push(device),
+                super::super::ws_client::WsCommand::SendToRoom { data, .. } => {
+                    if let Ok(HavenMessage::MlsChannelMessage { channel_id, .. }) = serde_json::from_slice(&data) {
+                        groups.push(channel_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        carried.sort();
+        assert_eq!(carried, vec![admin.to_string(), admin.to_string()], "a member who cannot see the channel was told");
+        assert_eq!(groups, vec![Some(cid.clone()), Some(cid.clone())], "the server-wide group carried a restricted channel's presence");
         super::super::resolver::clear_all();
     }
 

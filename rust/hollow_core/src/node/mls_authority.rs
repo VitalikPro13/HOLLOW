@@ -76,6 +76,9 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
             if !facts.adds.is_empty() || !facts.removes.is_empty() {
                 return Verdict::Refuse("a rebind carries membership changes".into());
             }
+            if refused(after) {
+                return Verdict::Refuse(format!("rebinds as revoked or disowned device {}", after.device));
+            }
             return match rules {
                 GroupRules::Meeting { host } if *host != Some(after.master.as_str()) => {
                     Verdict::Refuse("committer is not the meeting's host".into())
@@ -88,6 +91,9 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
         }
         (LeafView::Bound(identity), _) => identity,
     };
+    if refused(committer) {
+        return Verdict::Refuse(format!("committed by revoked or disowned device {}", committer.device));
+    }
     if let Some(add) = facts.adds.iter().filter_map(LeafView::bound).find(|a| refused(a)) {
         return Verdict::Refuse(format!("adds revoked or disowned device {}", add.device));
     }
@@ -420,6 +426,39 @@ mod tests {
         assert_eq!(
             stale_leaves(&[owner, restored, leaf("alice-d", "alice")], "owner-d", &rules),
             vec!["alice-restored".to_string()]
+        );
+        crate::node::resolver::clear_all();
+    }
+
+    /// A-10 and G1: a device its roster removed or never counted commits nothing, not
+    /// even a removal of its own identity's other leaves, and is never added; the master
+    /// id itself is such a device once its roster leaves it out.
+    #[test]
+    fn a_removed_disowned_or_bare_master_leaf_neither_commits_nor_is_added() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update_many("alice", ["alice-d"]);
+        crate::node::resolver::note_roster("alice");
+        crate::node::resolver::mark_revoked(&["alice-gone".into()]);
+        let state = server(&["owner", "alice"]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let owner = leaf("owner-d", "owner");
+        for (what, bad) in [
+            ("a removed device", leaf("alice-gone", "alice")),
+            ("a device the roster never counted", leaf("alice-restored", "alice")),
+            ("the bare master id", leaf("alice", "alice")),
+        ] {
+            let evicts_sibling = CommitFacts { removes: vec![leaf("alice-d", "alice")], ..facts(bad.clone()) };
+            assert!(matches!(commit_verdict(&evicts_sibling, &rules), Verdict::Refuse(_)), "{what} committed");
+            let added = CommitFacts { adds: vec![bad.clone()], ..facts(owner.clone()) };
+            assert!(matches!(commit_verdict(&added, &rules), Verdict::Refuse(_)), "{what} was added");
+            let rebind = CommitFacts { path_leaf: Some(bad.clone()), ..facts(LeafView::Unbound("alice".into())) };
+            assert!(matches!(commit_verdict(&rebind, &rules), Verdict::Refuse(_)), "a legacy leaf rebound as {what}");
+        }
+        assert_eq!(
+            commit_verdict(&CommitFacts { removes: vec![leaf("alice", "alice")], ..facts(leaf("alice-d", "alice")) }, &rules),
+            Verdict::Accept,
+            "a member still sweeps them",
         );
         crate::node::resolver::clear_all();
     }

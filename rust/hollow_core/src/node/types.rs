@@ -22,11 +22,8 @@ pub(crate) const MAX_SDP_SIZE: usize = 64 * 1024;
 /// Maximum peers in a single PeerExchange gossip message.
 pub(crate) const MAX_PEER_EXCHANGE_SIZE: usize = 50;
 
-/// Maximum allowed TTL on incoming BroadcastMeta gossip messages.
+/// Maximum allowed TTL on an incoming gossip broadcast.
 pub(crate) const MAX_BROADCAST_TTL: u8 = 8;
-
-/// Default broadcast TTL for serde deserialization (backward compat with old peers).
-pub(crate) fn default_broadcast_ttl() -> u8 { super::gossip::DEFAULT_BROADCAST_TTL }
 
 /// VC signaling sub-rate-limiter: burst capacity (per peer).
 pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 30;
@@ -3917,21 +3914,6 @@ pub(crate) enum MessageEnvelope {
         #[serde(default)]
         detail: String,
     },
-
-    // -- Gossip relay tree --
-
-    /// Broadcast metadata: notifies server members that a gossip file broadcast is in flight.
-    #[serde(rename = "broadcast_meta")]
-    BroadcastMeta {
-        broadcast_id: String,
-        origin: String,
-        sid: String,
-        cid: String,
-        file_id: String,
-        /// TTL, decremented on each relay hop.
-        #[serde(default = "default_broadcast_ttl")]
-        ttl: u8,
-    },
 }
 
 impl HavenMessage {
@@ -4314,8 +4296,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelRenegAnswer { sid, cid, .. }
             | Self::VoiceChannelLegRestart { sid, cid, .. }
             | Self::VoiceChannelCameraState { sid, cid, .. }
-            | Self::VoiceChannelRecordingState { sid, cid, .. }
-            | Self::BroadcastMeta { sid, cid, .. } => Server { sid, cid: Some(cid) },
+            | Self::VoiceChannelRecordingState { sid, cid, .. } => Server { sid, cid: Some(cid) },
         }
     }
 
@@ -4377,8 +4358,7 @@ impl MessageEnvelope {
             | Self::FwdDetach { .. }
             | Self::FwdEgressOffer { .. }
             | Self::FwdEgressAnswer { .. }
-            | Self::FwdError { .. }
-            | Self::BroadcastMeta { .. } => true,
+            | Self::FwdError { .. } => true,
         }
     }
 

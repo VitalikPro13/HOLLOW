@@ -32,9 +32,6 @@ pub const VOICE_GOSSIP_THRESHOLD_UP: usize = 6;
 /// Voice channel: switch back to mesh mode at this participant count (hysteresis).
 pub const VOICE_GOSSIP_THRESHOLD_DOWN: usize = 4;
 
-/// How long to wait for gossip file data before falling back to direct request (seconds).
-pub const BROADCAST_FALLBACK_TIMEOUT_SECS: u64 = 30;
-
 /// Adaptive gossip exchange interval based on max server member count.
 pub fn gossip_exchange_interval_secs(max_member_count: usize) -> u64 {
     match max_member_count {
@@ -184,20 +181,6 @@ impl PeerScore {
 
 // ── Gossip Overlay ───────────────────────────────────────────────────────────
 
-/// Info about a broadcast file that we received via MLS but haven't yet
-/// received the actual file data for. Once the file arrives via data channel,
-/// we relay it to our gossip neighbors.
-#[derive(Debug, Clone)]
-pub struct PendingRelay {
-    pub broadcast_id: String,
-    pub file_id: String,
-    pub ttl: u8,
-    pub origin: String,
-    pub channel_id: String,
-    pub sender_peer_id: String,
-    pub created: Instant,
-}
-
 /// Per-server gossip overlay state: which peers we keep WebRTC data channels with
 /// (our "gossip neighbors"), the peer scoring that selects and rotates them, and
 /// broadcast dedup.
@@ -212,10 +195,6 @@ pub struct GossipOverlay {
     pub peer_scores: HashMap<String, PeerScore>,
     /// Broadcast dedup cache: broadcast_id -> first_seen time.
     seen_broadcasts: HashMap<String, Instant>,
-    /// Pending relay: file_id -> PendingRelay.
-    /// Populated when BroadcastMeta arrives via MLS. Consumed when the
-    /// actual file data arrives via data channel (WebRtcTransferComplete).
-    pub pending_relays: HashMap<String, PendingRelay>,
     /// Last rotation timestamp.
     pub last_rotation: Instant,
 }
@@ -228,7 +207,6 @@ impl GossipOverlay {
             known_peers: HashSet::new(),
             peer_scores: HashMap::new(),
             seen_broadcasts: HashMap::new(),
-            pending_relays: HashMap::new(),
             last_rotation: Instant::now(),
         }
     }
@@ -401,61 +379,11 @@ impl GossipOverlay {
             .or_insert_with(Instant::now);
     }
 
-    /// Evict stale broadcast entries and expired pending relays.
+    /// Evict stale broadcast entries.
     pub fn evict_stale_broadcasts(&mut self) {
         let cutoff = Instant::now()
             - std::time::Duration::from_secs(BROADCAST_DEDUP_TTL_SECS);
         self.seen_broadcasts.retain(|_, seen_at| *seen_at > cutoff);
-
-        // Evict pending relays older than 30 seconds (file didn't arrive).
-        let relay_cutoff = Instant::now()
-            - std::time::Duration::from_secs(BROADCAST_FALLBACK_TIMEOUT_SECS);
-        self.pending_relays
-            .retain(|_, relay| relay.created > relay_cutoff);
-    }
-
-    /// Register a pending relay: we got BroadcastMeta via MLS, now waiting
-    /// for the actual file data to arrive via data channel.
-    pub fn add_pending_relay(
-        &mut self,
-        file_id: &str,
-        broadcast_id: &str,
-        ttl: u8,
-        origin: &str,
-        channel_id: &str,
-        sender_peer_id: &str,
-    ) {
-        self.pending_relays.insert(
-            file_id.to_string(),
-            PendingRelay {
-                broadcast_id: broadcast_id.to_string(),
-                file_id: file_id.to_string(),
-                ttl,
-                origin: origin.to_string(),
-                channel_id: channel_id.to_string(),
-                sender_peer_id: sender_peer_id.to_string(),
-                created: Instant::now(),
-            },
-        );
-    }
-
-    /// Check if a completed file transfer has a pending relay, and consume it.
-    /// Returns the relay info if the file should be relayed onward.
-    pub fn take_pending_relay(&mut self, file_id: &str) -> Option<PendingRelay> {
-        self.pending_relays.remove(file_id)
-    }
-
-    /// Get file_ids of pending relays that have timed out (30s).
-    /// These files didn't arrive via gossip — the peer should request them
-    /// directly from the origin or any available peer.
-    pub fn get_timed_out_relays(&self) -> Vec<String> {
-        let cutoff = Instant::now()
-            - std::time::Duration::from_secs(BROADCAST_FALLBACK_TIMEOUT_SECS);
-        self.pending_relays
-            .iter()
-            .filter(|(_, relay)| relay.created <= cutoff)
-            .map(|(fid, _)| fid.clone())
-            .collect()
     }
 
     /// Gossip neighbors with a LIVE data channel right now, excluding the sender.
@@ -901,104 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_relay_add_and_take() {
-        let mut overlay = GossipOverlay::new("server-1".to_string());
-        overlay.add_pending_relay("file-1", "broadcast-1", 3, "origin-peer", "ch-1", "sender-1");
-        assert_eq!(overlay.pending_relays.len(), 1);
-
-        let relay = overlay.take_pending_relay("file-1");
-        assert!(relay.is_some());
-        let r = relay.unwrap();
-        assert_eq!(r.broadcast_id, "broadcast-1");
-        assert_eq!(r.ttl, 3);
-        assert_eq!(r.origin, "origin-peer");
-        assert_eq!(r.channel_id, "ch-1");
-        assert_eq!(r.sender_peer_id, "sender-1");
-
-        // Second take should return None (consumed).
-        assert!(overlay.take_pending_relay("file-1").is_none());
-        assert_eq!(overlay.pending_relays.len(), 0);
-    }
-
-    #[test]
-    fn test_pending_relay_timeout() {
-        let mut overlay = GossipOverlay::new("server-1".to_string());
-
-        // Insert a relay with an old timestamp.
-        overlay.pending_relays.insert(
-            "old-file".to_string(),
-            PendingRelay {
-                broadcast_id: "old-bid".to_string(),
-                file_id: "old-file".to_string(),
-                ttl: 3,
-                origin: "origin".to_string(),
-                channel_id: "ch".to_string(),
-                sender_peer_id: "sender".to_string(),
-                created: Instant::now() - std::time::Duration::from_secs(60),
-            },
-        );
-        // Insert a fresh relay.
-        overlay.add_pending_relay("new-file", "new-bid", 2, "origin", "ch", "sender");
-
-        let timed_out = overlay.get_timed_out_relays();
-        assert_eq!(timed_out.len(), 1);
-        assert!(timed_out.contains(&"old-file".to_string()));
-    }
-
-    #[test]
-    fn test_pending_relay_eviction() {
-        let mut overlay = GossipOverlay::new("server-1".to_string());
-        overlay.pending_relays.insert(
-            "stale-file".to_string(),
-            PendingRelay {
-                broadcast_id: "stale-bid".to_string(),
-                file_id: "stale-file".to_string(),
-                ttl: 3,
-                origin: "origin".to_string(),
-                channel_id: "ch".to_string(),
-                sender_peer_id: "sender".to_string(),
-                created: Instant::now() - std::time::Duration::from_secs(120),
-            },
-        );
-        overlay.add_pending_relay("fresh-file", "fresh-bid", 2, "origin", "ch", "sender");
-
-        overlay.evict_stale_broadcasts();
-        // Stale relay should be evicted, fresh one kept.
-        assert!(!overlay.pending_relays.contains_key("stale-file"));
-        assert!(overlay.pending_relays.contains_key("fresh-file"));
-    }
-
-    #[test]
-    fn test_full_broadcast_relay_flow() {
-        // Simulates: originator broadcasts → relay peer receives BroadcastMeta
-        // → file arrives → relay takes pending → forwards
-        let mut overlay = make_overlay(10);
-        overlay.select_initial_neighbors(0);
-
-        // 1. BroadcastMeta arrives — register pending relay.
-        let broadcast_id = generate_broadcast_id();
-        overlay.mark_broadcast_seen(&broadcast_id);
-        overlay.add_pending_relay("file-42", &broadcast_id, 3, "origin-peer", "ch-general", "sender-peer");
-
-        // 2. File arrives via data channel (simulated).
-        let relay = overlay.take_pending_relay("file-42");
-        assert!(relay.is_some());
-        let r = relay.unwrap();
-        assert_eq!(r.ttl, 3);
-
-        // 3. Get relay targets (excluding the sender).
-        let targets = overlay.get_relay_targets(Some(&r.sender_peer_id));
-        // Should have neighbors minus the sender.
-        assert!(!targets.is_empty());
-        for t in &targets {
-            assert_ne!(t, &r.sender_peer_id);
-        }
-
-        // 4. Dedup: if same broadcast arrives again, should_relay returns false.
-        assert!(!overlay.should_relay_broadcast(&broadcast_id));
-    }
-
-    #[test]
     fn test_voice_gossip_neighbors_subset() {
         let mut overlay = make_overlay(20);
         overlay.select_initial_neighbors(0);
@@ -1051,12 +881,6 @@ mod tests {
         let selected = overlay.select_initial_neighbors(48);
         assert!(selected.len() <= 2);
         assert!(!selected.is_empty());
-    }
-
-    #[test]
-    fn test_pending_relay_take_returns_none_for_unknown() {
-        let mut overlay = GossipOverlay::new("server-1".to_string());
-        assert!(overlay.take_pending_relay("nonexistent").is_none());
     }
 
     #[test]

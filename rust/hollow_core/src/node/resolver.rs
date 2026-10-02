@@ -9,7 +9,8 @@
 //! all stay MASTER; the resolver is needed only where a REMOTE device id arrives
 //! and has to be mapped. Process-global, so no map is threaded through handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 /// device_peer_id → master_peer_id. Only contains entries learned from verified
@@ -22,10 +23,31 @@ fn links() -> &'static RwLock<HashMap<String, String>> {
 
 /// Device peer_ids whose signed tombstone we enforced, warmed from the store at
 /// boot. Cleared on `clear_all`; our own running device id is never here.
-static REVOKED: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
+static REVOKED: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 
-fn revoked() -> &'static RwLock<std::collections::HashSet<String>> {
-    REVOKED.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+fn revoked() -> &'static RwLock<HashSet<String>> {
+    REVOKED.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// Masters whose roster this process holds: their own id is a device only when that
+/// roster counts it.
+static ROSTERED: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+
+fn rostered() -> &'static RwLock<HashSet<String>> {
+    ROSTERED.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// Moves whenever who is whose device may have changed, so state derived from the
+/// resolver (room presence) knows to look again.
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn changed() {
+    EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The current [`EPOCH`].
+pub(crate) fn epoch() -> u64 {
+    EPOCH.load(Ordering::Relaxed)
 }
 
 /// Resolve a device peer_id to its master identity; unknown peers resolve to
@@ -56,12 +78,36 @@ pub(crate) fn is_known_master(peer_id: &str) -> bool {
 /// have not arrived yet keeps working on the certificate alone.
 pub(crate) fn disowns(master: &str, device: &str) -> bool {
     if device == master {
-        return false;
+        return is_bare_master(master);
     }
+    let held = rostered().read().is_ok_and(|set| set.contains(master));
     links().read().is_ok_and(|map| {
-        let known = map.iter().any(|(d, m)| m == master && d != master);
+        let known = held || map.iter().any(|(d, m)| m == master && d != master);
         known && map.get(device).map(String::as_str) != Some(master)
     })
+}
+
+/// True when `peer_id` is the id of a master whose roster we hold and that roster
+/// does not count it as a device (G1). Whoever logs in as it holds the master key and
+/// nothing more: a restored backup nobody approved, a removed install. It is no device
+/// of anyone's; only the roster statements it carries count, since they verify alone.
+pub(crate) fn is_bare_master(peer_id: &str) -> bool {
+    rostered().read().is_ok_and(|set| set.contains(peer_id)) && !is_device_of(peer_id, peer_id)
+}
+
+/// True when `device` links to `master`: a member of the roster we hold for it. Unlike
+/// [`resolve`], an id nobody links resolves to no one here, the master's own included.
+pub(crate) fn is_device_of(device: &str, master: &str) -> bool {
+    links().read().is_ok_and(|map| map.get(device).map(String::as_str) == Some(master))
+}
+
+/// Record that we hold `master`'s roster.
+pub(crate) fn note_roster(master: &str) {
+    if let Ok(mut set) = rostered().write()
+        && set.insert(master.to_string())
+    {
+        changed();
+    }
 }
 
 /// Record a verified (device → master) link. Idempotent.
@@ -70,6 +116,7 @@ pub(crate) fn update(device_peer_id: &str, master_peer_id: &str) {
     if let Ok(mut map) = links().write() {
         map.insert(device_peer_id.to_string(), master_peer_id.to_string());
     }
+    changed();
 }
 
 /// Record many links at once (e.g. all devices from one ingested list).
@@ -82,19 +129,19 @@ pub(crate) fn update_many<'a>(
             map.insert(d.to_string(), master_peer_id.to_string());
         }
     }
+    changed();
 }
 
 /// Seed our OWN devices to our master so self-checks recognise them before any
-/// device list round-trips. On a pre-multi-device install device == master, so
-/// this is a harmless self-mapping.
+/// device list round-trips. The master id maps to itself only when it is one of
+/// `device_peer_ids` (a pre-multi-device install, where device == master).
 pub(crate) fn seed_self(master_peer_id: &str, device_peer_ids: &[String]) {
     if let Ok(mut map) = links().write() {
         for d in device_peer_ids {
             map.insert(d.clone(), master_peer_id.to_string());
         }
-        // Master maps to itself (so resolving the master id is stable).
-        map.insert(master_peer_id.to_string(), master_peer_id.to_string());
     }
+    changed();
 }
 
 /// Warm the resolver from persisted device links. MUST run before the event loop
@@ -105,6 +152,7 @@ pub(crate) fn warm_from_links(pairs: &[(String, String)]) {
             map.insert(device.clone(), master.clone());
         }
     }
+    changed();
 }
 
 /// Warm every process-global trust set from the store: device links, enforced
@@ -113,6 +161,11 @@ pub(crate) fn warm_from_links(pairs: &[(String, String)]) {
 pub(crate) fn warm_from_store(store: &crate::storage::MessageStore) {
     if let Ok(links) = store.get_all_device_links() {
         warm_from_links(&links);
+    }
+    if let Ok(masters) = store.rostered_masters() {
+        for master in &masters {
+            note_roster(master);
+        }
     }
     if let Ok(revoked) = store.get_all_revoked_devices() {
         mark_revoked(&revoked);
@@ -156,6 +209,7 @@ pub(crate) fn forget(device_peer_id: &str) {
     if let Ok(mut map) = links().write() {
         map.remove(device_peer_id);
     }
+    changed();
 }
 
 /// Mark device ids revoked for this process: DMs, typing and key exchange refuse
@@ -198,14 +252,21 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// What a node that never met `id` knows of it: no link, and no roster held for it.
+/// The harness shares one resolver between its nodes, so [`forget`] alone still leaves
+/// the roster mark another node's ingest set.
+#[cfg(test)]
+pub(crate) fn forget_for_test(id: &str) {
+    forget(id);
+    if let Ok(mut set) = rostered().write() {
+        set.remove(id);
+    }
+    changed();
+}
+
 #[cfg(test)]
 pub(crate) fn clear_for_test() {
-    if let Ok(mut map) = links().write() {
-        map.clear();
-    }
-    if let Ok(mut set) = revoked().write() {
-        set.clear();
-    }
+    clear_all();
 }
 
 /// Clear the in-memory resolver between tests.
@@ -217,6 +278,10 @@ pub(crate) fn clear_all() {
     if let Ok(mut set) = revoked().write() {
         set.clear();
     }
+    if let Ok(mut set) = rostered().write() {
+        set.clear();
+    }
+    changed();
 }
 
 #[cfg(test)]
@@ -341,9 +406,33 @@ mod tests {
         update_many("M", ["devA"]);
         assert!(disowns("M", "devStolen"), "a device the roster does not name");
         assert!(!disowns("M", "devA"));
-        assert!(!disowns("M", "M"), "the bare master is never disowned");
+        assert!(!disowns("M", "M"), "no roster held: the master id is not judged");
         assert!(!disowns("Unknown", "devQ"), "nothing held for that master yet");
         update_many("M2", ["devB"]);
         assert!(disowns("M", "devB"), "another identity's device is not M's");
+        note_roster("M");
+        assert!(disowns("M", "M"), "G1: a held roster that does not count the master id");
+        note_roster("L");
+        update_many("L", ["L"]);
+        assert!(!disowns("L", "L"), "a legacy install whose roster counts its master id");
+        assert!(disowns("L", "devQ"), "a held roster judges every device, even one counting only its master id");
+    }
+
+    /// G1: the master id is a device only when the roster we hold counts it; seeding our
+    /// own devices never makes it one.
+    #[test]
+    fn a_master_id_is_bare_only_under_a_roster_that_leaves_it_out() {
+        let _g = guarded();
+        seed_self("M", &["devA".into()]);
+        assert!(!is_bare_master("M"), "no roster held for it");
+        note_roster("M");
+        assert!(is_bare_master("M"));
+        assert!(!is_bare_master("devA"));
+        assert!(!is_device_of("M", "M"));
+        assert_eq!(resolve("M"), "M", "it still names the identity");
+        seed_self("M", &["devA".into(), "M".into()]);
+        assert!(!is_bare_master("M"), "a legacy seat");
+        forget("M");
+        assert!(is_bare_master("M"));
     }
 }

@@ -13275,6 +13275,74 @@ impl Drop for BlocklistClearGuard {
     }
 }
 
+/// A-DM-19: a blocked friend pulls none of our conversation. B took A's DM live, then
+/// lost its copy while A restarted (so A holds no copy to resend), and only B's catch-up
+/// sync brings it back: answered for a friend (the control round), never once A has
+/// blocked B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_blocked_friend_pulls_no_dm_history() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 211;
+    const B_MASTER: u8 = 212;
+    let a_master = tag_kp(A_MASTER).peer_id();
+    let b_master = tag_kp(B_MASTER).peer_id();
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+
+    let lost_round = async |a: TestNode, text: &str, mid: &str, block_while_away: bool| -> TestNode {
+        a.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: b_master.clone(),
+                text: text.to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            wait_until(15, async || b.dm_thread(&a_master).iter().any(|m| m.text == text)).await,
+            "B takes the DM live",
+        );
+        relay.set_online(&b.device_id, false);
+        assert!(wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await, "B must be off the relay");
+        {
+            let conn = rusqlite::Connection::open(&b.db_path).expect("open B's DB");
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", b.passphrase)).expect("key B's DB");
+            conn.execute_batch("PRAGMA busy_timeout = 8000;").expect("busy timeout");
+            conn.execute("DELETE FROM messages WHERE message_id = ?1", [mid]).expect("B loses its copy");
+        }
+        let a = restart_node(&relay, a, A_MASTER, A_MASTER).await;
+        if block_while_away {
+            super::blocklist::block(&b_master);
+        }
+        relay.set_online(&b.device_id, true);
+        a
+    };
+
+    let a = lost_round(a, "first copy lost", "dm19-1", false).await;
+    assert!(
+        wait_until(20, async || b.dm_thread(&a_master).iter().any(|m| m.text == "first copy lost")).await,
+        "control: a friend's catch-up sync brings back what it lost",
+    );
+
+    let a = lost_round(a, "lost, then blocked", "dm19-2", true).await;
+    sleep_ms(4000).await; // ABSENCE: a reply that must never come
+    assert!(
+        !b.dm_thread(&a_master).iter().any(|m| m.text == "lost, then blocked"),
+        "a blocked friend's sync pulled our conversation",
+    );
+    drop((a, b));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn blocked_peer_dm_and_friend_request_dropped() {
@@ -19352,7 +19420,7 @@ async fn friend_reject_delivered_with_no_overlap() {
     // sees every device-to-master link and `resolve(b_device)` succeeds for a node that
     // in the field has never heard of B. That gap is what hid the field bug, so forget
     // the link and make attribution come from the list the reject carries.
-    super::resolver::forget(&b_device);
+    super::resolver::forget_for_test(&b_device);
     relay.set_online(&a_device, true);
     assert!(
         wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
@@ -19590,7 +19658,7 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     // sees every device-to-master link and `resolve(b_device)` succeeds for a node that
     // in the field has never heard of B. Forget the link so attribution must come from
     // the list the reject carries; it is restored below.
-    super::resolver::forget(&b_device);
+    super::resolver::forget_for_test(&b_device);
     relay.set_online(&a_device, true);
     assert!(
         wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
@@ -20338,7 +20406,7 @@ async fn parked_join_completes_with_zero_overlap() {
     // The harness resolver is PROCESS-GLOBAL, so without this A could attribute
     // B's device from a link no real member could possibly hold. Forgetting it
     // makes the carried roster the only thing that can work.
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     relay.set_online(&a.device_id, true);
     assert!(
@@ -21022,7 +21090,7 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
     );
     expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
     go_offline(&relay, &b, &server_id).await;
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     relay.set_online(&o.device_id, true);
     expect_ring_resolution(&relay, &server_id, &o.device_id, &b_master, false).await;
@@ -21159,7 +21227,7 @@ async fn late_member_does_not_reserve_a_parked_join() {
 
     go_offline(&relay, &b, &server_id).await;
     go_offline(&relay, &a, &server_id).await;
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     let buffered_before = relay.buffered_count(&b.device_id);
     relay.reset_meter();
@@ -21506,7 +21574,7 @@ async fn discarded_parked_join_ignores_a_late_answer() {
     );
 
     go_offline(&relay, &b, &server_id).await;
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     relay.set_online(&a.device_id, true);
     assert!(
@@ -21657,7 +21725,7 @@ async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity()
     );
 
     go_offline(&relay, &b, &server_id).await;
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     // --- The owner returns alone, runs the SAME offline gate on the parked
     //     copy, and admits. This is what the strip used to make impossible. ---
@@ -21744,7 +21812,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     );
     expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
     go_offline(&relay, &b, &server_id).await;
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     relay.set_online(&o.device_id, true);
     assert!(
@@ -21911,7 +21979,7 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
     );
     expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
     go_offline(&relay, &b, &server_id).await;
-    super::resolver::forget(&b.device_id);
+    super::resolver::forget_for_test(&b.device_id);
 
     relay.set_online(&a.device_id, true);
     assert!(
@@ -23146,7 +23214,13 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // (10.5 s).
     // 2026-10-01: the share-backed DM file test added one absence proof, bytes that
     // must never come down the DM (1.5 s).
-    const BUDGET_MS: u64 = 663_300;
+    // 2026-10-02: the G1 bare-master test added two absence proofs, sibling state the
+    // owner's device never serves and a DM the friend never fans out (5.5 s).
+    // 2026-10-02: A-DM-19 added one absence proof, a sync reply a blocked friend
+    // must never get (4.0 s).
+    // 2026-10-02: D7 added one absence proof, a sync request never aimed at a stranger
+    // whose frame failed to decrypt (1.5 s).
+    const BUDGET_MS: u64 = 674_300;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -23557,7 +23631,7 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
     // The resolver is process-global in this harness, so clear anything already
     // known about the attacker's id: a pass has to mean "refused", never
     // "we happened not to have learned it".
-    super::resolver::forget(&a_dev);
+    super::resolver::forget_for_test(&a_dev);
 
     let room = super::types::dm_room_code(&v_master, &t_master);
     relay.inject(&room, &a_dev, &t.device_id, replay);
@@ -23657,7 +23731,7 @@ async fn friend_request_from_an_unlisted_device_does_not_bind() {
         "the carried roster is real",
     );
 
-    super::resolver::forget(&a_dev);
+    super::resolver::forget_for_test(&a_dev);
 
     let request = serde_json::to_vec(&super::types::HavenMessage::FriendRequest {
         requested_at: super::types::now_ms(),
@@ -26327,6 +26401,67 @@ async fn authz_garbage_mls_frames_never_drop_a_group() {
     }
     expect_group_unchanged(&[&v, &o], &server_id, epoch, &members, "garbage MLS frames").await;
     expect_channel_post_arrives(&o, &mut v, &server_id, "group intact").await;
+}
+
+/// D7: a frame that fails to decrypt can come from anyone in the room, and our answer
+/// to one is a sync request naming what we hold. A member's garbage gets that answer
+/// (the control); a stranger's gets nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_frame_that_fails_to_decrypt_asks_only_a_member_to_sync() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 172, 173, 174).await;
+    let stranger = tag_kp(175);
+    relay.register_key(&stranger);
+    use super::types::HavenMessage;
+    let asks_sync = |m: &HavenMessage| matches!(m, HavenMessage::SyncRequest { .. } | HavenMessage::ChannelSyncRequest { .. });
+    let asks_channel = |m: &HavenMessage| matches!(m, HavenMessage::ChannelSyncRequest { .. });
+    v.cmd_tx
+        .send(NodeCommand::SubscribeChannels { server_id: server_id.clone(), channel_ids: vec![general_channel_of(&server_id)] })
+        .await
+        .unwrap();
+
+    // Anyone in the room sees the members' ciphertext; a copy naming the next epoch is
+    // well formed and fails to decrypt, the way a frame from a member ahead of us does.
+    relay.set_recording(&c.device_id, true);
+    expect_channel_post_arrives(&c, &mut v, &server_id, "seen by the room").await;
+    let body = relay.recorded_frames(&c.device_id).into_iter().find_map(|f| {
+        match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+            Ok(HavenMessage::MlsChannelMessage { body, .. }) => Some(body),
+            _ => None,
+        }
+    }).expect("a recorded MLS ciphertext");
+    let mut bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body).unwrap();
+    // MLSMessage: version, wire format, then the PrivateMessage's group id (a QUIC-style
+    // length) and its epoch, a big-endian u64.
+    let (len_bytes, gid_len) = match bytes[4] >> 6 {
+        0 => (1, (bytes[4] & 0x3f) as usize),
+        1 => (2, (((bytes[4] & 0x3f) as usize) << 8) | bytes[5] as usize),
+        _ => panic!("unexpected group id length prefix"),
+    };
+    let epoch_end = 4 + len_bytes + gid_len + 8;
+    bytes[epoch_end - 1] = bytes[epoch_end - 1].wrapping_add(1);
+    let garbage = || frame(&HavenMessage::MlsChannelMessage { server_id: server_id.clone(), body: b64(&bytes), channel_id: None });
+
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, garbage());
+    assert!(
+        wait_until(10, async || {
+            let carried = v.carried_to(&c.device_id).await;
+            carried.iter().any(asks_channel) && carried.iter().any(asks_sync)
+        })
+        .await,
+        "control: a member's undecryptable frame is answered with channel and op sync requests",
+    );
+
+    relay.inject_direct(&server_id, &stranger.peer_id(), &v.device_id, garbage());
+    sleep_ms(1500).await; // ABSENCE: a request that must never be aimed at the stranger
+    assert!(
+        !v.carried_to(&stranger.peer_id()).await.iter().any(asks_sync),
+        "a stranger's undecryptable frame was answered with what we hold",
+    );
 }
 
 /// D9: the relay re-attributes a member's MLS-encrypted voice join to another member.
@@ -29962,6 +30097,101 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
     assert_ne!(super::resolver::resolve(&t2_dev), o_master);
 
     drop((o, f, t, t2));
+}
+
+/// G1: the relay lets whoever holds a key log in as that key's id, so a stolen backup
+/// can log in AS the bare master id. That id is a device only when the roster counts
+/// it: the owner's device serves it no sibling state, and a friend opens no session
+/// with it, files nothing it says under the owner and fans none of the owner's DMs
+/// out to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_the_master_key_alone_never_speaks_as_the_bare_master_id() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 161;
+    const O_DEV: u8 = 162;
+    const F_MASTER: u8 = 163;
+    const G_MASTER: u8 = 164;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let o_dev = tag_kp(O_DEV).peer_id();
+    let f_master = tag_kp(F_MASTER).peer_id();
+    let g_master = tag_kp(G_MASTER).peer_id();
+    let now = super::roster_book::now_ms();
+
+    let mut o = spawn_node_seeded(
+        &relay, O_MASTER, O_DEV, &[&f_master, &g_master], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000)),
+    ).await;
+    let f = spawn_node_with_friends(&relay, F_MASTER, F_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &f, 20).await;
+    assert!(
+        wait_until(20, async || f.known_devices(&o_master) == vec![o_dev.clone()]).await,
+        "F must hold O's roster first, got {:?}",
+        f.known_devices(&o_master),
+    );
+
+    // The thief runs the stolen roster with the master key as its device key.
+    let stolen = super::roster_book::load(&o.store(), &o_master).expect("O holds its roster");
+    let t = spawn_node_seeded(&relay, O_MASTER, O_MASTER, &[&f_master], Some(stolen)).await;
+    assert_eq!(t.device_id, o_master, "the thief is logged in as the master id itself");
+    let dm_room = super::types::dm_room_code(&o_master, &f_master);
+    assert!(
+        wait_until(20, async || relay.room_devices(&dm_room).contains(&o_master)).await,
+        "the thief sits in the owner's DM room with the friend",
+    );
+
+    // It asks the owner's device for the identity's state, and writes to the friend.
+    t.cmd_tx.send(NodeCommand::RequestStateSync { source_device_id: o_dev.clone() }).await.unwrap();
+    t.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: f_master.clone(),
+            text: "from the bare master".to_string(),
+            message_id: "g1-a-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(4000).await; // ABSENCE: nothing to poll for state that must never arrive
+
+    // The friend writes to the owner: the owner's device gets it, the thief never.
+    f.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: o_master.clone(),
+            text: "for the owner's devices".to_string(),
+            message_id: "g1-a-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "for the owner's devices")
+        })
+        .await,
+        "the owner's device receives the friend's DM",
+    );
+    sleep_ms(1500).await; // ABSENCE again
+
+    let t_friends: Vec<String> =
+        t.store().load_friends(Some("accepted")).unwrap_or_default().into_iter().map(|row| row.0).collect();
+    assert!(!t_friends.contains(&g_master), "the owner's device served its friends to the bare master id: {t_friends:?}");
+    assert_ne!(o.olm_status(&o_master).await, "confirmed", "the owner's device keyed a session with the bare master id");
+    assert_ne!(f.olm_status(&o_master).await, "confirmed", "the friend keyed a session with the bare master id");
+    assert!(
+        !f.dm_thread(&o_master).iter().any(|b| b.text == "from the bare master"),
+        "the friend filed the bare master id's DM under the owner",
+    );
+    assert!(
+        !t.dm_thread(&f_master).iter().any(|b| b.text == "for the owner's devices"),
+        "the friend fanned the owner's DM out to the bare master id",
+    );
+
+    drop((o, f, t));
 }
 
 /// Turning the seven-day wait off with the phrase starts a new base, so a backup

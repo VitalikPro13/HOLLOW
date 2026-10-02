@@ -53,7 +53,8 @@ fn stamp_pending(store: &MessageStore, roster: &Roster) {
 }
 
 /// Persist `roster` and point its master's links at the members. The resolver
-/// follows: a device that stopped being a member stops resolving to the master.
+/// follows: a device that stopped being a member stops resolving to the master, the
+/// master's own id included.
 fn save(
     store: &MessageStore,
     roster: &Roster,
@@ -64,11 +65,13 @@ fn save(
     let json = serde_json::to_string(roster).map_err(|e| format!("roster json: {e}"))?;
     let members: Vec<String> = state.members.iter().cloned().collect();
     store.save_device_list(&roster.master, &json, 0, &members, now_ms())?;
-    for d in super::resolver::devices_for(&roster.master) {
+    let held = super::resolver::devices_for(&roster.master).into_iter().chain([roster.master.clone()]);
+    for d in held {
         if !state.members.contains(&d) {
             super::resolver::forget(&d);
         }
     }
+    super::resolver::note_roster(&roster.master);
     if roster.master == local_master {
         super::resolver::seed_self(local_master, &members);
     } else {
@@ -637,8 +640,10 @@ async fn ingest_inner(
             return Ingested::default();
         }
     } else if master == local_master {
+        super::resolver::note_roster(&master);
         super::resolver::seed_self(local_master, &now.members.iter().cloned().collect::<Vec<_>>());
     } else {
+        super::resolver::note_roster(&master);
         super::resolver::update_many(&master, now.members.iter().map(String::as_str));
     }
 
@@ -734,10 +739,71 @@ async fn own_changes(
 }
 
 /// The master a carried roster attributes `sender` to, read after [`ingest`]: its
-/// master when the sender is a member of what we now hold for it.
+/// master when the sender is a member of what we now hold for it. The master's own id
+/// is no exception: it resolves to itself whether or not the roster counts it.
 pub(crate) fn carried_master(roster: &Roster, sender: &str) -> Option<String> {
-    let bound = super::resolver::resolve(sender) == roster.master;
+    let bound = super::resolver::is_device_of(sender, &roster.master);
     (bound && !super::resolver::is_revoked(sender)).then(|| roster.master.clone())
+}
+
+/// Whether a frame from `from` may be read at all (G1). A master id its own roster does
+/// not count is someone holding the master key and nothing more; only the roster
+/// statements it carries are heard, since each verifies alone.
+pub(crate) fn heard_from(from: &str, msg: &super::types::HavenMessage) -> bool {
+    !super::resolver::is_bare_master(from) || matches!(msg, super::types::HavenMessage::RosterNotice { .. })
+}
+
+/// Room presence never lists a master id its roster does not count (G1): sends would
+/// pick it as the identity's device, and the identity would show online. The ids left
+/// out are remembered so that one admitted later is let back in.
+#[derive(Default)]
+pub(crate) struct BarePresence {
+    held: std::collections::HashSet<String>,
+    epoch: u64,
+}
+
+impl BarePresence {
+    /// False for a peer room presence must leave out.
+    pub(crate) fn admits(&mut self, peer: &str) -> bool {
+        if super::resolver::is_bare_master(peer) {
+            self.held.insert(peer.to_string());
+            return false;
+        }
+        true
+    }
+
+    /// The resolver moved since the last [`Self::settle`].
+    pub(crate) fn stale(&self) -> bool {
+        super::resolver::epoch() != self.epoch
+    }
+
+    /// Follow the resolver once it moved: take out every id that turned bare, and say
+    /// whether one left out is a device now, so the caller asks each room again.
+    /// Returns the ids taken out.
+    pub(crate) fn settle(
+        &mut self,
+        ws_room_peers: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+    ) -> (Vec<String>, bool) {
+        let epoch = super::resolver::epoch();
+        if epoch == self.epoch {
+            return (Vec::new(), false);
+        }
+        self.epoch = epoch;
+        let mut out = std::collections::HashSet::new();
+        for peers in ws_room_peers.values_mut() {
+            peers.retain(|p| {
+                let bare = super::resolver::is_bare_master(p);
+                if bare {
+                    out.insert(p.clone());
+                }
+                !bare
+            });
+        }
+        self.held.extend(out.iter().cloned());
+        let before = self.held.len();
+        self.held.retain(|p| super::resolver::is_bare_master(p));
+        (out.into_iter().collect(), self.held.len() < before)
+    }
 }
 
 /// Whether `device` is a member of `carried`, judged against our own roster for that
@@ -977,6 +1043,124 @@ mod tests {
             "HOL-SEC-032: a removed device passed key exchange after a restart",
         );
         assert!(!super::super::crypto_handler::key_exchange_device_unauthorized(&kept.peer_id()));
+    }
+
+    /// G1. A master id is a device only while its roster counts it. A legacy install
+    /// (device id = master id) is one; our own protected master is not; a recovery that
+    /// leaves the legacy seat out makes it nobody at once and after a restart: refused by
+    /// key exchange, its MLS leaf disowned, no carried roster attributes it, and of its
+    /// frames only the roster statements are heard.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn authz_a_master_id_is_a_device_only_while_its_roster_counts_it() {
+        use super::super::crypto_handler::key_exchange_device_unauthorized;
+        use super::super::resolver::{disowns, is_bare_master};
+        use super::super::types::HavenMessage;
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        write_bootstrap(&me.dir(), &Roster::genesis(&me.master, &kp(0x03), &me.device, now_ms())).unwrap();
+        me.own();
+        let own = me.master.peer_id();
+        assert!(is_bare_master(&own), "our own master key is not one of our devices");
+        assert!(key_exchange_device_unauthorized(&own));
+
+        let (bob, bob_r, bob_dev) = (kp(0x60), kp(0x64), kp(0x61));
+        let b = bob.peer_id();
+        let mut r = Roster::legacy_for_test(&bob, &[&bob, &bob_dev]);
+        me.ingest(&b, &r).await;
+        assert!(!is_bare_master(&b), "a legacy seat speaks as the master id");
+        assert_eq!(carried_master(&r, &b), Some(b.clone()));
+        assert!(!key_exchange_device_unauthorized(&b));
+        assert!(!disowns(&b, &b));
+
+        let rec = crate::identity::roster::sign_recovery(&bob, &bob_r, now_ms(), &[bob_dev.peer_id()], false);
+        r.add_phrase_statement(&r_pub_of(&bob_r), Some(rec), None).unwrap();
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert!(is_bare_master(&b), "the recovery left the legacy seat out");
+        assert_eq!(carried_master(&r, &b), None, "a carried roster attributed the bare master id");
+        assert!(key_exchange_device_unauthorized(&b), "the bare master id passed key exchange");
+        assert!(disowns(&b, &b), "an MLS leaf of the bare master id holds a seat");
+        assert!(heard_from(&b, &HavenMessage::RosterNotice { roster: r.clone() }), "its roster statements still count");
+        assert!(!heard_from(&b, &HavenMessage::SiblingStateSyncRequest), "a frame from the bare master id was read");
+        assert!(heard_from(&bob_dev.peer_id(), &HavenMessage::SiblingStateSyncRequest));
+
+        super::super::resolver::clear_all();
+        super::super::resolver::warm_from_store(&me.store());
+        assert!(is_bare_master(&b) && is_bare_master(&own), "a restart forgot which master ids are bare");
+        assert!(!is_bare_master(&bob_dev.peer_id()));
+    }
+
+    /// G1. Room presence leaves a bare master id out, takes out one that turned bare,
+    /// and lets one back in once the phrase admits it again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn room_presence_follows_whether_a_master_id_is_a_device() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (bob, bob_r, bob_dev) = (kp(0x60), kp(0x64), kp(0x61));
+        let (b, d) = (bob.peer_id(), bob_dev.peer_id());
+        let mut r = Roster::legacy_for_test(&bob, &[&bob, &bob_dev]);
+        me.ingest(&b, &r).await;
+        let mut presence = BarePresence::default();
+        let mut rooms = std::collections::HashMap::from([(
+            "room".to_string(),
+            std::collections::HashSet::from([b.clone(), d.clone()]),
+        )]);
+        assert!(presence.admits(&b));
+        assert_eq!(presence.settle(&mut rooms), (Vec::new(), false));
+
+        let rec = crate::identity::roster::sign_recovery(&bob, &bob_r, now_ms(), std::slice::from_ref(&d), false);
+        r.add_phrase_statement(&r_pub_of(&bob_r), Some(rec), None).unwrap();
+        me.ingest(&d, &r).await;
+        assert_eq!(presence.settle(&mut rooms), (vec![b.clone()], false), "the bare master id stayed present");
+        assert_eq!(rooms["room"], std::collections::HashSet::from([d.clone()]));
+        assert!(!presence.admits(&b), "a bare master id joined room presence");
+
+        let admit = crate::identity::roster::sign_phrase_admit(&bob, &bob_r, now_ms() + 1, &b);
+        r.add_phrase_statement(&r_pub_of(&bob_r), None, Some(admit)).unwrap();
+        me.ingest(&d, &r).await;
+        assert_eq!(presence.settle(&mut rooms), (Vec::new(), true), "an admitted master id is never asked for again");
+        assert!(presence.admits(&b));
+    }
+
+    /// G1: the bare master refusal is only as good as the doors that ask it: relay
+    /// frames, stream chunks, room presence (both events and the loop's settle) and the
+    /// push fetch node.
+    #[test]
+    fn bare_master_gates_stay_wired() {
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let read = |f: &str| std::fs::read_to_string(node.join(f)).expect("read node source").replace("\r\n", "\n");
+        let (swarm, fetch) = (read("swarm.rs"), read("fetch.rs"));
+        let between = |src: &str, from: &str, to: &str| -> String {
+            let start = src.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = src[start..].find(to).unwrap_or_else(|| panic!("missing {to} after {from}"));
+            src[start..start + end].to_string()
+        };
+        for (from, to, gate) in [
+            ("if let Ok(msg) = parsed {", "let rate_ok", "roster_book::heard_from(&from, &msg)"),
+            ("WsEvent::BinaryDirect { room, from, data } => {", "ws_stream_receive(", "resolver::is_bare_master(&from)"),
+            ("WsEvent::PeerJoined { room, peer_id } => {", "ws_room_peers.entry(", "bare_presence.admits(&peer_id)"),
+            ("WsEvent::RoomMembers { room, peers } => {", "ws_room_peers.insert(", "bare_presence.admits(p)"),
+            ("loop_stall.check(arm, name, t0);", "tokio::select! {", "settle_bare_presence(&mut bare_presence"),
+            ("async fn settle_bare_presence(", "\n}\n", "bare_presence.settle(ws_room_peers)"),
+        ] {
+            assert!(between(&swarm, from, to).contains(gate), "swarm.rs: {from} no longer asks {gate}");
+        }
+        assert!(
+            between(&fetch, "let payload = parsed.and_then(", "frame_auth::open(").contains("resolver::is_bare_master(&from)"),
+            "fetch.rs: a push wake reads frames from a bare master id",
+        );
+        // The push processes seed only their own device: the store says whether the
+        // master id is one too.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for file in ["api/network.rs", "push_enrich.rs"] {
+            let text = std::fs::read_to_string(src.join(file)).expect("read source");
+            let seeds: Vec<&str> = text.lines().filter(|l| l.contains("resolver::seed_self(")).collect();
+            assert!(
+                !seeds.is_empty() && seeds.iter().all(|l| l.contains("seed_self(&local_master, std::slice::from_ref(&peer_id))")),
+                "{file}: a push process seeds the master id as one of its devices: {seeds:?}",
+            );
+        }
     }
 
     /// HOL-SEC-033. A carried roster attributes its sender to its master only when the

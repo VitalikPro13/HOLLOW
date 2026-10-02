@@ -2588,27 +2588,26 @@ pub struct FetchedMessage {
 /// The FCM background isolate shares its process with the still-running full node,
 /// so `start_fetch_node` refuses to start; the live node can collect the buffered
 /// ciphertext instead, and a queued JoinRoom rides the reconnect if the WS is a
-/// doze-killed zombie. Returns Ok(false) when no node is running, in which case the
-/// caller should use the fetch node.
+/// doze-killed zombie. Returns Ok(false) when no node is running, or when the wake
+/// names nobody we share a DM room with, in which case the caller should use the
+/// fetch node (which refuses that wake the same way).
 #[frb]
 pub fn nudge_live_dm_fetch(sender_peer_id: String) -> Result<bool, String> {
     crate::log::init();
+    let local_master = match identity::load_existing_identity()? {
+        Some(id) => id.peer_id,
+        None => return Ok(false),
+    };
+    let Some(room) = node::fetch::dm_wake_room(&open_local_store()?, &local_master, &sender_peer_id) else {
+        hollow_log!("[HOLLOW-PUSH] nudge_live_dm_fetch: the wake names no friend of ours, ignored");
+        return Ok(false);
+    };
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let Some(state) = guard.as_ref() else {
         return Ok(false);
     };
-    // The live node runs in this process, so the resolver is warm. dm_room_code is
-    // PURE, so resolve to masters first: the push `sender` is a DEVICE id.
-    let local_master = match identity::load_existing_identity()? {
-        Some(id) => id.peer_id,
-        None => return Ok(false),
-    };
-    let sender_master = crate::node::resolver::resolve(&sender_peer_id);
-    let room = crate::node::types::dm_room_code(&local_master, &sender_master);
-    hollow_log!(
-        "[HOLLOW-PUSH] nudge_live_dm_fetch: joining DM room for sender master {sender_master}"
-    );
+    hollow_log!("[HOLLOW-PUSH] nudge_live_dm_fetch: joining the DM room of the wake's sender");
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::JoinRoom { room_code: room }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
@@ -2746,7 +2745,7 @@ pub fn start_fetch_node(
         node::resolver::warm_from_store(&store);
     }
     // Ensure our own device→master mapping exists even if no links row yet.
-    node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
+    node::resolver::seed_self(&local_master, std::slice::from_ref(&peer_id));
     node::dm_room::register(&id.keypair);
 
     let license_key = get_license_key()

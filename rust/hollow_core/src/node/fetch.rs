@@ -74,7 +74,17 @@ pub(crate) async fn run_fetch(
         hollow_log!("[HOLLOW-FETCH] Channel wake for a server we are not a member of, nothing fetched");
         return Ok(Vec::new());
     }
-    let room = fetch_room_code(server_room, local_master, sender_peer_id);
+    let room = match server_room {
+        Some(sid) => sid.to_string(),
+        None => {
+            let store = crate::storage::MessageStore::open(db_path, db_passphrase)?;
+            let Some(room) = dm_wake_room(&store, local_master, sender_peer_id) else {
+                hollow_log!("[HOLLOW-FETCH] DM wake from someone who is not a friend, nothing fetched");
+                return Ok(Vec::new());
+            };
+            room
+        }
+    };
 
     // AUTO-DOWNLOAD GATE (#41): this headless process never receives Dart's
     // `set_auto_download_config` (the FCM isolate is a fresh process), so the
@@ -163,17 +173,18 @@ pub(crate) async fn run_fetch(
 
 /// Compute the single room the fetch joins: the server room for a channel
 /// wake, or the MASTER-paired DM room for a DM wake.
-fn fetch_room_code(server_room: Option<&str>, local_master: &str, sender_peer_id: &str) -> String {
-    match server_room {
-        Some(s) => s.to_string(),
-        None => {
-            // MASTER-paired DM room: resolve both ends to their master (the
-            // resolver is warmed from DB links before this call). The socket
-            // still AUTHS as the device.
-            let sender_master = crate::node::resolver::resolve(sender_peer_id);
-            crate::node::types::dm_room_code(local_master, &sender_master)
-        }
+/// The DM room a wake naming `sender` may join: ours with our own identity, or with an
+/// accepted friend we have not blocked. Anyone else is a stranger or a forged wake, and
+/// a live node that joined would show itself there and start a key exchange (A-T12).
+/// Masters on both ends: the resolver is warm in every process that calls this.
+pub(crate) fn dm_wake_room(store: &crate::storage::MessageStore, local_master: &str, sender: &str) -> Option<String> {
+    let master = crate::node::resolver::resolve(sender);
+    if crate::node::blocklist::is_blocked(sender) {
+        return None;
     }
+    let ours = master == local_master;
+    let friend = store.get_friend_status(&master).ok().flatten().as_deref() == Some("accepted");
+    (ours || friend).then(|| crate::node::types::dm_room_code(local_master, &master))
 }
 
 // After the first message the relay replays its whole buffer back-to-back, so a
@@ -334,6 +345,10 @@ fn handle_binary_frame(
     };
     let payload = parsed.and_then(|(direct, (room, from, frame))| {
         if from == peer_id {
+            return None;
+        }
+        if crate::node::resolver::is_bare_master(&from) {
+            hollow_log!("[HOLLOW-FETCH] Dropped a frame from {from}: a master id its roster does not count is no device");
             return None;
         }
         let delivery = if direct {
@@ -1799,6 +1814,62 @@ mod tests {
             "a wake for a foreign server tried to connect: {:?}",
             fetched.err(),
         );
+    }
+
+    /// A-T12. A DM wake names its sender, and only our own identity or an accepted,
+    /// unblocked friend is worth a room: anyone else is a stranger or a forged wake.
+    #[tokio::test]
+    async fn a_dm_wake_from_a_stranger_joins_nothing() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = temp_store();
+        let me = kp(181);
+        let mut olm = OlmManager::new();
+        let mut mls = None;
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let proto = me.to_protobuf_encoding().unwrap();
+        let fetched = run_fetch(
+            "127.0.0.1:9", &me.peer_id(), &me.peer_id(), &proto, &pk_b64(&me), None,
+            &kp(182).peer_id(), None, Duration::from_secs(2),
+            &mut olm, &mut mls, &crypto_store, &path, &pass,
+        )
+        .await;
+        assert!(
+            matches!(fetched.as_deref(), Ok([])),
+            "a stranger's DM wake tried to connect: {:?}",
+            fetched.err(),
+        );
+    }
+
+    /// A-T12. Who a DM wake may put us in a room with, the live node's nudge included.
+    #[test]
+    fn a_dm_wake_names_only_ourselves_or_a_friend() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let (me, friend, pending, blocked) = (kp(191).peer_id(), kp(192).peer_id(), kp(193).peer_id(), kp(194).peer_id());
+        store.save_friend(&friend, "accepted", "outgoing", 1).unwrap();
+        store.save_friend(&pending, "pending", "incoming", 1).unwrap();
+        store.save_friend(&blocked, "accepted", "outgoing", 1).unwrap();
+        crate::node::blocklist::block(&blocked);
+        let friend_dev = kp(195).peer_id();
+        crate::node::resolver::update_many(&friend, [friend_dev.as_str()]);
+
+        let room = |sender: &str| dm_wake_room(&store, &me, sender);
+        assert_eq!(room(&friend), Some(crate::node::types::dm_room_code(&me, &friend)));
+        assert_eq!(room(&friend_dev), Some(crate::node::types::dm_room_code(&me, &friend)), "a friend's device");
+        assert_eq!(room(&me), Some(crate::node::types::dm_room_code(&me, &me)), "our own identity");
+        assert_eq!(room(&kp(196).peer_id()), None, "a stranger");
+        assert_eq!(room(&pending), None, "a request we never accepted");
+        assert_eq!(room(&blocked), None, "a blocked friend");
+
+        let api = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/network.rs")).unwrap();
+        let start = api.find("pub fn nudge_live_dm_fetch(").expect("nudge_live_dm_fetch");
+        let body = &api[start..start + api[start..].find("NodeCommand::JoinRoom").expect("its join")];
+        assert!(body.contains("fetch::dm_wake_room("), "the live node's DM nudge joins a room for any wake");
+        crate::node::blocklist::clear_for_test();
+        crate::node::resolver::clear_all();
     }
 
     /// C11 on the push path: a DM is stored exactly as signed or not at all. The

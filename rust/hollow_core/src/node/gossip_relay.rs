@@ -22,7 +22,7 @@ pub(crate) async fn handle_webrtc_broadcast_received(
 ) {
     // SECURITY (TRANSPORT-3): the TTL is a wire field. Unclamped, a neighbor
     // could hand us 255 and have the mesh forward the same broadcast 255 hops
-    // deep. Cap it the way the BroadcastMeta path already does.
+    // deep.
     let ttl = ttl.min(MAX_BROADCAST_TTL);
 
     // Find which server this broadcast belongs to by checking every overlay.
@@ -144,22 +144,11 @@ pub(crate) async fn handle_gossip_rotation(
     }
 }
 
-/// Handle gossip broadcast dedup eviction timer tick. A timed-out relay is logged,
-/// never chased.
+/// Handle gossip broadcast dedup eviction timer tick.
 pub(crate) fn handle_gossip_eviction(
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
 ) {
     for overlay in gossip_overlays.values_mut() {
-        // Check for timed-out pending relays — file didn't arrive via gossip.
-        let timed_out = overlay.get_timed_out_relays();
-        for file_id in &timed_out {
-            if let Some(relay) = overlay.pending_relays.get(file_id) {
-                hollow_log!(
-                    "[HOLLOW-GOSSIP] Broadcast timeout for file {} (bid={}) from origin {}",
-                    file_id, relay.broadcast_id, relay.origin
-                );
-            }
-        }
         overlay.evict_stale_broadcasts();
     }
 }
