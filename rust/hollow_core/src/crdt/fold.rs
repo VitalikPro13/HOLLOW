@@ -120,7 +120,7 @@ impl ServerState {
             for (who, until_ms) in current.into_iter().chain(past) {
                 let spans = base.member_record.entry(who).or_default();
                 if spans.first().is_none_or(|s| s.from_ms > 0) {
-                    spans.insert(0, MemberSpan { from_ms: 0, until_ms });
+                    spans.insert(0, MemberSpan { from_ms: 0, until_ms, asked_at: 0 });
                 }
             }
         }
@@ -133,7 +133,8 @@ impl ServerState {
     /// invite pin the snapshot's owner must be it; without one this is trust on first
     /// use (residual R1), and the owner it names becomes the anchor from then on. A
     /// snapshot is only ever a legacy state: a checkpointed server's own checkpoint op
-    /// follows in the ops and rebases the joiner.
+    /// follows in the ops and rebases the joiner. Until then it is one member's word,
+    /// so it decides who belongs and what exists, never who may decide (D2).
     pub fn accept_join_snapshot(
         mut snap: ServerState,
         server_id: &str,
@@ -150,6 +151,15 @@ impl ServerState {
             return Err("its owner is not the one the invite named");
         }
         let Some(owner) = owner else { return Err("no owner") };
+        snap.roles.retain(|id, _| *id == owner);
+        snap.role_permissions.clear();
+        snap.banned_members.clear();
+        snap.muted_members.clear();
+        snap.label_assignments.clear();
+        snap.channel_grants.clear();
+        for channel in snap.channels.values_mut() {
+            channel.is_public = false;
+        }
         snap.owner_pin = Some(owner);
         snap.checkpoint_hlc = None;
         Ok(snap)
@@ -403,8 +413,10 @@ mod tests {
         keys(tag).1
     }
 
-    fn add(tag: u8) -> P {
-        P::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None }
+    /// `tag` admitted to `sid` on its own ask.
+    fn add(sid: &str, tag: u8) -> P {
+        let ask = crate::crdt::operations::JoinAsk::sign(sid, 1, &keys(tag).0);
+        P::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None, ask: Some(ask) }
     }
 
     fn general(s: &ServerState) -> String {
@@ -426,7 +438,7 @@ mod tests {
         let t = founding.hlc.physical_ms;
         let ops = vec![
             founding.clone(),
-            op_at(1, &sid, t + 1, add(2)),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
             op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 2 }),
             op_at(2, &sid, t + 3, P::ChannelPublicChanged { channel_id: ch.clone(), is_public: true }),
             op_at(1, &sid, t + 4, P::ChannelPublicChanged { channel_id: ch.clone(), is_public: false }),
@@ -463,7 +475,7 @@ mod tests {
         let sid = owner.server_id.clone();
         let t = founding.hlc.physical_ms;
         let mut r = joiner(&sid, 9);
-        r.ingest_remote(&[founding, op_at(1, &sid, t + 1, add(2))]);
+        r.ingest_remote(&[founding, op_at(1, &sid, t + 1, add(&sid, 2))]);
         let wall = crate::crdt::hlc::wall_clock_ms();
         let ahead = wall + crate::crdt::hlc::MAX_DRIFT_MS - 30_000;
 
@@ -486,7 +498,7 @@ mod tests {
         let ch = general(&owner);
         let t = founding.hlc.physical_ms;
         let opened = op_at(1, &sid, t + 2, P::ChannelPublicChanged { channel_id: ch.clone(), is_public: true });
-        let admitted = op_at(1, &sid, t + 1, add(2));
+        let admitted = op_at(1, &sid, t + 1, add(&sid, 2));
         let mut ops = vec![
             founding.clone(),
             admitted.clone(),
@@ -521,7 +533,7 @@ mod tests {
         assert_eq!(r.anchor(), Anchor::Genesis);
         r.ingest_remote(std::slice::from_ref(&forged));
         assert!(r.current_owner().is_none(), "the forged founding op takes nothing");
-        r.ingest_remote(&[founding, forged, op_at(5, &sid, t + 1, add(5))]);
+        r.ingest_remote(&[founding, forged, op_at(5, &sid, t + 1, add(&sid, 5))]);
         assert_eq!(r.current_owner(), Some(id(1)));
         assert_eq!(r.name(), "S");
         assert!(!r.is_member(&id(5)), "and its author cannot admit itself");
@@ -533,7 +545,7 @@ mod tests {
     fn authz_a_checkpoint_comes_only_from_the_anchor_owner() {
         let (mut legacy, o) = crate::crdt::testkeys::owned_state("s-legacy", "Old", 1);
         let ch = general(&legacy);
-        legacy.author_checked(add(2)).unwrap();
+        legacy.author_checked(add(&legacy.server_id, 2)).unwrap();
         legacy.author_checked(P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }).unwrap();
         let mut member = legacy.clone();
         member.set_hlc(Hlc::new(id(3)));
@@ -585,7 +597,7 @@ mod tests {
         let ch = format!("{}-general", &sid[..8]);
         let history = vec![
             op_at(1, &sid, t, P::ServerCreated { name: "S".into(), owner_peer_id: id(1), nonce: "n".into() }),
-            op_at(1, &sid, t + 1, add(2)),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
             op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 3 }),
         ];
         // The owner saw nothing after that; the admin renamed the channel an hour later.
@@ -626,6 +638,38 @@ mod tests {
             "no snapshot for a self-certifying id");
     }
 
+    /// D2: a member's snapshot decides who belongs and what exists, never who may
+    /// decide: only the owner keeps its role, and permissions, bans, mutes, label
+    /// assignments, grants and public channels wait for the owner's ops or checkpoint.
+    #[test]
+    fn authz_a_join_snapshot_carries_no_authority() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::operations::Permission;
+        let (mut legacy, o) = crate::crdt::testkeys::owned_state("s-legacy", "Old", 1);
+        let hlc = legacy.name.hlc().clone();
+        legacy.members.insert(id(2), crate::crdt::server_state::MemberInfo { peer_id: id(2), display_name: "m".into() });
+        legacy.roles.insert(id(2), AdminLwwReg::new(MemberRole::Admin, hlc.clone(), 3));
+        legacy.banned_members.insert(id(3), AdminLwwReg::new(true, hlc.clone(), 3));
+        legacy.muted_members.insert(id(4), AdminLwwReg::new(u64::MAX, hlc.clone(), 3));
+        legacy.role_permissions.insert("member".into(), AdminLwwReg::new(Permission::ALL, hlc.clone(), 3));
+        legacy.label_assignments.insert(id(2), vec!["vip".into()]);
+        legacy.channel_grants.insert("c".into(), [(id(2), AdminLwwReg::new(u64::MAX, hlc, 3))].into());
+        for ch in legacy.channels.values_mut() {
+            ch.is_public = true;
+        }
+
+        let snap = ServerState::accept_join_snapshot(legacy.lean_snapshot(), "s-legacy", Some(&o)).unwrap();
+        assert_eq!(snap.get_role(&o), MemberRole::Owner);
+        assert!(snap.is_member(&id(2)), "who belongs stands");
+        assert_eq!(snap.get_role(&id(2)), MemberRole::Member, "a role on the member's word");
+        assert!(!snap.is_banned(&id(3)), "a ban");
+        assert!(!snap.is_muted(&id(4), 0), "a mute");
+        assert!(!snap.has_permission(&id(2), Permission::KICK_MEMBERS), "a permission");
+        assert!(snap.label_assignments.is_empty(), "a label");
+        assert!(snap.channel_grants.is_empty(), "a grant");
+        assert!(snap.channels.values().all(|c| !c.is_public), "a public channel");
+    }
+
     /// E4: the membership record spans admission to removal, with slack for clocks,
     /// and an existing server's first checkpoint seeds it from what the owner holds.
     #[test]
@@ -639,7 +683,7 @@ mod tests {
         let mut r = joiner(&sid, 9);
         r.ingest_remote(&[
             founding,
-            op_at(1, &sid, t + hour, add(2)),
+            op_at(1, &sid, t + hour, add(&sid, 2)),
             op_at(1, &sid, t + 2 * hour, P::MemberRemoved { peer_id: id(2) }),
         ]);
         assert!(r.was_member_at(&id(1), t + 1));

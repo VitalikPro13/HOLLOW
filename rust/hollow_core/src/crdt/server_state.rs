@@ -184,11 +184,16 @@ pub struct ChannelInfo {
 impl ChannelInfo {
     /// Whether this channel is EFFECTIVELY public. Voice channels can never be public:
     /// only their text chat would be browsable, and a public voice channel silently
-    /// changes the SFrame key domain. A stale or malicious `is_public` on a voice
-    /// channel is neutralized HERE, so every read must go through this, never the raw
-    /// flag.
+    /// changes the SFrame key domain. Nor can a restricted channel, whatever order its
+    /// flags were set in (D6). A stale or malicious `is_public` is neutralized HERE, so
+    /// every read must go through this, never the raw flag.
     pub fn effective_public(&self) -> bool {
-        self.is_public && self.channel_type == ChannelType::Text
+        self.is_public && self.channel_type == ChannelType::Text && !self.restricted()
+    }
+
+    /// Whether only some members may see it: a tier above everyone, or a label gate.
+    pub fn restricted(&self) -> bool {
+        self.visibility != ChannelVisibility::Everyone || !self.visibility_labels.is_empty()
     }
 }
 
@@ -205,6 +210,9 @@ pub struct MemberInfo {
 pub struct MemberSpan {
     pub from_ms: u64,
     pub until_ms: u64,
+    /// The `at` of the ask that opened it; 0 for the founder and spans a checkpoint seeded.
+    #[serde(default)]
+    pub asked_at: i64,
 }
 
 /// Slack either side of a membership span when judging a post's time: post clocks
@@ -439,7 +447,7 @@ impl ServerState {
             owner.to_string(),
             AdminLwwReg::new(MemberRole::Owner, at.clone(), MemberRole::Owner.priority()),
         );
-        self.open_span(owner, at.physical_ms);
+        self.open_span(owner, at.physical_ms, 0);
         let general_id = format!("{}-general", &self.server_id[..8.min(self.server_id.len())]);
         self.channels.entry(general_id.clone()).or_insert_with(|| ChannelInfo {
             channel_id: general_id,
@@ -475,10 +483,10 @@ impl ServerState {
         self.owner_pin.clone().or_else(|| self.current_owner())
     }
 
-    fn open_span(&mut self, master: &str, at_ms: u64) {
+    fn open_span(&mut self, master: &str, at_ms: u64, asked_at: i64) {
         let spans = self.member_record.entry(master.to_string()).or_default();
         if spans.last().is_none_or(|s| s.until_ms != u64::MAX) {
-            spans.push(MemberSpan { from_ms: at_ms, until_ms: u64::MAX });
+            spans.push(MemberSpan { from_ms: at_ms, until_ms: u64::MAX, asked_at });
         }
     }
 
@@ -940,10 +948,11 @@ impl ServerState {
 
             CrdtPayload::MemberAdded {
                 peer_id,
-                display_name, ..
+                display_name,
+                ask, ..
             } => {
                 if !self.members.contains_key(peer_id) {
-                    self.open_span(peer_id, op.hlc.physical_ms);
+                    self.open_span(peer_id, op.hlc.physical_ms, ask.as_ref().map_or(0, |a| a.at));
                 }
                 self.members.entry(peer_id.clone()).or_insert_with(|| {
                     MemberInfo {
@@ -972,6 +981,8 @@ impl ServerState {
                 self.storage_pledges.remove(peer_id);
             }
 
+            // Closing a channel also takes it off the public list for good, so lifting
+            // the restriction later never reopens it to guests.
             CrdtPayload::ChannelVisibilityChanged { channel_id, visibility } => {
                 if let Some(ch) = self.channels.get_mut(channel_id) {
                     ch.visibility = match visibility.as_str() {
@@ -979,6 +990,7 @@ impl ServerState {
                         "admin" => ChannelVisibility::AdminPlus,
                         _ => ChannelVisibility::Everyone,
                     };
+                    ch.is_public &= !ch.restricted();
                 }
             }
 
@@ -1017,6 +1029,7 @@ impl ServerState {
             CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, labels } => {
                 if let Some(ch) = self.channels.get_mut(channel_id) {
                     ch.visibility_labels = labels.clone();
+                    ch.is_public &= !ch.restricted();
                 }
             }
 
@@ -1736,8 +1749,8 @@ impl ServerState {
                 self.kick_allowed(&role, perms, peer_id)
                     && self.lifts_register(&role, self.muted_members.get(&super::resolve_identity(peer_id)))
             }
-            CrdtPayload::MemberAdded { peer_id, follow, .. } => {
-                self.admission_allowed(&role, op, peer_id, follow.as_deref())
+            CrdtPayload::MemberAdded { peer_id, follow, ask, .. } => {
+                self.admission_allowed(&role, op, peer_id, follow.as_deref(), ask.as_ref())
             }
             // Self, or Owner/Admin over a member ranked below them (never the Owner).
             CrdtPayload::NicknameChanged { peer_id, .. }
@@ -1760,14 +1773,14 @@ impl ServerState {
                     && role.outranks(&target)
                     && permissions & !perms == 0
             }
-            CrdtPayload::ChannelPublicChanged { channel_id, .. } => {
-                // Voice channels can never be public (#44). Unknown channel id passes
-                // (apply is a no-op there); the apply guard is the backstop.
+            CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
+                // Voice channels can never be public (#44), nor restricted ones (D6).
+                // Unknown channel id passes (apply is a no-op there).
                 has(Permission::MANAGE_CHANNELS)
                     && self
                         .channels
                         .get(channel_id)
-                        .is_none_or(|ch| ch.channel_type == ChannelType::Text)
+                        .is_none_or(|ch| ch.channel_type == ChannelType::Text && !(*is_public && ch.restricted()))
             }
             CrdtPayload::LabelCreated { .. }
             | CrdtPayload::LabelDeleted { .. }
@@ -1817,13 +1830,27 @@ impl ServerState {
     /// E7: the join gates the admitter ran, re-checked by every member against the
     /// state at the op's own point in the fold. Any member may admit (owner-offline
     /// joins keep working); nobody admits past a ban, a private server, the member
-    /// cap, owner-verify or the Twitch follow gate.
-    fn admission_allowed(&self, author: &MemberRole, op: &CrdtOp, target: &str, follow: Option<&str>) -> bool {
+    /// cap, owner-verify or the Twitch follow gate. D3: nor anyone but the identity
+    /// that signed the ask, with an ask newer than every one that admitted it before.
+    fn admission_allowed(
+        &self,
+        author: &MemberRole,
+        op: &CrdtOp,
+        target: &str,
+        follow: Option<&str>,
+        ask: Option<&super::operations::JoinAsk>,
+    ) -> bool {
+        let Some(ask) = ask.filter(|a| a.verifies(&self.server_id, target)) else {
+            return false;
+        };
         if self.is_banned(target) {
             return false;
         }
         if self.is_member(target) {
             return true;
+        }
+        if self.member_record.get(target).is_some_and(|spans| spans.iter().any(|s| ask.at <= s.asked_at)) {
+            return false;
         }
         if self.is_private() || self.max_members().is_some_and(|max| self.members.len() as u32 >= max) {
             return false;
@@ -2065,28 +2092,19 @@ impl ServerState {
     }
 
     /// Whether a channel is cryptographically isolated in its own MLS subgroup: true iff
-    /// it has a restricted visibility tier and is not a plaintext public channel. Such a
-    /// channel is encrypted under `subgroup_id(server_id, channel_id)`, so only members
-    /// whose role satisfies the tier hold the key.
+    /// it is restricted (and so never public). Such a channel is encrypted under
+    /// `subgroup_id(server_id, channel_id)`, so only members who may see it hold the key.
     pub fn channel_uses_subgroup(&self, channel_id: &str) -> bool {
-        self.channels.get(channel_id).is_some_and(|ch| {
-            !ch.effective_public()
-                && (ch.visibility != ChannelVisibility::Everyone
-                    || !ch.visibility_labels.is_empty())
-        })
+        self.channels.get(channel_id).is_some_and(ChannelInfo::restricted)
     }
 
-    /// All channel ids that currently use a dedicated MLS subgroup (restricted +
-    /// non-public). Used to enumerate subgroup ids for MLS persistence reload and
+    /// All channel ids that currently use a dedicated MLS subgroup (the restricted
+    /// ones). Used to enumerate subgroup ids for MLS persistence reload and
     /// to reconcile membership on role/visibility changes.
     pub fn subgroup_channel_ids(&self) -> Vec<String> {
         self.channels
             .values()
-            .filter(|ch| {
-                !ch.effective_public()
-                    && (ch.visibility != ChannelVisibility::Everyone
-                        || !ch.visibility_labels.is_empty())
-            })
+            .filter(|ch| ch.restricted())
             .map(|ch| ch.channel_id.clone())
             .collect()
     }
@@ -2167,6 +2185,7 @@ mod tests {
                 peer_id: id.into(),
                 display_name: id.into(),
                 follow: None,
+                ask: None,
             });
             let _ = s.apply_op(&op);
         }
@@ -2215,9 +2234,9 @@ mod tests {
             ("alice", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, false),
             ("moder", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, true),
             ("moder", CrdtPayload::MemberRemoved { peer_id: "admin".into() }, false),
-            // MemberAdded: any current member (invite), stranger no.
-            ("alice", CrdtPayload::MemberAdded { peer_id: "carol".into(), display_name: "c".into(), follow: None, }, true),
-            ("stranger", CrdtPayload::MemberAdded { peer_id: "dave".into(), display_name: "d".into(), follow: None, }, false),
+            // MemberAdded: any current member, on the joiner's own ask; a stranger no.
+            ("alice", add_on_ask(30, 1, None), true),
+            ("stranger", add_on_ask(31, 1, None), false),
             // Nickname / Twitch / pledge: self or Owner/Admin.
             ("alice", CrdtPayload::NicknameChanged { peer_id: "alice".into(), nickname: "a".into() }, true),
             ("alice", CrdtPayload::NicknameChanged { peer_id: "bob".into(), nickname: "x".into() }, false),
@@ -2358,7 +2377,7 @@ mod tests {
         let server = "0123456789abcdef0123456789abcdef".to_string();
         let mut s = test_state(server.clone(), "S".into(), owner.clone());
         for id in ["moder", "alice", "bob"] {
-            let op = s.create_op(CrdtPayload::MemberAdded { peer_id: id.into(), display_name: id.into(), follow: None });
+            let op = s.create_op(CrdtPayload::MemberAdded { peer_id: id.into(), display_name: id.into(), follow: None, ask: None });
             let _ = s.apply_op(&op);
         }
         let op = s.create_op(CrdtPayload::RoleChanged { peer_id: "moder".into(), role: MemberRole::Moderator, priority: 3 });
@@ -2452,6 +2471,7 @@ mod tests {
             peer_id: "joiner_device".into(),
             display_name: "joiner".into(),
             follow: None,
+            ask: None,
         });
         let _ = state.apply_op(&op);
         assert!(state.members.contains_key("joiner_device"));
@@ -2484,6 +2504,7 @@ mod tests {
             peer_id: "bob".into(),
             display_name: "bob".into(),
             follow: None,
+            ask: None,
         });
         let _ = state.apply_op(&op);
         assert!(!state.canonicalize_members(|id| id.to_string()));
@@ -2503,6 +2524,7 @@ mod tests {
             peer_id: "x_master".into(),
             display_name: "x".into(),
             follow: None,
+            ask: None,
         });
         let _ = state.apply_op(&op1);
 
@@ -2511,6 +2533,7 @@ mod tests {
             peer_id: "x_device".into(),
             display_name: "x".into(),
             follow: None,
+            ask: None,
         });
         let _ = state.apply_op(&op2);
         let op3 = state.create_op(CrdtPayload::RoleChanged {
@@ -2544,6 +2567,7 @@ mod tests {
         let add = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bob_master".into(), display_name: "bob".into(),
             follow: None,
+            ask: None,
         });
         let _ = state.apply_op(&add);
         let role = state.create_op(CrdtPayload::RoleChanged {
@@ -2598,6 +2622,7 @@ mod tests {
             peer_id: "peer_b".into(),
             display_name: "Bob".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op2).unwrap();
 
@@ -2645,6 +2670,7 @@ mod tests {
             peer_id: "peer_b".into(),
             display_name: "Bob".into(),
             follow: None,
+            ask: None,
         });
 
         // B adds channel (concurrently, doesn't know about op_a yet)
@@ -2676,6 +2702,7 @@ mod tests {
             peer_id: "admin_peer".into(),
             display_name: "A".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&add).unwrap();
         let promote = state.create_op(CrdtPayload::RoleChanged {
@@ -2809,6 +2836,7 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2827,6 +2855,7 @@ mod tests {
             peer_id: "admin".into(),
             display_name: "A".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         // Owner (priority 3) promotes admin — uses author's priority
@@ -2841,6 +2870,7 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2865,6 +2895,7 @@ mod tests {
             peer_id: "mod".into(),
             display_name: "Mod".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         // Owner (priority 3) promotes moderator — uses author's priority
@@ -2879,6 +2910,7 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -2904,6 +2936,7 @@ mod tests {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         assert_eq!(state.get_role("peer_b"), MemberRole::Member);
@@ -2976,6 +3009,7 @@ mod tests {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3134,6 +3168,7 @@ mod tests {
                 peer_id: id.into(),
                 display_name: id.into(),
                 follow: None,
+                ask: None,
             });
             s.apply_op(&op).unwrap();
             if let Some(r) = role {
@@ -3406,6 +3441,7 @@ mod tests {
             peer_id: "bad_peer".into(),
             display_name: "Bad".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3442,6 +3478,7 @@ mod tests {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3484,12 +3521,14 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "mod".into(),
             display_name: "Mod".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::RoleChanged {
@@ -3537,6 +3576,7 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3616,6 +3656,7 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         // Non-owner gets false for a channel that doesn't exist
@@ -3739,6 +3780,7 @@ mod tests {
             peer_id: "member".into(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
 
@@ -3841,6 +3883,7 @@ mod tests {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::NicknameChanged {
@@ -4029,6 +4072,7 @@ mod tests {
             peer_id: member.1.clone(),
             display_name: "M".into(),
             follow: None,
+            ask: None,
         });
         state.apply_op(&add).unwrap();
         (state, owner_id, member)
@@ -4182,7 +4226,7 @@ mod tests {
         let (mut state, owner_id) = owned_state("s1", "Server", 1);
         let (_, member_id, _) = keys(2);
         for payload in [
-            CrdtPayload::MemberAdded { peer_id: member_id.clone(), display_name: "M".into(), follow: None, },
+            CrdtPayload::MemberAdded { peer_id: member_id.clone(), display_name: "M".into(), follow: None, ask: None, },
             CrdtPayload::RoleChanged {
                 peer_id: member_id.clone(),
                 role: MemberRole::Moderator,
@@ -4323,6 +4367,7 @@ mod tests {
         for id in ["admin", "moder", "alice", "bob"] {
             let op = s.create_op(CrdtPayload::MemberAdded {
                 peer_id: id.into(), display_name: id.into(), follow: None,
+                ask: None,
             });
             s.apply_op(&op).unwrap();
         }
@@ -4331,6 +4376,17 @@ mod tests {
             s.apply_op(&op).unwrap();
         }
         s
+    }
+
+    /// A `MemberAdded` for `tag`'s identity on its own ask to "s1", the fixtures' server.
+    fn add_on_ask(tag: u8, at: i64, follow: Option<String>) -> CrdtPayload {
+        let (kp, id, _) = keys(tag);
+        CrdtPayload::MemberAdded {
+            peer_id: id,
+            display_name: "m".into(),
+            follow,
+            ask: Some(crate::crdt::operations::JoinAsk::sign("s1", at, &kp)),
+        }
     }
 
     fn allowed(s: &mut ServerState, author: &str, payload: CrdtPayload) -> bool {
@@ -4377,40 +4433,103 @@ mod tests {
     /// never past a ban, a private server, the cap, owner-verify or the Twitch gate.
     #[test]
     fn authz_member_added_rechecks_the_join_gates() {
-        let add = |id: &str, follow: Option<String>| CrdtPayload::MemberAdded {
-            peer_id: id.into(), display_name: id.into(), follow,
-        };
+        const CAROL: u8 = 30;
+        const MALLORY: u8 = 31;
+        const DAVE: u8 = 32;
+        let add = |tag: u8, follow: Option<String>| add_on_ask(tag, 1, follow);
         let setting = |k: &str, v: &str| CrdtPayload::ServerSettingChanged { key: k.into(), value: v.into() };
 
         let mut s = ranked_fixture();
-        assert!(allowed(&mut s, "alice", add("carol", None)), "any member admits");
-        assert!(allowed(&mut s, "alice", add("bob", None)), "re-adding a member is a no-op");
-        apply_as(&mut s, "moder", CrdtPayload::MemberBanned { peer_id: "mallory".into() });
-        assert!(!allowed(&mut s, "alice", add("mallory", None)), "a banned identity");
+        assert!(allowed(&mut s, "alice", add(CAROL, None)), "any member admits");
+        apply_as(&mut s, "alice", add(DAVE, None));
+        assert!(allowed(&mut s, "alice", add(DAVE, None)), "re-adding a member is a no-op");
+        apply_as(&mut s, "moder", CrdtPayload::MemberBanned { peer_id: keys(MALLORY).1 });
+        assert!(!allowed(&mut s, "alice", add(MALLORY, None)), "a banned identity");
 
-        apply_as(&mut s, "owner", setting("max_members", "5"));
-        assert!(!allowed(&mut s, "alice", add("carol", None)), "the cap is reached");
+        apply_as(&mut s, "owner", setting("max_members", "6"));
+        assert!(!allowed(&mut s, "alice", add(CAROL, None)), "the cap is reached");
         apply_as(&mut s, "owner", setting("max_members", "0"));
         apply_as(&mut s, "owner", setting("is_private", "true"));
-        assert!(!allowed(&mut s, "owner", add("carol", None)), "a private server");
+        assert!(!allowed(&mut s, "owner", add(CAROL, None)), "a private server");
         apply_as(&mut s, "owner", setting("is_private", "false"));
 
         apply_as(&mut s, "owner", setting("twitch_verification_enabled", "true"));
         apply_as(&mut s, "owner", setting("twitch_channel_id", "12345"));
-        assert!(!allowed(&mut s, "alice", add("carol", None)), "no follow credential");
+        assert!(!allowed(&mut s, "alice", add(CAROL, None)), "no follow credential");
         let at_ms = s.hlc.as_mut().unwrap().now().physical_ms;
         let period = crate::node::support_creds::period_of(at_ms / 1000);
-        let mint = |master: &str, channel: &str| {
-            let entry = crate::node::support_creds::testing::mint_follow_for(master, channel, 30, "0", period);
+        let mint = |tag: u8, channel: &str| {
+            let entry = crate::node::support_creds::testing::mint_follow_for(&keys(tag).1, channel, 30, "0", period);
             Some(serde_json::to_string(&entry).unwrap())
         };
-        assert!(allowed(&mut s, "alice", add("carol", mint("carol", "12345"))));
-        assert!(!allowed(&mut s, "alice", add("carol", mint("dave", "12345"))), "someone else's credential");
-        assert!(!allowed(&mut s, "alice", add("carol", mint("carol", "999"))), "another channel's");
+        assert!(allowed(&mut s, "alice", add(CAROL, mint(CAROL, "12345"))));
+        assert!(!allowed(&mut s, "alice", add(CAROL, mint(MALLORY, "12345"))), "someone else's credential");
+        assert!(!allowed(&mut s, "alice", add(CAROL, mint(CAROL, "999"))), "another channel's");
 
         apply_as(&mut s, "owner", setting("twitch_owner_verify", "true"));
-        assert!(!allowed(&mut s, "admin", add("carol", mint("carol", "12345"))), "owner-verify");
-        assert!(allowed(&mut s, "owner", add("carol", mint("carol", "12345"))));
+        assert!(!allowed(&mut s, "admin", add(CAROL, mint(CAROL, "12345"))), "owner-verify");
+        assert!(allowed(&mut s, "owner", add(CAROL, mint(CAROL, "12345"))));
+    }
+
+    /// D3: `MemberAdded` lists only an identity that signed its own ask to this
+    /// server, and each ask admits once: after a leave only a newer one brings it back.
+    #[test]
+    fn authz_member_added_names_only_someone_who_asked() {
+        use crate::crdt::operations::JoinAsk;
+        let mut s = ranked_fixture();
+        let (carol_kp, carol, _) = keys(30);
+        let dave_kp = keys(31).0;
+        let add = |ask: Option<JoinAsk>| CrdtPayload::MemberAdded {
+            peer_id: carol.clone(), display_name: "c".into(), follow: None, ask,
+        };
+        let ask = |server: &str, at: i64, kp: &NativeKeypair| Some(JoinAsk::sign(server, at, kp));
+
+        assert!(!allowed(&mut s, "alice", add(None)), "nobody asked");
+        assert!(!allowed(&mut s, "alice", add(ask("s1", 5, &dave_kp))), "someone else's ask");
+        assert!(!allowed(&mut s, "alice", add(ask("s2", 5, &carol_kp))), "an ask to another server");
+        let moved = ask("s1", 5, &carol_kp).map(|a| JoinAsk { at: 6, ..a });
+        assert!(!allowed(&mut s, "alice", add(moved)), "an ask whose time was changed");
+
+        apply_as(&mut s, "alice", add(ask("s1", 5, &carol_kp)));
+        apply_as(&mut s, &carol, CrdtPayload::MemberRemoved { peer_id: carol.clone() });
+        assert!(!allowed(&mut s, "alice", add(ask("s1", 5, &carol_kp))), "the ask that admitted her once");
+        assert!(!allowed(&mut s, "alice", add(ask("s1", 4, &carol_kp))), "an older one");
+        assert!(allowed(&mut s, "alice", add(ask("s1", 9, &carol_kp))), "a newer ask");
+    }
+
+    /// D6: a restricted channel is never public: it cannot be flagged public, restricting
+    /// it clears the flag for good, and a state holding both reads it as restricted.
+    #[test]
+    fn authz_a_restricted_channel_is_never_public() {
+        let mut s = ranked_fixture();
+        let ch = "s1-general".to_string();
+        let public = |on: bool| CrdtPayload::ChannelPublicChanged { channel_id: ch.clone(), is_public: on };
+        let tier = |v: &str| CrdtPayload::ChannelVisibilityChanged { channel_id: ch.clone(), visibility: v.into() };
+        let labels = |l: &[&str]| CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: ch.clone(), labels: l.iter().map(|x| x.to_string()).collect(),
+        };
+
+        apply_as(&mut s, "admin", public(true));
+        assert!(s.is_channel_public(&ch));
+        apply_as(&mut s, "admin", tier("admin"));
+        assert!(!s.is_channel_public(&ch), "restricting closes it");
+        assert!(s.subgroup_channel_ids().contains(&ch), "and its posts ride its own group");
+        assert!(!allowed(&mut s, "admin", public(true)), "a restricted channel is flagged public");
+        assert!(allowed(&mut s, "admin", public(false)));
+        apply_as(&mut s, "admin", tier("everyone"));
+        assert!(!s.is_channel_public(&ch), "lifting the restriction reopens it to guests");
+
+        apply_as(&mut s, "admin", public(true));
+        apply_as(&mut s, "admin", labels(&["vip"]));
+        assert!(!s.is_channel_public(&ch), "a label gate closes it");
+        assert!(!allowed(&mut s, "admin", public(true)), "a label-gated channel is flagged public");
+        apply_as(&mut s, "admin", labels(&[]));
+        assert!(!s.is_channel_public(&ch));
+
+        apply_as(&mut s, "admin", public(true));
+        let both = s.channels.get_mut(&ch).unwrap();
+        both.visibility = ChannelVisibility::ModeratorPlus;
+        assert!(!s.is_channel_public(&ch), "a state holding both flags reads as restricted");
     }
 
     /// E11: lifting a ban or mute needs the rank that set it, nickname-class edits of
@@ -4428,6 +4547,7 @@ mod tests {
 
         let op = s.create_op(CrdtPayload::MemberAdded {
             peer_id: "admin2".into(), display_name: "a2".into(), follow: None,
+            ask: None,
         });
         s.apply_op(&op).unwrap();
         apply_as(&mut s, "owner", CrdtPayload::RoleChanged {

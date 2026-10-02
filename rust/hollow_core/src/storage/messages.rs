@@ -481,6 +481,23 @@ fn channel_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredC
     })
 }
 
+/// A master-signed card as stored; `node::profile_card` verifies it on the way in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCard {
+    pub master: String,
+    pub display_name: String,
+    pub updated_at: i64,
+    pub avatar_hash: String,
+    pub sig: String,
+    pub pk: String,
+}
+
+/// The path of a store that lives in this process's memory only, for as long as one
+/// connection to it stays open; `name` keeps one node's store apart from another's.
+pub fn guest_store_path(name: &str) -> String {
+    format!("file:hollow-guest-{name}?mode=memory&cache=shared")
+}
+
 impl MessageStore {
     /// Open (or create) an encrypted database at `path` using `passphrase`.
     pub fn open(path: &str, passphrase: &str) -> Result<Self, String> {
@@ -1243,7 +1260,52 @@ impl MessageStore {
                 created_at INTEGER NOT NULL
             )")?;
 
+        // Each identity's newest master-signed card (name and avatar hash) with its
+        // proof, so we can show a stranger who wrote a public post (D6).
+        ddl(conn, "signed_cards table",
+            "CREATE TABLE IF NOT EXISTS signed_cards (
+                master       TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                updated_at   INTEGER NOT NULL,
+                avatar_hash  TEXT NOT NULL,
+                sig          TEXT NOT NULL,
+                pk           TEXT NOT NULL
+            )")?;
+
         Ok(())
+    }
+
+    /// Keep a card the caller verified, unless we hold one at least as new.
+    pub fn save_signed_card(&self, card: &StoredCard) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "INSERT INTO signed_cards (master, display_name, updated_at, avatar_hash, sig, pk)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(master) DO UPDATE SET
+                    display_name = excluded.display_name, updated_at = excluded.updated_at,
+                    avatar_hash = excluded.avatar_hash, sig = excluded.sig, pk = excluded.pk
+                 WHERE excluded.updated_at > signed_cards.updated_at",
+                params![card.master, card.display_name, card.updated_at, card.avatar_hash, card.sig, card.pk],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save signed card: {e}"))
+    }
+
+    pub fn load_signed_card(&self, master: &str) -> Option<StoredCard> {
+        self.conn
+            .query_row(
+                "SELECT master, display_name, updated_at, avatar_hash, sig, pk FROM signed_cards WHERE master = ?1",
+                params![master],
+                |r| Ok(StoredCard {
+                    master: r.get(0)?,
+                    display_name: r.get(1)?,
+                    updated_at: r.get(2)?,
+                    avatar_hash: r.get(3)?,
+                    sig: r.get(4)?,
+                    pk: r.get(5)?,
+                }),
+            )
+            .ok()
     }
 
     /// Every at-rest file key, loaded once into the process key ring so reads
@@ -6563,6 +6625,22 @@ mod tests {
             connected_at: Some(started + 2_000),
             ended_at: started + 242_000,
         }
+    }
+
+    /// D6: a guest's store is shared memory: every open sees the same rows while one
+    /// connection holds it, and nothing of it outlives the last one.
+    #[test]
+    fn a_guest_store_lives_in_memory_only_while_held() {
+        let path = guest_store_path("test-held");
+        let key = "ab".repeat(32);
+        let keeper = MessageStore::open(&path, &key).unwrap();
+        MessageStore::open(&path, &key).unwrap()
+            .insert_channel_message("s", "c", "al", "hi", false, 1, None, None, Some("m1"), None, None, None, None)
+            .unwrap();
+        assert!(MessageStore::open(&path, &key).unwrap().channel_message_exists("m1"), "seen by the next open");
+        drop(keeper);
+        assert!(!MessageStore::open(&path, &key).unwrap().channel_message_exists("m1"), "gone with the last connection");
+        assert!(!std::path::Path::new("test-held").exists(), "never a file");
     }
 
     /// C9: the guest browser's pages never carry a deleted message.

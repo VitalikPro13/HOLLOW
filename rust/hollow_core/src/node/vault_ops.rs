@@ -984,6 +984,7 @@ mod tests {
             peer_id: id.to_string(),
             display_name: "m".into(),
             follow: None,
+            ask: None,
         }));
         for payload in ops {
             let op = state.create_op(payload);

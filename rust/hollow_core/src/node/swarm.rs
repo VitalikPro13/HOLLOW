@@ -1148,6 +1148,7 @@ async fn run_event_loop(
                         reply_secret: row.reply_secret.as_deref().and_then(super::join_lane::ReplySecret::from_stored),
                         refused,
                         card: card.clone(),
+                        ask: Some(crate::crdt::operations::JoinAsk::sign(&row.server_id, row.requested_at, &master_keypair)),
                         ..Default::default()
                     });
                     restored += 1;
@@ -1227,7 +1228,7 @@ async fn run_event_loop(
     let mut slow_mode_clock = message_ops::SlowModeClock::default();
 
     // Guest sync: rooms joined as a non-member for browsing public channels.
-    let mut guest_rooms: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut guest_rooms = super::guest_view::GuestView::new();
 
     // SECURITY: Per-peer rate limiter — token bucket (100 burst, refill 20/sec).
     // Prevents message flooding from malicious peers.
@@ -2009,7 +2010,7 @@ async fn run_event_loop(
                             }).await;
                         } else {
                             hollow_log!("[HOLLOW-GUEST] Not a member, joining room as guest: {server_id}");
-                            guest_rooms.insert(server_id.clone());
+                            guest_rooms.enter(&server_id, &db_passphrase);
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
                             let msg = HavenMessage::PublicChannelListRequest { server_id: server_id.clone() };
                             if let Ok(data) = serde_json::to_vec(&msg) {
@@ -2121,7 +2122,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::LeaveGuestRoom { server_id } => {
-                        guest_rooms.remove(&server_id);
+                        guest_rooms.leave(&server_id);
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id });
                     }
 
@@ -3383,7 +3384,7 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        for guest_sid in guest_rooms.iter() {
+                        for guest_sid in guest_rooms.rooms() {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: guest_sid.clone(),
                             });
@@ -4691,8 +4692,8 @@ async fn run_event_loop(
                                 sync_handler::JoinAnswer::Open(msg) => msg,
                                 sync_handler::JoinAnswer::Stale => {
                                     sync_handler::reask_join(
-                                        &ws_cmd_tx, &ws_room_peers, &crdt_store, &server, &device_peer_id, pending,
-                                        door_rooms.is_hidden(&server),
+                                        &ws_cmd_tx, &ws_room_peers, &crdt_store, &server, &device_peer_id, &master_keypair,
+                                        pending, door_rooms.is_hidden(&server),
                                     );
                                     continue;
                                 }
@@ -7156,7 +7157,7 @@ async fn handle_incoming_request(
     conference_host: &mut HashMap<String, super::conference::ConferenceHostState>,
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
     mls_dirty: &mut bool,
-    guest_rooms: &std::collections::HashSet<String>,
+    guest_rooms: &super::guest_view::GuestView,
     subscribed_channels: &HashMap<String, Vec<String>>,
     db_path: &str,
     db_passphrase: &str,
@@ -9707,7 +9708,7 @@ async fn handle_incoming_request(
         }
         HavenMessage::ServerJoinRequest {
             server_id, twitch_proof_json, nsfw_confirmed,
-            requested_at, device_list, parked, key_package, reply_key, card, avatar_b64,
+            requested_at, device_list, parked, key_package, reply_key, card, avatar_b64, ask,
         } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id} (nonce {requested_at}, parked {parked})");
 
@@ -9999,13 +10000,15 @@ async fn handle_incoming_request(
                     // The short display label is derived from the master id.
                     let display_name = format!("{}...{}", &member_master[..4.min(member_master.len())], &member_master[member_master.len().saturating_sub(4)..]);
                     // Authored through the SAME rules every member re-checks (E7), so
-                    // the Twitch credential rides along for them to verify.
+                    // the Twitch credential and the joiner's own ask ride along for them
+                    // to verify.
                     let follow = twitch::TwitchServerSettings::from_server_state(state)
                         .and(twitch_proof_json.clone());
                     let Some(op) = state.author_checked(CrdtPayload::MemberAdded {
                         peer_id: member_master.clone(),
                         display_name,
                         follow,
+                        ask,
                     }) else {
                         hollow_log!("[HOLLOW-CRDT] Not admitting {member_master} to {server_id}: the admission rules refuse it here");
                         return;
@@ -10875,13 +10878,14 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
                                         status: "invisible".to_string(),
                                     }).await;
                                 }
+                                let card_sender = sender_peer_id.clone();
                                 let envelope_revoked = super::social::handle_envelope_profile_update(
                                     event_tx, server_states, master_peer_str,
                                     device_peer_id, ws_cmd_tx, ws_room_peers,
@@ -10893,6 +10897,9 @@ async fn handle_incoming_request(
                                     support_creds_sig, profile_sig, profile_pk,
                                     db_path, db_passphrase,
                                 ).await;
+                                if let Some(card) = card {
+                                    super::profile_card::keep_card(&card, &super::resolver::resolve(&card_sender), db_path, db_passphrase);
+                                }
                                 // Step 7: enforce revocations learned via the MLS
                                 // server-member profile path too (Olm drop + single
                                 // leaf removal where we coordinate).
@@ -12448,13 +12455,15 @@ async fn handle_incoming_request(
             //
             // `order_us` is the SENDER's Lamport stamp and the v2 signature binds it, so
             // a local ts*1000 default would store a row whose signature fails on re-serve.
+            // A guest keeps what it is shown in memory only (D6).
+            let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), slow_mode_clock, &local_peer_str,
                 sender_master.clone(),
                 server_id.clone(), channel_id.clone(), text, ts, sig, pk,
                 Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us, album.map(|a| *a),
-                &db_path, &db_passphrase,
+                store, db_passphrase,
             ).await;
             // GUEST live file card: we cannot decrypt the MLS FileHeader that
             // follows, so the plaintext message carries display metadata. Members
@@ -12495,12 +12504,14 @@ async fn handle_incoming_request(
             {
                 return;
             }
+            // A guest keeps what it is shown in memory only (D6).
+            let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_edit_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, text, ts, sig, pk,
                 Some(server_id), Some(channel_id),
-                &db_path, &db_passphrase,
+                store, db_passphrase,
             ).await;
         }
 
@@ -12513,12 +12524,14 @@ async fn handle_incoming_request(
             {
                 return;
             }
+            // A guest keeps what it is shown in memory only (D6).
+            let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_link_preview_set(
                 &event_tx, server_states.get(&server_id), &sender_master, local_peer_str,
                 mid, lp, ts, sig, pk,
                 Some(server_id), Some(channel_id), frame_ts_ms,
-                &db_path, &db_passphrase,
+                store, db_passphrase,
             ).await;
         }
 
@@ -12531,12 +12544,14 @@ async fn handle_incoming_request(
             {
                 return;
             }
+            // A guest keeps what it is shown in memory only (D6).
+            let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_delete_message(
                 &event_tx, &bundle_keypair, &sender_master,
                 mid, ts, sig, pk,
                 Some(server_id), Some(channel_id),
-                &db_path, &db_passphrase,
+                store, db_passphrase,
             ).await;
         }
 
@@ -12549,12 +12564,14 @@ async fn handle_incoming_request(
             {
                 return;
             }
+            // A guest keeps what it is shown in memory only (D6).
+            let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_add_reaction(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, emoji, ts, sig, pk,
                 Some(server_id), Some(channel_id),
-                &db_path, &db_passphrase,
+                store, db_passphrase,
             ).await;
         }
 
@@ -12567,12 +12584,14 @@ async fn handle_incoming_request(
             {
                 return;
             }
+            // A guest keeps what it is shown in memory only (D6).
+            let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_remove_reaction(
                 &event_tx, &bundle_keypair, &sender_master,
                 mid, emoji, ts, sig, pk,
                 Some(server_id), Some(channel_id),
-                &db_path, &db_passphrase,
+                store, db_passphrase,
             ).await;
         }
 
@@ -12697,35 +12716,16 @@ async fn handle_incoming_request(
                         }
                         let has_more = truncated || msgs.len() as i32 >= limit;
 
-                        // Build sender profiles (one per unique sender)
-                        // Priority: server nickname > profile display name > nothing
-                        // Avatar: from local user_profiles DB (whatever we've cached from ProfileUpdated events)
                         let unique_senders: std::collections::HashSet<&str> = items.iter().map(|m| m.s.as_str()).collect();
-                        let mut sender_profiles = std::collections::HashMap::new();
-                        for sender in &unique_senders {
-                            let mut profile = SyncSenderProfile { name: None, avatar_b64: None };
-                            let nickname = state.get_nickname(sender);
-                            if !nickname.is_empty() {
-                                profile.name = Some(nickname);
-                            } else if let Ok(Some(stored)) = store.load_profile_light(sender) {
-                                if !stored.display_name.is_empty() {
-                                    profile.name = Some(stored.display_name);
-                                }
-                            }
-                            if let Ok(Some(avatar_bytes)) = store.load_avatar(sender) {
-                                if let Ok(thumb) = crate::node::image_convert::process_sync_avatar(&avatar_bytes) {
-                                    profile.avatar_b64 = Some(base64::engine::general_purpose::STANDARD.encode(&thumb));
-                                }
-                            }
-                            sender_profiles.insert(sender.to_string(), profile);
-                        }
+                        let own = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
+                        let sender_cards = super::profile_card::cards_for_guest(&store, unique_senders, own.as_ref());
 
                         let resp = HavenMessage::PublicChannelSyncResponse {
                             server_id: server_id.clone(),
                             channel_id: channel_id.clone(),
                             messages: items,
                             has_more,
-                            sender_profiles,
+                            sender_cards,
                         };
                         // Send directly using server_id as room — guests may not be in ws_room_peers
                         if let Ok(data) = serde_json::to_vec(&resp) {
@@ -12767,7 +12767,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::PublicChannelSyncResponse { server_id, channel_id, messages, has_more, sender_profiles } => {
+        HavenMessage::PublicChannelSyncResponse { server_id, channel_id, messages, has_more, sender_cards } => {
             if peer_str == local_peer_str { return; }
             if !guest_rooms.contains(&server_id) { return; }
             // Guests hold no rows to check against, so EVERYTHING is verified from
@@ -12834,9 +12834,10 @@ async fn handle_incoming_request(
                     link_preview: m.lp.map(|b| *b),
                 });
             }
-            let ffi_profiles: Vec<SyncSenderProfileFfi> = sender_profiles.into_iter().map(|(pid, p)| {
-                let avatar = p.avatar_b64.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(&b64).ok());
-                SyncSenderProfileFfi { peer_id: pid, name: p.name, avatar }
+            // Names and avatars only as each sender's own card signs them (D6).
+            let ffi_profiles: Vec<SyncSenderProfileFfi> = sender_cards.into_iter().filter_map(|(pid, given)| {
+                let (name, avatar) = super::profile_card::guest_sender(&pid, given)?;
+                Some(SyncSenderProfileFfi { peer_id: pid, name: Some(name), avatar })
             }).collect();
             let _ = event_tx.send(NetworkEvent::PublicChannelSyncReceived {
                 server_id, channel_id, messages: ffi_messages, has_more, sender_profiles: ffi_profiles,
@@ -12953,7 +12954,7 @@ async fn handle_incoming_request(
             peer_auto_dl.insert(peer_str.to_string(), mb);
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -12976,6 +12977,9 @@ async fn handle_incoming_request(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 device_list, db_path, db_passphrase,
             ).await;
+            if let Some(card) = &card {
+                super::profile_card::keep_card(card, &super::resolver::resolve(peer_str), db_path, db_passphrase);
+            }
             let our_devices_grew = ingest_outcome.our_devices_grew;
             if ingest_outcome.asks_again {
                 super::roster_book::ask_again(

@@ -160,6 +160,7 @@ mod tests {
             peer_id: b_id.clone(),
             display_name: "Bob".into(),
             follow: None,
+            ask: None,
         });
         state_a.apply_op(&add_b).unwrap();
 

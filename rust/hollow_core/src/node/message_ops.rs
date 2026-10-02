@@ -4153,6 +4153,7 @@ mod tests {
             let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberAdded {
                 peer_id: id, display_name: "m".into(),
                 follow: None,
+                ask: None,
             });
             state.apply_op(&op).unwrap();
         }
@@ -4204,8 +4205,8 @@ mod tests {
         let (bob, us) = (kp(214), kp(215));
         let (b, a) = (bob.peer_id(), us.peer_id());
         for op in [
-            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into(), follow: None, },
-            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: a.clone(), display_name: "a".into(), follow: None, },
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into(), follow: None, ask: None, },
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: a.clone(), display_name: "a".into(), follow: None, ask: None, },
             crate::crdt::operations::CrdtPayload::ChannelAdded {
                 channel_id: "general".into(), name: "general".into(), category: None, channel_type: "text".into(),
             },
@@ -4245,8 +4246,8 @@ mod tests {
         let (bob, us) = (kp(194), kp(195));
         let (b, a) = (bob.peer_id(), us.peer_id());
         for op in [
-            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into(), follow: None, },
-            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: a.clone(), display_name: "a".into(), follow: None, },
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: b.clone(), display_name: "b".into(), follow: None, ask: None, },
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: a.clone(), display_name: "a".into(), follow: None, ask: None, },
             crate::crdt::operations::CrdtPayload::ChannelAdded {
                 channel_id: "general".into(), name: "general".into(), category: None, channel_type: "text".into(),
             },

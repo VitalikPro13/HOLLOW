@@ -116,6 +116,7 @@ pub(crate) fn request_frame(server_id: &str, our_device: &str, pending: &Pending
         card: pending.card.clone(),
         // The avatar is for the member deciding right now; a ring copy stays small.
         avatar_b64: if parked { String::new() } else { pending.avatar_b64.clone() },
+        ask: pending.ask.clone(),
     };
     seal_to_members(&door.door_key()?, &invite, door.n, server_id, our_device, &request)
 }
@@ -255,6 +256,7 @@ mod tests {
             reply_key: reply_key.into(),
             card: None,
             avatar_b64: String::new(),
+            ask: None,
         }
     }
 

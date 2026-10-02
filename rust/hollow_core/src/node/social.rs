@@ -1042,6 +1042,8 @@ pub(crate) async fn handle_update_profile(
         master_keypair, local_peer_str, now, Some(&stored_support_creds),
     );
 
+    // Our card rides along, so a co-member can show a guest who wrote our public posts.
+    let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
     // Over MLS to each server we share, then over Olm to everyone MLS did not reach.
     let envelope = MessageEnvelope::ProfileUpdate {
         display_name: display_name.clone(),
@@ -1065,6 +1067,7 @@ pub(crate) async fn handle_update_profile(
         support_creds_sig: support_creds_sig.clone(),
         profile_sig: profile_sig.clone(),
         profile_pk: profile_pk.clone(),
+        card: card.clone().map(Box::new),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     for sid in server_states.keys() {
@@ -1110,10 +1113,10 @@ pub(crate) async fn handle_update_profile(
         support_creds_sig,
         profile_sig,
         profile_pk,
+        card: card.clone().map(Box::new),
     };
     // The whole update to our own devices, friends and co-members, the card to either
     // side of a pending friend request, nothing to anyone else.
-    let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
     let room_peers: std::collections::HashSet<String> =
         ws_room_peers.values().flat_map(|peers| peers.iter().cloned()).collect();
     let mut carried = 0usize;
@@ -1807,6 +1810,7 @@ pub(crate) fn own_profile_update(
         support_creds_sig,
         profile_sig,
         profile_pk,
+        card: super::profile_card::own_card(master_keypair, db_path, db_passphrase).map(Box::new),
     })
 }
 

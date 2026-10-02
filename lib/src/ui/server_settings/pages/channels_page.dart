@@ -639,7 +639,8 @@ class _ChannelPanel extends ConsumerWidget {
       ref,
       // Rust's tier handler clears a label gate too.
       (ch) => see
-          ? ch.copyWith(visibility: tier, visibilityLabels: const [])
+          ? _closedIfRestricted(
+              ch.copyWith(visibility: tier, visibilityLabels: const []))
           : ch.copyWith(posting: tier, postingLabels: const []),
       () => see
           ? crdt_api.setChannelVisibility(
@@ -648,6 +649,10 @@ class _ChannelPanel extends ConsumerWidget {
               serverId: serverId, channelId: _id, posting: tier),
     );
   }
+
+  /// Closing a channel takes it off the public list, as Rust does when it applies.
+  static ChannelInfo _closedIfRestricted(ChannelInfo ch) =>
+      ch.restricted ? ch.copyWith(isPublic: false) : ch;
 
   Future<void> _pickLabels(BuildContext context, WidgetRef ref,
       {required bool see}) async {
@@ -666,9 +671,9 @@ class _ChannelPanel extends ConsumerWidget {
       ref,
       // Mirrors the Rust handler's stamp for old clients.
       (ch) => see
-          ? ch.copyWith(
+          ? _closedIfRestricted(ch.copyWith(
               visibilityLabels: ids,
-              visibility: ids.isEmpty ? ch.visibility : 'admin')
+              visibility: ids.isEmpty ? ch.visibility : 'admin'))
           : ch.copyWith(
               postingLabels: ids,
               posting: ids.isEmpty ? ch.posting : 'admin'),
@@ -775,15 +780,19 @@ class _ChannelPanel extends ConsumerWidget {
             ),
             SettingsSwitchRow(
               title: 'Public',
-              subtitle: 'Anyone can read it without joining the server',
+              subtitle: channel.restricted
+                  ? 'Only a channel everyone can see can be public'
+                  : 'Anyone can read it without joining the server',
               value: channel.isPublic,
-              onChanged: (v) => _commit(
-                context,
-                ref,
-                (ch) => ch.copyWith(isPublic: v),
-                () => crdt_api.setChannelPublic(
-                    serverId: serverId, channelId: _id, isPublic: v),
-              ),
+              onChanged: channel.restricted
+                  ? null
+                  : (v) => _commit(
+                        context,
+                        ref,
+                        (ch) => ch.copyWith(isPublic: v),
+                        () => crdt_api.setChannelPublic(
+                            serverId: serverId, channelId: _id, isPublic: v),
+                      ),
             ),
           ],
           // A public channel has no gate to open.

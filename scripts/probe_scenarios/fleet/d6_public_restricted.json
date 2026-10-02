@@ -1,0 +1,41 @@
+{
+ "_": [
+  "D6 (HOL-SEC-094): a restricted channel is never public. The Public switch works on an open",
+  "channel, and once the channel is closed to Admin+ it turns off and is disabled with the reason.",
+  "run: powershell -File scripts\\fleet.ps1 -Scenario d6_public_restricted -Peers a"
+ ],
+ "peers": ["a"],
+ "steps": [
+  {"peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
+  {"peer": "a", "op": "tap", "target": "semantics:Create a server"},
+  {"peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "d6-${RUN}"},
+  {"peer": "a", "op": "tap", "target": "text:Create", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "server:d6-${RUN}", "timeout_ms": 30000},
+  {"peer": "a", "op": "open_server", "name": "d6-${RUN}"},
+  {"peer": "a", "op": "tap", "target": "semantics:Server settings", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "type:ServerSettingsPlace > type:SettingsRailItem > text:Channels", "timeout_ms": 15000},
+  {"peer": "a", "op": "tap", "target": "type:ServerSettingsPlace > type:SettingsRailItem > text:Channels", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "semantics:general. Open its settings", "timeout_ms": 10000},
+  {"peer": "a", "op": "tap", "target": "semantics:general. Open its settings", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "type:ServerSettingsPlace > semantics:Public", "timeout_ms": 5000},
+  {"peer": "a", "op": "tap", "target": "type:ServerSettingsPlace > semantics:Public", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "semantics:general, Public. Close its settings", "timeout_ms": 10000},
+  {"peer": "a", "op": "shot", "name": "d6-01-open-and-public"},
+  {"peer": "a", "op": "tap", "target": "semantics:Who can see #general", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "menu > text:Admin+", "timeout_ms": 5000},
+  {"peer": "a", "op": "tap", "target": "menu > text:Admin+", "index": 0},
+  {"peer": "a", "op": "wait_for", "target": "text:Only a channel everyone can see can be public", "timeout_ms": 10000},
+  {"peer": "a", "op": "shot", "name": "d6-02-closed-not-public"},
+  {"peer": "a", "op": "look", "filter": "Public"}
+ ],
+ "cleanup": [
+  {"peer": "a", "op": "tap", "target": "semantics:Close server settings", "index": 0, "soft": true},
+  {"peer": "a", "op": "right_click", "target": "server:d6-${RUN}"},
+  {"peer": "a", "op": "tap", "target": "menu > text:Server settings"},
+  {"peer": "a", "op": "wait", "ms": 400},
+  {"peer": "a", "op": "reveal", "target": "text:Delete server", "index": 0},
+  {"peer": "a", "op": "tap", "target": "text:Delete server", "index": 0},
+  {"peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 0},
+  {"peer": "a", "op": "wait_for", "gone": "server:d6-${RUN}", "timeout_ms": 30000}
+ ]
+}

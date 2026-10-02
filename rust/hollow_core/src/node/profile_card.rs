@@ -7,9 +7,13 @@ use base64::Engine;
 
 use crate::identity::native_identity::NativeKeypair;
 
-use super::types::{SealedCard, SignedCard};
+use super::types::{SealedCard, SenderCard, SignedCard};
 
 const SEAL_DOMAIN: &[u8] = b"hollow-card-seal1";
+
+/// The avatar bytes one guest sync answer may carry in all, and any one of them.
+const GUEST_AVATARS_BUDGET: usize = 1024 * 1024;
+const GUEST_AVATAR_MAX_BYTES: usize = 256 * 1024;
 
 /// Our own card, signed now from the stored profile. `None` with no name to show.
 pub(crate) fn own_card(master_keypair: &NativeKeypair, db_path: &str, db_passphrase: &str) -> Option<SignedCard> {
@@ -90,6 +94,79 @@ pub(crate) fn open_from(sealed: &SealedCard, local_master: &str, requester_maste
     (card.master == requester_master && card_holds(&card)).then_some(card)
 }
 
+fn stored(card: &SignedCard) -> crate::storage::messages::StoredCard {
+    crate::storage::messages::StoredCard {
+        master: card.master.clone(),
+        display_name: card.display_name.clone(),
+        updated_at: card.updated_at,
+        avatar_hash: card.avatar_hash.clone(),
+        sig: card.sig.clone(),
+        pk: card.pk.clone(),
+    }
+}
+
+/// Keep `card` as `master`'s newest signed card, when it is that master's own. Only the
+/// card: a co-member's full profile stays what decides how we show them.
+pub(crate) fn keep_card(card: &SignedCard, master: &str, db_path: &str, db_passphrase: &str) -> bool {
+    card.master == master
+        && card_holds(card)
+        && crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|st| st.save_signed_card(&stored(card)).ok())
+            .unwrap_or(false)
+}
+
+/// For a guest, the signed card of each sender we have one for (our own we sign now),
+/// with its avatar while the answer has room. Never a name a card does not sign (D6).
+pub(crate) fn cards_for_guest<'a>(
+    store: &crate::storage::MessageStore,
+    senders: impl IntoIterator<Item = &'a str>,
+    own: Option<&SignedCard>,
+) -> std::collections::HashMap<String, SenderCard> {
+    use base64::Engine;
+    let mut budget = GUEST_AVATARS_BUDGET;
+    let mut out = std::collections::HashMap::new();
+    for sender in senders {
+        let card = match own.filter(|c| c.master == sender) {
+            Some(own) => own.clone(),
+            None => match store.load_signed_card(sender) {
+                Some(c) => SignedCard {
+                    master: c.master, display_name: c.display_name, avatar_hash: c.avatar_hash,
+                    updated_at: c.updated_at, sig: c.sig, pk: c.pk,
+                },
+                None => continue,
+            },
+        };
+        let avatar = store
+            .load_avatar(sender)
+            .ok()
+            .flatten()
+            .filter(|b| b.len() <= GUEST_AVATAR_MAX_BYTES.min(budget))
+            .filter(|b| !card.avatar_hash.is_empty() && super::social::profile_blob_hash(Some(b)) == card.avatar_hash);
+        budget -= avatar.as_ref().map_or(0, Vec::len);
+        let avatar_b64 = avatar.map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default();
+        out.insert(sender.to_string(), SenderCard { card, avatar_b64 });
+    }
+    out
+}
+
+/// What a guest shows for `sender` from a card a member handed it: the name the card
+/// signs and the avatar whose hash it signs, or nothing when the card is not the
+/// sender's own.
+pub(crate) fn guest_sender(sender: &str, given: SenderCard) -> Option<(String, Option<Vec<u8>>)> {
+    use base64::Engine;
+    let SenderCard { card, avatar_b64 } = given;
+    if card.master != sender || !card_holds(&card) {
+        return None;
+    }
+    let avatar = base64::engine::general_purpose::STANDARD
+        .decode(&avatar_b64)
+        .ok()
+        .filter(|b| b.len() <= GUEST_AVATAR_MAX_BYTES && !card.avatar_hash.is_empty())
+        .filter(|b| super::social::profile_blob_hash(Some(b)) == card.avatar_hash);
+    Some((card.display_name, avatar))
+}
+
 /// Store a card that `card_holds` passed, with the avatar when its bytes hash to the
 /// signed hash. Returns whether anything was written.
 pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, db_path: &str, db_passphrase: &str) -> bool {
@@ -102,7 +179,10 @@ pub(crate) fn store_card(card: &SignedCard, avatar: Option<&[u8]>, db_path: &str
         });
     crate::storage::MessageStore::open(db_path, db_passphrase)
         .ok()
-        .and_then(|st| st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar).ok())
+        .and_then(|st| {
+            let _ = st.save_signed_card(&stored(card));
+            st.save_profile_card(&card.master, &card.display_name, card.updated_at, &card.avatar_hash, avatar).ok()
+        })
         .unwrap_or(false)
 }
 
@@ -116,13 +196,60 @@ mod tests {
     }
 
     fn genuine_card(owner: &NativeKeypair, name: &str) -> SignedCard {
+        card_with(owner, name, "")
+    }
+
+    fn card_with(owner: &NativeKeypair, name: &str, avatar_hash: &str) -> SignedCard {
         let master = owner.peer_id();
-        let payload = crate::node::crypto_handler::card_signing_payload(&master, 7, name, "");
+        let payload = crate::node::crypto_handler::card_signing_payload(&master, 7, name, avatar_hash);
         let pk = base64::engine::general_purpose::STANDARD.encode(owner.public_key_protobuf());
         let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(owner, &pk, &payload) else {
             panic!("signing never fails");
         };
-        SignedCard { master, display_name: name.into(), avatar_hash: String::new(), updated_at: 7, sig, pk }
+        SignedCard { master, display_name: name.into(), avatar_hash: avatar_hash.into(), updated_at: 7, sig, pk }
+    }
+
+    /// D6: a guest shows a sender's name only as the sender's own card signs it, and a
+    /// picture only when its bytes hash to the card's.
+    #[test]
+    fn authz_a_guest_shows_only_what_the_senders_card_signs() {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (owner, other) = (keypair(51), keypair(52));
+        let face = b"the owner's face".to_vec();
+        let own = card_with(&owner, "Owen", &crate::node::social::profile_blob_hash(Some(&face)));
+        let given = |card: SignedCard, avatar: &[u8]| SenderCard { card, avatar_b64: b64(avatar) };
+
+        assert_eq!(guest_sender(&owner.peer_id(), given(own.clone(), &face)), Some(("Owen".into(), Some(face.clone()))));
+        assert_eq!(
+            guest_sender(&owner.peer_id(), given(own.clone(), b"another face")),
+            Some(("Owen".into(), None)),
+            "a picture the card does not sign",
+        );
+        let renamed = SignedCard { display_name: "Not Owen".into(), ..own.clone() };
+        assert!(guest_sender(&owner.peer_id(), given(renamed, &face)).is_none(), "a name the card does not sign");
+        assert!(guest_sender(&owner.peer_id(), given(genuine_card(&other, "Owen"), b"")).is_none(), "another identity's card");
+        let in_his_name = SignedCard { master: owner.peer_id(), ..genuine_card(&other, "Owen") };
+        assert!(guest_sender(&owner.peer_id(), given(in_his_name, b"")).is_none(), "a card in his name, signed by another key");
+    }
+
+    /// D6: a member hands a guest only cards it holds signed, and keeps a card only for
+    /// the identity that signed it.
+    #[test]
+    fn a_member_hands_a_guest_only_signed_cards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("m.db").to_string_lossy().into_owned();
+        let key = "ab".repeat(32);
+        let (a, b, c) = (keypair(53), keypair(54), keypair(55));
+        let a_card = genuine_card(&a, "Ay");
+        assert!(!keep_card(&a_card, &c.peer_id(), &db, &key), "a card kept for someone else");
+        assert!(keep_card(&a_card, &a.peer_id(), &db, &key));
+        let store = crate::storage::MessageStore::open(&db, &key).unwrap();
+        let own = genuine_card(&b, "Bee");
+        let (a_id, b_id, c_id) = (a.peer_id(), b.peer_id(), c.peer_id());
+        let cards = cards_for_guest(&store, [a_id.as_str(), b_id.as_str(), c_id.as_str()], Some(&own));
+        assert_eq!(cards.len(), 2, "no card, no name");
+        assert_eq!(cards[&a_id].card, a_card);
+        assert_eq!(cards[&b_id].card, own, "our own, signed now");
     }
 
     /// `card` sealed under the `sealer`/`target` pair secret, whoever the card names.

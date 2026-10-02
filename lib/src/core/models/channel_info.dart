@@ -31,11 +31,15 @@ class ChannelInfo {
   final bool meCanSee;
   final bool meCanPost;
 
-  /// Whether the channel is cryptographically isolated in its own MLS subgroup:
-  /// restricted visibility and not public. Mirrors Rust `channel_uses_subgroup`,
-  /// a key-domain rule, never the admin-tier stamp.
-  bool get usesSubgroup =>
-      !isPublic && (visibility != 'everyone' || visibilityLabels.isNotEmpty);
+  /// Whether only some members may see it. Mirrors Rust `ChannelInfo::restricted`:
+  /// a restricted channel is never public.
+  bool get restricted =>
+      visibility != 'everyone' || visibilityLabels.isNotEmpty;
+
+  /// Whether the channel is cryptographically isolated in its own MLS subgroup.
+  /// Mirrors Rust `channel_uses_subgroup`, a key-domain rule, never the admin-tier
+  /// stamp.
+  bool get usesSubgroup => restricted;
 
   const ChannelInfo({
     required this.channelId,

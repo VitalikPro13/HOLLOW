@@ -2720,6 +2720,11 @@ async fn live_join_key(node: &TestNode, server_id: &str) -> Option<String> {
     node.live_server_state(server_id).await.and_then(|s| s.join_public_text())
 }
 
+/// `kp`'s signed ask to join `server_id`, as a real joiner's request carries it.
+fn join_ask(server_id: &str, at: i64, kp: &NativeKeypair) -> Option<crate::crdt::operations::JoinAsk> {
+    Some(crate::crdt::operations::JoinAsk::sign(server_id, at, kp))
+}
+
 /// A reply key for a hand-built join request.
 fn fresh_reply_key() -> String {
     super::sealed_box::key_to_text(&super::sealed_box::public_of(&super::sealed_box::new_secret().unwrap()))
@@ -12376,6 +12381,7 @@ async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
     super::swarm::install_op_signer(&mut legacy, &keys(O));
     let add_b = legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: ids[1].clone(), display_name: "b".into(), follow: None,
+        ask: join_ask(&server_id, 1, &keys(B)),
     }).unwrap();
     legacy.owner_pin = None;
     let json = serde_json::to_string(&legacy).unwrap();
@@ -20341,17 +20347,19 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
     );
     assert!(frames_of_type(&relay, &j.device_id, "join_sealed").is_empty(), "and nothing goes out");
 
+    let asked_at = super::types::now_ms();
     let plain = super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
-        requested_at: super::types::now_ms(),
+        requested_at: asked_at,
         device_list: None,
         parked: false,
         key_package: None,
         reply_key: fresh_reply_key(),
         card: None,
         avatar_b64: String::new(),
+        ask: join_ask(&server_id, asked_at, &j.master_kp),
     };
     relay.inject(&server_id, &j.device_id, &o.device_id, serde_json::to_vec(&plain).unwrap());
     flush_frames(&relay, &mut o).await;
@@ -20388,6 +20396,7 @@ async fn authz_a_join_request_counts_only_in_the_join_box() {
         reply_key: fresh_reply_key(),
         card: None,
         avatar_b64: String::new(),
+        ask: join_ask(&server_id, held_at, &j.master_kp),
     });
     let j_key = NativeKeypair::from_secret_bytes(&seed_bytes(237));
     relay.inject_raw_direct(
@@ -21644,24 +21653,30 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     let forged_master_id = forged_master.peer_id();
 
     let now = super::types::now_ms();
-    let bad = sealed_to_members(&relay, &server_id, &tampered_device, &super::types::HavenMessage::ServerJoinRequest {
-        server_id: server_id.clone(),
-        twitch_proof_json: None,
-        nsfw_confirmed: false,
-        requested_at: now,
-        device_list: Some(tampered),
-        parked: true,
-        key_package: None,
-        reply_key: fresh_reply_key(),
-        card: None,
-        avatar_b64: String::new(),
-    });
-    relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &tampered_device, bad);
+    // Asked by the master the list claims, and by the device itself: whichever the
+    // request were wrongly attributed to, its ask would match.
+    for asker in [&forged_master, &tampered_kp] {
+        let bad = sealed_to_members(&relay, &server_id, &tampered_device, &super::types::HavenMessage::ServerJoinRequest {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            requested_at: now,
+            device_list: Some(tampered.clone()),
+            parked: true,
+            key_package: None,
+            reply_key: fresh_reply_key(),
+            card: None,
+            avatar_b64: String::new(),
+            ask: join_ask(&server_id, now, asker),
+        });
+        relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &tampered_device, bad);
+    }
 
     // …and a legacy client, which carries no list at all. It is the CONTROL:
     // when this one lands we know A's catch-up has run, so the tampered frame's
     // absence from the member list is a decision, not a race.
-    let legacy_device = NativeKeypair::from_secret_bytes(&seed_bytes(129)).peer_id();
+    let legacy_kp = NativeKeypair::from_secret_bytes(&seed_bytes(129));
+    let legacy_device = legacy_kp.peer_id();
     let legacy = sealed_to_members(&relay, &server_id, &legacy_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
@@ -21673,6 +21688,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         reply_key: fresh_reply_key(),
         card: None,
         avatar_b64: String::new(),
+        ask: join_ask(&server_id, now, &legacy_kp),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &legacy_device, legacy);
 
@@ -22368,17 +22384,20 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
     go_offline(&relay, &a, &server_id).await;
 
     let mut sock = raw_socket(&relay, &b_device);
+    let asked_at = super::types::now_ms();
+    let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
     let legacy = sealed_to_members(&relay, &server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
-        requested_at: super::types::now_ms(),
+        requested_at: asked_at,
         device_list: None,
         parked: true,
         key_package: None,
         reply_key: fresh_reply_key(),
         card: None,
         avatar_b64: String::new(),
+        ask: join_ask(&server_id, asked_at, &b_key),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
@@ -22689,17 +22708,20 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
     go_offline(&relay, &a, &server_id).await;
 
     let mut sock = raw_socket(&relay, &b_device);
+    let asked_at = super::types::now_ms();
+    let b_key = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
     let legacy = sealed_to_members(&relay, &server_id, &b_device, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(),
         twitch_proof_json: None,
         nsfw_confirmed: false,
-        requested_at: super::types::now_ms(),
+        requested_at: asked_at,
         device_list: None,
         parked: true,
         key_package: None,
         reply_key: fresh_reply_key(),
         card: None,
         avatar_b64: String::new(),
+        ask: join_ask(&server_id, asked_at, &b_key),
     });
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
 
@@ -24039,6 +24061,7 @@ fn crafted_announce(
         support_creds_sig,
         profile_sig,
         profile_pk,
+        card: None,
     }
 }
 
@@ -26894,6 +26917,7 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
     }, 0, Some(&m.master_kp));
     let admit = forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+        ask: join_ask(&server_id, 1, &j.master_kp),
     }, 1, Some(&m.master_kp));
     // The snapshot alone first (with M's admission of J), then the founding op.
     // Sealed to J's reply key: M is a member, so it reads J's request and can answer.
@@ -26955,6 +26979,7 @@ async fn authz_a_pending_join_takes_its_answer_only_from_its_reply_key() {
     let mut ops = o.store().load_ops_for_server(&server_id, None).unwrap();
     ops.push(forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+        ask: join_ask(&server_id, 1, &j.master_kp),
     }, 1, Some(&m.master_kp)));
     carry_as(&m, &j, sync_response(&server_id, &ops)).await;
     // A typing dot behind it on the same session is the barrier.
@@ -27091,6 +27116,7 @@ async fn join_lock_a_removed_members_door_neither_reads_nor_answers_a_join() {
     let mut ops = o.store().load_ops_for_server(&server_id, None).unwrap();
     ops.push(forge_crdt_op(&server_id, &o.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+        ask: join_ask(&server_id, 1, &j.master_kp),
     }, 1, Some(&o.master_kp)));
     let from_kept = |msg: &super::types::HavenMessage| {
         super::join_lane::seal_to_joiner(&reply, &kept_door, first.n, &server_id, &k.device_id, &j.device_id, msg).unwrap()
@@ -27240,6 +27266,7 @@ async fn join_lock_a_stale_admission_is_overtaken_by_the_real_one() {
     let mut stale = before_leave.clone();
     stale.push(forge_crdt_op(&server_id, &l.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+        ask: join_ask(&server_id, 1, &j.master_kp),
     }, 1, Some(&l.master_kp)));
     let fake = super::join_lane::seal_to_joiner(
         &reply_key_of(&j, &server_id), &kept_door, door_link.n, &server_id, &l.device_id, &j.device_id,
@@ -27443,7 +27470,7 @@ async fn join_lock_the_card_rides_inside_the_request() {
     let forged = sealed_to_members(&relay, &server_id, &j.device_id, &super::types::HavenMessage::ServerJoinRequest {
         server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, requested_at: 5,
         device_list: Some(list), parked: false, key_package: None, reply_key: fresh_reply_key(),
-        card: Some(foreign), avatar_b64: String::new(),
+        card: Some(foreign), avatar_b64: String::new(), ask: None,
     });
     relay.inject(&server_id, &j.device_id, &o.device_id, forged);
     sleep_ms(500).await; // absence proof: a card that must never be stored
@@ -27489,6 +27516,7 @@ async fn join_lock_a_lock_read_before_a_removal_is_read_again_before_an_answer_c
     let mut stale = before_kick.clone();
     stale.push(forge_crdt_op(&server_id, &k.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: j.master_id.clone(), display_name: "j".into(), follow: None,
+        ask: join_ask(&server_id, 1, &j.master_kp),
     }, 1, Some(&k.master_kp)));
     let fake = super::join_lane::seal_to_joiner(
         &reply_key_of(&j, &server_id), &kept_door, first.n, &server_id, &k.device_id, &j.device_id,
@@ -27605,9 +27633,14 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
     let (banned, open, closed) = (keys(187).peer_id(), keys(188).peer_id(), keys(189).peer_id());
     // One author never stamps two ops with one clock, so neither may the forger.
     let clock = std::sync::atomic::AtomicU64::new(0);
+    // Each on its own ask: the gates below are what refuses them.
     let admit = |who: &str| crdt_broadcast(&server_id, &forge_crdt_op(
         &server_id, &m.master_id,
-        crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: who.into(), display_name: "z".into(), follow: None },
+        crate::crdt::operations::CrdtPayload::MemberAdded {
+            peer_id: who.into(), display_name: "z".into(), follow: None,
+            ask: [187, 188, 189].into_iter().map(keys).find(|k| k.peer_id() == who)
+                .and_then(|k| join_ask(&server_id, super::types::now_ms(), &k)),
+        },
         clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed), Some(&m.master_kp),
     ));
     let deliver = async |msg: super::types::HavenMessage| for target in [&o, &x] {
@@ -27641,6 +27674,403 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
         assert!(!state.is_member(&banned), "{who} re-admitted a banned identity");
         assert!(!state.is_member(&closed), "{who} admitted someone into a private server");
     }
+}
+
+/// D3: a member lists as a member only someone who asked to join, and each ask
+/// admits once: replayed after the joiner left, it brings nobody back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_lists_only_someone_who_asked_to_join() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 215, 216, 217).await;
+    let victim_kp = keys(218);
+    let victim = victim_kp.peer_id();
+    // One author never stamps two ops with one clock, so neither may the forger.
+    let clock = std::sync::atomic::AtomicU64::new(0);
+    let admit = |ask| crdt_broadcast(&server_id, &forge_crdt_op(
+        &server_id, &m.master_id,
+        crate::crdt::operations::CrdtPayload::MemberAdded { peer_id: victim.clone(), display_name: "z".into(), follow: None, ask },
+        clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed), Some(&m.master_kp),
+    ));
+    let deliver = async |msg: super::types::HavenMessage| for target in [&o, &x] {
+        carry_as(&m, target, msg.clone()).await;
+    };
+    let listed = async |node: &TestNode| node.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&victim));
+    // The `at` of each admission of the victim a node took, in log order.
+    let admissions = async |node: &TestNode| -> Vec<i64> {
+        node.live_server_state(&server_id).await.unwrap().op_log.iter().filter_map(|op| match &op.payload {
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, ask, .. } if *peer_id == victim => {
+                Some(ask.as_ref().map_or(0, |a| a.at))
+            }
+            _ => None,
+        }).collect()
+    };
+
+    // Each refused admission rides ahead of a genuine one on the same session, so once
+    // the genuine one lands the refused ones were judged too.
+    let first = super::types::now_ms();
+    deliver(admit(None)).await;
+    deliver(admit(join_ask(&server_id, first - 1, &m.master_kp))).await;
+    deliver(admit(join_ask(&server_id, first, &victim_kp))).await;
+    assert!(
+        wait_until(10, async || listed(&o).await && listed(&x).await).await,
+        "the joiner's own ask admits it"
+    );
+    for (node, who) in [(&o, "O"), (&x, "X")] {
+        assert_eq!(admissions(node).await, vec![first], "{who} took an admission nobody asked for");
+    }
+
+    let leave = crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: victim.clone() };
+    deliver(crdt_broadcast(&server_id, &forge_crdt_op(&server_id, &victim, leave, 0, Some(&victim_kp)))).await;
+    assert!(
+        wait_until(10, async || !listed(&o).await && !listed(&x).await).await,
+        "the joiner leaves"
+    );
+    deliver(admit(join_ask(&server_id, first, &victim_kp))).await;
+    let second = super::types::now_ms().max(first + 1);
+    deliver(admit(join_ask(&server_id, second, &victim_kp))).await;
+    assert!(
+        wait_until(10, async || listed(&o).await && listed(&x).await).await,
+        "a new ask admits it again"
+    );
+    for (node, who) in [(&o, "O"), (&x, "X")] {
+        assert_eq!(admissions(node).await, vec![first, second], "{who} re-admitted a joiner who left on its old ask");
+    }
+}
+
+/// D3: a join a restart cut short is restored with its ask, so the copy it parks
+/// afterwards still admits it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_join_restored_after_a_restart_still_carries_its_ask() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 223;
+    const B_MASTER: u8 = 224;
+    const B_DEVICE: u8 = 225;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut a, "Cut Short").await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner must register the join ring before it goes dark",
+    );
+    go_offline(&relay, &a, &server_id).await;
+
+    let b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || !b.pending_joins().is_empty()).await, "the join is persisted at once");
+    assert_eq!(ring_requests_from(&relay, &server_id, &b.device_id), 0, "it parks only once its live window ends");
+
+    let b = restart_node(&relay, b, B_MASTER, B_DEVICE).await;
+    expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    // Offline while the owner answers, so the copy parked after the restart is the
+    // only one there is.
+    go_offline(&relay, &b, &server_id).await;
+    relay.set_online(&a.device_id, true);
+    assert!(
+        wait_until(40, async || a.raw_crdt_member_keys(&server_id).contains(&b_master)).await,
+        "the owner admits B from the copy it parked after the restart",
+    );
+}
+
+/// D6: a channel closed to most members never shows to a guest: a guest browsing when
+/// it closes is told, and an admin flagging it public again changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_hidden_channel_never_shows_to_a_guest() {
+    use crate::crdt::operations::CrdtPayload;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 226, 227, 228).await;
+    let mut g = spawn_node_with_friends(&relay, 229, 229, &[]).await;
+    let general = general_channel_of(&server_id);
+    let lobby = format!("{}-lobby", &server_id[..8]);
+
+    let commands = [
+        NodeCommand::CreateChannel {
+            server_id: server_id.clone(), channel_id: lobby.clone(), name: "lobby".into(), category: None,
+            channel_type: "text".into(),
+        },
+        NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: lobby.clone(), is_public: true },
+        NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true },
+        NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "admin".into() },
+    ];
+    for command in commands {
+        o.cmd_tx.send(command).await.unwrap();
+    }
+    let settled = async |node: &TestNode| node.live_server_state(&server_id).await.is_some_and(|s| {
+        s.is_channel_public(&lobby)
+            && s.is_channel_public(&general)
+            && s.get_role(&m.master_id) == crate::crdt::operations::MemberRole::Admin
+    });
+    assert!(wait_until(15, async || settled(&o).await && settled(&x).await).await, "O and X hold the setup");
+
+    // Any member can tell a guest anything about the server's name and channels (the
+    // preview is unauthenticated, accepted); the honest ones never name a closed one.
+    relay.swallow_direct(&m.device_id, &g.device_id);
+    let guest_lists = async |g: &mut TestNode| {
+        g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+        let mut listed: Vec<Vec<String>> = Vec::new();
+        wait_event(g, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::PublicChannelListReceived { server_id: sid, channels, .. } = ev
+                && *sid == server_id
+            {
+                listed.push(channels.iter().map(|c| c.channel_id.clone()).collect());
+            }
+            listed.len() == 2
+        })
+        .await;
+        assert_eq!(listed.len(), 2, "O and X both answer the guest");
+        listed
+    };
+    for ids in guest_lists(&mut g).await {
+        assert!(ids.contains(&general), "the guest sees the public channel");
+    }
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility { server_id: server_id.clone(), channel_id: general.clone(), visibility: "admin".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PublicChannelConfigChanged { channel_id, is_public: false, .. } if *channel_id == general
+        ))
+        .await,
+        "the guest browsing is told the channel closed"
+    );
+    let closed = async |node: &TestNode| node.live_server_state(&server_id).await
+        .is_some_and(|s| s.channels.get(&general).is_some_and(|c| c.restricted()));
+    assert!(wait_until(10, async || closed(&o).await && closed(&x).await).await, "O and X close it");
+
+    // M, an admin now, flags the closed channel public again. A rename behind it on
+    // the same session is the barrier: once it lands, the flag was judged.
+    let reopen = forge_crdt_op(&server_id, &m.master_id,
+        CrdtPayload::ChannelPublicChanged { channel_id: general.clone(), is_public: true }, 0, Some(&m.master_kp));
+    let rename = forge_crdt_op(&server_id, &m.master_id,
+        CrdtPayload::ChannelRenamed { channel_id: lobby.clone(), new_name: "hall".into() }, 1, Some(&m.master_kp));
+    for target in [&o, &x] {
+        carry_as(&m, target, crdt_broadcast(&server_id, &reopen)).await;
+        carry_as(&m, target, crdt_broadcast(&server_id, &rename)).await;
+    }
+    let renamed = async |node: &TestNode| node.live_server_state(&server_id).await
+        .is_some_and(|s| s.channels.get(&lobby).is_some_and(|c| c.name == "hall"));
+    assert!(wait_until(10, async || renamed(&o).await && renamed(&x).await).await, "the barrier lands");
+    for (node, who) in [(&o, "O"), (&x, "X")] {
+        assert!(!node.live_server_state(&server_id).await.unwrap().is_channel_public(&general), "{who} holds a closed channel public");
+    }
+    for ids in guest_lists(&mut g).await {
+        assert!(ids.contains(&lobby) && !ids.contains(&general), "a guest was shown {ids:?}");
+    }
+}
+
+/// D6: a guest keeps a public channel's posts in memory only. None reaches its
+/// database, a member's delete still takes one away, and leaving forgets them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_guest_keeps_public_posts_in_memory_only() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 232, 232, &[]).await;
+    let mut g = spawn_node_with_friends(&relay, 233, 233, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Open Door").await;
+    let general = general_channel_of(&server_id);
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_channel_public(&general))).await,
+        "the channel goes public"
+    );
+
+    let browse = async |g: &mut TestNode| {
+        g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+        assert!(
+            wait_event(g, std::time::Duration::from_secs(10), |ev| matches!(
+                ev, NetworkEvent::PublicChannelListReceived { server_id: sid, .. } if *sid == server_id
+            ))
+            .await,
+            "the guest sees the server's public channels"
+        );
+    };
+    let post = async |mid: &str| {
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(), channel_id: general.clone(), text: mid.into(),
+                message_id: mid.into(), reply_to_mid: None, link_preview: None,
+            })
+            .await
+            .unwrap();
+    };
+    let delete = async |mid: &str| {
+        o.cmd_tx
+            .send(NodeCommand::DeleteChannelMessage {
+                server_id: server_id.clone(), channel_id: general.clone(), message_id: mid.into(),
+            })
+            .await
+            .unwrap();
+    };
+
+    browse(&mut g).await;
+    post("d6-first").await;
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ChannelMessageReceived { message_id, .. } if message_id == "d6-first"
+        ))
+        .await,
+        "the guest sees the post live"
+    );
+    assert!(g.channel_messages(&server_id, &general).is_empty(), "a guest stored a public post");
+    delete("d6-first").await;
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ChannelMessageDeleted { message_id, .. } if message_id == "d6-first"
+        ))
+        .await,
+        "a member's delete still reaches the guest"
+    );
+
+    post("d6-second").await;
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ChannelMessageReceived { message_id, .. } if message_id == "d6-second"
+        ))
+        .await,
+        "the guest sees the second post"
+    );
+    g.cmd_tx.send(NodeCommand::LeaveGuestRoom { server_id: server_id.clone() }).await.unwrap();
+    browse(&mut g).await;
+    // A delete of the post from before the leave, then a new post as the barrier: the
+    // guest no longer holds the old post, so the delete has nothing to take away.
+    delete("d6-second").await;
+    post("d6-third").await;
+    let mut forgot = true;
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| match ev {
+            NetworkEvent::ChannelMessageDeleted { message_id, .. } if message_id == "d6-second" => {
+                forgot = false;
+                false
+            }
+            NetworkEvent::ChannelMessageReceived { message_id, .. } => message_id == "d6-third",
+            _ => false,
+        })
+        .await,
+        "the guest sees the third post"
+    );
+    assert!(forgot, "the guest kept a post from before it left");
+    assert!(g.channel_messages(&server_id, &general).is_empty());
+}
+
+/// D6: a guest learns who wrote a public post only from that author's own signed card,
+/// which a member holds from the author's profile update; a name a member makes up is
+/// never shown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_guest_shows_an_author_only_by_its_own_card() {
+    use base64::Engine as _;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 234, 235, 236).await;
+    let mut g = spawn_node_with_friends(&relay, 237, 237, &[]).await;
+    let general = general_channel_of(&server_id);
+
+    o.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Owen".into(), status: String::new(), about_me: String::new(), avatar_bytes: None,
+            banner_bytes: None, twitch_username: String::new(), showcase_board: None, showcase_assets: None,
+            avatar_frame: None, avatar_anim: None, banner_anim: None, support_creds: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || x.store().load_signed_card(&o.master_id).is_some_and(|c| c.display_name == "Owen")).await,
+        "X keeps the card O's profile update carried"
+    );
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(), channel_id: general.clone(), text: "for guests".into(),
+            message_id: "d6-card".into(), reply_to_mid: None, link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || x.channel_messages(&server_id, &general).iter().any(|m| m.text == "for guests")).await,
+        "X holds the post"
+    );
+
+    // Only X answers the guest.
+    relay.swallow_direct(&o.device_id, &g.device_id);
+    relay.swallow_direct(&m.device_id, &g.device_id);
+    g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PublicChannelListReceived { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the guest sees the public channel"
+    );
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannelSync { server_id: server_id.clone(), channel_id: general.clone(), before_timestamp: None })
+        .await
+        .unwrap();
+    let mut owen = false;
+    wait_event(&mut g, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::PublicChannelSyncReceived { sender_profiles, .. } = ev {
+            owen = sender_profiles.iter().any(|p| p.peer_id == o.master_id && p.name.as_deref() == Some("Owen"));
+        }
+        owen
+    })
+    .await;
+    assert!(owen, "the guest shows the author by the card X held");
+
+    // M labels O's posts with a name of its own, under its own key.
+    let payload = super::crypto_handler::card_signing_payload(&o.master_id, 99, "Not Owen", "");
+    let pk = base64::engine::general_purpose::STANDARD.encode(m.master_kp.public_key_protobuf());
+    let (Some(sig), Some(pk)) = super::crypto_handler::sign_message(&m.master_kp, &pk, &payload) else { panic!("signs") };
+    let forged = super::types::SignedCard {
+        master: o.master_id.clone(), display_name: "Not Owen".into(), avatar_hash: String::new(), updated_at: 99, sig, pk,
+    };
+    let answer = super::types::HavenMessage::PublicChannelSyncResponse {
+        server_id: server_id.clone(),
+        channel_id: general.clone(),
+        messages: Vec::new(),
+        has_more: false,
+        sender_cards: [(o.master_id.clone(), super::types::SenderCard { card: forged, avatar_b64: String::new() })].into(),
+    };
+    relay.release_direct(&m.device_id, &g.device_id);
+    send_as(&relay, &server_id, &m, &g, answer).await;
+    let mut shown: Option<Vec<(String, Option<String>)>> = None;
+    wait_event(&mut g, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::PublicChannelSyncReceived { sender_profiles, .. } = ev {
+            shown = Some(sender_profiles.iter().map(|p| (p.peer_id.clone(), p.name.clone())).collect());
+        }
+        shown.is_some()
+    })
+    .await;
+    assert_eq!(shown, Some(Vec::new()), "the guest showed a name M made up");
 }
 
 /// E4: a member backfills a channel post signed by someone who was never a member.
@@ -27711,6 +28141,7 @@ async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
     super::swarm::install_op_signer(&mut legacy, &keys(O));
     let add_b = legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
         peer_id: ids[1].clone(), display_name: "b".into(), follow: None,
+        ask: join_ask(&server_id, 1, &keys(B)),
     }).unwrap();
     legacy.owner_pin = None;
     let json = serde_json::to_string(&legacy).unwrap();
@@ -27761,6 +28192,105 @@ async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
     assert_eq!(state.current_owner().as_deref(), Some(ids[0].as_str()));
     assert!(state.is_member(&ids[1]) && state.is_member(&ids[2]));
     assert_eq!(state.name(), "Old Server");
+    drop((o, b));
+}
+
+/// D2: a member answering a pinned join to a pre-0.12 server with a snapshot of its own
+/// decides who belongs and what exists, never who may decide: the joiner gives that
+/// member no role and bans or mutes nobody on its word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_members_snapshot_of_an_older_server_decides_nothing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 219;
+    const B: u8 = 220;
+    const J: u8 = 221;
+    let ids: Vec<String> = [O, B, J].iter().map(|t| keys(*t).peer_id()).collect();
+    let bystander = keys(222).peer_id();
+    let o = spawn_node_with_friends(&relay, O, O, &[&ids[1], &ids[2]]).await;
+    let b = spawn_node_with_friends(&relay, B, B, &[&ids[0], &ids[2]]).await;
+    let j = spawn_node_with_friends(&relay, J, J, &[&ids[0], &ids[1]]).await;
+    expect_dm_pair_ready(&relay, &o, &b, 15).await;
+
+    let server_id = "5e2f".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Server".into(), ids[0].clone());
+    super::swarm::install_op_signer(&mut legacy, &keys(O));
+    let add_b = legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: ids[1].clone(), display_name: "b".into(), follow: None,
+        ask: join_ask(&server_id, 1, &keys(B)),
+    }).unwrap();
+    legacy.owner_pin = None;
+    let json = serde_json::to_string(&legacy).unwrap();
+    for node in [&o, &b] {
+        let store = node.store();
+        store.save_server_state(&server_id, &json).unwrap();
+        store.insert_crdt_op(&add_b).unwrap();
+    }
+    let o = restart_node(&relay, o, O, O).await;
+    let b = restart_node(&relay, b, B, B).await;
+    assert!(
+        wait_until(20, async || {
+            let owner_key = live_join_key(&o, &server_id).await;
+            owner_key.is_some() && owner_key == live_join_key(&b, &server_id).await
+        })
+        .await,
+        "the owner moves the server onto its checkpoint and sets a join key B holds too"
+    );
+    SERVER_OWNERS.lock().unwrap().insert(server_id.clone(), ids[0].clone());
+    assert!(
+        wait_until(20, async || !relay.lock_chain(&server_id, &ids[0]).is_empty()).await,
+        "the owner puts the server's join lock on the relay"
+    );
+
+    // Only B's forged answer reaches J.
+    relay.swallow_direct(&o.device_id, &j.device_id);
+    relay.swallow_direct(&b.device_id, &j.device_id);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false,
+            owner_pin: Some(ids[0].clone()),
+            join_key: live_join_key(&b, &server_id).await,
+        })
+        .await
+        .unwrap();
+
+    // The owner's state as B could hand it over, with B made an admin, a bystander
+    // banned and muted, every permission for members, and the channel made public.
+    let mut forged = legacy.lean_snapshot();
+    let hlc = forged.name.hlc().clone();
+    let reg = |v| crate::crdt::admin_lww::AdminLwwReg::new(v, hlc.clone(), 3);
+    forged.roles.insert(ids[1].clone(), reg(crate::crdt::operations::MemberRole::Admin));
+    forged.banned_members.insert(bystander.clone(), crate::crdt::admin_lww::AdminLwwReg::new(true, hlc.clone(), 3));
+    forged.muted_members.insert(bystander.clone(), crate::crdt::admin_lww::AdminLwwReg::new(u64::MAX, hlc.clone(), 3));
+    forged.role_permissions.insert("member".into(), crate::crdt::admin_lww::AdminLwwReg::new(
+        crate::crdt::operations::Permission::ALL, hlc.clone(), 3,
+    ));
+    for ch in forged.channels.values_mut() {
+        ch.is_public = true;
+    }
+    let snapshot = super::types::HavenMessage::ServerStateSnapshot {
+        server_id: server_id.clone(),
+        state_json: serde_json::to_string(&forged).unwrap(),
+    };
+    let sealed = sealed_to_joiner(&relay, &j, &server_id, &b.device_id, &snapshot).await;
+    relay.inject(&server_id, &b.device_id, &j.device_id, sealed);
+    assert!(
+        wait_until(10, async || j.live_server_state(&server_id).await.is_some()).await,
+        "J takes the snapshot of a server that has no founding op"
+    );
+    let state = j.live_server_state(&server_id).await.unwrap();
+    assert_eq!(state.current_owner().as_deref(), Some(ids[0].as_str()), "the pinned owner keeps its role");
+    assert!(state.is_member(&ids[1]), "who belongs stands");
+    assert_eq!(state.get_role(&ids[1]), crate::crdt::operations::MemberRole::Member, "B made itself an admin");
+    assert!(!state.is_banned(&bystander) && !state.is_muted(&bystander, 0), "B banned or muted someone");
+    assert!(
+        !state.has_permission(&ids[2], crate::crdt::operations::Permission::KICK_MEMBERS),
+        "B handed members a permission"
+    );
+    assert!(state.channels.values().all(|c| !c.is_public), "B made a channel public");
     drop((o, b));
 }
 
@@ -28601,6 +29131,7 @@ async fn authz_a_join_request_from_before_a_leave_never_readmits() {
             reply_key: fresh_reply_key(),
             card: None,
             avatar_b64: String::new(),
+            ask: join_ask(&server_id, at, &m_key),
         });
         super::frame_auth::seal_at(&m_key, &server_id, &o_device, at, [nonce; 16], &body)
     };

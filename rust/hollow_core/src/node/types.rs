@@ -832,6 +832,16 @@ pub(crate) struct PendingJoin {
     /// Our card and its avatar, carried inside every copy of the request.
     pub(crate) card: Option<SignedCard>,
     pub(crate) avatar_b64: String,
+    /// Our signed ask for the current `requested_at` ([`PendingJoin::ask_again`]).
+    pub(crate) ask: Option<crate::crdt::operations::JoinAsk>,
+}
+
+impl PendingJoin {
+    /// A new nonce for this join, and our master's ask signed over it.
+    pub(crate) fn ask_again(&mut self, server_id: &str, at: i64, master: &crate::identity::native_identity::NativeKeypair) {
+        self.requested_at = at;
+        self.ask = Some(crate::crdt::operations::JoinAsk::sign(server_id, at, master));
+    }
 }
 
 /// A sealed answer to our join, kept until the lock it names can be judged.
@@ -1647,6 +1657,10 @@ pub(crate) enum HavenMessage {
         /// The card's avatar on the live copy only; the ring copy stays small.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         avatar_b64: String,
+        /// The joiner's master-signed ask for this `requested_at`: the admitting
+        /// member copies it into `MemberAdded`, which every member refuses without it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<crate::crdt::operations::JoinAsk>,
     },
 
     #[serde(rename = "join_rejected")]
@@ -2041,6 +2055,10 @@ pub(crate) enum HavenMessage {
         /// Owner MASTER public key (base64 protobuf) paired with `profile_sig`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_pk: Option<String>,
+        /// The sender's own signed card, which a member may show a guest beside the
+        /// sender's public posts (D6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card: Option<Box<SignedCard>>,
     },
 
     // -- Friends --
@@ -2382,8 +2400,9 @@ pub(crate) enum HavenMessage {
         messages: Vec<SyncMessageItem>,
         #[serde(default)]
         has_more: bool,
+        /// Each sender's own signed card, keyed by master: the only names a guest shows.
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-        sender_profiles: std::collections::HashMap<String, SyncSenderProfile>,
+        sender_cards: std::collections::HashMap<String, SenderCard>,
     },
 
     #[serde(rename = "pub_ch_config")]
@@ -3471,6 +3490,9 @@ pub(crate) enum MessageEnvelope {
         profile_sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_pk: Option<String>,
+        /// The sender's signed card; see `HavenMessage::ProfileUpdate`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card: Option<Box<SignedCard>>,
     },
 
     /// Lightweight encrypted ping sent after creating an inbound session.
@@ -4443,13 +4465,13 @@ pub(crate) struct PendingShardStream {
     pub tier: String,
 }
 
-/// Sender profile embedded in public channel sync responses (one per unique sender per batch).
+/// A public post's author as a guest is shown it: the author's own signed card, and the
+/// avatar whose hash it signs when the answer had room for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SyncSenderProfile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar_b64: Option<String>,
+pub(crate) struct SenderCard {
+    pub card: SignedCard,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub avatar_b64: String,
 }
 
 /// A single message in a sync batch.

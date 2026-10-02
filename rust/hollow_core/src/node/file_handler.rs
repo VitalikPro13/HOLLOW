@@ -3210,6 +3210,7 @@ mod tests {
                 peer_id: id.clone(),
                 display_name: "m".into(),
                 follow: None,
+                ask: None,
             });
             state.apply_op(&op).unwrap();
         }

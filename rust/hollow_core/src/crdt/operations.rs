@@ -141,6 +141,41 @@ impl std::fmt::Debug for JoinSecret {
     }
 }
 
+/// A joiner's own signed ask to join one server (D3): a `MemberAdded` lists only
+/// someone who asked, and each ask admits once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinAsk {
+    /// The request's `requested_at`, in the joiner's own clock.
+    pub at: i64,
+    pub sig: String,
+    pub pk: String,
+}
+
+impl JoinAsk {
+    fn signing_payload(server_id: &str, joiner: &str, at: i64) -> Vec<u8> {
+        [b"hollow-join-ask1\0".as_slice(), server_id.as_bytes(), b"\0", joiner.as_bytes(), b"\0", at.to_string().as_bytes()]
+            .concat()
+    }
+
+    /// `keypair`'s ask to join `server_id`, made at `at`.
+    pub fn sign(server_id: &str, at: i64, keypair: &NativeKeypair) -> Self {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let sig = keypair.sign(&Self::signing_payload(server_id, &keypair.peer_id(), at));
+        Self { at, sig: b64.encode(sig), pk: b64.encode(keypair.public_key_protobuf()) }
+    }
+
+    /// Whether `joiner`'s own key signed this ask for `server_id`.
+    pub fn verifies(&self, server_id: &str, joiner: &str) -> bool {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (Ok(pk), Ok(sig)) = (b64.decode(&self.pk), b64.decode(&self.sig)) else { return false };
+        NativeKeypair::peer_id_from_pubkey_protobuf(&pk).is_some_and(|id| id == joiner)
+            && matches!(
+                NativeKeypair::verify_peer_signature(&pk, &sig, &Self::signing_payload(server_id, joiner, self.at)),
+                Ok(true)
+            )
+    }
+}
+
 /// The payload of a CRDT operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CrdtPayload {
@@ -215,11 +250,14 @@ pub enum CrdtPayload {
     // Member operations
     /// `follow` is the joiner's Twitch follow credential, copied in by the admitter
     /// so every member re-checks the gate; absent (and not serialized) otherwise.
+    /// `ask` is the joiner's own, copied in the same way; none is refused.
     MemberAdded {
         peer_id: String,
         display_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         follow: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<JoinAsk>,
     },
     MemberRemoved {
         peer_id: String,
@@ -483,6 +521,25 @@ impl MemberRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D3: an ask stands only for the key that signed it, over the server and time it
+    /// names; text naming someone else, signed by any other key, stands for nobody.
+    #[test]
+    fn authz_a_join_ask_stands_only_for_its_own_signer() {
+        let (carol, mallory) = (crate::crdt::testkeys::keys(30), crate::crdt::testkeys::keys(31));
+        let ask = JoinAsk::sign("srv", 5, &carol.0);
+        assert!(ask.verifies("srv", &carol.1));
+        assert!(!ask.verifies("other", &carol.1), "another server");
+        assert!(!JoinAsk { at: 6, ..ask.clone() }.verifies("srv", &carol.1), "another time");
+        assert!(!ask.verifies("srv", &mallory.1), "another identity");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let in_her_name = JoinAsk {
+            at: 5,
+            sig: b64.encode(mallory.0.sign(&JoinAsk::signing_payload("srv", &carol.1, 5))),
+            pk: mallory.2.clone(),
+        };
+        assert!(!in_her_name.verifies("srv", &carol.1), "an ask in someone else's name");
+    }
 
     #[test]
     fn role_priority_order() {

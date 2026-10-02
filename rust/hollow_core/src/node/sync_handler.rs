@@ -1502,6 +1502,7 @@ pub(crate) async fn handle_join_server(
         lock: pending_server_joins.get(&server_id).and_then(|p| p.lock.clone()).filter(|l| l.fresh()),
         card,
         avatar_b64,
+        ask: Some(crate::crdt::operations::JoinAsk::sign(&server_id, requested_at, master_keypair)),
         ..Default::default()
     };
     // Persist BEFORE anything can go wrong: a crash inside the 15s live window
@@ -1687,12 +1688,14 @@ pub(crate) fn reask_join_locks(
 /// member who answered just before the lock moved, or from someone it moved to shut
 /// out. Ask again, once per lock, sealed to the newest door under a new nonce, so a
 /// member answers from that door (one that already admitted us sends our state).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reask_join(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     crdt_store: &CrdtStore,
     server_id: &str,
     our_device: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
     pending: &mut PendingJoin,
     hidden: bool,
 ) {
@@ -1702,7 +1705,7 @@ pub(crate) fn reask_join(
     }
     hollow_log!("[HOLLOW-CRDT] Asking again to join {server_id} from join lock {tip}");
     pending.reasked_for = Some(tip);
-    pending.requested_at = super::types::now_ms();
+    pending.ask_again(server_id, super::types::now_ms(), master_keypair);
     if hidden {
         super::join_lane::send_request_to_room(ws_cmd_tx, server_id, our_device, pending);
     }
@@ -2559,6 +2562,7 @@ pub(crate) async fn handle_set_channel_visibility(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
+    let was_public = server_states.get(&server_id).is_some_and(|s| s.is_channel_public(&channel_id));
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
@@ -2595,6 +2599,8 @@ pub(crate) async fn handle_set_channel_visibility(
             return true;
         }
     }
+
+    tell_guests_if_closed(server_states, event_tx, ws_cmd_tx, &server_id, &channel_id, was_public).await;
 
     // Per-channel MLS subgroup: if the channel is no longer restricted, tear its
     // subgroup down locally and messages revert to the server-wide group. Becoming
@@ -2687,6 +2693,7 @@ pub(crate) async fn handle_set_channel_visibility_labels(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
+    let was_public = server_states.get(&server_id).is_some_and(|s| s.is_channel_public(&channel_id));
     let needs_admin_stamp = !labels.is_empty()
         && server_states
             .get(&server_id)
@@ -2721,6 +2728,8 @@ pub(crate) async fn handle_set_channel_visibility_labels(
     ).await {
         return true;
     }
+
+    tell_guests_if_closed(server_states, event_tx, ws_cmd_tx, &server_id, &channel_id, was_public).await;
 
     // Defensive teardown mirror of handle_set_channel_visibility: if the
     // channel ended up fully unrestricted (labels cleared while the tier is
@@ -2890,6 +2899,18 @@ pub(crate) async fn handle_set_channel_public(
         }).await;
         return true;
     }
+    if is_public
+        && server_states
+            .get(&server_id)
+            .and_then(|s| s.channels.get(&channel_id))
+            .is_some_and(crate::crdt::server_state::ChannelInfo::restricted)
+    {
+        hollow_log!("[HOLLOW-CRDT] REFUSED set_channel_public on restricted channel {channel_id}");
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: "Only a channel everyone can see can be public".to_string(),
+        }).await;
+        return true;
+    }
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
@@ -2904,35 +2925,58 @@ pub(crate) async fn handle_set_channel_public(
         return true;
     }
 
-    if let Some(state) = server_states.get(&server_id) {
-        // Tell the room's guests, who hold no server state. Only the author does, and a
-        // channel going private keeps its name and category out of the clear: a guest
-        // needs only its id to drop it.
-        if let Some(ch) = state.channels.get(&channel_id) {
-            let notify = HavenMessage::PublicChannelConfigChanged {
-                server_id: server_id.clone(),
-                channel_id: channel_id.clone(),
-                is_public,
-                channel_name: if is_public { ch.name.clone() } else { String::new() },
-                category: if is_public { ch.category.clone() } else { None },
-            };
-            if let Ok(data) = serde_json::to_vec(&notify) {
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendPublic {
-                    room_code: server_id.clone(),
-                    data,
-                });
-            }
-            // Also emit locally so in-app guest browser updates for own servers
-            let _ = event_tx.send(NetworkEvent::PublicChannelConfigChanged {
-                server_id: server_id.clone(),
-                channel_id: channel_id.clone(),
-                is_public,
-                channel_name: ch.name.clone(),
-                category: ch.category.clone(),
-            }).await;
-        }
+    if let Some(ch) = server_states.get(&server_id).and_then(|s| s.channels.get(&channel_id)) {
+        tell_guests(event_tx, ws_cmd_tx, &server_id, ch, is_public).await;
     }
     false
+}
+
+/// Tell the room's guests, who hold no server state, that a channel opened or closed,
+/// and our own guest browser too. Only the author does. A closing channel keeps its
+/// name and category out of the clear: a guest needs only its id to drop it.
+async fn tell_guests(
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    server_id: &str,
+    ch: &crate::crdt::server_state::ChannelInfo,
+    is_public: bool,
+) {
+    let notify = HavenMessage::PublicChannelConfigChanged {
+        server_id: server_id.to_string(),
+        channel_id: ch.channel_id.clone(),
+        is_public,
+        channel_name: if is_public { ch.name.clone() } else { String::new() },
+        category: if is_public { ch.category.clone() } else { None },
+    };
+    if let Ok(data) = serde_json::to_vec(&notify) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendPublic { room_code: server_id.to_string(), data });
+    }
+    let _ = event_tx.send(NetworkEvent::PublicChannelConfigChanged {
+        server_id: server_id.to_string(),
+        channel_id: ch.channel_id.clone(),
+        is_public,
+        channel_name: ch.name.clone(),
+        category: ch.category.clone(),
+    }).await;
+}
+
+/// After a visibility change: a channel that was public and is now closed leaves the
+/// guests' lists.
+async fn tell_guests_if_closed(
+    server_states: &ServerStates,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    server_id: &str,
+    channel_id: &str,
+    was_public: bool,
+) {
+    let closed = server_states
+        .get(server_id)
+        .and_then(|s| s.channels.get(channel_id))
+        .filter(|ch| was_public && !ch.effective_public());
+    if let Some(ch) = closed {
+        tell_guests(event_tx, ws_cmd_tx, server_id, ch, false).await;
+    }
 }
 
 // ── 10g. ChangeRolePermissions ──────────────────────────────────────

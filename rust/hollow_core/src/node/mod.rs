@@ -23,6 +23,7 @@ pub(crate) mod file_transfer;
 pub(crate) mod forwarder_client;
 pub(crate) mod gossip;
 pub(crate) mod gossip_relay;
+pub(crate) mod guest_view;
 pub(crate) mod image_convert;
 pub(crate) mod join_lane;
 pub(crate) mod join_lock;
