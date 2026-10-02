@@ -395,8 +395,11 @@ impl MockRelay {
     /// `by_ms`, as if that much time had passed at the relay.
     pub(crate) fn age_inbox_wait(&self, master: &str, device: &str, by_ms: i64) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(seen) = inner.inbox_rosters.get_mut(master).and_then(|h| h.seen.get_mut(device)) {
-            *seen -= by_ms;
+        if let Some(held) = inner.inbox_rosters.get_mut(master) {
+            let key = format!("{}|{device}", held.roster.base());
+            if let Some(seen) = held.seen.get_mut(&key) {
+                *seen -= by_ms;
+            }
         }
     }
 
@@ -1101,6 +1104,7 @@ impl MockRelay {
 /// first saw each pending join.
 struct InboxRoster {
     roster: crate::identity::roster::Roster,
+    /// `base|device` -> first sight.
     seen: HashMap<String, i64>,
 }
 
@@ -1121,15 +1125,21 @@ impl RelayInner {
             seen: HashMap::new(),
         });
         let merged = held.roster.merged(&shown.verified(now));
+        // First sights per base, as `RosterBook::seen_key`: a recovery restarts them.
         let seen: HashMap<String, i64> = merged
             .pendings
             .iter()
-            .map(|p| (p.device.clone(), held.seen.get(&p.device).copied().unwrap_or(now)))
+            .map(|p| {
+                let key = format!("{}|{}", p.base, p.device);
+                let first = held.seen.get(&key).copied().unwrap_or(now);
+                (key, first)
+            })
             .collect();
         let changed = merged != held.roster || seen != held.seen;
         held.roster = merged;
         held.seen = seen;
-        let state = held.roster.fold(|d| held.seen.get(d).copied(), now);
+        let base = held.roster.base();
+        let state = held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), now);
         if changed {
             self.drop_inbox_owners(room, &state.members);
         }
@@ -29765,6 +29775,18 @@ fn tag_kp(tag: u8) -> NativeKeypair {
     NativeKeypair::from_secret_bytes(&seed_bytes(tag))
 }
 
+/// `master`'s pending-join clocks in its current base, as `store` holds them.
+fn pending_seen(store: &crate::storage::MessageStore, master: &str) -> HashMap<String, i64> {
+    let base = super::roster_book::load(store, master).map_or_else(|| crate::identity::roster::LEGACY_BASE.to_string(), |r| r.base());
+    store.load_roster_seen(master, &base).unwrap_or_default()
+}
+
+/// Back-date `device`'s pending-join clock in `master`'s current base.
+fn backdate_pending(store: &crate::storage::MessageStore, master: &str, device: &str, at_ms: i64) {
+    let base = super::roster_book::load(store, master).map_or_else(|| crate::identity::roster::LEGACY_BASE.to_string(), |r| r.base());
+    store.set_roster_seen(master, &base, device, at_ms).unwrap();
+}
+
 /// The recovery key standing in for `master_tag`'s phrase: any key the master binds.
 fn recovery_kp(master_tag: u8) -> NativeKeypair {
     let mut seed = seed_bytes(master_tag);
@@ -29843,7 +29865,7 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
     let (_, t_view) = super::roster_book::own(&o_master, &t.db_path, &t.passphrase).expect("T's roster");
     assert!(t_view.pending.contains(&t_dev) && !t_view.is_member(&t_dev), "the thief waits: {t_view:?}");
     assert!(
-        wait_until(20, async || f.store().load_roster_seen(&o_master).unwrap_or_default().contains_key(&t_dev)).await,
+        wait_until(20, async || pending_seen(&f.store(), &o_master).contains_key(&t_dev)).await,
         "the friend must start its seven days on the request",
     );
     assert_eq!(super::resolver::resolve(&t_dev), t_dev, "the thief resolves to nobody");
@@ -29919,7 +29941,7 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
         "the owner is asked about the second backup",
     );
     assert!(
-        wait_until(20, async || f.store().load_roster_seen(&o_master).unwrap_or_default().contains_key(&t2_dev)).await,
+        wait_until(20, async || pending_seen(&f.store(), &o_master).contains_key(&t2_dev)).await,
         "the friend saw the second request",
     );
     o.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t2_dev.clone() }).await.unwrap();
@@ -29931,7 +29953,7 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
         wait_until(20, async || f.revoked_devices(&o_master).contains(&t2_dev)).await,
         "the friend learns the refusal",
     );
-    f.store().set_roster_seen(&o_master, &t2_dev, now - EIGHT_DAYS_MS).unwrap();
+    backdate_pending(&f.store(), &o_master, &t2_dev, now - EIGHT_DAYS_MS);
     assert!(
         !f.known_devices(&o_master).contains(&t2_dev),
         "a refused request never matures, got {:?}",
@@ -29940,6 +29962,71 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
     assert_ne!(super::resolver::resolve(&t2_dev), o_master);
 
     drop((o, f, t, t2));
+}
+
+/// Turning the seven-day wait off with the phrase starts a new base, so a backup
+/// waiting at that moment must ask again. With no friends and no servers it hears the
+/// new base only in the room its master key names, asks again in it at once, and the
+/// owner is asked again, now with no date.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_waiting_backup_asks_again_when_the_wait_is_turned_off() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 141;
+    const O_DEV: u8 = 142;
+    const T_DEV: u8 = 143;
+    let o_master = tag_kp(O_MASTER).peer_id();
+    let o_dev = tag_kp(O_DEV).peer_id();
+    let t_dev = tag_kp(T_DEV).peer_id();
+    let now = super::roster_book::now_ms();
+
+    let mut o = spawn_node_seeded(
+        &relay, O_MASTER, O_DEV, &[], Some(protected_roster(O_MASTER, &[O_DEV], now - 60_000)),
+    ).await;
+    let stolen = super::roster_book::load(&o.store(), &o_master).expect("O holds its roster");
+    let t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[], Some(stolen)).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t_dev)
+        })
+        .await,
+        "the owner's device must be asked about the restored backup",
+    );
+
+    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[o_dev.clone()], true, &o.db_path, &o.passphrase)
+        .expect("the phrase turns the wait off");
+    let new_base = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().0.base();
+    drain_events(&mut o);
+    o.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: Vec::new() }).await.unwrap();
+
+    assert!(
+        wait_until(20, async || {
+            super::roster_book::own(&o_master, &t.db_path, &t.passphrase)
+                .is_some_and(|(r, s)| r.base() == new_base && s.no_wait && s.pending.contains(&t_dev))
+        })
+        .await,
+        "the waiting backup learns the new base and asks again in it",
+    );
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t_dev)
+        })
+        .await,
+        "the owner's device is asked again",
+    );
+    let (_, o_view) = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap();
+    assert!(o_view.no_wait && o_view.pending.contains(&t_dev) && !o_view.is_member(&t_dev));
+    backdate_pending(&o.store(), &o_master, &t_dev, now - EIGHT_DAYS_MS);
+    assert!(
+        !super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().1.is_member(&t_dev),
+        "with the wait off, seven quiet days admit nothing",
+    );
+
+    drop((o, t));
 }
 
 /// An identity with no friends and no servers shares no room with a restored backup,
@@ -30895,7 +30982,7 @@ async fn a_restored_device_matures_at_a_contact_after_seven_quiet_days() {
     let restored = super::roster_book::load(&o.store(), &o_master).expect("O's roster");
     let t = spawn_node_seeded(&relay, O_MASTER, T_DEV, &[&f_master], Some(restored)).await;
     assert!(
-        wait_until(20, async || f.store().load_roster_seen(&o_master).unwrap_or_default().contains_key(&t_dev)).await,
+        wait_until(20, async || pending_seen(&f.store(), &o_master).contains_key(&t_dev)).await,
         "the friend starts its clock on the request",
     );
     assert!(!f.known_devices(&o_master).contains(&t_dev), "a fresh request is not a member");
@@ -30906,7 +30993,7 @@ async fn a_restored_device_matures_at_a_contact_after_seven_quiet_days() {
 
     // Seven quiet days pass on every clock that saw the request.
     for n in [&o, &f, &t] {
-        n.store().set_roster_seen(&o_master, &t_dev, now - EIGHT_DAYS_MS).unwrap();
+        backdate_pending(&n.store(), &o_master, &t_dev, now - EIGHT_DAYS_MS);
     }
     // The next roster the friend hears (any announce of O's) folds it in.
     o.cmd_tx
@@ -30971,7 +31058,7 @@ async fn a_restored_device_tells_its_ui_once_it_waits() {
     let roster = super::roster_book::load(&store, &o_master).expect("T's roster");
     assert!(super::roster_book::fold(&store, &roster).pending.contains(&t_dev), "and it is waiting by then");
     assert!(
-        store.load_roster_seen(&o_master).unwrap_or_default().contains_key(&t_dev),
+        pending_seen(&store, &o_master).contains_key(&t_dev),
         "with its own clock started, which dates the waiting lock",
     );
     drop((o, t));

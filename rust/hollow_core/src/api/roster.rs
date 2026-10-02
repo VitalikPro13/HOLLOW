@@ -79,7 +79,7 @@ pub fn roster_status() -> Result<RosterStatus, String> {
         });
     };
     let state = crate::node::roster_book::fold(&store, &roster);
-    let seen = store.load_roster_seen(&roster.master).unwrap_or_default();
+    let seen = store.load_roster_seen(&roster.master, &roster.base()).unwrap_or_default();
     let mut devices: Vec<RosterDevice> = Vec::new();
     let mut push = |d: &String, kind: &str| {
         devices.push(RosterDevice {

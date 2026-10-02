@@ -100,9 +100,9 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         const auto& held = st.roster_book.records.at(*master);
         snapshot::Roster r{*master, roster::to_json(held.roster).dump(),
                            st.roster_book.ledger.share_of(*master).value_or(snapshot::NO_SHARE), {}};
-        for (const auto& [device, seen] : held.seen_ms) {
+        for (const auto& [key, seen] : held.seen_ms) {
             int64_t age = (wall - seen) / 1000;
-            r.seen.push_back({device, static_cast<uint32_t>(std::clamp<int64_t>(age, 0, UINT32_MAX))});
+            r.seen.push_back({key, static_cast<uint32_t>(std::clamp<int64_t>(age, 0, UINT32_MAX))});
         }
         d.rosters.push_back(std::move(r));
     }

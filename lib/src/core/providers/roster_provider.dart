@@ -30,9 +30,11 @@ class RosterGate {
   static DateTime? _at(int? ms) =>
       ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
 
-  /// The gate a stored roster implies. An identity with no roster yet is none.
+  /// The gate a stored roster implies. An identity with no roster yet is none;
+  /// any other device the roster does not count waits, with a date only while the
+  /// phrase lets backups join by waiting.
   factory RosterGate.fromStatus(roster_api.RosterStatus s) {
-    if (s.member) return const RosterGate();
+    if (s.member || s.devices.isEmpty) return const RosterGate();
     if (s.removedBy != null) {
       return RosterGate(
         kind: RosterGateKind.removed,
@@ -40,10 +42,7 @@ class RosterGate {
         wipeAt: _at(s.wipeAtMs),
       );
     }
-    if (s.joinsAtMs != null) {
-      return RosterGate(kind: RosterGateKind.pending, joinsAt: _at(s.joinsAtMs));
-    }
-    return const RosterGate();
+    return RosterGate(kind: RosterGateKind.pending, joinsAt: _at(s.joinsAtMs));
   }
 
   @override

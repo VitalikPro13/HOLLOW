@@ -32,8 +32,10 @@ locked the real devices out of their own mailbox.
    see it leave. Every device shows its roster on every connect and after every change to
    it, the remover included (`roster_book::show_relay`).
 5. **Pending joins count seven quiet days on the relay's own clock**, from when it first
-   saw them, like every contact (Vitalik, 2026-10-02), unless the phrase turned the wait
-   off (below). A device that stops asking is forgotten.
+   saw them in the current base, like every contact (Vitalik, 2026-10-02), unless the
+   phrase turned the wait off (below). A device that stops asking is forgotten, and a
+   recovery starts every clock over (HOL-SEC-082: kept per device, a backup the phrase
+   left out rejoined at once).
 6. **Bounded and kept across restarts.** The registry is a `FairShare` table of 128 MB,
    charged to the share of the member who last showed the roster (a stranger showing it
    first never makes it theirs to lose); it rides the restart snapshot (codec v7: each
@@ -64,7 +66,9 @@ inside its signature, payload suffix `:nowait`), so every contact and the relay 
 only the phrase changes it either way, and nobody holding the master key can strip it.
 Settings > Security > Advanced, "Let restored backups join on their own"; changing it signs
 a recovery that keeps every current device (`set_backup_wait`), so a device waiting at that
-moment asks again. With the wait off, the waiting screens promise no date.
+moment asks again: the change reaches it in the identity's own room, and a device a new
+base leaves out signs a new ask at once. With the wait off, the waiting screens promise no
+date and the device still waits behind its lock.
 
 ## The fold, as fixed here
 

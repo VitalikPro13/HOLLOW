@@ -1132,14 +1132,17 @@ impl MessageStore {
                 master_peer_id TEXT NOT NULL
             )")?;
 
-        // When THIS node first saw a device's pending join: the clock its seven days run
-        // on (design ID-1). Local by nature; never synced.
-        ddl(conn, "roster_seen table",
-            "CREATE TABLE IF NOT EXISTS roster_seen (
+        // When THIS node first saw a device's pending join in a base: the clock its seven
+        // days run on (design ID-1). Per base, so a recovery restarts it. Local by
+        // nature; never synced. `roster_seen` was its per-device predecessor.
+        migrate(conn, "DROP TABLE IF EXISTS roster_seen");
+        ddl(conn, "roster_pending_seen table",
+            "CREATE TABLE IF NOT EXISTS roster_pending_seen (
                 master_peer_id TEXT NOT NULL,
+                base           TEXT NOT NULL,
                 device_peer_id TEXT NOT NULL,
                 first_seen_ms  INTEGER NOT NULL,
-                PRIMARY KEY (master_peer_id, device_peer_id)
+                PRIMARY KEY (master_peer_id, base, device_peer_id)
             )")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
@@ -2936,40 +2939,50 @@ impl MessageStore {
             .and_then(|v| serde_json::from_value(v).ok()))
     }
 
-    /// Record when this node first saw `device`'s pending join; the first stamp stays.
-    pub fn stamp_roster_seen(&self, master_peer_id: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
+    /// Record when this node first saw `device`'s pending join in `base`; the first
+    /// stamp stays. Stamps of every other base go: a newer recovery never gives way.
+    pub fn stamp_roster_seen(&self, master_peer_id: &str, base: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO roster_seen (master_peer_id, device_peer_id, first_seen_ms)
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params![master_peer_id, device_peer_id, at_ms],
+                "DELETE FROM roster_pending_seen WHERE master_peer_id = ?1 AND base <> ?2",
+                rusqlite::params![master_peer_id, base],
             )
-            .map_err(|e| format!("Failed to stamp roster_seen: {e}"))?;
+            .map_err(|e| format!("Failed to prune roster_pending_seen: {e}"))?;
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO roster_pending_seen (master_peer_id, base, device_peer_id, first_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![master_peer_id, base, device_peer_id, at_ms],
+            )
+            .map_err(|e| format!("Failed to stamp roster_pending_seen: {e}"))?;
         Ok(())
     }
 
-    /// Every first-sight stamp for one master's pending joins.
-    pub fn load_roster_seen(&self, master_peer_id: &str) -> Result<std::collections::HashMap<String, i64>, String> {
+    /// Every first-sight stamp for one master's pending joins in `base`.
+    pub fn load_roster_seen(&self, master_peer_id: &str, base: &str) -> Result<std::collections::HashMap<String, i64>, String> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT device_peer_id, first_seen_ms FROM roster_seen WHERE master_peer_id = ?1")
-            .map_err(|e| format!("Failed to prepare roster_seen: {e}"))?;
+            .prepare_cached(
+                "SELECT device_peer_id, first_seen_ms FROM roster_pending_seen
+                 WHERE master_peer_id = ?1 AND base = ?2",
+            )
+            .map_err(|e| format!("Failed to prepare roster_pending_seen: {e}"))?;
         let rows = stmt
-            .query_map([master_peer_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
-            .map_err(|e| format!("Failed to query roster_seen: {e}"))?;
-        Ok(collect_rows(rows, "roster_seen")?.into_iter().collect())
+            .query_map([master_peer_id, base], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to query roster_pending_seen: {e}"))?;
+        Ok(collect_rows(rows, "roster_pending_seen")?.into_iter().collect())
     }
 
     /// Back-date a first-sight stamp. Tests only: seven days do not pass in a test.
     #[cfg(test)]
-    pub fn set_roster_seen(&self, master_peer_id: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
+    pub fn set_roster_seen(&self, master_peer_id: &str, base: &str, device_peer_id: &str, at_ms: i64) -> Result<(), String> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO roster_seen (master_peer_id, device_peer_id, first_seen_ms)
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params![master_peer_id, device_peer_id, at_ms],
+                "INSERT OR REPLACE INTO roster_pending_seen (master_peer_id, base, device_peer_id, first_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![master_peer_id, base, device_peer_id, at_ms],
             )
-            .map_err(|e| format!("Failed to set roster_seen: {e}"))?;
+            .map_err(|e| format!("Failed to set roster_pending_seen: {e}"))?;
         Ok(())
     }
 

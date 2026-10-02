@@ -497,6 +497,25 @@ widgets, not copy, wherever one exists:
 - An edited message is ONE text `body (edited)`: wait with `contains:`, and a reply's quote
   repeats the original, so `contains:` on it hits the quote first.
 
+## A waiting device and the backup-wait toggle (session 26)
+
+**Making a waiting device on Windows:** a: Settings > Security > `text:Export` with
+`arm_file_pick` at a path, the dialog's two `dialog > type:EditableText` (index 0 and 1)
+get the passphrase, `dialog > text:Export`, wait `contains:Backup exported`. Then an
+emptied peer (`win_relaunch.ps1 -Peer d -Wipe`): `arm_file_pick` the same path, tap
+`text:Restore from a backup`, type the passphrase into `type:EditableText`, `text:Restore`,
+wait `text:Waiting to join your identity`. a is asked (`text:A device wants to join`,
+`dialog > text:Later`) and Devices shows a `text:Waiting` row. The toggle sits under
+Security > `semantics:Show advanced settings` (collapsed again every time the page is
+left), `semantics:Let restored backups join on their own`, phrase into
+`dialog > hint:The 12 or 24 words, in order`, `dialog > text:Turn off` / `Turn on`. The
+relay keeps every recovery shown, so a later run on the same fixture starts from that
+state: `-Onboard -Fresh` the peer first. Driver and the phone batches: `build/fleet_out/kept/session26/helpers` (gitignored).
+
+**Other selectors:** a linked device's row menu is `semantics:More options for <name>`
+(e.g. `Phone`), then `text:Remove device` and `dialog > text:Remove device`; the removed
+phone waits on `text:This device was removed`.
+
 ## fleet_all.ps1 (session 23)
 
 `powershell -File scripts\fleet_all.ps1 [-SkipBuild] [-Only a,b] [-From x] [-KeepFixtures]`

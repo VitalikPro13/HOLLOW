@@ -237,7 +237,8 @@ proof stays a master-signed list of the current members (`InboxProof`, same JSON
 ID-1R.
 
 **Storage.** `device_lists.json` holds the roster; `device_links` = the fold's members;
-`revoked_devices` = removed; new `roster_seen(master, device, first_seen_ms)`. A 0.11 row
+`revoked_devices` = removed; new `roster_pending_seen(master, base, device, first_seen_ms)`
+(per base since HOL-SEC-082: a recovery restarts every waiting device's seven days). A 0.11 row
 is a fallback: its links stay until that master's first roster replaces them.
 
 **Our own roster at start** (`swarm.rs` startup, where the own list is loaded today):

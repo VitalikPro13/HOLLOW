@@ -39,15 +39,16 @@ pub(crate) fn load(store: &MessageStore, master: &str) -> Option<Roster> {
 
 /// Fold `roster` on this node's own first-sight clock.
 pub(crate) fn fold(store: &MessageStore, roster: &Roster) -> RosterState {
-    let seen = store.load_roster_seen(&roster.master).unwrap_or_default();
+    let seen = store.load_roster_seen(&roster.master, &roster.base()).unwrap_or_default();
     roster.fold(|d| seen.get(d).copied(), now_ms())
 }
 
-/// Stamp when this node first saw each pending join in `roster`.
+/// Stamp when this node first saw each pending join in `roster`'s current base.
 fn stamp_pending(store: &MessageStore, roster: &Roster) {
     let now = now_ms();
-    for p in &roster.pendings {
-        let _ = store.stamp_roster_seen(&roster.master, &p.device, now);
+    let base = roster.base();
+    for p in roster.pendings.iter().filter(|p| p.base == base) {
+        let _ = store.stamp_roster_seen(&roster.master, &base, &p.device, now);
     }
 }
 
@@ -462,6 +463,35 @@ pub(crate) fn announce_pending<'a>(
     hollow_log!("[HOLLOW-ROSTER] Asked to join the identity (mailbox, contacts, servers)");
 }
 
+/// A new base left this device out while it was not a member: it asks again in that
+/// base at once, not at its next start.
+pub(crate) async fn ask_again<'a>(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    master: &NativeKeypair,
+    device: &NativeKeypair,
+    server_ids: impl Iterator<Item = &'a String>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let me = device.peer_id();
+    let asked = change_own(master, device, db_path, db_passphrase, |r, s| {
+        if s.is_member(&me) || s.removed.contains_key(&me) || s.pending.contains(&me) {
+            return Err("settled".into());
+        }
+        r.add_pending(roster::sign_pending(master, &r.base(), &me));
+        Ok(())
+    });
+    let Ok((roster, _)) = asked else { return };
+    if let Ok(store) = MessageStore::open(db_path, db_passphrase) {
+        stamp_pending(&store, &roster);
+    }
+    hollow_log!("[HOLLOW-ROSTER] A new base left this device out: asking to join again");
+    show_relay(ws_cmd_tx, &master.peer_id(), db_path, db_passphrase);
+    fan_out(ws_cmd_tx, &master.peer_id(), roster, server_ids, db_path, db_passphrase);
+    let _ = event_tx.send(NetworkEvent::DeviceListUpdated { master_peer_id: master.peer_id() }).await;
+}
+
 /// The phrase changed our roster: everyone hears it the way a pending device asks,
 /// with no session needed, since a contact may still hold this device as removed and
 /// refuse its sessions until the recovery reaches it.
@@ -487,6 +517,9 @@ fn fan_out<'a>(
     let notice = super::types::HavenMessage::RosterNotice { roster };
     super::social::deposit_friend_request_to_inbox(ws_cmd_tx, local_master, &notice);
     let Ok(data) = serde_json::to_vec(&notice) else { return };
+    // Live to every device of ours, a waiting or removed one too: the mailbox
+    // replays only to members.
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom { room_code: own_room(local_master), data: data.clone() });
     // Each friend's whole DM room: we may know none of its devices yet, and a
     // single-device friend's device is its master id, which no link names.
     let friends = MessageStore::open(db_path, db_passphrase)
@@ -518,6 +551,9 @@ pub(crate) struct Ingested {
     pub newly_revoked: Vec<String>,
     /// Members this ingest admitted, for our own master: siblings to converge with.
     pub added: Vec<String>,
+    /// Our own roster moved to a base that leaves this device out and not yet
+    /// asking: the caller asks again ([`ask_again`]), as only it holds the keys.
+    pub asks_again: bool,
 }
 
 /// Fold a roster someone delivered into ours for that master.
@@ -650,10 +686,16 @@ async fn ingest_inner(
         );
     }
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated { master_peer_id: master.clone() }).await;
+    let asks_again = master == local_master
+        && changed
+        && !now.is_member(local_device)
+        && !now.removed.contains_key(local_device)
+        && !now.pending.contains(local_device);
     Ingested {
         our_devices_grew: master == local_master && changed,
         newly_revoked,
         added: if master == local_master { added } else { Vec::new() },
+        asks_again,
     }
 }
 
@@ -876,12 +918,41 @@ mod tests {
         me.ingest(&restored.peer_id(), &r).await;
         assert!(me.state_of(&bob.peer_id()).pending.contains(&restored.peer_id()));
 
-        me.store().set_roster_seen(&bob.peer_id(), &restored.peer_id(), now_ms() - PENDING_MATURITY_MS).unwrap();
+        me.store().set_roster_seen(&bob.peer_id(), LEGACY_BASE, &restored.peer_id(), now_ms() - PENDING_MATURITY_MS).unwrap();
         assert!(me.state_of(&bob.peer_id()).is_member(&restored.peer_id()), "seven quiet days admit it");
 
         r.add_removal(sign_removal(&bob_dev, &bob.peer_id(), LEGACY_BASE, &restored.peer_id(), &[]));
         me.ingest(&bob_dev.peer_id(), &r).await;
         assert!(!me.state_of(&bob.peer_id()).is_member(&restored.peer_id()), "a refusal keeps it out");
+    }
+
+    /// A recovery that leaves out a backup which joined by waiting is not undone by the
+    /// backup asking again: its seven days start over in the new base.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn authz_a_backup_left_out_by_a_recovery_waits_again_in_the_new_base() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (bob, recovery, bob_dev, restored) = (kp(0x60), kp(0x64), kp(0x61), kp(0x62));
+        let mut r = Roster::genesis(&bob, &recovery, &bob_dev, now_ms() - 60_000);
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        r.add_consent(sign_consent(&restored, &bob.peer_id()));
+        r.add_pending(sign_pending(&bob, &r.base(), &restored.peer_id()));
+        me.ingest(&restored.peer_id(), &r).await;
+        me.store().set_roster_seen(&bob.peer_id(), &r.base(), &restored.peer_id(), now_ms() - PENDING_MATURITY_MS).unwrap();
+        assert!(me.state_of(&bob.peer_id()).is_member(&restored.peer_id()), "seven quiet days admit it");
+
+        let keep = [bob_dev.peer_id()];
+        let rec = crate::identity::roster::sign_recovery(&bob, &recovery, now_ms(), &keep, false);
+        r.add_phrase_statement(&r_pub_of(&recovery), Some(rec), None).unwrap();
+        me.ingest(&bob_dev.peer_id(), &r).await;
+        assert!(!me.state_of(&bob.peer_id()).is_member(&restored.peer_id()), "the recovery left it out");
+
+        r.add_pending(sign_pending(&bob, &r.base(), &restored.peer_id()));
+        me.ingest(&restored.peer_id(), &r).await;
+        let now = me.state_of(&bob.peer_id());
+        assert!(!now.is_member(&restored.peer_id()), "its old seven days carried into the new base");
+        assert!(now.pending.contains(&restored.peer_id()));
     }
 
     /// HOL-SEC-032. A removed device is refused by key exchange, and the refusal is

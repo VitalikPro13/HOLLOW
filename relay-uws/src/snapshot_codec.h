@@ -111,7 +111,7 @@ struct Lock {
 // One identity's roster as the relay holds it (v7), and how long ago the relay first
 // saw each pending join in it.
 struct RosterSeen {
-    std::string device;
+    std::string device;  // RosterBook::seen_key(base, device)
     uint32_t age_secs = 0;
 };
 struct Roster {

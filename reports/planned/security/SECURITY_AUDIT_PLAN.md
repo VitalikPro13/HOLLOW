@@ -296,6 +296,18 @@ into possible holes, so this file itself belongs on the security branch.
   against the deployed relay: friend_dm, regress_social, friend offline/decline/re-add,
   device link and destroy all PASS. Owed for session 26: the new toggle on screen (desktop
   and the Mac mini's phones) and a phone's inbox against the new relay.
+- **Session 26 (2026-10-02): ID-1R finished on screen.** Driving the toggle with a
+  restored backup waiting found **HOL-SEC-082** (High: a pending join's first sight was
+  kept per device across bases, so a backup that had joined by waiting and was left out
+  by a recovery joined again at once; now per base in the apps and at the relay, relay
+  DEPLOYED, live probe 19/19) and two defects: a waiting device never heard a phrase
+  change made by a contactless identity (the change now also rides the identity's own
+  room, and a device a new base leaves out asks again at once instead of at its next
+  start), and with the wait off a waiting device showed the app instead of its lock (the
+  lock now follows the roster, not the date). Phones on the Mac mini: the toggle, a
+  friend request to an offline phone arriving by mailbox replay, a desktop and a phone of
+  one identity both getting a request live, and a removal on the desktop locking the
+  phone in the same second with nothing more reaching it.
 - **NEXT:** the program's remaining phases (section 4, C to G); Vitalik sets the order.
   **On release day** add `ACCEPT_DEVICE_LIST_INBOX_PROOF` to the switches turned off.
 - **Before session 20 (2026-09-30):** **next session: ID-1 with HOL-SEC-002** (xhigh). Fuzzing and flood

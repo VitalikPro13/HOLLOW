@@ -12864,6 +12864,11 @@ async fn handle_incoming_request(
                 device_list, db_path, db_passphrase,
             ).await;
             let our_devices_grew = ingest_outcome.our_devices_grew;
+            if ingest_outcome.asks_again {
+                super::roster_book::ask_again(
+                    event_tx, ws_cmd_tx, master_keypair, device_keypair, server_states.keys(), db_path, db_passphrase,
+                ).await;
+            }
             converge_new_siblings(
                 &ingest_outcome.added, ws_cmd_tx, ws_room_peers, master_keypair, device_peer_id,
                 local_peer_str, server_states, is_invisible, db_path, db_passphrase, call_book.own(),
@@ -13552,6 +13557,11 @@ async fn handle_incoming_request(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 Some(roster), db_path, db_passphrase,
             ).await;
+            if outcome.asks_again {
+                super::roster_book::ask_again(
+                    event_tx, ws_cmd_tx, master_keypair, device_keypair, server_states.keys(), db_path, db_passphrase,
+                ).await;
+            }
             if outcome.our_devices_grew {
                 super::roster_book::show_relay(ws_cmd_tx, local_peer_str, db_path, db_passphrase);
             }

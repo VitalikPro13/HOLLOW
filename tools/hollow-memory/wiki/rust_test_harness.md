@@ -195,8 +195,9 @@ MockRelay keeps lock chains (`locks`, rule `relay_lock_put` = the relay's `relay
 into the node's own before start (`spawn_node_full`'s device tags become a legacy roster and
 call it). `tag_kp`, `recovery_kp(master_tag)` (any key the master binds stands in for the
 phrase), `protected_roster(master_tag, device_tags, at_ms)` (a recovery keeping those devices),
-`legacy_roster`, `EIGHT_DAYS_MS` with `MessageStore::set_roster_seen` (cfg(test)) to pass seven
-days on an observer's clock. A "stolen backup" is a node seeded with the owner's stored roster
+`legacy_roster`, `EIGHT_DAYS_MS` with `backdate_pending(store, master, device, at)` to pass seven
+days on an observer's clock (`pending_seen` reads it; both use the roster's CURRENT base, as
+the clock is per base since HOL-SEC-082). A "stolen backup" is a node seeded with the owner's stored roster
 (`roster_book::load(&owner.store(), ..)`) under a new device tag. The resolver is shared, so
 wait on it (in memory) for the shared view and check each node's own roster with
 `known_devices`/`revoked_devices` (they fold its DB). MockRelay models link codes (claim,

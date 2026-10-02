@@ -12,7 +12,8 @@
 // `inbox:{master}` join is folded into the one held for that master, so nothing shown
 // later can take back a removal or a newer recovery, and the first recovery key held
 // stays pinned. A socket owns the inbox only while the fold counts its device a member.
-// Pending joins mature on the relay's own clock, from when it first saw them.
+// Pending joins mature on the relay's own clock, from when it first saw them in the
+// current base: a recovery restarts it.
 //
 // Anyone may show a roster (its statements verify alone), so the byte budget is what
 // bounds the table: past it the address share holding the most bytes loses its least
@@ -22,8 +23,10 @@ struct RosterBook {
 
     struct Held {
         roster::Roster roster;
-        std::unordered_map<std::string, int64_t> seen_ms;  // pending device -> first seen
+        std::unordered_map<std::string, int64_t> seen_ms;  // seen_key(base, device) -> first seen
     };
+
+    static std::string seen_key(const std::string& base, const std::string& device) { return base + "|" + device; }
 
     struct Shown {
         bool member = false;
@@ -49,9 +52,10 @@ struct RosterBook {
     }
 
     roster::State fold(const Held& h, int64_t now_ms, const RosterCrypto& c) const {
+        const std::string base = h.roster.base(c);
         return h.roster.fold(
             [&](const std::string& d) -> std::optional<int64_t> {
-                auto it = h.seen_ms.find(d);
+                auto it = h.seen_ms.find(seen_key(base, d));
                 if (it == h.seen_ms.end()) return std::nullopt;
                 return it->second;
             },
@@ -77,8 +81,9 @@ struct RosterBook {
         // First sight of each pending join; a device that stopped asking is forgotten.
         std::unordered_map<std::string, int64_t> seen;
         for (const auto& p : held.roster.pendings) {
-            auto s = held.seen_ms.find(p.device);
-            seen[p.device] = s == held.seen_ms.end() ? now_ms : s->second;
+            const std::string key = seen_key(p.base, p.device);
+            auto s = held.seen_ms.find(key);
+            seen[key] = s == held.seen_ms.end() ? now_ms : s->second;
         }
         out.changed = out.changed || seen != held.seen_ms;
         held.seen_ms = std::move(seen);

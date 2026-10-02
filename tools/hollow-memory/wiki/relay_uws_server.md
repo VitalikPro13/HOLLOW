@@ -27,7 +27,8 @@ Binary name: `hollow-relay`
   (`roster::from_json`, strict like serde), refuses one over 256 KiB, past a ceiling or
   for another master, and hands it to `RosterBook::show` (`roster_book.h`): verify (a
   statement the held roster already has skips its signature check), merge into the one
-  roster held per master, stamp first sights of pending joins (wall clock), fold, judge.
+  roster held per master, stamp first sights of pending joins (wall clock, keyed
+  `base|device` so a recovery restarts them, HOL-SEC-082), fold, judge.
   `roster.h` mirrors `identity/roster.rs` rule for rule; `test/test_roster.cpp` replays
   the vectors the Rust test `roster_vectors_are_current` writes to
   `test/roster_vectors.json` (regenerate with `HOLLOW_WRITE_ROSTER_VECTORS=1`; change

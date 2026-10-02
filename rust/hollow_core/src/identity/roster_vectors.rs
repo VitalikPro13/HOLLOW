@@ -272,6 +272,11 @@ struct Case {
     member: bool,
 }
 
+/// `RosterBook::seen_key`: the relay's clock for a pending join runs per base.
+fn seen_key(base: &str, device: &str) -> String {
+    format!("{base}|{device}")
+}
+
 /// The relay's flow on one shown roster (`RosterBook::show`), in Rust.
 fn relay_case(name: &str, now: i64, master: &str, device: &str, held: Option<(Roster, BTreeMap<String, i64>)>, shown: Roster) -> Case {
     let (base_roster, base_seen) = held.clone().unwrap_or_else(|| (Roster::new(master), BTreeMap::new()));
@@ -281,13 +286,18 @@ fn relay_case(name: &str, now: i64, master: &str, device: &str, held: Option<(Ro
         let seen: BTreeMap<String, i64> = merged
             .pendings
             .iter()
-            .map(|p| (p.device.clone(), base_seen.get(&p.device).copied().unwrap_or(now)))
+            .map(|p| {
+                let key = seen_key(&p.base, &p.device);
+                let first = base_seen.get(&key).copied().unwrap_or(now);
+                (key, first)
+            })
             .collect();
         (merged, seen)
     } else {
         (base_roster, base_seen.clone())
     };
-    let state = merged.fold(|d| seen.get(d).copied(), now);
+    let base = merged.base();
+    let state = merged.fold(|d| seen.get(&seen_key(&base, d)).copied(), now);
     let member = accepted && state.is_member(device);
     let json = serde_json::to_string(&merged).unwrap();
     Case {
@@ -334,7 +344,7 @@ fn cases() -> Vec<Case> {
             let mut seen = BTreeMap::new();
             for p in &prior.pendings {
                 if rng.chance(70) {
-                    seen.insert(p.device.clone(), NOW - rng.below(10) as i64 * DAY);
+                    seen.insert(seen_key(&p.base, &p.device), NOW - rng.below(10) as i64 * DAY);
                 }
             }
             Some((prior, seen))
@@ -377,16 +387,23 @@ fn cases() -> Vec<Case> {
     let base = asking.base();
     asking.add_consent(sign_consent(&k.devices[5], &m));
     asking.add_pending(sign_pending(&k.m, &base, &k.devices[5].peer_id()));
-    let waited = BTreeMap::from([(k.devices[5].peer_id(), NOW - 8 * DAY)]);
-    let held = Some((asking.clone().verified(NOW), waited.clone()));
+    let waited = BTreeMap::from([(seen_key(&base, &k.devices[5].peer_id()), NOW - 8 * DAY)]);
+    let held = Some((asking.clone().verified(NOW), waited));
     out.push(relay_case("matured-at-the-relay", NOW, &m, &k.devices[5].peer_id(), held.clone(), asking.clone()));
     out.push(relay_case("first-sight-now", NOW, &m, &k.devices[5].peer_id(), None, asking.clone()));
+    let mut left_out = asking.clone();
+    let keep_first = sign_recovery(&k.m, &k.r, NOW - DAY, &[k.devices[0].peer_id()], false);
+    left_out.add_phrase_statement(&r_pub_of(&k.r), Some(keep_first), None).unwrap();
+    let new_base = left_out.base();
+    left_out.add_pending(sign_pending(&k.m, &new_base, &k.devices[5].peer_id()));
+    out.push(relay_case("a-recovery-restarts-the-clock", NOW, &m, &k.devices[5].peer_id(), held, left_out));
     let mut strict = Roster::new(&m);
     strict.add_consent(sign_consent(&k.devices[0], &m));
     strict.add_consent(sign_consent(&k.devices[5], &m));
     strict.add_phrase_statement(&r_pub_of(&k.r), Some(sign_recovery(&k.m, &k.r, NOW - 9 * DAY, &[k.devices[0].peer_id()], true)), None).unwrap();
     let sbase = strict.base();
     strict.add_pending(sign_pending(&k.m, &sbase, &k.devices[5].peer_id()));
+    let waited = BTreeMap::from([(seen_key(&sbase, &k.devices[5].peer_id()), NOW - 8 * DAY)]);
     out.push(relay_case("no-wait", NOW, &m, &k.devices[5].peer_id(), Some((strict.clone().verified(NOW), waited)), strict));
     out
 }
@@ -415,4 +432,9 @@ fn roster_vectors_are_current() {
     assert!(n(&|c| !c.pending.is_empty()) >= 5, "too few pending joins");
     assert!(n(&|c| c.merged_counts[3] == MAX_VOUCHES) >= 1 && n(&|c| c.merged_counts[6] == MAX_REMOVALS) >= 1);
     assert!(n(&|c| !c.accepted) >= 2);
+    let named = |name: &str| cases.iter().find(|c| c.name == name).unwrap();
+    assert!(named("matured-at-the-relay").member, "seven quiet days admit a backup");
+    let restarted = named("a-recovery-restarts-the-clock");
+    assert!(!restarted.member && !restarted.pending.is_empty(), "a recovery restarts a left-out backup's seven days");
+    assert!(!named("no-wait").member, "with the wait off nothing joins by waiting");
 }
