@@ -98,6 +98,11 @@ impl LockKeeper {
         self.ask(ws_cmd_tx, server_id, owner);
     }
 
+    /// The newest lock of the relay's chain for a server, as we last verified it.
+    pub(crate) fn relay_tip(&self, server_id: &str) -> Option<&LockLink> {
+        self.views.get(server_id).and_then(|(links, _)| links.last())
+    }
+
     /// Someone who held a key was just removed by us: move the lock on the next tick.
     pub(crate) fn nudge(&mut self, server_id: &str) {
         self.due_since.insert(server_id.to_string(), Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now));

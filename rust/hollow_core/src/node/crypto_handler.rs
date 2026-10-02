@@ -2010,6 +2010,16 @@ pub(crate) fn ws_room_for_peer(
     None
 }
 
+/// Where a frame for `peer_str` goes: a room that shows it to us, else the room a peer
+/// the relay hides from us last spoke from (a guest reading public channels). Never
+/// a sign that the peer is online: only sends use it.
+pub(crate) fn send_room_for_peer(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_str: &str,
+) -> Option<String> {
+    ws_room_for_peer(ws_room_peers, peer_str).or_else(|| super::door_room::heard_room(peer_str))
+}
+
 /// MLS-encrypt an envelope and broadcast to the server room via WS relay: one
 /// encrypt, one send, the relay fans out. `Err(reason)` lets the caller fall back.
 pub(crate) fn send_mls_broadcast(
@@ -2186,7 +2196,7 @@ pub(crate) async fn send_encrypted_message(
 
             let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
 
-            if let Some(room) = ws_room_for_peer(ws_room_peers, peer_id_str) {
+            if let Some(room) = send_room_for_peer(ws_room_peers, peer_id_str) {
                 let json = serde_json::to_string(&haven_msg).unwrap_or_default();
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
                     room_code: room,
@@ -2339,7 +2349,7 @@ pub(crate) fn send_message_to_peer(
     peer_str: &str,
     msg: HavenMessage,
 ) {
-    if let Some(room) = ws_room_for_peer(ws_room_peers, peer_str) {
+    if let Some(room) = send_room_for_peer(ws_room_peers, peer_str) {
         let json = serde_json::to_string(&msg).unwrap_or_default();
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
             room_code: room,

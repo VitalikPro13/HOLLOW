@@ -47,3 +47,24 @@ std::string genesis_server_id(const std::string& owner_peer_id, const std::strin
 uint64_t share_id(const std::string& key, const std::string& block);
 
 uint64_t now_unix_secs();
+
+// The relay's X25519 key for door proofs (door_room.h): minted at start, RAM only,
+// so a proof made for one relay process opens nothing on the next.
+struct DoorKey {
+    unsigned char sk[32];
+    unsigned char pk[32];
+    std::string text;  // the public half, URL-safe base64 without padding
+};
+
+void door_key_from(DoorKey& key, const unsigned char secret[32]);
+void door_key_mint(DoorKey& key);
+
+// Whether `proof_text` is the proof the holder of door `door_text`'s secret makes over
+// `message` for `key`: HMAC-SHA256 under their X25519 shared secret, compared in
+// constant time. A low-order door or a malformed text proves nothing.
+bool door_proof_opens(const DoorKey& key, const std::string& door_text, const std::string& message,
+                      const std::string& proof_text);
+
+// The proof a door secret makes over `message` for relay key `relay_pk` (the client's
+// side, for tests). "" when the shared secret is all zero.
+std::string door_proof_make(const unsigned char door_sk[32], const unsigned char relay_pk[32], const std::string& message);

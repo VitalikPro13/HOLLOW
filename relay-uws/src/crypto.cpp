@@ -215,3 +215,56 @@ uint64_t now_unix_secs() {
         std::chrono::duration_cast<std::chrono::seconds>(epoch).count()
     );
 }
+
+static std::string b64url(const unsigned char* data, size_t len) {
+    std::string out(sodium_base64_encoded_len(len, sodium_base64_VARIANT_URLSAFE_NO_PADDING), '\0');
+    sodium_bin2base64(out.data(), out.size(), data, len, sodium_base64_VARIANT_URLSAFE_NO_PADDING);
+    out.resize(strlen(out.c_str()));
+    return out;
+}
+
+static bool b64url_32(const std::string& text, unsigned char out[32]) {
+    size_t len = 0;
+    return text.size() == 43 &&
+           sodium_base642bin(out, 32, text.c_str(), text.size(), nullptr, &len, nullptr,
+                             sodium_base64_VARIANT_URLSAFE_NO_PADDING) == 0 &&
+           len == 32;
+}
+
+void door_key_from(DoorKey& key, const unsigned char secret[32]) {
+    memcpy(key.sk, secret, 32);
+    crypto_scalarmult_base(key.pk, key.sk);
+    key.text = b64url(key.pk, 32);
+}
+
+void door_key_mint(DoorKey& key) {
+    unsigned char secret[32];
+    randombytes_buf(secret, sizeof(secret));
+    door_key_from(key, secret);
+    sodium_memzero(secret, sizeof(secret));
+}
+
+static bool door_mac(const unsigned char sk[32], const unsigned char pk[32], const std::string& message,
+                     unsigned char out[crypto_auth_hmacsha256_BYTES]) {
+    unsigned char shared[crypto_scalarmult_BYTES];
+    if (crypto_scalarmult(shared, sk, pk) != 0) return false;
+    crypto_auth_hmacsha256(out, reinterpret_cast<const unsigned char*>(message.data()), message.size(), shared);
+    sodium_memzero(shared, sizeof(shared));
+    return true;
+}
+
+bool door_proof_opens(const DoorKey& key, const std::string& door_text, const std::string& message,
+                      const std::string& proof_text) {
+    unsigned char door[32];
+    unsigned char proof[32];
+    unsigned char expected[crypto_auth_hmacsha256_BYTES];
+    if (!b64url_32(door_text, door) || !b64url_32(proof_text, proof)) return false;
+    if (!door_mac(key.sk, door, message, expected)) return false;
+    return crypto_verify_32(expected, proof) == 0;
+}
+
+std::string door_proof_make(const unsigned char door_sk[32], const unsigned char relay_pk[32], const std::string& message) {
+    unsigned char mac[crypto_auth_hmacsha256_BYTES];
+    if (!door_mac(door_sk, relay_pk, message, mac)) return "";
+    return b64url(mac, sizeof(mac));
+}

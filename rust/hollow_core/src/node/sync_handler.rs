@@ -1634,6 +1634,7 @@ pub(crate) fn handle_join_lock_chain(
     our_device: &str,
     server_id: &str,
     links: Vec<super::join_lock::LockLink>,
+    hidden: bool,
 ) -> Vec<HeldAnswer> {
     let Some(pending) = pending_server_joins.get_mut(server_id) else { return Vec::new() };
     let asked = pending.lock_asks.pop_front();
@@ -1644,6 +1645,10 @@ pub(crate) fn handle_join_lock_chain(
     let first = pending.lock.is_none();
     pending.lock = Some(super::join_lock::VerifiedLock { links, checked_at: std::time::Instant::now() });
     if first && !pending.asked {
+        // A locked room hides its members from a joiner: ask the whole room.
+        if hidden && super::join_lane::send_request_to_room(ws_cmd_tx, server_id, our_device, pending) {
+            hollow_log!("[HOLLOW-CRDT] Sent our join request for {server_id} to the whole room");
+        }
         for peer in ws_room_peers.get(server_id).into_iter().flatten() {
             if super::join_lane::send_request(ws_cmd_tx, server_id, our_device, pending, peer) {
                 hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
@@ -1689,6 +1694,7 @@ pub(crate) fn reask_join(
     server_id: &str,
     our_device: &str,
     pending: &mut PendingJoin,
+    hidden: bool,
 ) {
     let Some(tip) = pending.lock.as_ref().and_then(|l| l.newest()).map(|l| l.n) else { return };
     if pending.asked || pending.reasked_for == Some(tip) {
@@ -1697,6 +1703,9 @@ pub(crate) fn reask_join(
     hollow_log!("[HOLLOW-CRDT] Asking again to join {server_id} from join lock {tip}");
     pending.reasked_for = Some(tip);
     pending.requested_at = super::types::now_ms();
+    if hidden {
+        super::join_lane::send_request_to_room(ws_cmd_tx, server_id, our_device, pending);
+    }
     for peer in ws_room_peers.get(server_id).into_iter().flatten() {
         super::join_lane::send_request(ws_cmd_tx, server_id, our_device, pending, peer);
     }
@@ -2908,7 +2917,7 @@ pub(crate) async fn handle_set_channel_public(
                 category: if is_public { ch.category.clone() } else { None },
             };
             if let Ok(data) = serde_json::to_vec(&notify) {
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendPublic {
                     room_code: server_id.clone(),
                     data,
                 });

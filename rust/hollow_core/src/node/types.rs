@@ -1707,6 +1707,24 @@ pub(crate) enum HavenMessage {
         door: String,
     },
 
+    /// A member device the relay hides in its server's room (its door is older than
+    /// the relay's newest lock) asks the members who see it for the newest door
+    /// (`node/door_room.rs`). Carries nothing the relay does not already know.
+    #[serde(rename = "door_ask")]
+    DoorAsk {
+        server_id: String,
+    },
+
+    /// The newest door of a server, sealed to the asking device's own key: what it
+    /// proves to the relay with until its state holds that door.
+    #[serde(rename = "door_grant")]
+    DoorGrant {
+        server_id: String,
+        n: u64,
+        eph: String,
+        ct: String,
+    },
+
     /// Sent to the kicked member so they remove themselves from the server.
     #[serde(rename = "member_kick")]
     MemberKickBroadcast {
@@ -3932,6 +3950,7 @@ impl HavenMessage {
             | Self::ServerJoinRejected { .. }
             | Self::ServerJoinResolved { .. }
             | Self::JoinSealed { .. }
+            | Self::DoorGrant { .. }
             | Self::MemberKickBroadcast { .. }
             | Self::MlsChannelMessage { .. }
             | Self::MlsWelcome { .. }
@@ -3954,6 +3973,7 @@ impl HavenMessage {
             | Self::ShareManifestResponse { .. } => false,
             Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
+            | Self::DoorAsk { .. }
             | Self::ServerJoinRequest { parked: false, .. }
             | Self::MlsKeyPackage { .. }
             | Self::SyncRequest { .. }
@@ -4137,6 +4157,8 @@ impl HavenMessage {
             | Self::CallRecordingState { .. } => Lane::CallSignal,
             Self::Encrypted { .. }
             | Self::JoinSealed { .. }
+            | Self::DoorAsk { .. }
+            | Self::DoorGrant { .. }
             | Self::MlsChannelMessage { .. }
             | Self::MlsWelcome { .. }
             | Self::MlsCommit { .. }

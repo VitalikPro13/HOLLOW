@@ -291,9 +291,10 @@ pub(crate) fn mint_next(server_id: &str, prev: &LockLink, prev_change: &[u8; 32]
     Some(lock)
 }
 
-/// The X25519 public key of a master identity, which every device of it can use.
-fn master_x25519(master: &str) -> Option<[u8; 32]> {
-    let ed = crate::crypto::safety_number::pubkey_from_peer_id(master)?;
+/// The X25519 public key of a peer id: a master's, which every device of it can use,
+/// or one device's own.
+pub(crate) fn peer_x25519(peer_id: &str) -> Option<[u8; 32]> {
+    let ed = crate::crypto::safety_number::pubkey_from_peer_id(peer_id)?;
     Some(ed25519_dalek::VerifyingKey::from_bytes(&ed).ok()?.to_montgomery().to_bytes())
 }
 
@@ -303,7 +304,7 @@ fn grant_aad(server_id: &str, change: &str, master: &str) -> Vec<u8> {
 
 /// A change key sealed to one owner, admin or mod, by master id.
 pub(crate) fn seal_grant(server_id: &str, change: &str, master: &str, change_secret: &[u8; 32]) -> Option<String> {
-    let sealed = sealed_box::seal(&master_x25519(master)?, GRANT_DOMAIN, &grant_aad(server_id, change, master), change_secret)?;
+    let sealed = sealed_box::seal(&peer_x25519(master)?, GRANT_DOMAIN, &grant_aad(server_id, change, master), change_secret)?;
     Some(format!("{}.{}", sealed.eph, sealed.ct))
 }
 

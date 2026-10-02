@@ -52,9 +52,15 @@ pub enum WsCommand {
     /// Join our own `inbox:` room showing our roster, from which the relay decides
     /// whether this device is one of the identity's (design ID-1R).
     JoinInbox { room_code: String, roster: crate::identity::roster::Roster },
+    /// The newest door we hold for a server's room (`None` = none any more). Joins of
+    /// that room prove it to the relay from now on; a joined room proves it at once.
+    SetDoor { room_code: String, door: Option<DoorSecret> },
     LeaveRoom { room_code: String },
     /// Broadcast an encrypted message to all peers in a room.
     SendToRoom { room_code: String, data: Vec<u8> },
+    /// A room broadcast that also reaches the peers a door-locked room hides: public
+    /// channel traffic, which guests read.
+    SendPublic { room_code: String, data: Vec<u8> },
     /// Send directly to a specific peer in a room (for shard transfers).
     SendDirect { room_code: String, target_peer: String, data: Vec<u8> },
     /// Send directly to a peer, flagged as carrying an inlined image. Identical
@@ -176,6 +182,10 @@ pub enum WsEvent {
     /// the frozen list stays forever and `ws_room_for_peer`'s first match can
     /// route targeted sends into it, which the relay then drops.
     LeftRoom { room: String },
+    /// Whether the relay shows us the room: false only in a door-locked server room
+    /// whose newest door it does not count us as holding. Sent right before the
+    /// `RoomMembers` it came with.
+    DoorStatus { room: String, proved: bool },
     RoomMembers { room: String, peers: Vec<String> },
     /// Encrypted message from another peer, routed through a room.
     Message { room: String, from: String, data: Vec<u8> },
@@ -234,6 +244,7 @@ impl WsEvent {
             Self::PeerJoined { .. } => "PeerJoined",
             Self::PeerLeft { .. } => "PeerLeft",
             Self::LeftRoom { .. } => "LeftRoom",
+            Self::DoorStatus { .. } => "DoorStatus",
             Self::RoomMembers { .. } => "RoomMembers",
             Self::Message { .. } => "Message",
             Self::DirectMessage { .. } => "DirectMessage",
@@ -290,6 +301,9 @@ enum ClientMsg {
         /// into what it holds for the master and lets in only a member.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         inbox_roster: Option<crate::identity::roster::Roster>,
+        /// For a server room: that we hold its newest door ([`door_proof`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        door_proof: Option<String>,
     },
     Leave { room: String },
 }
@@ -298,12 +312,13 @@ enum ClientMsg {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum ServerMsg {
-    AuthChallenge { nonce: String },
+    AuthChallenge { nonce: String, #[serde(default)] door_key: String },
     AuthOk,
     AuthFailed { error: String },
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
-    Members { room: String, peers: Vec<String> },
+    /// `proved` only in a door-locked server room.
+    Members { room: String, peers: Vec<String>, #[serde(default)] proved: Option<bool> },
     // `active_rooms` is always empty now: the relay's room-activity probe was
     // removed (it let anyone holding two peer_ids ask whether their deterministic
     // DM room was live). Defaulted so a relay dropping the field deserializes.
@@ -346,6 +361,51 @@ enum ServerMsg {
     },
 }
 
+/// A server's door secret on its way to the socket that proves it; never printed.
+#[derive(Clone)]
+pub struct DoorSecret(pub zeroize::Zeroizing<[u8; 32]>);
+
+impl std::fmt::Debug for DoorSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DoorSecret(..)")
+    }
+}
+
+/// What door proofs on one socket are made for: the relay's challenge and domain, our
+/// id there, and the relay's door key (none from a relay without door rooms).
+#[derive(Clone, Default)]
+pub(crate) struct RelaySession {
+    pub domain: String,
+    pub nonce: String,
+    pub peer_id: String,
+    pub door_key: String,
+}
+
+/// The bytes a door proof's HMAC covers; pinned against the relay's
+/// `door_room::proof_message` (relay-uws/test/test_door_room.cpp).
+pub(crate) fn door_proof_message(session: &RelaySession, room: &str, door: &str) -> String {
+    format!(
+        "hollow-door1\n{}\n{}\n{}\n{room}\n{door}\n{}",
+        session.domain, session.nonce, session.peer_id, session.door_key
+    )
+}
+
+/// Proof that we hold `door` (a server's newest door secret) for this socket in
+/// `room`: HMAC-SHA256 under the X25519 secret it shares with the relay's door key.
+/// `None` without a relay key, or for a low-order one.
+pub(crate) fn door_proof(session: &RelaySession, room: &str, door: &[u8; 32]) -> Option<String> {
+    use hmac::Mac;
+    let relay = super::sealed_box::key_from_text(&session.door_key)?;
+    let shared = x25519_dalek::StaticSecret::from(*door).diffie_hellman(&x25519_dalek::PublicKey::from(relay));
+    if !shared.was_contributory() {
+        return None;
+    }
+    let door_text = super::sealed_box::key_to_text(&super::sealed_box::public_of(door));
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(shared.as_bytes()).ok()?;
+    mac.update(door_proof_message(session, room, &door_text).as_bytes());
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
 // -- State --
 
 const ROOM_BUDGET_LIMIT: u32 = 2000;
@@ -367,6 +427,9 @@ struct WsClientState {
     /// The roster each `inbox:` room was joined with via [`WsCommand::JoinInbox`]. The
     /// reconnect replay re-sends it: a plain `Join` on a NEW socket owns nothing.
     inbox_rosters: Arc<RwLock<std::collections::HashMap<String, crate::identity::roster::Roster>>>,
+    /// The newest door the node holds per server room ([`WsCommand::SetDoor`]), proved
+    /// on every join of it, the reconnect replay's included.
+    doors: Arc<RwLock<std::collections::HashMap<String, DoorSecret>>>,
     /// The host we dialled; TURN URIs naming any other host are dropped.
     relay_host: String,
 }
@@ -434,6 +497,7 @@ async fn ws_client_loop(
         subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         offline_optin: Arc::new(RwLock::new(None)),
         inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        doors: Arc::new(RwLock::new(std::collections::HashMap::new())),
         relay_host: relay_auth_domain(&relay_url).unwrap_or_default(),
     };
 
@@ -447,8 +511,8 @@ async fn ws_client_loop(
         // success), so this attempt is a reconnect rather than the first connect.
         let _ = event_tx.send(WsEvent::Connecting { reconnecting: backoff_secs > 1 });
 
-        match connect_and_auth(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref(), fetch).await {
-            Ok(ws_stream) => {
+        match connect_and_auth_session(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref(), fetch).await {
+            Ok((ws_stream, session)) => {
                 backoff_secs = 1; // Reset backoff on successful connect.
                 let _ = event_tx.send(WsEvent::Connected);
                 hollow_log!("[HOLLOW-WS] Connected and authenticated");
@@ -458,10 +522,12 @@ async fn ws_client_loop(
                 {
                     let rooms = state.joined_rooms.read().await;
                     let rosters = state.inbox_rosters.read().await;
+                    let doors = state.doors.read().await;
                     for room in rooms.iter() {
                         let join_msg = serde_json::to_string(&ClientMsg::Join {
                             room: room.clone(),
                             inbox_roster: rosters.get(room).cloned(),
+                            door_proof: doors.get(room).and_then(|d| door_proof(&session, room, &d.0)),
                         })
                             .unwrap_or_default();
                         let _ = bounded_send(&mut ws_write, Message::Text(join_msg.into())).await;
@@ -509,7 +575,7 @@ async fn ws_client_loop(
                 {
                     let cmds: Vec<WsCommand> = pending_commands.drain(..).collect();
                     for cmd in cmds {
-                        if !send_command(&mut ws_write, &cmd).await {
+                        if !send_with_doors(&mut ws_write, &cmd, &state, &session).await {
                             hollow_log!("[HOLLOW-WS] Replay failed — connection dead again");
                             pending_commands.push(cmd);
                             break;
@@ -646,7 +712,7 @@ async fn ws_client_loop(
                                 hollow_log!("[HOLLOW-WS] Command channel closed — shutting down WS client task");
                                 break 'reconnect;
                             };
-                            if !send_command(&mut ws_write, &cmd).await {
+                            if !send_with_doors(&mut ws_write, &cmd, &state, &session).await {
                                 hollow_log!("[HOLLOW-WS] Send failed — connection dead, reconnecting");
                                 pending_commands.push(cmd);
                                 break;
@@ -857,6 +923,20 @@ pub(crate) async fn connect_and_auth(
     license_key: Option<&str>,
     fetch: bool,
 ) -> Result<WsStream, ConnectError> {
+    connect_and_auth_session(url, peer_id, keypair_proto, pub_key_b64, license_key, fetch)
+        .await
+        .map(|(stream, _)| stream)
+}
+
+/// [`connect_and_auth`], with what the socket's door proofs are made for.
+async fn connect_and_auth_session(
+    url: &str,
+    peer_id: &str,
+    keypair_proto: &[u8],
+    pub_key_b64: &str,
+    license_key: Option<&str>,
+    fetch: bool,
+) -> Result<(WsStream, RelaySession), ConnectError> {
     let domain = relay_auth_domain(url).ok_or_else(|| format!("Bad relay URL: {url}"))?;
 
     let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
@@ -869,8 +949,8 @@ pub(crate) async fn connect_and_auth(
     bounded_send(&mut write, Message::Text(hello.into()))
         .await
         .map_err(|e| format!("Failed to ask for a challenge: {e}"))?;
-    let nonce = match read_auth_reply(&mut read).await? {
-        (ServerMsg::AuthChallenge { nonce }, _) if is_auth_nonce(&nonce) => nonce,
+    let (nonce, door_key) = match read_auth_reply(&mut read).await? {
+        (ServerMsg::AuthChallenge { nonce, door_key }, _) if is_auth_nonce(&nonce) => (nonce, door_key),
         // A relay older than 0.12 answers the hello as a bad auth frame.
         (ServerMsg::AuthFailed { .. }, _) => {
             return Err("The relay offers no auth challenge (it needs updating)".to_string().into());
@@ -890,6 +970,12 @@ pub(crate) async fn connect_and_auth(
     let sig_bytes = keypair.sign(sign_payload.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_bytes);
 
+    let session = RelaySession {
+        domain: domain.clone(),
+        nonce: nonce.clone(),
+        peer_id: peer_id.to_string(),
+        door_key,
+    };
     let auth = ClientMsg::Auth {
         v: 2,
         peer_id: peer_id.to_string(),
@@ -907,7 +993,7 @@ pub(crate) async fn connect_and_auth(
         .map_err(|e| format!("Failed to send auth: {e}"))?;
 
     match read_auth_reply(&mut read).await? {
-        (ServerMsg::AuthOk, _) => Ok(read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?),
+        (ServerMsg::AuthOk, _) => Ok((read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?, session)),
         (ServerMsg::AuthFailed { error }, _) => Err(match LicenseRefusal::from_code(&error) {
             Some(refusal) => ConnectError::License(refusal),
             None => ConnectError::Other(error),
@@ -932,6 +1018,44 @@ async fn bounded_send(write: &mut WsSink, msg: Message) -> Result<(), String> {
             "write timed out after {}s — connection wedged",
             WRITE_TIMEOUT.as_secs()
         )),
+    }
+}
+
+/// The relay's join frame for `room`, proving its door when we hold one.
+async fn join_text(state: &WsClientState, session: &RelaySession, room: &str) -> Option<String> {
+    let door_proof = state.doors.read().await.get(room).and_then(|d| door_proof(session, room, &d.0));
+    serde_json::to_string(&ClientMsg::Join { room: room.to_string(), inbox_roster: None, door_proof }).ok()
+}
+
+/// [`send_command`], with a door proof on every join of a room we hold the door of. A
+/// new door for a room we are in is proved at once by joining it again.
+async fn send_with_doors(write: &mut WsSink, cmd: &WsCommand, state: &WsClientState, session: &RelaySession) -> bool {
+    let room = match cmd {
+        WsCommand::JoinRoom { room_code } => room_code,
+        WsCommand::SetDoor { room_code, door } => {
+            if !remember_door(state, room_code, door.clone()).await || door.is_none()
+                || !state.joined_rooms.read().await.contains(room_code)
+            {
+                return true;
+            }
+            room_code
+        }
+        _ => return send_command(write, cmd).await,
+    };
+    let Some(text) = join_text(state, session, room).await else { return true };
+    if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
+        hollow_log!("[HOLLOW-WS] Join send failed: {e}");
+        return false;
+    }
+    true
+}
+
+/// Keep (or forget) the door of `room`; whether it changed.
+async fn remember_door(state: &WsClientState, room: &str, door: Option<DoorSecret>) -> bool {
+    let mut doors = state.doors.write().await;
+    match door {
+        Some(door) => doors.insert(room.to_string(), door.clone()).is_none_or(|old| *old.0 != *door.0),
+        None => doors.remove(room).is_some(),
     }
 }
 
@@ -1182,10 +1306,10 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::SendToRoom { room_code, data } => {
+        WsCommand::SendToRoom { room_code, data } | WsCommand::SendPublic { room_code, data } => {
             let room = room_code.as_bytes();
             let mut frame = Vec::with_capacity(1 + room.len() + 1 + data.len());
-            frame.push(0x03);
+            frame.push(if matches!(cmd, WsCommand::SendPublic { .. }) { 0x0A } else { 0x03 });
             frame.extend_from_slice(room);
             frame.push(0x00);
             frame.extend_from_slice(data);
@@ -1285,16 +1409,11 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
     }
 
     let json = match cmd {
-        WsCommand::JoinRoom { room_code } => {
-            serde_json::to_string(&ClientMsg::Join {
-                room: room_code.clone(),
-                inbox_roster: None,
-            })
-        }
         WsCommand::JoinInbox { room_code, roster } => {
             serde_json::to_string(&ClientMsg::Join {
                 room: room_code.clone(),
                 inbox_roster: Some(roster.clone()),
+                door_proof: None,
             })
         }
         WsCommand::LeaveRoom { room_code } => {
@@ -1357,6 +1476,11 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
             *state.offline_optin.write().await = Some((*enabled, *retention_secs));
             return;
         }
+        WsCommand::SetDoor { room_code, door } => {
+            // Sent while disconnected: the reconnect replay proves it.
+            remember_door(state, room_code, door.clone()).await;
+            return;
+        }
         _ => return,
     };
     let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: count, limit: ROOM_BUDGET_LIMIT });
@@ -1387,8 +1511,10 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             hollow_log!("[HOLLOW-WS] Peer left {room}: {peer_id}");
             WsEvent::PeerLeft { room, peer_id }
         }
-        ServerMsg::Members { room, peers } => {
+        ServerMsg::Members { room, peers, proved } => {
             hollow_log!("[HOLLOW-WS] Room {room} members: {} peers", peers.len());
+            // An open room hides nobody: every roster says where we stand.
+            let _ = event_tx.send(WsEvent::DoorStatus { room: room.clone(), proved: proved.unwrap_or(true) });
             WsEvent::RoomMembers { room, peers }
         }
         ServerMsg::PeerStatus { online, active_rooms } => {
@@ -1606,11 +1732,35 @@ mod tests {
 
     #[test]
     fn test_join_message_format() {
-        let msg = ClientMsg::Join { room: "server123".into(), inbox_roster: None };
+        let msg = ClientMsg::Join { room: "server123".into(), inbox_roster: None, door_proof: None };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains("\"room\":\"server123\""));
         assert!(!json.contains("inbox_roster"), "a plain join carries no roster");
+        assert!(!json.contains("door_proof"), "nor a door it does not hold");
+    }
+
+    /// A door proof, pinned against the relay's copy in relay-uws/test/test_door_room.cpp
+    /// and computed a third time outside both: the socket's challenge, the peer, the
+    /// room, the door and the relay's key are all under the HMAC.
+    #[test]
+    fn door_proof_matches_the_relays_pinned_vector() {
+        let relay_key = super::super::sealed_box::key_to_text(&super::super::sealed_box::public_of(&[0x22; 32]));
+        assert_eq!(relay_key, "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA");
+        let session = RelaySession {
+            domain: "relay.example.org".into(),
+            nonce: "0123456789abcdef".repeat(4),
+            peer_id: "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5".into(),
+            door_key: relay_key,
+        };
+        let room = "8ef8bc89d3891dca86ff72c6783e396351aed5ba";
+        assert_eq!(door_proof(&session, room, &[0x11; 32]).as_deref(), Some("iyHv-DBusf2SG9eXxTNOd1-VpXZM77eeFbZbz9Su9Lo"));
+        assert_ne!(door_proof(&session, "00112233445566778899aabbccddeeff00112233", &[0x11; 32]), door_proof(&session, room, &[0x11; 32]));
+        assert_ne!(door_proof(&session, room, &[0x33; 32]), door_proof(&session, room, &[0x11; 32]));
+        let low_order = RelaySession { door_key: "A".repeat(43), ..session.clone() };
+        assert_eq!(door_proof(&low_order, room, &[0x11; 32]), None, "a low-order relay key gets no proof");
+        let none = RelaySession { door_key: String::new(), ..session };
+        assert_eq!(door_proof(&none, room, &[0x11; 32]), None, "a relay without door rooms gets none");
     }
 
     /// The inbox join carries the roster the relay folds before it lets a device read
@@ -1620,7 +1770,7 @@ mod tests {
         let k = |t: u8| crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[t; 32]);
         let roster = crate::identity::roster::Roster::genesis(&k(0x7a), &k(0x7b), &k(0x7c), 1_000);
         let room = format!("inbox:{}", roster.master);
-        let msg = ClientMsg::Join { room: room.clone(), inbox_roster: Some(roster) };
+        let msg = ClientMsg::Join { room: room.clone(), inbox_roster: Some(roster), door_proof: None };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains(&format!("\"room\":\"{room}\"")));
@@ -1664,12 +1814,15 @@ mod tests {
         let json = r#"{"type":"members","room":"server1","peers":["peer_a","peer_b"]}"#;
         let msg: ServerMsg = serde_json::from_str(json).unwrap();
         match msg {
-            ServerMsg::Members { room, peers } => {
+            ServerMsg::Members { room, peers, proved } => {
                 assert_eq!(room, "server1");
                 assert_eq!(peers.len(), 2);
+                assert_eq!(proved, None, "an open room says nothing of doors");
             }
             _ => panic!("Wrong variant"),
         }
+        let locked = r#"{"type":"members","room":"s","peers":["me"],"proved":false}"#;
+        assert!(matches!(serde_json::from_str(locked).unwrap(), ServerMsg::Members { proved: Some(false), .. }));
     }
 
     #[test]

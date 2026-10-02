@@ -111,8 +111,44 @@ static std::string to_lowercase(std::string_view s) {
     return result;
 }
 
-static bool receives_in_room(const WsRoom& room, const std::string& room_name,
-                             const std::string& receiver);
+static bool is_inbox_room(const std::string& room);
+
+static int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// The newest join lock of a self-certifying server room, or null: a room with one is
+// door-locked (door_room.h). A legacy id's chain is kept per owner, which a room
+// name does not say, so a legacy room stays open.
+static const LockLink* room_lock(const RelayState& state, const std::string& room) {
+    if (!join_lock::is_genesis_id(room)) return nullptr;
+    auto it = state.join_locks.records.find(room);
+    return it == state.join_locks.records.end() || it->second.empty() ? nullptr : &it->second.back();
+}
+
+// Who in one room sees it (the roster, presence, broadcasts and rings) and whom a
+// direct may reach. An inbox shows its owners only, to each other and to nobody
+// else; a door-locked server room shows its provers only, but a direct still reaches
+// anyone in it, because a member chooses whom to address.
+struct Audience {
+    const WsRoom& room;
+    bool inbox = false;
+    bool locked = false;
+    int64_t now_ms = 0;
+
+    bool sees(const std::string& peer) const {
+        if (inbox) return room.owners.count(peer) != 0;
+        return !locked || room.doors.sees(peer, now_ms);
+    }
+
+    bool reachable(const std::string& peer) const { return !inbox || room.owners.count(peer) != 0; }
+};
+
+static Audience audience(const RelayState& state, const WsRoom& room, const std::string& name) {
+    return Audience{room, is_inbox_room(name), room_lock(state, name) != nullptr, steady_ms()};
+}
 
 // "Is `x` in one of the same rooms as `caller`" is the only relationship the
 // relay can verify between two peers, so it is what gates the answers one peer
@@ -132,11 +168,12 @@ static std::unordered_set<std::string> collect_room_co_members(
     for (const auto& room : it->second) {
         auto rit = state.ws_rooms.find(room);
         if (rit == state.ws_rooms.end()) continue;
-        // An inbox makes only its owners co-members of each other.
-        if (!receives_in_room(rit->second, room, caller)) continue;
+        // An inbox makes only its owners co-members of each other, a locked room its provers.
+        const Audience aud = audience(state, rit->second, room);
+        if (!aud.sees(caller)) continue;
         for (const auto& [pid, sock] : rit->second.peers) {
             (void)sock;
-            if (!receives_in_room(rit->second, room, pid)) continue;
+            if (!aud.sees(pid)) continue;
             if (budget == 0) return members;
             budget--;
             members.insert(pid);
@@ -197,12 +234,13 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
 static constexpr bool ACCEPT_AUTH_V1 = true;
 
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
-// minted once per socket; asking again gets the same one.
-static void handle_auth_hello(SSLWebSocket* ws, PerSocketData* data) {
+// minted once per socket; asking again gets the same one. `door_key` is what this
+// socket's door proofs are made for.
+static void handle_auth_hello(SSLWebSocket* ws, PerSocketData* data, const RelayState& state) {
     if (data->auth_nonce.empty()) {
         data->auth_nonce = random_hex(AUTH_NONCE_HEX_LEN / 2);
     }
-    send_json(ws, {{"type", "auth_challenge"}, {"nonce", data->auth_nonce}});
+    send_json(ws, {{"type", "auth_challenge"}, {"nonce", data->auth_nonce}, {"door_key", state.door_key.text}});
 }
 
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
@@ -210,7 +248,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
                          const Config& config) {
     // Neither parser throws: these frames come from anyone on the internet.
     if (is_auth_hello(message)) {
-        handle_auth_hello(ws, data);
+        handle_auth_hello(ws, data, state);
         return;
     }
     std::optional<AuthFrame> frame = parse_auth_frame(message);
@@ -286,13 +324,15 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         ws->end(1008, "bad_auth");
         return;
     }
-    // One challenge, one attempt.
+    // One challenge, one attempt; door proofs stay bound to the one that logged in.
+    const std::string challenge = frame->version == 2 ? data->auth_nonce : std::string();
     data->auth_nonce.clear();
     if (!verify_ed25519(public_key, signature, signed_msg)) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
         ws->end(1008, "bad_auth");
         return;
     }
+    data->door_nonce = challenge;
 
     // The three license outcomes below are distinguishable to the caller, which
     // makes this a validity oracle for a license key. That is an ACCEPTED,
@@ -577,18 +617,9 @@ static bool inbox_owner_proved(PerSocketData* data, const std::string& room,
     return owns;
 }
 
-// An inbox room shows its owners (the devices that proved they belong to its
-// master) to each other and to nobody else: a stranger with a request pending
-// learns neither which devices a person has nor when they are online, and the
-// owner learns nothing of the other people asking. Only owners receive frames
-// there; a deposit for the master reaches them live (handle_binary_direct_msg).
-static bool receives_in_room(const WsRoom& room, const std::string& room_name,
-                             const std::string& receiver) {
-    return !is_inbox_room(room_name) || room.owners.count(receiver) != 0;
-}
-
 // Owners of `room` that `state` (the held roster's fold) no longer counts lose the
-// inbox at once; the owners left see them go.
+// inbox at once; the owners left see them go. A stranger with a request pending
+// learns neither which devices a person has nor when they are online (Audience).
 static void drop_inbox_owners(RelayState& state, const std::string& room, const roster::State& st) {
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
@@ -600,10 +631,43 @@ static void drop_inbox_owners(RelayState& state, const std::string& room, const 
     for (const auto& peer : gone) {
         r.owners.erase(peer);
         std::string left = json{{"type", "peer_left"}, {"room", room}, {"peer_id", peer}}.dump();
+        const Audience aud = audience(state, r, room);
         for (auto& [pid, sock] : r.peers) {
-            if (pid != peer && !sock->getUserData()->is_guest && receives_in_room(r, room, pid)) {
+            if (pid != peer && !sock->getUserData()->is_guest && aud.sees(pid)) {
                 send_to_peer(sock, left, uWS::OpCode::TEXT);
             }
+        }
+    }
+}
+
+// Whether `proof` opens `door` for this socket in `room`. A socket that never asked
+// for a challenge (a 0.11 login) has no nonce to bind a proof to.
+static bool door_opens(const RelayState& state, const PerSocketData* data, const std::string& room,
+                       const std::string& door, const std::string& proof) {
+    if (data->door_nonce.empty() || proof.size() != door_room::PROOF_TEXT_LEN) return false;
+    const std::string msg =
+        door_room::proof_message(state.door_domain, data->door_nonce, data->peer_id, room, door, state.door_key.text);
+    return door_proof_opens(state.door_key, door, msg, proof);
+}
+
+// The room as `peer` sees it now that it sees it: the visible peers, itself last.
+static std::vector<std::string> roster_for(const WsRoom& room, const Audience& aud, const std::string& peer) {
+    std::vector<std::string> out;
+    for (const auto& [pid, sock] : room.peers) {
+        const auto* pd = sock->getUserData();
+        if (pid != peer && !pd->is_guest && !pd->is_fetch && aud.sees(pid)) out.push_back(pid);
+    }
+    out.push_back(peer);
+    return out;
+}
+
+// `peer` is now seen in `room`, or no longer is: tell the other provers.
+static void announce_door_change(const WsRoom& room, const Audience& aud, const std::string& room_name,
+                                 const std::string& peer, const char* type) {
+    std::string frame = json{{"type", type}, {"room", room_name}, {"peer_id", peer}}.dump();
+    for (const auto& [pid, sock] : room.peers) {
+        if (pid != peer && !sock->getUserData()->is_guest && aud.sees(pid)) {
+            send_to_peer(sock, frame, uWS::OpCode::TEXT);
         }
     }
 }
@@ -625,11 +689,13 @@ static bool inbox_owner_by_roster(PerSocketData* data, const std::string& room,
 }
 
 // `inbox_roster` (0.12) or `inbox_proof` (0.11) may be null: a plain JoinRoom
-// carries neither. They are only consulted for an `inbox:` room.
+// carries neither. They are only consulted for an `inbox:` room, `door_proof`
+// (empty = none) only for a door-locked server room.
 static void handle_join(SSLWebSocket* ws, PerSocketData* data,
                          const std::string& room, RelayState& state,
                          const json* inbox_proof = nullptr,
-                         const json* inbox_roster = nullptr) {
+                         const json* inbox_roster = nullptr,
+                         const std::string& door_proof = std::string()) {
     if (!is_valid_room_code(room)) {
         send_json(ws, {{"type", "error"}, {"error", "Invalid room code"}});
         return;
@@ -678,13 +744,29 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
                                ws_room.owners.count(data->peer_id) != 0;
     const bool owner = inbox && (already_owner || proved);
 
+    // A door-locked room: only a socket that proves the newest door sees it.
+    const LockLink* lock = room_lock(state, room);
+    const int64_t now_ms = steady_ms();
+    const bool same_socket = held_slot != ws_room.peers.end() && held_slot->second == ws;
+    bool saw_before = false;
+    bool door_ok = true;
+    if (lock) {
+        saw_before = same_socket && ws_room.doors.sees(data->peer_id, now_ms);
+        const std::string proof = data->is_guest ? std::string() : door_proof;
+        const bool opens = !proof.empty() && door_opens(state, data, room, lock->door, proof);
+        door_ok = ws_room.doors.join(data->peer_id, proof, opens, same_socket, now_ms);
+    }
+    const bool visible = (!inbox || owner) && door_ok;
+    const Audience aud = audience(state, ws_room, room);
+
     // Collect existing non-guest peer IDs before adding. In an inbox room a
-    // non-owner sees nobody and an owner sees only the other owners.
+    // non-owner sees nobody and an owner sees only the other owners; in a locked
+    // room the same holds for provers.
     std::vector<std::string> existing_peers;
-    if (!inbox || owner) {
+    if (visible) {
         for (auto& [pid, peer_ws] : ws_room.peers) {
             auto* pd = peer_ws->getUserData();
-            if (!pd->is_guest && !pd->is_fetch && receives_in_room(ws_room, room, pid)) {
+            if (pid != data->peer_id && !pd->is_guest && !pd->is_fetch && aud.sees(pid)) {
                 existing_peers.push_back(pid);
             }
         }
@@ -698,9 +780,11 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // friend handshake's room churn — loops ~10x in seconds. Suppress the
     // broadcast on a redundant join; the joiner still gets its `members` reply
     // below for stale-membership reconciliation.
-    // The device's own fetch socket holding the slot is not presence.
+    // The device's own fetch socket holding the slot is not presence, and neither is
+    // a socket the provers could not see until now.
     auto prev = ws_room.peers.find(data->peer_id);
-    bool already_present = prev != ws_room.peers.end() && !prev->second->getUserData()->is_fetch;
+    bool already_present = prev != ws_room.peers.end() && !prev->second->getUserData()->is_fetch &&
+                           (!lock || saw_before);
 
     // Add peer to room
     ws_room.peers[data->peer_id] = ws;
@@ -723,23 +807,13 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         {"room", room},
         {"peers", all_peers}
     };
+    if (lock) members_msg["proved"] = door_ok;
     send_json(ws, members_msg);
 
     // Notify existing non-guest peers (skip if joiner is a guest or fetch-mode,
     // or if this is a redundant re-join — the peer was already in the room).
-    if (!data->is_guest && !data->is_fetch && !already_present && (!inbox || owner)) {
-        json join_msg = {
-            {"type", "peer_joined"},
-            {"room", room},
-            {"peer_id", data->peer_id}
-        };
-        std::string join_str = join_msg.dump();
-        for (auto& [pid, peer_ws] : ws_room.peers) {
-            if (pid != data->peer_id && !peer_ws->getUserData()->is_guest &&
-                receives_in_room(ws_room, room, pid)) {
-                send_to_peer(peer_ws, join_str, uWS::OpCode::TEXT);
-            }
-        }
+    if (!data->is_guest && !data->is_fetch && !already_present && visible) {
+        announce_door_change(ws_room, aud, room, data->peer_id, "peer_joined");
     }
 
     // Full-app join: reset the channel-push offline cap for this room — the
@@ -791,10 +865,11 @@ static void leave_room(RelayState& state, const std::string& peer_id,
 
     // Check visibility BEFORE erasing from room
     bool leaving_peer_invisible = is_invisible_in_room(state, peer_id, room) ||
-                                  !receives_in_room(rit->second, room, peer_id);
+                                  !audience(state, rit->second, room).sees(peer_id);
 
     rit->second.peers.erase(peer_id);
     rit->second.owners.erase(peer_id);
+    rit->second.doors.leave(peer_id);
 
     bool should_notify = !rit->second.peers.empty();
 
@@ -817,19 +892,9 @@ static void leave_room(RelayState& state, const std::string& peer_id,
         // broadcasts peer_joined and refreshes the members snapshot.
         if (g_diag) g_diag->ghost_left_suppressed++;
     } else if (should_notify && !leaving_peer_invisible) {
-        json leave_msg = {
-            {"type", "peer_left"},
-            {"room", room},
-            {"peer_id", peer_id}
-        };
-        std::string leave_str = leave_msg.dump();
         auto rit2 = state.ws_rooms.find(room);
         if (rit2 != state.ws_rooms.end()) {
-            for (auto& [pid, peer_ws] : rit2->second.peers) {
-                if (!peer_ws->getUserData()->is_guest && receives_in_room(rit2->second, room, pid)) {
-                    send_to_peer(peer_ws, leave_str, uWS::OpCode::TEXT);
-                }
-            }
+            announce_door_change(rit2->second, audience(state, rit2->second, room), room, peer_id, "peer_left");
         }
     }
 }
@@ -1159,6 +1224,28 @@ void sweep_kill_list(RelayState& state) {
     state.kill_list.sweep(std::chrono::steady_clock::now());
 }
 
+void sweep_door_grace(RelayState& state) {
+    const int64_t now_ms = steady_ms();
+    for (auto it = state.door_grace_rooms.begin(); it != state.door_grace_rooms.end();) {
+        auto rit = state.ws_rooms.find(*it);
+        if (rit == state.ws_rooms.end()) {
+            it = state.door_grace_rooms.erase(it);
+            continue;
+        }
+        const std::string& room = rit->first;
+        WsRoom& r = rit->second;
+        const Audience aud = audience(state, r, room);
+        // A lock gone from the relay leaves the room open: nobody to hide anyone from.
+        for (const auto& peer : r.doors.expire(now_ms)) {
+            auto pit = r.peers.find(peer);
+            if (!aud.locked || pit == r.peers.end()) continue;
+            announce_door_change(r, aud, room, peer, "peer_left");
+            send_json(pit->second, {{"type", "members"}, {"room", room}, {"peers", json::array({peer})}, {"proved", false}});
+        }
+        it = r.doors.in_grace() ? std::next(it) : state.door_grace_rooms.erase(it);
+    }
+}
+
 // Muted DM senders ride the reserved `~dm` server-pref entry (sender device
 // id -> "nothing"), so the snapshot codec and set_push_prefs stay unchanged.
 static const char* DM_MUTE_PREF_KEY = "~dm";
@@ -1357,6 +1444,33 @@ static void handle_lock_get(SSLWebSocket* ws, PerSocketData* data, const json& j
     }
 }
 
+// The newest door of `room` changed, or the room just became locked. A socket whose
+// stored proof opens the new door proves at once; everyone else who could see keeps
+// seeing for the grace, so the op handing out the new door still reaches them.
+static void relock_room(RelayState& state, const std::string& room, bool was_locked) {
+    auto rit = state.ws_rooms.find(room);
+    const LockLink* lock = room_lock(state, room);
+    if (rit == state.ws_rooms.end() || !lock) return;
+    WsRoom& r = rit->second;
+    std::vector<std::string> peers;
+    for (const auto& [pid, sock] : r.peers) {
+        const auto* pd = sock->getUserData();
+        if (!pd->is_guest && !pd->is_fetch) peers.push_back(pid);
+    }
+    const std::string door = lock->door;
+    auto opens = [&](const std::string& peer, const std::string& proof) {
+        auto pit = r.peers.find(peer);
+        return pit != r.peers.end() && door_opens(state, pit->second->getUserData(), room, door, proof);
+    };
+    auto newly = r.doors.relock(peers, was_locked, opens, steady_ms());
+    if (r.doors.in_grace()) state.door_grace_rooms.insert(room);
+    const Audience aud = audience(state, r, room);
+    for (const auto& peer : newly) {
+        send_json(r.peers[peer], {{"type", "members"}, {"room", room}, {"peers", roster_for(r, aud, peer)}, {"proved", true}});
+        announce_door_change(r, aud, room, peer, "peer_joined");
+    }
+}
+
 // Offer a chain, or the next links of one. The relay takes it only by the rules in
 // join_lock.h, charged to this socket's address share, and answers with the chain
 // it holds either way.
@@ -1369,8 +1483,12 @@ static void handle_lock_put(SSLWebSocket* ws, PerSocketData* data, const json& j
     if (links_it == j.end()) return;
     auto links = join_lock::links_from_json(*links_it);
     if (!links) return;
+    const LockLink* before = room_lock(state, server);
+    const std::string old_door = before ? before->door : std::string();
     std::vector<LockLink> current;
     bool accepted = state.join_locks.put(server, owner, *links, lock_crypto(), current, socket_share(state, data));
+    const LockLink* after = room_lock(state, server);
+    if (after && (!before || after->door != old_door)) relock_room(state, server, before != nullptr);
     send_json(ws, {{"type", "lock_chain"},
                    {"server", server},
                    {"owner", owner},
@@ -1586,6 +1704,8 @@ static void handle_topic_catchup(SSLWebSocket* ws, PerSocketData* data,
     if (room.empty() || channel.empty()) return;
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
+    // A ring names who wrote what, when: only for those who see the room.
+    if (!audience(state, rit->second, room).sees(data->peer_id)) return;
     std::string key = room;
     key.push_back('\0');
     key += channel;
@@ -1711,7 +1831,9 @@ static void handle_binary_channel_direct(PerSocketData* data,
     // the auth→join race (and the ghost-socket window after a hard quit):
     // "connected" per peer_sockets does NOT mean the member received the room
     // broadcast, and the old full-return here silently dropped the copy.
-    bool in_room = rit->second.peers.find(target_str) != rit->second.peers.end();
+    // A member hidden by a locked room missed the broadcast too.
+    bool in_room = rit->second.peers.find(target_str) != rit->second.peers.end() &&
+                   audience(state, rit->second, room_str).sees(target_str);
     bool fully_offline = state.peer_sockets.find(target_str) == state.peer_sockets.end();
     if (in_room) return;
 
@@ -1750,8 +1872,9 @@ static void handle_msg(PerSocketData* data, const std::string& room,
         {"data", msg_data}
     };
     std::string broadcast_str = broadcast.dump();
+    const Audience aud = audience(state, rit->second, room);
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id && receives_in_room(rit->second, room, pid)) {
+        if (pid != data->peer_id && aud.sees(pid)) {
             send_to_peer(peer_ws, broadcast_str, uWS::OpCode::TEXT);
         }
     }
@@ -1775,7 +1898,7 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     }
 
     auto tit = rit->second.peers.find(target);
-    if (tit != rit->second.peers.end() && !receives_in_room(rit->second, room, target)) return;
+    if (tit != rit->second.peers.end() && !audience(state, rit->second, room).reachable(target)) return;
     if (tit == rit->second.peers.end()) {
         // Target not in THIS room. Buffer either way (replays on join); only
         // push when fully offline. A connected-but-not-yet-joined target hits a
@@ -1852,7 +1975,7 @@ static void handle_binary_direct(PerSocketData* data,
     if (!is_peer_id_shape(target_str)) return;
     auto tit = rit->second.peers.find(target_str);
     if (tit == rit->second.peers.end()) return;
-    if (!receives_in_room(rit->second, room_str, target_str)) return;
+    if (!audience(state, rit->second, room_str).reachable(target_str)) return;
 
     // Build forwarded frame: replace target with sender
     std::string forwarded;
@@ -1867,9 +1990,12 @@ static void handle_binary_direct(PerSocketData* data,
     send_to_peer(tit->second, forwarded, uWS::OpCode::BINARY);
 }
 
+// 0x03 reaches whoever sees the room; 0x0A (`to_all`) is a public frame, which a
+// prover's send also hands to everyone a locked room hides (guests reading public
+// channels). Both arrive as 0x05.
 static void handle_binary_msg(PerSocketData* data,
-                               std::string_view raw, RelayState& state) {
-    // Parse: [0x03][room\0][payload]
+                               std::string_view raw, RelayState& state, bool to_all = false) {
+    // Parse: [0x03 or 0x0A][room\0][payload]
     if (raw.size() < 3) return;
 
     auto room_nul = raw.find('\0', 1);
@@ -1897,8 +2023,10 @@ static void handle_binary_msg(PerSocketData* data,
     forwarded.push_back(0x00);
     forwarded.append(payload);
 
+    const Audience aud = audience(state, rit->second, room_str);
+    const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id && receives_in_room(rit->second, room_str, pid)) {
+        if (pid != data->peer_id && (public_frame || aud.sees(pid))) {
             send_to_peer(peer_ws, forwarded, uWS::OpCode::BINARY);
         }
     }
@@ -2003,7 +2131,7 @@ static void handle_binary_direct_msg(PerSocketData* data,
         }
         return;
     }
-    if (!receives_in_room(rit->second, room_str, target_str)) return;
+    if (!audience(state, rit->second, room_str).reachable(target_str)) return;
 
     if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
         state.diag.fwd_delivered++;
@@ -2108,9 +2236,10 @@ static void handle_binary_topic_msg(PerSocketData* data,
         }
     }
 
+    const Audience aud = audience(state, rit->second, room_str);
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid == data->peer_id) continue;
-        if (!receives_in_room(rit->second, room_str, pid)) continue;
+        if (!aud.sees(pid)) continue;
 
         auto* peer_data = peer_ws->getUserData();
         auto sit = peer_data->subscriptions.find(room_str);
@@ -2493,7 +2622,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         auto rit = j.find("inbox_roster");
         const json* inbox_roster =
             (rit != j.end() && rit->is_object()) ? &(*rit) : nullptr;
-        handle_join(ws, data, j.value("room", ""), state, inbox_proof, inbox_roster);
+        handle_join(ws, data, j.value("room", ""), state, inbox_proof, inbox_roster, json_text(j, "door_proof"));
     } else if (type == "leave") {
         // Only this socket's own slot: a fetch socket's leave must not unjoin the
         // device's full node.
@@ -2570,11 +2699,11 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
             // room says when that phone was woken.
             if (rit != state.ws_rooms.end() &&
                 rit->second.peers.count(data->peer_id)) {
-                const bool sees = receives_in_room(rit->second, room, data->peer_id);
+                const Audience aud = audience(state, rit->second, room);
+                const bool sees = aud.sees(data->peer_id);
                 for (const auto& [pid, sock] : rit->second.peers) {
                     const auto* pd = sock->getUserData();
-                    if (sees && pid != data->peer_id && !pd->is_guest && !pd->is_fetch &&
-                        receives_in_room(rit->second, room, pid)) {
+                    if (sees && pid != data->peer_id && !pd->is_guest && !pd->is_fetch && aud.sees(pid)) {
                         peers.push_back(pid);
                     }
                 }
@@ -2734,6 +2863,8 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
     g_diag = &state.diag;
     g_forwarder_peer_id = config.forwarder_peer_id;
+    door_key_mint(state.door_key);
+    state.door_domain = auth_domain(config.domain);
     app.ws<PerSocketData>("/ws", {
         .compression = uWS::DISABLED,
         .maxPayloadLength = 64 * 1024 * 1024,
@@ -2826,7 +2957,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                         // No SendDirect and no channel topic for guests: the web
                         // viewer only reads, and 0x07 feeds the catch-up rings.
                         if (opcode == 0x04 || opcode == 0x07 || opcode == 0x08 || opcode == 0x09) return;
-                        if (opcode == 0x03) {
+                        if (opcode == 0x03 || opcode == 0x0A) {
                             auto now = std::chrono::steady_clock::now();
                             if ((now - data->minute_window_start) > std::chrono::seconds(60)) {
                                 data->binary_frames_this_minute = 0;
@@ -2848,6 +2979,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                             break;
                         case 0x03:
                             handle_binary_msg(data, message, state);
+                            break;
+                        case 0x0A:
+                            handle_binary_msg(data, message, state, /*to_all=*/true);
                             break;
                         case 0x04:
                             handle_binary_direct_msg(data, message, state);

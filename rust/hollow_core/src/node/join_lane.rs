@@ -135,6 +135,14 @@ pub(crate) fn send_request(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &st
     true
 }
 
+/// Send our join request to every member who sees the server's room: a joiner the
+/// relay hides there sees none of them. `false` when it cannot be sealed yet.
+pub(crate) fn send_request_to_room(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &str, pending: &PendingJoin) -> bool {
+    let Some(data) = request_frame(server_id, our_device, pending, false) else { return false };
+    let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: server_id.to_string(), data });
+    true
+}
+
 /// What a join box from `from` in `room` holds, opened with the invite key and a door
 /// secret of number `n`: a request with its reply key, or a members' resolution, for
 /// this server. `None` otherwise.

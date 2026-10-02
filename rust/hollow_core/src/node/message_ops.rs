@@ -1096,7 +1096,7 @@ pub(crate) fn send_public_channel_msg(
     msg: &HavenMessage,
 ) -> Option<Vec<u8>> {
     let data = serde_json::to_vec(msg).ok()?;
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendPublic {
         room_code: server.server_id.clone(),
         data: data.clone(),
     });

@@ -8,6 +8,8 @@
 #include <cstdint>
 
 #include <App.h>
+#include "crypto.h"
+#include "door_room.h"
 #include "join_lock.h"
 #include "kill_list.h"
 #include "license.h"
@@ -154,6 +156,9 @@ struct PerSocketData {
     // The auth v2 challenge this socket was handed; empty until it asks. One per
     // socket, so a signature over it cannot open a second connection.
     std::string auth_nonce;
+    // The challenge this socket logged in with (auth v2), which its door proofs
+    // (door_room.h) are bound to; `auth_nonce` is spent by the login.
+    std::string door_nonce;
     // A fetch socket's rooms, kept apart from `RelayState::peer_rooms`: that set
     // belongs to the device's full socket, whose auth resets it, and a fetch slot
     // it forgot would outlive the fetch socket.
@@ -185,6 +190,8 @@ struct WsRoom {
     // In an `inbox:{master}` room, the peers that proved on join that they are
     // devices of that master. Empty in every other room.
     std::unordered_set<std::string> owners;
+    // In a server room with a join lock here, who proved its newest door.
+    door_room::Doors doors;
 };
 
 struct IpState {
@@ -395,6 +402,12 @@ struct RelayState {
     KillList kill_list;
     // Join lock chains (join_lock.h): public halves only, re-checked by every reader.
     JoinLocks join_locks;
+    // What a door proof is made for (door_room.h): this process's key, and the domain
+    // auth v2 binds.
+    DoorKey door_key;
+    std::string door_domain;
+    // Rooms with a prover in its grace, for sweep_door_grace.
+    std::unordered_set<std::string> door_grace_rooms;
 
     // Highest device-list version this relay has seen verify for each master
     // (RELAY-6). A revoked device keeps its last master-signed list forever and

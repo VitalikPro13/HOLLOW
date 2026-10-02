@@ -111,8 +111,17 @@ impl JoinLockState {
 
     /// The newest door we hold: its number, public half and secret.
     pub fn newest_door(&self) -> Option<(u64, [u8; 32], Zeroizing<[u8; 32]>)> {
-        let (public, door) = self.doors.iter().max_by(|a, b| a.1.n.cmp(&b.1.n).then_with(|| b.0.cmp(a.0)))?;
+        let (public, door) = self.newest()?;
         Some((door.n, crate::node::sealed_box::key_from_text(public)?, secret_bytes(&door.secret)?))
+    }
+
+    /// [`Self::newest_door`]'s number and public half as text, decoding nothing.
+    pub fn newest_door_id(&self) -> Option<(u64, &str)> {
+        self.newest().map(|(public, door)| (door.n, public.as_str()))
+    }
+
+    fn newest(&self) -> Option<(&String, &Door)> {
+        self.doors.iter().max_by(|a, b| a.1.n.cmp(&b.1.n).then_with(|| b.0.cmp(a.0)))
     }
 
     /// Every door secret with number `n` (a fork can hold two).

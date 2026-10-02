@@ -70,6 +70,27 @@ Binary name: `hollow-relay`
   `ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`,
   `ACCEPT_DEVICE_LIST_INBOX_PROOF`.
 
+## Door-proof server rooms (design D1, 2026-10-02, HOL-SEC-091)
+
+- **Locked room** = a 40-hex server id with a join lock record (`room_lock`). Legacy rooms,
+  meetings, DM and inbox rooms are unchanged.
+- **Proof**: `RelayState::door_key` (X25519, minted at start, RAM only) rides
+  `auth_challenge.door_key`; a join's `door_proof` is checked by `door_opens` against the
+  newest link's door, bound to `PerSocketData::door_nonce` (the challenge the socket logged
+  in with; `auth_nonce` is spent at login). Pure rules in `door_room.h`, unit test
+  `test_door_room.cpp` (pinned vector shared with Rust).
+- **`Audience`** (`audience()`): `sees` = inbox owners / locked-room provers / everyone;
+  `reachable` (directs) = inbox owners / everyone. Every fan-out, discover, check_peers,
+  0x09 in-room test and topic catch-up uses it.
+- **0x0A** = public broadcast, delivered as 0x05; a prover's reaches hidden sockets too.
+- **Lock move** (`relock_room` from `handle_lock_put`): who saw keeps it for
+  `door_room::GRACE_MS` (60 s); a stored proof that opens the new door (a lock put back)
+  proves at once. `sweep_door_grace` (5 s timer) ends graces: peer_left to provers,
+  `members [self] proved:false` to the demoted socket.
+- No new state in the snapshot: proofs die with the socket, the key with the process.
+- Live probe: `~/relay-next/door_probe.py [url] [domain]` (24 checks; mind the 10 new
+  connections per minute per address when chaining probes).
+
 ## config.h — Configuration
 
 ### Config struct

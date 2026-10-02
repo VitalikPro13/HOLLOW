@@ -20,6 +20,10 @@ void restore_registration(RelayState& state, const std::string& peer, uint64_t s
 // timer loop.
 void sweep_kill_list(RelayState& state);
 
+// End the grace of every door-locked room's provers who did not prove the new door
+// in time (door_room.h): the others see them leave. Called from main's timer loop.
+void sweep_door_grace(RelayState& state);
+
 // Release multi-device link codes whose 5-minute TTL has elapsed (server-side
 // backstop; the live countdown is client-side). Called from main's timer loop.
 void sweep_link_codes(RelayState& state);

@@ -2770,7 +2770,7 @@ pub(crate) async fn stream_to_peer(
         return;
     }
     // Fallback: WSS relay binary streaming.
-    if let Some(room) = ws_room_for_peer(ws_room_peers, peer_str) {
+    if let Some(room) = super::crypto_handler::send_room_for_peer(ws_room_peers, peer_str) {
         ws_stream_transfer::ws_stream_send(
             ws_cmd_tx, &room, peer_str, kind, id, source_path, total_size, 0,
         ).await;
@@ -2825,7 +2825,7 @@ pub(crate) async fn stream_to_peer_bytes(
         hollow_log!("[HOLLOW-WEBRTC] Routing {id} to {peer_str} via WebRTC data channel (from bytes)");
         return;
     }
-    if let Some(room) = ws_room_for_peer(ws_room_peers, peer_str) {
+    if let Some(room) = super::crypto_handler::send_room_for_peer(ws_room_peers, peer_str) {
         ws_stream_transfer::ws_stream_send_bytes(
             ws_cmd_tx, &room, peer_str, kind, id, data,
         ).await;

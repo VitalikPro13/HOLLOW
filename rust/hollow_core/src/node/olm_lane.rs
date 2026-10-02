@@ -140,7 +140,7 @@ impl<'a> OlmLane<'a> {
     /// place. A device in no room we share, with no `room` pinned, is treated like one
     /// without a session.
     pub(crate) fn deliver(&mut self, device: &str, room: Option<&str>, json: &str, no_session: NoSession) -> Vec<WsCommand> {
-        let online = super::crypto_handler::ws_room_for_peer(self.ws_room_peers, device);
+        let online = super::crypto_handler::send_room_for_peer(self.ws_room_peers, device);
         let room = room.map(str::to_string).or(online.clone());
         if self.olm.has_session(device)
             && let Some(room) = room

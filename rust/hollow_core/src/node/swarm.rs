@@ -527,11 +527,11 @@ pub(crate) async fn spawn_node(
         hex::encode(&proto[..32.min(proto.len())])
     };
 
-    let handle = tokio::spawn(run_event_loop(
+    let handle = tokio::spawn(super::door_room::with_heard_routes(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    ));
+    ))));
 
     // The app's "my peer id" (friendships, display) is the MASTER id.
     Ok((master_peer_id, handle))
@@ -573,11 +573,11 @@ pub(crate) async fn spawn_node_mock(
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let handle = tokio::spawn(run_event_loop(
+    let handle = tokio::spawn(super::door_room::with_heard_routes(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    ));
+    ))));
 
     Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx))
 }
@@ -1040,6 +1040,8 @@ async fn run_event_loop(
     // Our side of every server's join lock (`lock_keeper`), and joins that just
     // completed, whose later answers still merge (`RecentJoin`).
     let mut lock_keeper = super::lock_keeper::LockKeeper::default();
+    // The door each server room's join proves to the relay (`door_room`).
+    let mut door_rooms = super::door_room::DoorRooms::default();
     let mut recent_joins: HashMap<String, RecentJoin> = HashMap::new();
     // "{server_id}|{joiner_device}" -> when we last saw that join request, so the
     // coordinator gate can tell a first ask from the joiner's escalation retry.
@@ -1332,6 +1334,9 @@ async fn run_event_loop(
         if bare_presence.stale() {
             Box::pin(settle_bare_presence(&mut bare_presence, &mut ws_room_peers, &mut synced_peers, &event_tx, &ws_cmd_tx)).await;
         }
+        // A door that just reached our state proves itself to the relay before
+        // anything else goes out.
+        door_rooms.sync(&server_states, &local_peer_str, &ws_cmd_tx);
         tokio::select! {
             Some((carry, done)) = carry_rx.recv() => {
                 if let super::ws_client::WsCommand::Carry { device, room, json, no_session } = carry {
@@ -2664,10 +2669,21 @@ async fn run_event_loop(
                         // answer. Mirrors the emote-rail peer pick.
                         let target = ws_room_peers.get(&server_id).and_then(|peers| {
                             peer_hint
+                                .clone()
                                 .filter(|h| peers.contains(h))
                                 .or_else(|| {
                                     peers.iter().find(|p| *p != &local_peer_str).cloned()
                                 })
+                        });
+                        // A locked room shows a guest nobody: ask a member we heard there,
+                        // the poster first.
+                        let target = target.or_else(|| {
+                            let heard = super::door_room::heard_in(&server_id);
+                            heard
+                                .iter()
+                                .find(|d| peer_hint.as_deref().is_some_and(|h| *d == h || super::resolver::resolve(d) == h))
+                                .or(heard.first())
+                                .cloned()
                         });
                         match target {
                             Some(t) => {
@@ -3019,12 +3035,15 @@ async fn run_event_loop(
 
                     // -- Server join timeout --
                     NodeCommand::CheckPendingJoinTimeout { server_id, only_if_empty } => {
-                        sync_handler::handle_check_pending_join_timeout(
-                            &mut pending_server_joins, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &local_peer_str, &device_peer_id,
-                            server_id, only_if_empty,
-                            &crdt_store,
-                        ).await;
+                        // A room that hides its members from us is not known to be empty.
+                        if !(only_if_empty && door_rooms.is_hidden(&server_id)) {
+                            sync_handler::handle_check_pending_join_timeout(
+                                &mut pending_server_joins, &event_tx, &ws_cmd_tx,
+                                &ws_room_peers, &local_peer_str, &device_peer_id,
+                                server_id, only_if_empty,
+                                &crdt_store,
+                            ).await;
+                        }
                     }
 
                     // -- Gossip relay tree commands --
@@ -3272,6 +3291,7 @@ async fn run_event_loop(
                         // reconnects are the only refresh needed — D5's
                         // fallback ladder corrects any staleness.
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetMediaForwarder);
+                        door_rooms.on_connected();
                         // Phase 2: if we're serving as a peer forwarder, the
                         // relay forgot our fwd room on the reconnect — rejoin
                         // (media legs survive the signaling blip).
@@ -3418,6 +3438,7 @@ async fn run_event_loop(
                         pending_nickname_resolve = None;
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
+                        super::door_room::forget_heard();
                         synced_peers.clear();
                         // A sibling's call is unknown until it re-announces on reconnect.
                         call_book.clear_siblings();
@@ -3917,6 +3938,22 @@ async fn run_event_loop(
                                 }
                             }
                     }
+                    WsEvent::DoorStatus { room, proved } => {
+                        // A hidden member asks the members for the newest door; reading the
+                        // relay's chain now lets us judge the grant that answers it.
+                        if door_rooms.on_status(&room, proved, &server_states, &local_peer_str, &ws_cmd_tx)
+                            && let Some(owner) = server_states.get(&room).and_then(|s| s.anchor_owner())
+                        {
+                            lock_keeper.watch(&room, &owner, &ws_cmd_tx);
+                        }
+                        // A joiner sees nobody in a locked room: its request goes to the room.
+                        if !proved
+                            && let Some(pending) = pending_server_joins.get(&room).filter(|p| !p.asked)
+                            && super::join_lane::send_request_to_room(&ws_cmd_tx, &room, &device_peer_id, pending)
+                        {
+                            hollow_log!("[HOLLOW-CRDT] Sent our join request for {room} to the whole room");
+                        }
+                    }
                     WsEvent::LeftRoom { room } => {
                         // WE left this room: purge its frozen member snapshot from the routing table.
                         // A self-left room receives no further PeerLeft or RoomMembers, so a stale
@@ -4157,10 +4194,15 @@ async fn run_event_loop(
                         // Replayed frames arrive as ordinary topic messages, so verification,
                         // dedup-by-message_id and CRDT merge make this idempotent with peer sync.
                         // Runs even for a room with zero peers: that is exactly the gap it closes.
-                        sync_handler::request_channel_catchups(
-                            &ws_cmd_tx, &crdt_store, server_states.get(&room), &room,
-                            &local_peer, &master_keypair, &mut relay_catchup_done, "connect",
-                        ).await;
+                        // Not while the relay hides us there: it reads no ring to us, and the
+                        // once-per-connection gate must wait for the join that proves our door.
+                        let hidden = door_rooms.is_hidden(&room);
+                        if !hidden {
+                            sync_handler::request_channel_catchups(
+                                &ws_cmd_tx, &crdt_store, server_states.get(&room), &room,
+                                &local_peer, &master_keypair, &mut relay_catchup_done, "connect",
+                            ).await;
+                        }
 
                         // -- The JOIN ring (pending joins, rung 1) --
                         // Read once per connection by BOTH roles: a member collects parked
@@ -4174,6 +4216,7 @@ async fn run_event_loop(
                                 .is_some_and(|s| s.relay_catchup_secs() > 0)
                                 || pending_server_joins.contains_key(&room);
                             if ring_wanted
+                                && !hidden
                                 && relay_catchup_done
                                     .insert((room.clone(), super::types::JOIN_TOPIC.to_string()))
                             {
@@ -4638,6 +4681,7 @@ async fn run_event_loop(
                         // A server we are joining: seal to it, and judge what waited for it.
                         let held = sync_handler::handle_join_lock_chain(
                             &mut pending_server_joins, &ws_cmd_tx, &ws_room_peers, &crdt_store, &device_peer_id, &server, links,
+                            door_rooms.is_hidden(&server),
                         );
                         for answer in held {
                             let (from, frame_ts, frame_nonce) = (answer.from.clone(), answer.frame_ts, answer.frame_nonce);
@@ -4646,7 +4690,10 @@ async fn run_event_loop(
                             let msg = match sync_handler::judge_join_answer(pending, &server, &device_peer_id, &answer) {
                                 sync_handler::JoinAnswer::Open(msg) => msg,
                                 sync_handler::JoinAnswer::Stale => {
-                                    sync_handler::reask_join(&ws_cmd_tx, &ws_room_peers, &crdt_store, &server, &device_peer_id, pending);
+                                    sync_handler::reask_join(
+                                        &ws_cmd_tx, &ws_room_peers, &crdt_store, &server, &device_peer_id, pending,
+                                        door_rooms.is_hidden(&server),
+                                    );
                                     continue;
                                 }
                                 sync_handler::JoinAnswer::Dropped => {
@@ -4915,6 +4962,36 @@ async fn run_event_loop(
                                     {
                                         hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live frame from {from} in {room}");
                                         continue;
+                                    }
+
+                                    // A peer the relay hides from us, speaking where strangers are
+                                    // answered (public channels) or to us as a joiner: keep the way
+                                    // back to it.
+                                    if !ws_room_peers.get(&room).is_some_and(|peers| peers.contains(&from))
+                                        && (guest_rooms.contains(&room)
+                                            || pending_server_joins.contains_key(&room)
+                                            || server_states
+                                                .get(&room)
+                                                .is_some_and(|s| s.channels.values().any(|c| c.effective_public())))
+                                    {
+                                        super::door_room::note_heard(&from, &room);
+                                    }
+                                    match &msg {
+                                        HavenMessage::DoorAsk { server_id } => {
+                                            door_rooms.answer_ask(
+                                                &room, server_id, &from, &server_states, &ws_room_peers,
+                                                &local_peer_str, &device_peer_id, &ws_cmd_tx,
+                                            );
+                                            continue;
+                                        }
+                                        HavenMessage::DoorGrant { server_id, n, eph, ct } => {
+                                            door_rooms.on_grant(
+                                                &room, &from, server_id, *n, eph, ct, lock_keeper.relay_tip(&room),
+                                                &device_keypair, &device_peer_id, &server_states, &local_peer_str, &ws_cmd_tx,
+                                            );
+                                            continue;
+                                        }
+                                        _ => {}
                                     }
 
                                     // The recovery pool rides sealed under its invite token; a
@@ -10101,8 +10178,9 @@ async fn handle_incoming_request(
                 // encrypted channel sync batches can be sent immediately.
                 if !olm.has_confirmed_session(&peer_str) && !key_request_is_fresh(key_request_in_flight, peer_str) {
                     hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with new member {peer_str}, sending KeyRequest");
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
+                    // Into the server's room: a locked one hides the joiner until it proves the door.
+                    super::crypto_handler::send_message_to_peer_in_room(
+                        ws_cmd_tx, &server_id,
                         peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                     );
                     key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());

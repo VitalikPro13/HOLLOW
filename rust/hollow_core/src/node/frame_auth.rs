@@ -178,6 +178,10 @@ pub(crate) fn seal_command(keypair: &NativeKeypair, cmd: WsCommand) -> WsCommand
             let data = seal(keypair, &room_code, ROUTE_ROOM, &data);
             WsCommand::SendToRoom { room_code, data }
         }
+        WsCommand::SendPublic { room_code, data } => {
+            let data = seal(keypair, &room_code, ROUTE_ROOM, &data);
+            WsCommand::SendPublic { room_code, data }
+        }
         WsCommand::SendToRoomTopic { room_code, topic, data } => {
             let data = seal(keypair, &room_code, ROUTE_ROOM, &data);
             WsCommand::SendToRoomTopic { room_code, topic, data }

@@ -189,6 +189,16 @@ int main(int argc, char** argv) {
             }, 300000, 300000);
             g_shutdown.timers.push_back(buffer_timer);
 
+            // Door grace sweep (5s): a removed member stops seeing its server's room
+            // within seconds of the grace, not minutes.
+            auto* door_timer = us_create_timer(loop, 0, sizeof(RelayState*));
+            *reinterpret_cast<RelayState**>(us_timer_ext(door_timer)) = &state;
+            us_timer_set(door_timer, [](struct us_timer_t* t) {
+                auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
+                sweep_door_grace(*s);
+            }, 5000, 5000);
+            g_shutdown.timers.push_back(door_timer);
+
             // Shutdown check timer (1s). The snapshot goes out while every
             // buffer is still intact; then the timers and app.close() (listen
             // socket plus every connection) release the loop. Closing only
