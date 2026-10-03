@@ -7220,66 +7220,319 @@ async fn authz_a_vc_signal_flood_over_olm_is_rate_limited() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // Under the 100-frame per-sender WS bucket, over the 30-signal VC bucket. Held at
-    // the relay and let go at once, so J takes the burst whatever the machine's load.
-    const FLOOD: usize = 80;
-    relay.hold_direct(&o.device_id, &j.device_id);
-    for i in 0..FLOOD {
-        o.cmd_tx
-            .send(NodeCommand::VoiceChannelSendSignal {
-                server_id: server_id.clone(),
-                channel_id: voice_cid.clone(),
-                peer_id: j_master.clone(),
-                signal_type: "ice".to_string(),
-                payload: serde_json::json!({
-                    "candidate": format!("candidate:{i} 1 udp 2122260223 10.0.0.1 {} typ host", 40000 + i),
-                    "sdpMid": "0",
-                    "sdpMLineIndex": 0,
+    // The VC bucket and the per-sender frame bucket both hold 100, so only the VC
+    // bucket's slower refill tells them apart: two floods, each within the frame
+    // bucket's tokens, the second after a pause that refills it. Each is held at the
+    // relay and let go at once, so J takes it whatever the machine's load.
+    const FLOODS: [(usize, &str); 2] = [(80, "flood-half"), (85, "flood-done")];
+    let mut ice = 0usize;
+    let mut span: Option<(std::time::Instant, std::time::Instant)> = None;
+    for (round, (flood, marker)) in FLOODS.into_iter().enumerate() {
+        if round > 0 {
+            // Refills the frame bucket for the second flood (counted in BUDGET_MS).
+            sleep_ms(4000).await;
+        }
+        relay.hold_direct(&o.device_id, &j.device_id);
+        for i in 0..flood {
+            let i = round * 100 + i;
+            o.cmd_tx
+                .send(NodeCommand::VoiceChannelSendSignal {
+                    server_id: server_id.clone(),
+                    channel_id: voice_cid.clone(),
+                    peer_id: j_master.clone(),
+                    signal_type: "ice".to_string(),
+                    payload: serde_json::json!({
+                        "candidate": format!("candidate:{i} 1 udp 2122260223 10.0.0.1 {} typ host", 40000 + i),
+                        "sdpMid": "0",
+                        "sdpMLineIndex": 0,
+                    })
+                    .to_string(),
                 })
-                .to_string(),
+                .await
+                .unwrap();
+        }
+        // The end of the flood: a DM sent after it reaches J after every ICE frame.
+        o.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: j_master.clone(),
+                text: marker.to_string(),
+                message_id: format!("vc-{marker}-1"),
+                reply_to_mid: None,
+                link_preview: None,
             })
             .await
             .unwrap();
-    }
-    // The end of the flood: a DM sent after it reaches J after every ICE frame.
-    o.cmd_tx
-        .send(NodeCommand::SendMessage {
-            peer_id: j_master.clone(),
-            text: "flood-done".to_string(),
-            message_id: "vc-flood-done-1".to_string(),
-            reply_to_mid: None,
-            link_preview: None,
-        })
-        .await
-        .unwrap();
-    let all_held = wait_until(20, async || relay.held_kinds(&o.device_id, &j.device_id).len() > FLOOD).await;
-    assert!(all_held, "the flood and the DM after it must reach the relay");
-    relay.release_held(&o.device_id, &j.device_id);
+        let all_held = wait_until(20, async || relay.held_kinds(&o.device_id, &j.device_id).len() > flood).await;
+        assert!(all_held, "flood {round} and the DM after it must reach the relay");
+        relay.release_held(&o.device_id, &j.device_id);
 
-    let mut ice = 0usize;
-    let mut span: Option<(std::time::Instant, std::time::Instant)> = None;
-    let done = wait_event(&mut j, std::time::Duration::from_secs(20), |ev| match ev {
-        NetworkEvent::VoiceChannelSignal { signal_type, channel_id, .. }
-            if signal_type == "ice" && *channel_id == voice_cid =>
-        {
-            ice += 1;
-            let now = std::time::Instant::now();
-            span = Some((span.map_or(now, |(first, _)| first), now));
-            false
-        }
-        NetworkEvent::MessageReceived { text, .. } => text == "flood-done",
-        _ => false,
-    })
-    .await;
-    assert!(done, "the DM sent after the flood must arrive");
+        let done = wait_event(&mut j, std::time::Duration::from_secs(20), |ev| match ev {
+            NetworkEvent::VoiceChannelSignal { signal_type, channel_id, .. }
+                if signal_type == "ice" && *channel_id == voice_cid =>
+            {
+                ice += 1;
+                let now = std::time::Instant::now();
+                span = Some((span.map_or(now, |(first, _)| first), now));
+                false
+            }
+            NetworkEvent::MessageReceived { text, .. } => text == marker,
+            _ => false,
+        })
+        .await;
+        assert!(done, "the DM sent after flood {round} must arrive");
+    }
     assert!(ice > 0, "VC ICE must still flow under the limit");
+    let sent: usize = FLOODS.iter().map(|(flood, _)| flood).sum();
     let secs = span.map_or(0.0, |(first, last)| (last - first).as_secs_f64());
     // Half a second of slack for when the test saw the events against when J took them.
     let allowed = VC_SIGNAL_RATE_BURST as usize + ((secs + 0.5) * VC_SIGNAL_RATE_REFILL as f64).ceil() as usize;
     assert!(
         ice <= allowed,
-        "{ice} of {FLOOD} VC ICE signals over Olm reached the app in {secs:.1}s; the VC bucket admits about {allowed}"
+        "{ice} of {sent} VC ICE signals over Olm reached the app in {secs:.1}s; the VC bucket admits about {allowed}"
     );
+}
+
+// ── HOL-SEC-117: a bad vault shard never blocks a download for good ─────────────
+//
+// A held shard is never replaced, so a first copy planted by a member (an unasked
+// ShardStore) or a wrong answer from a holder we asked used to refuse the real shard
+// and fail every rebuild of that content.
+
+/// An owner and two members, all friends, in one server with Olm both ways between
+/// every pair. Returns them with the server id.
+async fn vault_trio(relay: &MockRelay, o_tag: u8, a_tag: u8, m_tag: u8) -> (TestNode, TestNode, TestNode, String) {
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (o_master, a_master, m_master) = (id(o_tag), id(a_tag), id(m_tag));
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&a_master, &m_master]).await;
+    let mut a = spawn_node_with_friends(relay, a_tag, a_tag, &[&o_master, &m_master]).await;
+    let mut m = spawn_node_with_friends(relay, m_tag, m_tag, &[&o_master, &a_master]).await;
+    expect_dm_pair_ready(relay, &o, &a, 30).await;
+    expect_dm_pair_ready(relay, &o, &m, 30).await;
+    expect_dm_pair_ready(relay, &a, &m, 30).await;
+
+    let server_id = create_server_and_wait(&mut o, "Vault Shards").await;
+    for node in [&mut a, &mut m] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+                owner_pin: None,
+                join_key: invite_key(&server_id),
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{} joins the server", node.device_id);
+    }
+    expect_mls_group(&[&o, &a, &m], &server_id, 30).await;
+    // Every member pledges on joining: placements are computed from the pledges.
+    for node in [&o, &a] {
+        assert!(
+            wait_until(20, async || node.live_server_state(&server_id).await.is_some_and(|s| {
+                [&o_master, &a_master, &m_master].iter().all(|p| s.get_storage_pledge(p) > 0)
+            }))
+            .await,
+            "{} must see every member's storage pledge",
+            node.device_id,
+        );
+    }
+    (o, a, m, server_id)
+}
+
+/// `node`'s download of vault content `cid`: the cache path, or the error it failed
+/// with. A manifest still in flight is asked for again.
+async fn vault_download(node: &mut TestNode, server_id: &str, cid: &str) -> Result<String, String> {
+    for _ in 0..40 {
+        node.cmd_tx
+            .send(NodeCommand::VaultDownloadFile { server_id: server_id.to_string(), content_id: cid.to_string() })
+            .await
+            .unwrap();
+        let mut outcome = None;
+        wait_event(node, std::time::Duration::from_secs(40), |ev| {
+            match ev {
+                NetworkEvent::VaultDownloadComplete { content_id, disk_path, .. } if content_id == cid => {
+                    outcome = Some(Ok(disk_path.clone()));
+                }
+                NetworkEvent::VaultDownloadFailed { content_id, error, .. } if content_id == cid => {
+                    outcome = Some(Err(error.clone()));
+                }
+                _ => {}
+            }
+            outcome.is_some()
+        })
+        .await;
+        match outcome {
+            // The manifest landing has no event to wait on (counted in BUDGET_MS).
+            Some(Err(e)) if e.starts_with("Manifest not found") => sleep_ms(250).await,
+            Some(done) => return done,
+            None => return Err("the download never finished".into()),
+        }
+    }
+    Err("the manifest never arrived".into())
+}
+
+/// `owner` uploads `sealed` (the encrypted `size`-byte file) to the vault in #general.
+async fn vault_upload(owner: &mut TestNode, server_id: &str, sealed: crate::vault::pipeline::EncryptedFile, size: usize) {
+    let cid = crate::vault::content_store::content_id(&sealed.ciphertext);
+    owner
+        .cmd_tx
+        .send(NodeCommand::VaultUploadFile(Box::new(super::types::VaultUploadFilePayload {
+            server_id: server_id.to_string(),
+            channel_id: general_channel_of(server_id),
+            file_name: "plan.txt".into(),
+            mime_type: "text/plain".into(),
+            message_id: String::new(),
+            ciphertext: sealed.ciphertext,
+            aes_key: sealed.key.to_vec(),
+            aes_nonce: sealed.nonce.to_vec(),
+            original_size: size as u64,
+            content_id: cid.clone(),
+        })))
+        .await
+        .unwrap();
+    let uploaded = wait_event(owner, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::VaultUploadComplete { content_id, .. } if *content_id == cid)
+    })
+    .await;
+    assert!(uploaded, "the owner's vault upload completes");
+}
+
+/// `node`'s own vault store, as its event loop opens it.
+fn vault_store_of(node: &TestNode) -> crate::vault::content_store::ContentStore {
+    let vault_dir = crate::identity::data_dir().expect("data dir").join("vault");
+    crate::vault::content_store::ContentStore::open(&node.db_path, &node.passphrase, &vault_dir).expect("open the vault store")
+}
+
+/// A member plants junk as the first copy of a shard of content we will want, before
+/// the manifest names it. Our download deletes it and pulls the real one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_planted_vault_shard_is_dropped_and_the_real_one_pulled() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, m, server_id) = vault_trio(&relay, 150, 151, 152).await;
+
+    // The content id is the ciphertext's hash, so the test knows it before the upload.
+    let plaintext = b"the vault file everyone in the server should get back".to_vec();
+    let sealed = crate::vault::pipeline::aes_encrypt(&plaintext).expect("encrypt");
+    let cid = crate::vault::content_store::content_id(&sealed.ciphertext);
+    let junk = b"junk planted as the first copy".to_vec();
+    m.cmd_tx
+        .send(NodeCommand::StoreShardOnPeer {
+            server_id: server_id.clone(),
+            content_id: cid.clone(),
+            shard_index: 0,
+            shard_key: crate::vault::content_store::shard_key(&cid, 0),
+            k: 0,
+            m: 0,
+            total_data_size: junk.len() as u64,
+            storage_tier: "standard".into(),
+            data: junk,
+            target_peer: a.master_id.clone(),
+        })
+        .await
+        .unwrap();
+    let planted = wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::ShardStored { content_id, from_peer, .. } if *content_id == cid && *from_peer == m.device_id)
+    })
+    .await;
+    assert!(planted, "the unasked ShardStore lands: nothing names the content yet");
+    vault_upload(&mut o, &server_id, sealed, plaintext.len()).await;
+
+    let got = vault_download(&mut a, &server_id, &cid).await;
+    let path = got.unwrap_or_else(|e| panic!("A-V6: a planted first copy blocked the download: {e}"));
+    assert_eq!(
+        crate::node::at_rest::read_all(std::path::Path::new(&path)).expect("read the rebuilt file"),
+        plaintext,
+        "the rebuilt file is the owner's",
+    );
+    let held = vault_store_of(&a).read_shard_unchecked(&server_id, &crate::vault::content_store::shard_key(&cid, 0));
+    assert_eq!(
+        held.map(|b| crate::vault::content_store::content_id(&b)).ok(),
+        Some(cid.clone()),
+        "the planted copy is gone and the real one held in its place",
+    );
+}
+
+/// A holder we ask answers with bytes that are not the shard: the answer is refused,
+/// that holder is not asked for the content again, and the download completes from a
+/// holder that has the real one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_holder_that_answers_with_a_wrong_shard_is_not_asked_again() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    // The bad holder sorts first among the holders, so it is the one asked first.
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (o_tag, m_tag) = if id(155) < id(154) { (154, 155) } else { (155, 154) };
+    let (mut o, mut a, m, server_id) = vault_trio(&relay, o_tag, 153, m_tag).await;
+    assert!(m.master_id < o.master_id, "the bad holder is the first one asked");
+
+    // A pledges nothing, so it holds no copy and has to pull one.
+    a.cmd_tx
+        .send(NodeCommand::SetStoragePledge { server_id: server_id.clone(), pledge_bytes: 0 })
+        .await
+        .unwrap();
+    for node in [&o, &a] {
+        assert!(
+            wait_until(20, async || node
+                .live_server_state(&server_id)
+                .await
+                .is_some_and(|s| s.get_storage_pledge(&a.master_id) == 0))
+            .await,
+            "{} must see A's pledge withdrawn",
+            node.device_id,
+        );
+    }
+
+    let plaintext = b"only the owner and the bad holder hold this one".to_vec();
+    let sealed = crate::vault::pipeline::aes_encrypt(&plaintext).expect("encrypt");
+    let cid = crate::vault::content_store::content_id(&sealed.ciphertext);
+    // M's copy is junk, so the owner's real one is refused there as already held.
+    let junk = b"what the bad holder serves".to_vec();
+    vault_store_of(&m)
+        .store_shard(&server_id, &cid, 0, 0, 0, junk.len() as u64, crate::vault::content_store::StorageTier::Standard, &junk)
+        .expect("seed the bad holder's copy");
+    vault_upload(&mut o, &server_id, sealed, plaintext.len()).await;
+    // The manifest broadcast must leave the owner before its socket dies.
+    expect_relay_drained(&relay, &o, "vault-manifest").await;
+
+    // Only the bad holder is online: its answer is refused and nobody else can help.
+    go_offline(&relay, &o, &server_id).await;
+    assert!(wait_until(15, async || !a.sees_peer(&o.device_id).await).await, "A sees the owner leave");
+    let first = vault_download(&mut a, &server_id, &cid).await;
+    assert!(first.is_err(), "a wrong shard from the only holder online rebuilt a file: {first:?}");
+    assert!(
+        !vault_store_of(&a).has_shard(&crate::vault::content_store::shard_key(&cid, 0)).unwrap(),
+        "the wrong shard was kept",
+    );
+
+    relay.set_online(&o.device_id, true);
+    assert!(wait_until(20, async || a.sees_peer(&o.device_id).await).await, "A sees the owner back");
+    relay.start_wiretap();
+    let second = vault_download(&mut a, &server_id, &cid).await;
+    let path = second.unwrap_or_else(|e| panic!("A-V6: a holder that answered with a wrong shard blocked the download: {e}"));
+    assert_eq!(
+        crate::node::at_rest::read_all(std::path::Path::new(&path)).expect("read the rebuilt file"),
+        plaintext,
+    );
+    let asked_again = relay
+        .wiretap()
+        .frames
+        .iter()
+        .filter(|f| f.from == m.device_id && f.to.as_deref() == Some(a.device_id.as_str()) && f.kind() == "binary")
+        .count();
+    assert_eq!(asked_again, 0, "the holder that answered with a wrong shard was asked again");
 }
 
 // Recovery-pool formation: an initiator opens a pool, a second node joins and
@@ -11609,6 +11862,83 @@ async fn olm_key_request_crossing_a_prekey_is_answered_on_the_same_session() {
     assert!(stale_session_errors(&lo_events).is_empty() && stale_session_errors(&hi_events).is_empty(),
         "no message may fail to decrypt: lo {:?}, hi {:?}",
         stale_session_errors(&lo_events), stale_session_errors(&hi_events));
+}
+
+// Audit follow-up 3e: Olm frames to one device reach it in the order they were
+// encrypted. A carried frame takes its wire slot when it is queued but was encrypted
+// only when the node reached it, after direct frames queued behind it; past the 40
+// message keys a receiver keeps for a gap, the head of the burst could not be read.
+
+/// Send `count` DMs `{tag}-{i}` from `from` to `to`'s master.
+async fn send_dm_burst(from: &TestNode, to: &TestNode, tag: &str, count: usize) {
+    for i in 0..count {
+        from.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: to.master_id.clone(),
+                text: format!("{tag}-{i}"),
+                message_id: format!("{tag}-{i}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+/// Wait until `node` reads every DM `{tag}-{i}`, keeping every event it saw.
+async fn read_dm_burst(node: &mut TestNode, tag: &str, count: usize, secs: u64) -> (usize, Vec<NetworkEvent>) {
+    let mut events = Vec::new();
+    let mut read = std::collections::HashSet::new();
+    let prefix = format!("{tag}-");
+    wait_until(secs, async || {
+        for ev in take_events(node) {
+            if let NetworkEvent::MessageReceived { message_id, is_own: false, .. } = &ev
+                && message_id.starts_with(&prefix)
+            {
+                read.insert(message_id.clone());
+            }
+            events.push(ev);
+        }
+        read.len() == count
+    })
+    .await;
+    (read.len(), events)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn olm_a_direct_burst_behind_a_waiting_carry_keeps_the_session() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let a = spawn_node_with_friends(&relay, 153, 153, &[&id(154)]).await;
+    let mut b = spawn_node_with_friends(&relay, 154, 154, &[&id(153)]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    let session = b.olm_session_id(&a.device_id).await;
+    assert!(session.is_some() && session == a.olm_session_id(&b.device_id).await, "one session before the burst");
+    drain_events(&mut b);
+
+    // A's node is busy elsewhere while its carried frame waits; meanwhile it sends B
+    // more DMs straight on the session than B keeps message keys for a gap.
+    const BURST: usize = 60;
+    super::olm_lane::hold_carry_lane(&a.device_id, true);
+    carry_as(&a, &b, super::types::HavenMessage::StatusUpdate { status: "carried-first".to_string() }).await;
+    send_dm_burst(&a, &b, "burst", BURST).await;
+    // Commands run in order: the snapshot answers once the whole burst is encrypted,
+    // and the second one wakes the loop to take the carried frame.
+    let _ = a.olm_session_id(&b.device_id).await;
+    super::olm_lane::hold_carry_lane(&a.device_id, false);
+    let _ = a.olm_session_id(&b.device_id).await;
+
+    let (read, events) = read_dm_burst(&mut b, "burst", BURST, 20).await;
+    let carried = events.iter().any(|ev| matches!(ev, NetworkEvent::PeerStatusChanged { status, .. } if status == "carried-first"));
+    assert!(carried, "the carried frame must arrive, not time out in the queue");
+    assert!(stale_session_errors(&events).is_empty(), "a frame sent behind the carried one failed to decrypt: {:?}", stale_session_errors(&events));
+    assert_eq!(read, BURST, "every DM of the burst must arrive");
+    assert_eq!(b.olm_session_id(&a.device_id).await, session, "the session survives the burst");
 }
 
 // Two FRESH single-device people, each with device != master, become friends
@@ -23653,7 +23983,11 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-10-02: D1 added one settle, the rest of an owner's burst for an offline
     // member landing in a hold the test then empties (1.5 s).
     // 2026-10-03: the Olm VC rate-limit test added one spawn stagger (1.2 s).
-    const BUDGET_MS: u64 = 677_000;
+    // 2026-10-03: HOL-SEC-117's vault download helper added one settle, a manifest whose
+    // landing has no event (0.25 s).
+    // 2026-10-03: the VC burst rose to the frame bucket's 100, so the Olm VC rate-limit
+    // test waits for one refill between two floods (4.0 s).
+    const BUDGET_MS: u64 = 681_250;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -29065,14 +29399,214 @@ async fn authz_a_stale_siblings_friend_list_never_brings_back_a_removed_friend()
         seen.then_some(count)
     };
     drain_events(&mut b);
-    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, hour_ago), entry(&other, hour_ago)] }).await;
+    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, hour_ago), entry(&other, hour_ago)], removed: Vec::new() }).await;
     assert_eq!(backfilled(&mut b).await, Some(1), "only the friend B lacked may land");
     assert_eq!(friend_row(&b, &friend), None, "a stale sibling brought back a removed friend");
 
     // A friendship made again since the removal carries a newer stamp.
-    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, super::frame_auth::now_ms())] }).await;
+    carry_as(&c, &b, HavenMessage::FriendListSync { friends: vec![entry(&friend, super::frame_auth::now_ms())], removed: Vec::new() }).await;
     assert_eq!(backfilled(&mut b).await, Some(1), "a friend re-added since the removal must land");
     assert!(is_friend(&b, &friend), "and as a friend");
+}
+
+// ---------------------------------------------------------------------------
+// Audit follow-up 3b (HOL-SEC-115): a friend removal, ours or a friend's, reaches
+// every one of our own devices, one that was away included once it is back.
+// ---------------------------------------------------------------------------
+
+/// Two devices of one identity keyed to each other, and a live friend keyed to both.
+/// Our devices also hold `ours` as friends that never come online.
+async fn siblings_and_friend(relay: &MockRelay, [m, d1, d2, bm, bd]: [u8; 5], ours: &[&str]) -> (TestNode, TestNode, TestNode) {
+    let device = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let m_master = device(m);
+    let b_master = device(bm);
+    super::resolver::seed_self(&m_master, &[device(d1), device(d2)]);
+    let friends: Vec<&str> = std::iter::once(b_master.as_str()).chain(ours.iter().copied()).collect();
+    let a1 = spawn_node_with_friends(relay, m, d1, &friends).await;
+    let inbox = format!("inbox:{m_master}");
+    assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&a1.device_id)).await, "A1 is up before A2 keys it");
+    let a2 = spawn_node_with_friends(relay, m, d2, &friends).await;
+    expect_siblings_ready(relay, &a1, &a2, 15).await;
+    let b = spawn_node_with_friends(relay, bm, bd, &[&m_master]).await;
+    expect_dm_pair_ready(relay, &a1, &b, 20).await;
+    expect_dm_pair_ready(relay, &a2, &b, 20).await;
+    (a1, a2, b)
+}
+
+/// Removals as our own devices share them.
+fn removals(entries: &[(&str, i64)]) -> super::types::HavenMessage {
+    super::types::HavenMessage::FriendListSync {
+        friends: Vec::new(),
+        removed: entries
+            .iter()
+            .map(|(peer, at)| super::types::FriendRemoval { peer_id: peer.to_string(), at: *at })
+            .collect(),
+    }
+}
+
+/// Have `from` carry `msg` to `to` and wait until `to` has handled it: a status carried
+/// right behind it on the same session comes back. Returns the friends `to` dropped.
+async fn carry_and_settle(from: &TestNode, to: &mut TestNode, msg: super::types::HavenMessage) -> Vec<String> {
+    static MARK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let mark = format!("settled-{}", MARK.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    carry_as(from, to, msg).await;
+    carry_as(from, to, super::types::HavenMessage::StatusUpdate { status: mark.clone() }).await;
+    let mut dropped = Vec::new();
+    let settled = wait_event(to, std::time::Duration::from_secs(10), |ev| match ev {
+        NetworkEvent::FriendRemoved { peer_id } => {
+            dropped.push(peer_id.clone());
+            false
+        }
+        NetworkEvent::PeerStatusChanged { status, .. } => *status == mark,
+        _ => false,
+    })
+    .await;
+    assert!(settled, "the status carried behind the message must arrive");
+    dropped
+}
+
+/// Whether `node` drops `master` as a friend and tells its UI.
+async fn drops_friend(node: &mut TestNode, master: &str) -> bool {
+    wait_event(node, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::FriendRemoved { peer_id } if peer_id == master)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd() {
+    use super::types::{FriendListEntry, HavenMessage};
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let other = NativeKeypair::from_secret_bytes(&seed_bytes(155)).peer_id();
+    let (mut a1, mut a2, b) = siblings_and_friend(&relay, [150, 151, 152, 153, 154], &[&other]).await;
+    let (m_master, b_master) = (a1.master_id.clone(), b.master_id.clone());
+
+    // A1 removes B: A2, online at the time, drops B too.
+    drain_events(&mut a2);
+    a1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a2, &b_master).await, "an online sibling kept the friend we removed");
+    assert!(!is_friend(&a2, &b_master), "the sibling still lists the friend we removed");
+    let ended: i64 = a1
+        .store()
+        .load_setting(&format!("friend_removed:{b_master}"))
+        .unwrap()
+        .and_then(|v| v.parse().ok())
+        .expect("A1 records when the friendship ended");
+
+    // B asks again and A1 accepts: the friendship made since reaches A2.
+    drain_events(&mut a1);
+    b.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: m_master.clone() }).await.unwrap();
+    let mut asked_by = None;
+    assert!(
+        wait_event(&mut a1, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::FriendRequestReceived { peer_id } => {
+                asked_by = Some(peer_id.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "A1 hears B ask again"
+    );
+    a1.cmd_tx.send(NodeCommand::AcceptFriendRequest { peer_id: asked_by.unwrap() }).await.unwrap();
+    assert!(
+        wait_until(15, async || is_friend(&a1, &b_master) && is_friend(&a2, &b_master)).await,
+        "the re-add reaches both our devices"
+    );
+
+    // The old removal, late: the friendship made since stands.
+    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&b_master, ended)])).await;
+    assert!(dropped.is_empty() && is_friend(&a2, &b_master), "a late removal undid the friendship made since");
+
+    // A removal stamped far ahead of its frame never outlives a friendship made after it.
+    let far = super::frame_auth::now_ms() + 24 * 3600 * 1000;
+    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&other, far)])).await;
+    assert_eq!(dropped, vec![other.clone()], "our own device's removal lands");
+    let readd = HavenMessage::FriendListSync {
+        friends: vec![FriendListEntry {
+            peer_id: other.clone(),
+            status: "accepted".into(),
+            direction: String::new(),
+            requested_at: super::frame_auth::now_ms(),
+        }],
+        removed: Vec::new(),
+    };
+    carry_and_settle(&a1, &mut a2, readd).await;
+    assert!(is_friend(&a2, &other), "a removal stamped ahead of its frame outlived the friendship made since");
+
+    // B removes us and its frame reaches only A1: A1 passes it on.
+    relay.swallow_direct(&b.device_id, &a2.device_id);
+    drain_events(&mut a2);
+    b.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: m_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes B's removal");
+    assert!(drops_friend(&mut a2, &b_master).await, "a friend's removal heard by one of our devices never reached the other");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_removal_reaches_a_sibling_that_was_away() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let gone = NativeKeypair::from_secret_bytes(&seed_bytes(165)).peer_id();
+    let (mut a1, mut a2, mut b) = siblings_and_friend(&relay, [160, 161, 162, 163, 164], &[&gone]).await;
+    let (m_master, b_master) = (a1.master_id.clone(), b.master_id.clone());
+
+    // A2 goes away, and A1 and B have both taken that in.
+    relay.set_online(&a2.device_id, false);
+    relay.swallow_direct(&b.device_id, &a2.device_id);
+    flush_frames(&relay, &mut a1).await;
+    flush_frames(&relay, &mut b).await;
+
+    // Meanwhile A1 removes a friend, and B removes us.
+    a1.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: gone.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &gone).await, "A1 removes the friend");
+    b.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: m_master.clone() }).await.unwrap();
+    assert!(drops_friend(&mut a1, &b_master).await, "A1 takes B's removal");
+
+    drain_events(&mut a2);
+    relay.set_online(&a2.device_id, true);
+    let mut kept: std::collections::HashSet<String> = [gone.clone(), b_master.clone()].into();
+    let converged = wait_event(&mut a2, std::time::Duration::from_secs(20), |ev| {
+        if let NetworkEvent::FriendRemoved { peer_id } = ev {
+            kept.remove(peer_id);
+        }
+        kept.is_empty()
+    })
+    .await;
+    assert!(converged, "a sibling back from away kept {kept:?}");
+    assert!(!is_friend(&a2, &gone) && !is_friend(&a2, &b_master), "the sibling still lists a friendship that ended");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_only_our_own_device_tells_us_a_friendship_ended() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let f1 = NativeKeypair::from_secret_bytes(&seed_bytes(175)).peer_id();
+    let f2 = NativeKeypair::from_secret_bytes(&seed_bytes(176)).peer_id();
+    let (a1, mut a2, b) = siblings_and_friend(&relay, [170, 171, 172, 173, 174], &[&f1, &f2]).await;
+    let now = super::frame_auth::now_ms();
+
+    // B holds a session with A2 but is no device of ours.
+    let dropped = carry_and_settle(&b, &mut a2, removals(&[(&f1, now)])).await;
+    assert!(dropped.is_empty() && is_friend(&a2, &f1), "a friend's list ended one of our friendships");
+
+    // The same entry from our own device lands.
+    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&f1, now)])).await;
+    assert_eq!(dropped, vec![f1.clone()], "our own device's removal must land");
+
+    // A device our identity removed is no device of ours.
+    super::resolver::mark_revoked(std::slice::from_ref(&a1.device_id));
+    let dropped = carry_and_settle(&a1, &mut a2, removals(&[(&f2, now)])).await;
+    assert!(dropped.is_empty() && is_friend(&a2, &f2), "a removed device ended one of our friendships");
 }
 
 /// A socket of our own in `room`, as any stranger holding the room name can open.
@@ -29779,6 +30313,204 @@ async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
     );
 }
 
+// ── Section 2 follow-up 3a: a member removed while away learns it on its return ──
+// HOL-SEC-114. Members refused a former member's sync and door ask alike, so a member
+// offline through its kick or ban kept the server for good. Now one that asks is
+// handed the op that removed it and what its own fold needs to admit that op, never
+// anything stamped after it.
+
+/// Every op `from` carried to `to` in a sync answer for `server_id`.
+async fn sync_ops_carried(from: &TestNode, to: &TestNode, server_id: &str) -> Vec<crate::crdt::operations::CrdtOp> {
+    from.carried_to(&to.device_id)
+        .await
+        .into_iter()
+        .filter_map(|msg| match msg {
+            super::types::HavenMessage::SyncResponse { server_id: sid, ops_json } if sid == server_id => {
+                Some(crate::crdt::operations::parse_ops_tolerant(&ops_json))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The op in `node`'s log that last took `master` out of `server_id`.
+async fn removal_in(node: &TestNode, server_id: &str, master: &str) -> crate::crdt::operations::CrdtOp {
+    use crate::crdt::operations::CrdtPayload as P;
+    node.live_server_state(server_id)
+        .await
+        .expect("the remover's side keeps the server")
+        .op_log
+        .into_iter()
+        .rev()
+        .find(|op| matches!(&op.payload, P::MemberRemoved { peer_id } | P::MemberBanned { peer_id } if peer_id == master))
+        .expect("the log holds the removal")
+}
+
+/// What a former member was told: the removal is among it and nothing is later.
+fn assert_told_only_up_to(told: &[crate::crdt::operations::CrdtOp], removal: &crate::crdt::operations::CrdtOp) {
+    assert!(
+        told.iter().any(|op| op.author == removal.author && op.hlc == removal.hlc),
+        "the former member was never handed its removal"
+    );
+    let later: Vec<&str> = told
+        .iter()
+        .filter(|op| op.hlc > removal.hlc)
+        .map(|op| crate::crdt::sync::payload_name(&op.payload))
+        .collect();
+    assert!(later.is_empty(), "a former member was handed ops from after its removal: {later:?}");
+}
+
+/// B is offline while X, made a moderator after B left, kicks it and the lock moves.
+/// Back, B sees nobody in the room and shares no other room with anyone, so its door
+/// ask is all that reaches the members: they hand it the kick and the promotion behind
+/// it, and B's own fold drops it. X's demotion after the kick stays with the members.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_kicked_while_away_learns_it_when_it_asks_for_the_door() {
+    use crate::crdt::operations::MemberRole;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 246, 246, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Kick Server").await;
+    let mut b = spawn_node_with_friends(&relay, 247, 247, &[]).await;
+    b.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut b, &server_id, 25).await, "B joins");
+    let mut x = spawn_node_with_friends(&relay, 248, 248, &[]).await;
+    x.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut x, &server_id, 25).await, "X joins");
+    assert!(expect_sees_room(&relay, &server_id, &b.device_id).await);
+    // The owner's answer is enough; X answers too when it holds a session with B.
+    expect_olm_confirmed(&o, &b, 20).await;
+
+    go_offline(&relay, &b, &server_id).await;
+    // Gone for the members too, or a kick notice parks for B's return. Whatever they
+    // send B meanwhile is lost, as a buffer that aged out is.
+    for member in [&o, &x] {
+        assert!(wait_until(10, async || !member.sees_peer(&b.device_id).await).await, "the members see B leave");
+    }
+    relay.hold_direct(&o.device_id, &b.device_id);
+    relay.hold_direct(&x.device_id, &b.device_id);
+    let first = relay_tip(&relay, &server_id);
+    let role_of_x = async |want: MemberRole| {
+        wait_until(15, async || x.live_server_state(&server_id).await.is_some_and(|s| s.get_role(&x.master_id) == want)).await
+    };
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: x.master_id.clone(), new_role: "moderator".into() })
+        .await
+        .unwrap();
+    assert!(role_of_x(MemberRole::Moderator).await, "X is made a moderator");
+    x.cmd_tx
+        .send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: b.master_id.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id);
+            tip.n > first.n
+                && o.live_server_state(&server_id).await.is_some_and(|s| {
+                    !s.is_member(&b.master_id) && s.join_lock.newest_door().is_some_and(|(n, _, _)| n >= tip.n)
+                })
+        })
+        .await,
+        "the kick lands and moves the lock",
+    );
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: x.master_id.clone(), new_role: "member".into() })
+        .await
+        .unwrap();
+    assert!(role_of_x(MemberRole::Member).await, "X is demoted after the kick");
+    for from in [&o.device_id, &x.device_id] {
+        for kind in relay.held_kinds(from, &b.device_id) {
+            relay.discard_held_kind(from, &b.device_id, &kind);
+        }
+        relay.release_held(from, &b.device_id);
+    }
+
+    relay.set_online(&b.device_id, true);
+    assert!(
+        wait_until(30, async || b.live_server_state(&server_id).await.is_none()).await,
+        "B kept a server it was kicked from while it was away"
+    );
+    let removal = removal_in(&o, &server_id, &b.master_id).await;
+    let mut told = sync_ops_carried(&o, &b, &server_id).await;
+    told.extend(sync_ops_carried(&x, &b, &server_id).await);
+    assert_told_only_up_to(&told, &removal);
+}
+
+/// B is offline while the owner bans it and later lifts the ban. Back, B shares a DM
+/// room with the owner and asks it to sync: it is handed the ban, not the lifting, and
+/// leaves. A stranger the owner banned before it ever joined asks too, by sync and by
+/// door ask, and is told nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_banned_while_away_learns_it_from_its_sync() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, b, j, server_id) = owner_member_and_joiner(&relay, 249, 250, 251).await;
+    assert!(expect_sees_room(&relay, &server_id, &b.device_id).await);
+    expect_olm_confirmed(&o, &b, 20).await;
+    expect_olm_confirmed(&o, &j, 20).await;
+    o.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: j.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_banned(&j.master_id))).await,
+        "the owner bans J before J ever joins"
+    );
+
+    go_offline(&relay, &b, &server_id).await;
+    assert!(wait_until(10, async || !o.sees_peer(&b.device_id).await).await, "the owner sees B leave");
+    relay.hold_direct(&o.device_id, &b.device_id);
+    let first = relay_tip(&relay, &server_id);
+    o.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id);
+            tip.n > first.n
+                && o.live_server_state(&server_id).await.is_some_and(|s| {
+                    !s.is_member(&b.master_id) && s.join_lock.newest_door().is_some_and(|(n, _, _)| n >= tip.n)
+                })
+        })
+        .await,
+        "the ban lands and moves the lock",
+    );
+    o.cmd_tx.send(NodeCommand::UnbanMember { server_id: server_id.clone(), peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_banned(&b.master_id))).await,
+        "the owner lifts the ban later"
+    );
+    for kind in relay.held_kinds(&o.device_id, &b.device_id) {
+        relay.discard_held_kind(&o.device_id, &b.device_id, &kind);
+    }
+    relay.release_held(&o.device_id, &b.device_id);
+
+    // Only a sync reaches the owner: it hears no room broadcast, so B's door ask is lost.
+    relay.set_broadcast_deaf(&o.device_id, true);
+    let nothing_held = crate::crdt::sync::StateVector { server_id: server_id.clone(), entries: Default::default() };
+    carry_as(&j, &o, super::types::HavenMessage::SyncRequest {
+        server_id: server_id.clone(),
+        state_vector_json: serde_json::to_string(&nothing_held).unwrap(),
+        mls_epoch: None,
+    })
+    .await;
+    carried_barrier(&j, &mut o).await;
+    let ask = serde_json::to_vec(&super::types::HavenMessage::DoorAsk { server_id: server_id.clone() }).unwrap();
+    relay.inject(&server_id, &j.device_id, &o.device_id, ask);
+
+    relay.set_online(&b.device_id, true);
+    assert!(
+        wait_until(30, async || b.live_server_state(&server_id).await.is_none()).await,
+        "B kept a server it was banned from while it was away"
+    );
+    let removal = removal_in(&o, &server_id, &b.master_id).await;
+    assert_told_only_up_to(&sync_ops_carried(&o, &b, &server_id).await, &removal);
+    // B's answer went out after both of J's asks were handled, so J's would show by now.
+    assert!(sync_ops_carried(&o, &j, &server_id).await.is_empty(), "a stranger was told about the server");
+}
+
 /// A-D2: a file's id commits to its author, message and bytes, so a member holding a
 /// channel file's key cannot answer another member's pull with different bytes. The
 /// forged bytes decrypt under the holder's header and then fail the id.
@@ -30467,6 +31199,7 @@ async fn authz_a_sibling_lane_stamp_never_runs_ahead_of_its_frame() {
 
     carry_as(&c, &b, HavenMessage::FriendListSync {
         friends: vec![FriendListEntry { peer_id: friend.clone(), status: "accepted".into(), direction: String::new(), requested_at: far }],
+        removed: Vec::new(),
     })
     .await;
     assert!(
@@ -30776,6 +31509,7 @@ async fn c24_a_plaintext_copy_of_an_olm_only_message_is_dropped() {
             direction: "outgoing".into(),
             requested_at: 1,
         }],
+        removed: Vec::new(),
     };
     relay.inject_direct(
         &format!("inbox:{m_master}"), &b.device_id, &c.device_id,

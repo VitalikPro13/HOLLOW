@@ -23,7 +23,7 @@ The friend list arm skips an entry whose frozen request stamp predates the frien
 
 ## Residual risk
 
-Siblings are still not told about a removal, so they converge only through this refusal (follow-up).
+None; siblings are now told about every removal (HOL-SEC-115), and this refusal still guards a stale list.
 
 ## Test
 

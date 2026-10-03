@@ -238,6 +238,7 @@ mod tests {
             creator_peer_id: "creator".into(),
             channel_id: "ch1".into(),
             message_id: String::new(),
+            shard_hashes: Vec::new(),
         }
     }
 

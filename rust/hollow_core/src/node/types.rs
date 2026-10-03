@@ -26,8 +26,9 @@ pub(crate) const MAX_PEER_EXCHANGE_SIZE: usize = 50;
 pub(crate) const MAX_BROADCAST_TTL: u8 = 8;
 
 /// VC signaling sub-rate-limiter: burst capacity (per peer). Targeted SDP and ICE
-/// count too, so it holds one join's ICE trickle from a machine with many adapters.
-pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 50;
+/// count too, so it holds one join's ICE trickle from a machine with many adapters
+/// (a three-adapter box sent 40 in one second); a flood is bounded by the refill.
+pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 100;
 /// VC signaling sub-rate-limiter: refill rate (tokens per second per peer).
 pub(crate) const VC_SIGNAL_RATE_REFILL: u32 = 10;
 
@@ -206,6 +207,16 @@ pub(crate) struct FriendListEntry {
     pub direction: String,
     #[serde(default)]
     pub requested_at: i64,
+}
+
+/// A friendship our identity ended, as our own devices tell each other: whose, and
+/// when it ended (ms).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct FriendRemoval {
+    #[serde(default)]
+    pub peer_id: String,
+    #[serde(default)]
+    pub at: i64,
 }
 
 /// What one of our devices is doing that rules out a second call for the whole
@@ -2139,6 +2150,10 @@ pub(crate) enum HavenMessage {
     FriendListSync {
         #[serde(default)]
         friends: Vec<FriendListEntry>,
+        /// Friendships we ended, so a sibling that missed one drops its older row. Kept
+        /// out of `friends`, which an older device reads as accepted whatever the status.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<FriendRemoval>,
     },
 
     /// Multi-device: ask a SIBLING device to send us its friend list. The pull
@@ -4483,6 +4498,8 @@ pub(crate) struct PendingShardStream {
     pub sender: Option<String>,
     /// Our storage pledge for the server when it was registered, judged again at completion.
     pub pledge: u64,
+    /// It answers a shard pull of ours, so wrong bytes refute the holder that sent them.
+    pub asked: bool,
 }
 
 /// A public post's author as a guest is shown it: the author's own signed card, and the

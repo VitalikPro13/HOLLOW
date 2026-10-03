@@ -86,8 +86,9 @@ pub enum WsCommand {
     SendBinaryDirect { room_code: String, target_peer: String, data: Vec<u8> },
     /// Deliver `json` (a `MessageEnvelope`) to one device inside its Olm session.
     /// Never reaches the relay: the sealing stage hands it back to the node, which
-    /// owns the sessions (`olm_lane`).
-    Carry { device: String, room: Option<String>, json: String, no_session: super::olm_lane::NoSession },
+    /// owns the sessions (`olm_lane`); `ticket` names it in the node loop's book of
+    /// waiting carries.
+    Carry { device: String, room: Option<String>, json: String, no_session: super::olm_lane::NoSession, ticket: Option<u64> },
     /// Subscribe to specific channel topics in a room (reduces fan-out).
     Subscribe { room_code: String, topics: Vec<String> },
     /// Broadcast to peers subscribed to a specific topic in a room.

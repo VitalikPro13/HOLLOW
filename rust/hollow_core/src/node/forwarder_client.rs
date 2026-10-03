@@ -174,7 +174,7 @@ pub(crate) async fn send_fwd_envelope_via_room(
     label: &str,
 ) {
     if olm.has_session(&target_peer) {
-        match olm.encrypt(&target_peer, env_json.as_bytes()) {
+        match super::olm_lane::encrypt_in_turn(olm, &target_peer, env_json.as_bytes()) {
             Ok((msg_type, ciphertext)) => {
                 persist_olm_session(olm, crypto_store, &target_peer);
                 let haven = super::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);

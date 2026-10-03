@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,83 @@ pub fn compute_delta<'a>(our_ops: &'a [CrdtOp], their_vector: &StateVector) -> V
             }
         })
         .collect()
+}
+
+/// What a former member asking to sync is told: the op that ended its membership and,
+/// of the ops before it that `their_vector` lacks, those deciding who belongs and at
+/// what rank for the identities that op rests on. Never an op stamped after it, and
+/// nothing for an identity the log never shows as a member.
+pub fn removal_notice<'a>(state: &'a ServerState, master: &str, their_vector: &StateVector) -> Vec<&'a CrdtOp> {
+    let Some(removal) = membership_end(state, master) else { return Vec::new() };
+    let mut earlier: Vec<&CrdtOp> = compute_delta(&state.op_log, their_vector)
+        .into_iter()
+        .filter(|op| op.hlc < removal.hlc)
+        .collect();
+    earlier.push(removal);
+    // Grown by the author of every op picked for one of its identities until stable.
+    let mut chain: HashSet<&str> = HashSet::from([master, removal.author.as_str()]);
+    let mut picked = vec![false; earlier.len()];
+    loop {
+        let known = chain.len();
+        for (op, pick) in earlier.iter().zip(picked.iter_mut()) {
+            if !*pick && decides_rank(op, &chain) {
+                *pick = true;
+                chain.insert(op.author.as_str());
+            }
+        }
+        if chain.len() == known {
+            break;
+        }
+    }
+    earlier.into_iter().zip(picked).filter_map(|(op, keep)| keep.then_some(op)).collect()
+}
+
+/// The op that last ended `master`'s membership, when the log shows it a member just
+/// before that op and nothing after it admitted it again.
+fn membership_end<'a>(state: &'a ServerState, master: &str) -> Option<&'a CrdtOp> {
+    use super::operations::CrdtPayload as P;
+    let mut member = false;
+    let mut end = None;
+    for op in &state.op_log {
+        match &op.payload {
+            P::ServerCreated { owner_peer_id, .. } => member = owner_peer_id == master,
+            P::ServerCheckpoint { state: base, .. } => member = lists_member(base, master),
+            P::MemberAdded { peer_id, .. } if peer_id == master => member = true,
+            P::MemberRemoved { peer_id } | P::MemberBanned { peer_id } if peer_id == master && member => {
+                member = false;
+                end = Some(op);
+            }
+            _ => {}
+        }
+    }
+    end.filter(|_| !member)
+}
+
+/// Whether a checkpoint's state lists `master` as a member.
+fn lists_member(base: &str, master: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Members {
+        members: HashMap<String, serde::de::IgnoredAny>,
+    }
+    serde_json::from_str::<Members>(base).is_ok_and(|s| s.members.contains_key(master))
+}
+
+/// Whether `op` decides who belongs or at what rank for one of `chain`, or for
+/// everyone: role permissions, the settings an admission reads, the anchor.
+fn decides_rank(op: &CrdtOp, chain: &HashSet<&str>) -> bool {
+    use super::operations::CrdtPayload as P;
+    match &op.payload {
+        P::MemberAdded { peer_id, .. }
+        | P::MemberRemoved { peer_id }
+        | P::MemberBanned { peer_id }
+        | P::MemberUnbanned { peer_id }
+        | P::RoleChanged { peer_id, .. } => chain.contains(peer_id.as_str()),
+        P::RolePermissionsChanged { .. } | P::ServerCreated { .. } | P::ServerCheckpoint { .. } => true,
+        P::ServerSettingChanged { key, .. } => {
+            matches!(key.as_str(), "is_private" | "max_members") || key.starts_with("twitch_")
+        }
+        _ => false,
+    }
 }
 
 /// What a sync-batch merge did.
@@ -327,5 +404,125 @@ mod tests {
         assert_eq!(state_b.name(), "Fresh");
         let again = merge_ops(&mut state_b, &[fresh]).unwrap();
         assert_eq!(again, MergeReport { applied: 0, rejected: 0, rebuilt: false }, "a second copy is not new");
+    }
+
+    // HOL-SEC-114: what a former member asking to sync is told.
+
+    /// An op by `tag`'s identity at an exact clock, signed like any real one.
+    fn op_at(tag: u8, sid: &str, ms: u64, payload: CrdtPayload) -> CrdtOp {
+        let (kp, id, pk) = keys(tag);
+        let mut op = CrdtOp {
+            server_id: sid.into(),
+            hlc: HlcTimestamp { physical_ms: ms, counter: 0, actor: id.clone() },
+            author: id,
+            payload,
+            auth: None,
+        };
+        op.sign(&kp, &pk);
+        op
+    }
+
+    fn id(tag: u8) -> String {
+        keys(tag).1
+    }
+
+    /// `tag` admitted to `sid` on its own ask made at `at`.
+    fn add(sid: &str, tag: u8, at: i64) -> CrdtPayload {
+        let ask = crate::crdt::operations::JoinAsk::sign(sid, at, &keys(tag).0);
+        CrdtPayload::MemberAdded { peer_id: id(tag), display_name: "m".into(), follow: None, ask: Some(ask) }
+    }
+
+    fn folded(sid: &str, ops: &[CrdtOp]) -> ServerState {
+        let mut s = ServerState::skeleton(sid.into());
+        s.ingest_remote(ops);
+        s
+    }
+
+    fn nothing_held(sid: &str) -> StateVector {
+        StateVector { server_id: sid.into(), entries: HashMap::new() }
+    }
+
+    /// B left while X was a plain member; X was made a moderator and kicked B, then was
+    /// demoted, and B was banned for good measure. B is told the kick and the promotion
+    /// its own fold needs to admit it: not the rename before it, nothing after it.
+    #[test]
+    fn authz_a_former_member_is_told_its_removal_and_the_rank_behind_it_only() {
+        use crate::crdt::operations::MemberRole;
+        let (kp, owner, pk) = keys(1);
+        let (_, founding) = ServerState::found("S".into(), owner, kp, pk);
+        let sid = founding.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let (b, x) = (2u8, 3u8);
+        let before = vec![founding, op_at(1, &sid, t + 1, add(&sid, b, 1)), op_at(1, &sid, t + 2, add(&sid, x, 1))];
+        let kick = op_at(x, &sid, t + 5, CrdtPayload::MemberRemoved { peer_id: id(b) });
+        let after = vec![
+            op_at(1, &sid, t + 3, CrdtPayload::RoleChanged { peer_id: id(x), role: MemberRole::Moderator, priority: 3 }),
+            op_at(1, &sid, t + 4, CrdtPayload::ServerRenamed { new_name: "while away".into() }),
+            kick.clone(),
+            op_at(1, &sid, t + 6, CrdtPayload::RoleChanged { peer_id: id(x), role: MemberRole::Member, priority: 3 }),
+            op_at(1, &sid, t + 7, CrdtPayload::MemberBanned { peer_id: id(b) }),
+            op_at(1, &sid, t + 8, CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: 0 }),
+        ];
+        let mut away = folded(&sid, &before);
+        let members = folded(&sid, &[before.clone(), after].concat());
+        assert!(!members.is_member(&id(b)) && members.is_banned(&id(b)));
+
+        let notice = removal_notice(&members, &id(b), &StateVector::from_server_state(&away));
+        let kinds: Vec<&str> = notice.iter().map(|op| payload_name(&op.payload)).collect();
+        assert_eq!(kinds, ["RoleChanged", "MemberRemoved"], "only the kick and the promotion behind it");
+        assert!(notice.iter().all(|op| op.hlc <= kick.hlc), "an op from after the removal was handed over");
+
+        let told: Vec<CrdtOp> = notice.into_iter().cloned().collect();
+        let mut kick_alone = away.clone();
+        kick_alone.ingest_remote(&told[1..]);
+        assert!(kick_alone.is_member(&id(b)), "without the promotion B's fold refuses the kick");
+        away.ingest_remote(&told);
+        assert!(!away.is_member(&id(b)), "B's own fold drops it");
+    }
+
+    /// Nothing for someone the log never shows as a member, a pre-emptive ban included,
+    /// nor for a current member, a removed one admitted again among them. A ban of a
+    /// member is a removal like a kick.
+    #[test]
+    fn authz_no_removal_notice_for_a_stranger_or_a_member() {
+        let (kp, owner, pk) = keys(1);
+        let (_, founding) = ServerState::found("S".into(), owner, kp, pk);
+        let sid = founding.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let s = folded(&sid, &[
+            founding,
+            op_at(1, &sid, t + 1, add(&sid, 2, 1)),
+            op_at(1, &sid, t + 2, CrdtPayload::MemberBanned { peer_id: id(5) }),
+            op_at(1, &sid, t + 3, add(&sid, 3, 1)),
+            op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: id(3) }),
+            op_at(1, &sid, t + 5, add(&sid, 3, 2)),
+            op_at(1, &sid, t + 6, add(&sid, 4, 1)),
+            op_at(1, &sid, t + 7, CrdtPayload::MemberBanned { peer_id: id(4) }),
+        ]);
+        assert!(s.is_member(&id(3)) && s.is_banned(&id(5)) && !s.is_member(&id(4)));
+        let none = nothing_held(&sid);
+        assert!(removal_notice(&s, &id(9), &none).is_empty(), "a stranger was told something");
+        assert!(removal_notice(&s, &id(5), &none).is_empty(), "a stranger banned before it ever joined was told its ban");
+        assert!(removal_notice(&s, &id(2), &none).is_empty(), "a member got a removal notice");
+        assert!(removal_notice(&s, &id(3), &none).is_empty(), "a member admitted again got its old removal");
+        let banned = removal_notice(&s, &id(4), &none);
+        assert_eq!(banned.last().map(|op| payload_name(&op.payload)), Some("MemberBanned"), "a ban is a removal too");
+    }
+
+    /// A checkpoint prunes the admission, so the log shows the membership only through
+    /// the checkpoint's state: a kick after it is still told.
+    #[test]
+    fn a_removal_after_a_checkpoint_is_still_told() {
+        let (kp, owner, pk) = keys(1);
+        let (mut s, _) = ServerState::found("S".into(), owner.clone(), kp, pk);
+        let sid = s.server_id.clone();
+        let join = s.author_checked(add(&sid, 3, 1)).expect("the owner admits 3");
+        let covers = s.horizon();
+        let base = s.checkpoint_json(&owner, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
+        s.author_checked(CrdtPayload::ServerCheckpoint { state: base, covers }).expect("the owner checkpoints");
+        assert!(!s.op_log.iter().any(|op| op.hlc == join.hlc), "the checkpoint pruned the admission");
+        let kick = s.author_checked(CrdtPayload::MemberRemoved { peer_id: id(3) }).expect("the owner kicks 3");
+        let notice = removal_notice(&s, &id(3), &nothing_held(&sid));
+        assert!(notice.iter().any(|op| op.hlc == kick.hlc), "a member the checkpoint lists was not told of its kick");
     }
 }

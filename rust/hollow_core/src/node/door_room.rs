@@ -63,8 +63,21 @@ pub(crate) fn forget_heard() {
 const GRANT_DOMAIN: &[u8] = b"hollow-door-grant1";
 /// Between two asks for one room's door, and two answers to one device.
 const ASK_GAP: Duration = Duration::from_secs(20);
+/// Between two removal notices to one former member's device: one is enough to leave
+/// on, and each also tells it a member is online.
+const TOLD_GAP: Duration = Duration::from_secs(600);
 /// How many of the members who see an ask answer it.
 const ANSWERERS: usize = 3;
+
+/// The identity `device` speaks for: its master, unless it is a bare master id, a
+/// revoked device or one its roster disowns (HOL-SEC-083).
+pub(crate) fn speaks_for(device: &str) -> Option<String> {
+    let master = super::resolver::resolve(device);
+    let refused = super::resolver::is_bare_master(device)
+        || super::resolver::is_revoked(device)
+        || super::resolver::disowns(&master, device);
+    (!refused).then_some(master)
+}
 
 #[derive(Default)]
 pub(crate) struct DoorRooms {
@@ -77,6 +90,8 @@ pub(crate) struct DoorRooms {
     asked: HashMap<String, Instant>,
     /// (room, asker) -> the door we last handed it, and when.
     answered: HashMap<(String, String), (u64, Instant)>,
+    /// (room, asker) -> when we last told that former member's device of its removal.
+    told: HashMap<(String, String), Instant>,
 }
 
 fn grant_aad(server_id: &str, n: u64, asker: &str, granter: &str) -> Vec<u8> {
@@ -159,7 +174,8 @@ impl DoorRooms {
 
     /// A device the relay hides in `room` asked for its door. We answer when it is a
     /// device of a current member, we hold a door, and we are among the first few of
-    /// the members who see the room by a per-asker order (so not everyone answers).
+    /// the members who see the room by a per-asker order (so not everyone answers). A
+    /// former member's device is told of its removal instead.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn answer_ask(
         &mut self,
@@ -173,17 +189,14 @@ impl DoorRooms {
         ws_cmd_tx: &WsCmdTx,
     ) -> bool {
         let Some(state) = server_states.get(room).filter(|_| server_id == room) else { return false };
-        let master = super::resolver::resolve(asker);
-        if asker == our_device
-            || state.is_deleted()
-            || !state.is_member(local_master)
-            || !state.is_member(&master)
-            || super::resolver::is_bare_master(asker)
-            || super::resolver::is_revoked(asker)
-            || super::resolver::disowns(&master, asker)
-        {
+        let master = speaks_for(asker)
+            .filter(|_| asker != our_device && !state.is_deleted() && state.is_member(local_master));
+        let Some(master) = master else {
             hollow_log!("[HOLLOW-SECURITY] Not answering a door ask in {room} from {asker}: no device of a member");
             return false;
+        };
+        if !state.is_member(&master) {
+            return self.tell_removal(room, asker, &master, state, ws_room_peers, our_device, ws_cmd_tx);
         }
         let Some((n, _, secret)) = state.join_lock.newest_door() else { return false };
         if !self.first_to_answer(room, asker, ws_room_peers, our_device) {
@@ -218,6 +231,47 @@ impl DoorRooms {
             .filter(|d| d.as_str() != our_device && d.as_str() != asker && rank(d) < ours)
             .count();
         ahead < ANSWERERS
+    }
+
+    /// A former member's device asked: hand it the op that removed it, with what its
+    /// own fold needs to admit that op, so it leaves. Never a door, and nothing to
+    /// anyone our log never shows as a member.
+    #[allow(clippy::too_many_arguments)]
+    fn tell_removal(
+        &mut self,
+        room: &str,
+        asker: &str,
+        master: &str,
+        state: &crate::crdt::server_state::ServerState,
+        ws_room_peers: &WsRoomPeers,
+        our_device: &str,
+        ws_cmd_tx: &WsCmdTx,
+    ) -> bool {
+        // A door ask carries no state vector, so the notice reaches back to the anchor.
+        let nothing_held = crate::crdt::sync::StateVector { server_id: room.to_string(), entries: HashMap::new() };
+        let notice = crate::crdt::sync::removal_notice(state, master, &nothing_held);
+        if notice.is_empty() {
+            hollow_log!("[HOLLOW-SECURITY] Not answering a door ask in {room} from {asker}: no device of a member");
+            return false;
+        }
+        let key = (room.to_string(), asker.to_string());
+        if self.told.get(&key).is_some_and(|t| t.elapsed() < TOLD_GAP)
+            || !self.first_to_answer(room, asker, ws_room_peers, our_device)
+        {
+            return false;
+        }
+        let Ok(ops_json) = serde_json::to_string(&notice) else { return false };
+        self.told.retain(|_, t| t.elapsed() < TOLD_GAP);
+        self.told.insert(key, Instant::now());
+        hollow_log!("[HOLLOW-WS] Telling {asker}, a former member the relay hides in {room}, of its removal");
+        super::olm_lane::carry(
+            ws_cmd_tx,
+            asker,
+            Some(room),
+            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json },
+            super::olm_lane::NoSession::Drop,
+        );
+        true
     }
 
     /// A member handed us a door. We keep it only when it is the newest lock of the
@@ -263,5 +317,98 @@ impl DoorRooms {
     pub(crate) fn on_connected(&mut self) {
         self.hidden.clear();
         self.asked.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::resolver;
+    use super::super::ws_client::WsCommand;
+    use super::{speaks_for, DoorRooms, HavenMessage};
+    use crate::crdt::hlc::HlcTimestamp;
+    use crate::crdt::operations::{CrdtOp, CrdtPayload, JoinAsk};
+    use crate::crdt::server_state::ServerState;
+    use crate::crdt::testkeys::keys;
+
+    fn op_at(tag: u8, sid: &str, ms: u64, payload: CrdtPayload) -> CrdtOp {
+        let (kp, id, pk) = keys(tag);
+        let mut op = CrdtOp {
+            server_id: sid.into(),
+            hlc: HlcTimestamp { physical_ms: ms, counter: 0, actor: id.clone() },
+            author: id,
+            payload,
+            auth: None,
+        };
+        op.sign(&kp, &pk);
+        op
+    }
+
+    /// HOL-SEC-114: a kicked member's device that asks for the door is handed its
+    /// removal, once in a while and never the door; a stranger's ask gets nothing.
+    #[test]
+    fn a_former_member_asking_for_the_door_is_told_its_removal_once() {
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let (kp, owner, pk) = keys(1);
+        let (_, founding) = ServerState::found("S".into(), owner.clone(), kp, pk);
+        let sid = founding.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let kicked = keys(2).1;
+        let admit = CrdtPayload::MemberAdded {
+            peer_id: kicked.clone(),
+            display_name: "m".into(),
+            follow: None,
+            ask: Some(JoinAsk::sign(&sid, 1, &keys(2).0)),
+        };
+        let mut state = ServerState::skeleton(sid.clone());
+        state.ingest_remote(&[
+            founding,
+            op_at(1, &sid, t + 1, admit),
+            op_at(1, &sid, t + 2, CrdtPayload::MemberRemoved { peer_id: kicked.clone() }),
+        ]);
+        let states = std::collections::HashMap::from([(sid.clone(), state)]);
+        resolver::update("kicked-device", &kicked);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut doors = DoorRooms::default();
+        let peers = std::collections::HashMap::new();
+        let ask = |doors: &mut DoorRooms, asker: &str| doors.answer_ask(&sid, &sid, asker, &states, &peers, &owner, "our-device", &tx);
+
+        assert!(ask(&mut doors, "kicked-device"), "a kicked member's device asked and was not told");
+        match rx.try_recv() {
+            Ok(WsCommand::Carry { device, room, json, .. }) => {
+                assert_eq!((device.as_str(), room.as_deref()), ("kicked-device", Some(sid.as_str())));
+                let ops = match serde_json::from_str(&json) {
+                    Ok(super::super::types::MessageEnvelope::Carried { msg, .. }) => match *msg {
+                        HavenMessage::SyncResponse { ops_json, .. } => crate::crdt::operations::parse_ops_tolerant(&ops_json),
+                        other => panic!("not a sync answer: {other:?}"),
+                    },
+                    other => panic!("not a carried envelope: {other:?}"),
+                };
+                assert!(
+                    matches!(ops.last().map(|op| &op.payload), Some(CrdtPayload::MemberRemoved { peer_id }) if *peer_id == kicked),
+                    "the notice does not end on the removal"
+                );
+            }
+            other => panic!("no removal notice went out: {other:?}"),
+        }
+        assert!(!ask(&mut doors, "kicked-device") && rx.try_recv().is_err(), "told again inside the gap");
+        assert!(!ask(&mut doors, &keys(9).1) && rx.try_recv().is_err(), "a stranger was told something");
+        resolver::clear_for_test();
+    }
+
+    /// HOL-SEC-114: a former member is told of its removal only through a device its
+    /// roster counts, never through the bare master id or a revoked device.
+    #[test]
+    fn authz_a_bare_master_or_revoked_device_speaks_for_no_one() {
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        resolver::update("device", "master");
+        resolver::update("revoked", "master");
+        resolver::note_roster("master");
+        assert_eq!(speaks_for("device").as_deref(), Some("master"));
+        assert_eq!(speaks_for("master"), None, "the bare master id spoke for its identity");
+        resolver::mark_revoked(&["revoked".to_string()]);
+        assert_eq!(speaks_for("revoked"), None, "a revoked device spoke for its identity");
+        resolver::clear_for_test();
     }
 }

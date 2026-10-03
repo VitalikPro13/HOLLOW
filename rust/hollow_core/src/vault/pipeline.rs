@@ -30,6 +30,27 @@ pub struct VaultManifest {
     /// Message ID linking this manifest to the file record in the files table.
     #[serde(default)]
     pub message_id: String,
+    /// SHA-256 of each stored erasure shard, by index: a holder tells the creator's shard
+    /// from a planted one without a rebuild. Empty under replication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shard_hashes: Vec<String>,
+}
+
+impl VaultManifest {
+    /// The SHA-256 a stored shard `si` must have, when the manifest pins one. A replicated
+    /// copy is the whole ciphertext, so its hash is the content id.
+    pub fn shard_hash(&self, si: u16) -> Option<&str> {
+        if self.k == 0 && self.m == 0 {
+            return Some(&self.content_id);
+        }
+        if self.shard_hashes.len() != self.k as usize + self.m as usize {
+            return None;
+        }
+        self.shard_hashes
+            .get(si as usize)
+            .map(String::as_str)
+            .filter(|hash| super::content_store::is_content_id(hash))
+    }
 }
 
 /// AES-256-GCM encrypted output.
@@ -150,6 +171,11 @@ pub fn prepare_upload(
             (shards, placements, k_adj as u16, m_adj as u16, n as u16)
         }
     };
+    let shard_hashes = if shard_count == 0 {
+        Vec::new()
+    } else {
+        shards.iter().map(|(_, shard)| content_id(shard)).collect()
+    };
 
     let manifest = VaultManifest {
         content_id: cid.to_string(),
@@ -166,6 +192,7 @@ pub fn prepare_upload(
         creator_peer_id: our_peer_id.to_string(),
         channel_id: channel_id.to_string(),
         message_id: message_id.to_string(),
+        shard_hashes,
     };
 
     Ok(UploadPlan {
@@ -501,6 +528,36 @@ mod tests {
         assert_eq!(plan.placements.len(), 5);
     }
 
+    /// HOL-SEC-117: the manifest pins every shard it places, so a holder refuses a planted
+    /// copy before any rebuild; an older manifest without the list pins no erasure shard.
+    #[test]
+    fn a_manifest_pins_every_shard_it_places() {
+        let encrypted = aes_encrypt(b"file for an 8-member server").unwrap();
+        let cid = content_id(&encrypted.ciphertext);
+        let upload = |members: &[String]| {
+            let pledges: HashMap<String, u64> = members.iter().map(|m| (m.clone(), 1_000_000_000)).collect();
+            prepare_upload(
+                &encrypted.ciphertext, &cid, &encrypted.key, &encrypted.nonce,
+                "a.bin", "application/octet-stream", "ch1", 27, "peer_0", members, &pledges, "m",
+            )
+            .unwrap()
+        };
+        let plan = upload(&(0..8).map(|i| format!("peer_{i}")).collect::<Vec<_>>());
+        for (si, shard) in &plan.shards {
+            assert_eq!(plan.manifest.shard_hash(*si), Some(content_id(shard).as_str()), "HOL-SEC-117: shard {si} is not pinned");
+        }
+        assert_eq!(plan.manifest.shard_hash(plan.shards.len() as u16), None);
+
+        let replicated = upload(&make_members(&["peer_0", "peer_1", "peer_2"]));
+        assert!(replicated.manifest.shard_hashes.is_empty());
+        assert_eq!(replicated.manifest.shard_hash(0), Some(cid.as_str()), "a replicated copy is the ciphertext");
+
+        let mut older = serde_json::to_value(&plan.manifest).unwrap();
+        older.as_object_mut().unwrap().remove("shard_hashes");
+        let older: VaultManifest = serde_json::from_value(older).unwrap();
+        assert_eq!(older.shard_hash(0), None, "an older manifest pins no erasure shard");
+    }
+
     #[test]
     fn prepare_upload_audio_standard_tier() {
         let data = b"audio file";
@@ -558,6 +615,7 @@ mod tests {
             creator_peer_id: "12D3KooW...".into(),
             channel_id: "ch1".into(),
             message_id: "msg123".into(),
+            shard_hashes: Vec::new(),
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: VaultManifest = serde_json::from_str(&json).unwrap();
@@ -598,6 +656,7 @@ mod tests {
             creator_peer_id: "peer".into(),
             channel_id: "ch".into(),
             message_id: String::new(),
+            shard_hashes: Vec::new(),
         };
 
         // Replication: single shard = full ciphertext
@@ -629,6 +688,7 @@ mod tests {
             creator_peer_id: "peer".into(),
             channel_id: "ch".into(),
             message_id: String::new(),
+            shard_hashes: Vec::new(),
         };
 
         // Drop m parity shards
@@ -660,6 +720,7 @@ mod tests {
             creator_peer_id: "peer".into(),
             channel_id: "ch".into(),
             message_id: String::new(),
+            shard_hashes: Vec::new(),
         };
 
         let shards: Vec<Option<Vec<u8>>> = vec![Some(encrypted.ciphertext)];
@@ -686,6 +747,7 @@ mod tests {
             creator_peer_id: "peer".into(),
             channel_id: "ch".into(),
             message_id: String::new(),
+            shard_hashes: Vec::new(),
         };
         let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(encrypted.key));
         let forged = cipher.encrypt(&Nonce::from(encrypted.nonce), &b"someone else's"[..]).unwrap();

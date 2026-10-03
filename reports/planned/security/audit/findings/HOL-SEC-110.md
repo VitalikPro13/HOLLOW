@@ -20,8 +20,8 @@ Only the MLS arm charged voice channel signals to the per-sender VC bucket, but 
 
 ## Fix
 
-One predicate, `is_vc_signal`, feeds both the MLS guard and a new Olm guard. The burst is raised from 30 to 50 so an honest join's ICE trickle from a machine with many network adapters still fits; the refill stays 10 per second.
+One predicate, `is_vc_signal`, feeds both the MLS guard and a new Olm guard. The burst is raised from 30 to 100 so an honest join's ICE trickle from a machine with many network adapters still fits (the session 31 fleet check saw 40 in one second from a three-adapter machine); the refill stays 10 per second, half the per-sender frame bucket's, which is what bounds a flood.
 
 ## Test
 
-Harness `authz_a_vc_signal_flood_over_olm_is_rate_limited` (failed before: 80 of 80 reached the app); unit `is_vc_signal_covers_every_voice_channel_envelope`; mutation killed.
+Harness `authz_a_vc_signal_flood_over_olm_is_rate_limited` (failed before: 80 of 80 reached the app; since the burst equals the frame bucket's, it sends two floods around a refill, and without the Olm guard 165 of 165 reach the app against about 156 allowed); unit `is_vc_signal_covers_every_voice_channel_envelope`; mutation killed.

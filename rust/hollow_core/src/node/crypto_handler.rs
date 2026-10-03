@@ -106,6 +106,34 @@ pub(crate) fn accepted_friend_entries(db_path: &str, db_passphrase: &str) -> Vec
         .collect()
 }
 
+/// Send a sibling our friend list: accepted friends and the friendships we ended.
+/// Returns how many entries it held.
+pub(crate) fn send_friend_list_to_sibling(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    sibling: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> usize {
+    let friends = accepted_friend_entries(db_path, db_passphrase);
+    let removed = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .map(|store| super::social::friend_removals(&store))
+        .unwrap_or_default();
+    let entries = friends.len() + removed.len();
+    if entries > 0 {
+        hollow_log!(
+            "[HOLLOW-MULTIDEV] Sharing {} friends and {} removals with sibling {sibling}",
+            friends.len(),
+            removed.len()
+        );
+        super::olm_lane::carry(
+            ws_cmd_tx, sibling, None,
+            &HavenMessage::FriendListSync { friends, removed },
+            super::olm_lane::NoSession::Queue,
+        );
+    }
+    entries
+}
+
 /// What a sibling that just proved itself gets, from either detection path (the
 /// inbox proof and the device-list ingest): our friends, a pull of theirs, a DM
 /// backfill request and our read markers. Every piece is idempotent on arrival.
@@ -116,11 +144,7 @@ pub(crate) fn share_state_with_sibling(
     db_passphrase: &str,
 ) {
     use super::olm_lane::{carry, NoSession};
-    let friends = accepted_friend_entries(db_path, db_passphrase);
-    if !friends.is_empty() {
-        hollow_log!("[HOLLOW-MULTIDEV] Sharing {} friends with sibling {sibling}", friends.len());
-        carry(ws_cmd_tx, sibling, None, &HavenMessage::FriendListSync { friends }, NoSession::Queue);
-    }
+    send_friend_list_to_sibling(ws_cmd_tx, sibling, db_path, db_passphrase);
     carry(ws_cmd_tx, sibling, None, &HavenMessage::FriendListRequest, NoSession::Queue);
     request_sibling_dm_backfill(ws_cmd_tx, sibling, db_path, db_passphrase);
     send_read_markers_to_sibling(ws_cmd_tx, sibling, db_path, db_passphrase);
@@ -2198,7 +2222,7 @@ pub(crate) async fn send_encrypted_message(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> bool {
-    match olm.encrypt(peer_id_str, text.as_bytes()) {
+    match super::olm_lane::encrypt_in_turn(olm, peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, peer_id_str);
 
@@ -2248,7 +2272,7 @@ pub(crate) async fn send_encrypted_message_in_room(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
 ) -> bool {
-    match olm.encrypt(peer_id_str, text.as_bytes()) {
+    match super::olm_lane::encrypt_in_turn(olm, peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, peer_id_str);
             let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);
@@ -2288,7 +2312,7 @@ pub(crate) async fn send_encrypted_image_to_peer(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
 ) -> bool {
-    match olm.encrypt(peer_id_str, text.as_bytes()) {
+    match super::olm_lane::encrypt_in_turn(olm, peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             persist_olm_session(olm, crypto_store, peer_id_str);
             let haven_msg = encrypted_frame(olm, msg_type, &ciphertext);

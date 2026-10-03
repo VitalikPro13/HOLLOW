@@ -2153,7 +2153,7 @@ pub(crate) async fn handle_webrtc_transfer_complete(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> Option<super::vault_ops::VaultRepull> {
     hollow_log!("[HOLLOW-WEBRTC] Transfer complete: {transfer_id} from {sender_peer_id}");
     let stream_kind = if kind == "shard" {
         ws_stream_transfer::StreamKind::Shard { shard_index }
@@ -2184,8 +2184,7 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         ws_room_peers,
         db_path,
         db_passphrase,
-    ).await;
-
+    ).await
 }
 
 /// Handle NodeCommand::WebRtcSendComplete — completed send.
@@ -2374,7 +2373,8 @@ pub(crate) fn header_size_refused(
     None
 }
 
-/// Handle a completed stream transfer (file, shard, or link snapshot).
+/// Handle a completed stream transfer (file, shard, or link snapshot); a shard can hand
+/// back a vault download to pull afresh.
 ///
 /// Boxed: several swarm arms await it, and their futures sit near the worker stack.
 #[allow(clippy::too_many_arguments)]
@@ -2392,7 +2392,7 @@ pub(crate) async fn handle_completed_stream(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> Option<super::vault_ops::VaultRepull> {
     Box::pin(completed_stream_inner(
         request, sender_peer, pending_file_streams, pending_shard_streams, pending_vault_downloads,
         early_file_streams, pending_link_snapshots, bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
@@ -2416,7 +2416,7 @@ async fn completed_stream_inner(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> Option<super::vault_ops::VaultRepull> {
     use ws_stream_transfer::StreamKind;
 
     // Share chunks have their own completion path (handle_webrtc_share_chunk_complete)
@@ -2424,7 +2424,7 @@ async fn completed_stream_inner(
     // with its temp.
     if matches!(request.kind, StreamKind::ShareChunk { .. }) {
         let _ = tokio::fs::remove_file(&request.temp_path).await;
-        return;
+        return None;
     }
 
     match request.kind {
@@ -2434,18 +2434,20 @@ async fn completed_stream_inner(
                 &request, sender_peer, pending_link_snapshots,
                 event_tx, ws_cmd_tx, ws_room_peers,
             ).await;
+            None
         }
         StreamKind::File => {
             handle_file_stream_complete(
                 &request, sender_peer, pending_file_streams, early_file_streams,
                 event_tx, ws_cmd_tx, ws_room_peers, db_path, db_passphrase,
             ).await;
+            None
         }
         StreamKind::Shard { shard_index } => {
             handle_shard_stream_complete(
                 &request, shard_index, sender_peer, pending_shard_streams,
                 pending_vault_downloads, event_tx, db_path, db_passphrase,
-            ).await;
+            ).await
         }
     }
 }
@@ -2703,8 +2705,9 @@ fn hold_early_arrival_and_retry(
     }
 }
 
-/// StreamKind::Shard arm of handle_completed_stream: store the shard, emit
-/// ShardStored, and attempt reconstruction if a vault download is pending.
+/// StreamKind::Shard arm of handle_completed_stream: store the shard, emit ShardStored,
+/// and attempt reconstruction if a vault download is pending. Returns the download to
+/// pull afresh when its shards failed their manifest.
 #[allow(clippy::too_many_arguments)]
 async fn handle_shard_stream_complete(
     request: &ws_stream_transfer::StreamRequest,
@@ -2715,7 +2718,7 @@ async fn handle_shard_stream_complete(
     event_tx: &mpsc::Sender<NetworkEvent>,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> Option<super::vault_ops::VaultRepull> {
     let content_id = request.id.clone();
     let key = format!("{content_id}:{shard_index}");
     hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
@@ -2724,13 +2727,14 @@ async fn handle_shard_stream_complete(
     if pending_shard_streams.get(&key).is_some_and(|p| p.sender.as_deref().is_some_and(|s| s != sender_peer)) {
         hollow_log!("[HOLLOW-SECURITY] DROPPED shard stream {key} from {sender_peer}: registered for another device");
         let _ = tokio::fs::remove_file(&request.temp_path).await;
-        return;
+        return None;
     }
     let Some(pss) = pending_shard_streams.remove(&key) else {
         hollow_log!("[HOLLOW-STREAM] No pending ShardStore for stream {key} — ignoring");
         let _ = tokio::fs::remove_file(&request.temp_path).await;
-        return;
+        return None;
     };
+    let mut repull = None;
     if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
         // SECURITY (FILE-3): `store_shard` hashes the bytes it is handed against
         // themselves, so a holder that returned someone else's bytes was
@@ -2748,7 +2752,7 @@ async fn handle_shard_stream_complete(
             if !ok {
                 hollow_log!("[HOLLOW-SECURITY] DROPPED vault shard {shard_index} for {content_id} from {sender_peer}: missing or wrong per-shard hash");
                 let _ = tokio::fs::remove_file(&request.temp_path).await;
-                return;
+                return None;
             }
         }
         let data_dir = crate::identity::data_dir().unwrap_or_default();
@@ -2758,14 +2762,26 @@ async fn handle_shard_stream_complete(
             if content_store.has_shard(&key).unwrap_or(true) {
                 hollow_log!("[HOLLOW-VAULT] Shard {shard_index} of {content_id} from {sender_peer} dropped: already held");
                 let _ = tokio::fs::remove_file(&request.temp_path).await;
-                return;
+                return None;
             }
             // The envelope that registered the stream was judged before its size was known.
             let used = content_store.total_storage_used(&pss.server_id).unwrap_or(0);
             if super::vault_ops::pledge_refused(pss.pledge, used, shard_bytes.len() as u64) {
                 hollow_log!("[HOLLOW-VAULT] Shard {shard_index} of {content_id} from {sender_peer} dropped: our storage pledge for the server is full");
                 let _ = tokio::fs::remove_file(&request.temp_path).await;
-                return;
+                return None;
+            }
+            if let Some(reason) = super::vault_ops::shard_bytes_refused(&content_store, &pss.content_id, pss.shard_index, &shard_bytes) {
+                hollow_log!("[HOLLOW-SECURITY] DROPPED vault shard {shard_index} for {content_id} from {sender_peer}: {reason}");
+                let _ = tokio::fs::remove_file(&request.temp_path).await;
+                // An answer to our own pull: its download asks someone else.
+                return (pss.asked && pending_vault_downloads.contains_key(&content_id)).then(|| {
+                    super::vault_ops::VaultRepull {
+                        server_id: pss.server_id,
+                        content_id,
+                        refuted: Some(sender_peer.to_string()),
+                    }
+                });
             }
             let tier = crate::vault::content_store::StorageTier::from_str(&pss.tier);
             let _ = content_store.store_shard(
@@ -2782,7 +2798,7 @@ async fn handle_shard_stream_complete(
 
             if let Some((dl_server_id, dl_k, _)) = pending_vault_downloads.remove(&content_id) {
                 hollow_log!("[HOLLOW-VAULT] Shard arrived for pending download — attempting reconstruction: {content_id}");
-                attempt_vault_reconstruction(
+                repull = attempt_vault_reconstruction(
                     content_store, pending_vault_downloads, event_tx,
                     &content_id, dl_server_id, dl_k, db_path, db_passphrase,
                 ).await;
@@ -2790,11 +2806,13 @@ async fn handle_shard_stream_complete(
         }
     }
     let _ = tokio::fs::remove_file(&request.temp_path).await;
+    repull
 }
 
 /// Try to reconstruct a pending vault download after a new shard landed: gather
-/// local shards, reconstruct when >= k are available, else re-register the pending
-/// download and keep waiting for more shards.
+/// local shards, reconstruct when enough are held, else re-register the pending
+/// download and keep waiting for more shards. Returns the download to pull afresh
+/// when shards were deleted on the way.
 ///
 /// Takes the ContentStore by VALUE (last use in the shard arm): an owned store is
 /// Send across .await points, while a `&ContentStore` is not.
@@ -2808,7 +2826,7 @@ async fn attempt_vault_reconstruction(
     dl_k: usize,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> Option<super::vault_ops::VaultRepull> {
     // The caller already removed the pending-download registration — bailing
     // out here without rolling it back would wedge this content_id forever
     // (later shards find no pending entry and never retry reconstruction).
@@ -2823,41 +2841,42 @@ async fn attempt_vault_reconstruction(
                 content_id: content_id.to_string(),
                 error: "Manifest missing for this file".to_string(),
             }).await;
-            return;
+            return None;
         }
         Err(e) => {
             // Transient store failure — re-register the pending download so
             // the next shard arrival retries instead of abandoning it.
             hollow_log!("[HOLLOW-VAULT] load_manifest failed for {content_id}: {e} — keeping download pending for retry");
             pending_vault_downloads.insert(content_id.to_string(), (dl_server_id, dl_k, 0));
-            return;
+            return None;
         }
     };
-    let n = dl_k + manifest.m as usize;
-    let local_shards = content_store.list_content_shards(&dl_server_id, content_id).unwrap_or_default();
-    let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
-    for record in &local_shards {
-        let idx = record.shard_index as usize;
-        if idx < n {
-            // SECURITY (FILE-3): the CHECKED read, so a shard that rotted on
-            // disk (or was swapped underneath us) is left out of the decode
-            // rather than fed to Reed-Solomon and blamed on the AES layer.
-            match content_store.read_shard(&dl_server_id, &record.shard_key) {
-                Ok(data) => packed[idx] = Some(data),
-                Err(e) => hollow_log!(
-                    "[HOLLOW-SECURITY] vault shard {idx} for {content_id} failed its stored hash: {e}"
-                ),
-            }
+    let repull = |server_id: String| super::vault_ops::VaultRepull {
+        server_id,
+        content_id: content_id.to_string(),
+        refuted: None,
+    };
+    let need = (manifest.k as usize).max(1);
+    let (packed, dropped) = super::vault_ops::gather_vault_shards(&content_store, &manifest);
+    let avail = packed.iter().flatten().count();
+    if avail < need {
+        if dropped > 0 {
+            // Nothing asks for the shards just deleted but a fresh pull.
+            return Some(repull(dl_server_id));
         }
-    }
-    let avail = packed.iter().filter(|s| s.is_some()).count();
-    if avail < dl_k {
         pending_vault_downloads.insert(content_id.to_string(), (dl_server_id, dl_k, 0));
-        hollow_log!("[HOLLOW-VAULT] Still need more shards: have {avail}, need {dl_k}");
-        return;
+        hollow_log!("[HOLLOW-VAULT] Still need more shards: have {avail}, need {need}");
+        return None;
     }
     let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
-    let reconstructed = crate::vault::pipeline::reconstruct_file(&manifest, &packed).and_then(|plaintext| {
+    let rebuilt = crate::vault::pipeline::reconstruct_file(&manifest, &packed);
+    if let Err(e) = &rebuilt
+        && super::vault_ops::drop_unpinned_shards(&content_store, &manifest, &packed) > 0
+    {
+        hollow_log!("[HOLLOW-VAULT] Rebuild of {content_id} failed ({e}): pulling its shards again");
+        return Some(repull(dl_server_id));
+    }
+    let reconstructed = rebuilt.and_then(|plaintext| {
         match crate::storage::MessageStore::open(db_path, db_passphrase) {
             Ok(store) => match super::file_commit::vault_plaintext_refused(&store, content_id, &plaintext) {
                 Some(reason) => Err(format!("{FORGED_FILE_ERROR} ({reason})")),
@@ -2883,8 +2902,8 @@ async fn attempt_vault_reconstruction(
             }).await;
         }
     }
+    None
 }
-
 
 /// Stream file or shard data to a peer. Prefers WebRTC data channel if available,
 /// falls back to WS binary frames via relay.
@@ -3620,5 +3639,64 @@ mod tests {
 
         // Leave the permissive default behind for the rest of the suite.
         set_auto_download_conf(169, HashMap::new());
+    }
+
+    /// HOL-SEC-117: a shard landing for a download whose other copies fail their manifest
+    /// hands the download back for a fresh pull, with those copies deleted, instead of
+    /// failing it for good.
+    #[tokio::test]
+    async fn a_failed_rebuild_hands_back_a_fresh_pull() {
+        use crate::vault::content_store::{ContentStore, StorageTier, content_id, shard_key};
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("vault.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let vault = tmp.path().join("vault");
+        let (tx, _rx) = mpsc::channel(8);
+        let manifest = |cid: &str, shard_hashes: Vec<String>| crate::vault::pipeline::VaultManifest {
+            content_id: cid.to_string(),
+            encryption_key: "00".repeat(32),
+            nonce: "00".repeat(12),
+            original_size: 40,
+            k: 3,
+            m: 2,
+            shard_count: 5,
+            file_name: "a.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            storage_tier: "standard".into(),
+            created_at: 1,
+            creator_peer_id: "creator".into(),
+            channel_id: "srv-general".into(),
+            message_id: String::new(),
+            shard_hashes,
+        };
+        let ciphertext = b"an erasure-coded ciphertext long enough to split in three".to_vec();
+        let cid = content_id(&ciphertext);
+        let shards = crate::vault::erasure::encode(&ciphertext, 3, 2, &cid).unwrap();
+        let rebuild = async |cid: &str| {
+            let cs = ContentStore::open(&db, &pass, &vault).unwrap();
+            attempt_vault_reconstruction(cs, &mut HashMap::new(), &tx, cid, "srv".into(), 3, &db, &pass).await
+        };
+        let cs = ContentStore::open(&db, &pass, &vault).unwrap();
+
+        // No hashes to tell which copy is bad: every copy that took part goes.
+        cs.save_manifest("srv", "srv-general", &manifest(&cid, Vec::new())).unwrap();
+        for si in 0..2u16 {
+            cs.store_shard("srv", &cid, si, 3, 2, 0, StorageTier::Standard, &shards[si as usize]).unwrap();
+        }
+        cs.store_shard("srv", &cid, 2, 3, 2, 0, StorageTier::Standard, b"planted").unwrap();
+        let repull = rebuild(&cid).await;
+        assert!(
+            repull.is_some_and(|r| r.content_id == cid && r.refuted.is_none()),
+            "HOL-SEC-117: a rebuild that failed on unvouched copies was not pulled afresh",
+        );
+        assert!((0..3u16).all(|si| !cs.has_shard(&shard_key(&cid, si)).unwrap()), "the unvouched copies are still held");
+
+        // Hashes in the manifest: only the refuted copy goes, and the download pulls again.
+        let pinned = "e1".repeat(32);
+        cs.save_manifest("srv", "srv-general", &manifest(&pinned, shards.iter().map(|s| content_id(s)).collect())).unwrap();
+        cs.store_shard("srv", &pinned, 0, 3, 2, 0, StorageTier::Standard, &shards[0]).unwrap();
+        cs.store_shard("srv", &pinned, 1, 3, 2, 0, StorageTier::Standard, b"planted").unwrap();
+        assert!(rebuild(&pinned).await.is_some(), "HOL-SEC-117: a deleted copy was never asked for again");
+        assert!(cs.has_shard(&shard_key(&pinned, 0)).unwrap() && !cs.has_shard(&shard_key(&pinned, 1)).unwrap());
     }
 }

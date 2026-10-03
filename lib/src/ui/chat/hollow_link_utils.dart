@@ -217,7 +217,7 @@ HollowLink? classifyHollowLink(String url) {
             type: HollowLinkType.share, fullUrl: url, id: payload);
       }
     } else if (uri.host == 'join') {
-      final serverId = params['server'];
+      final serverId = params['server']?.toLowerCase();
       final roomCode = params['room'];
       if (serverId != null && serverId.isNotEmpty) {
         final owner = ownerOf(params);
@@ -288,7 +288,7 @@ HollowLink? classifyHollowLink(String url) {
       } catch (_) {}
     }
     final relay = relayOf(params);
-    final serverId = params['server'];
+    final serverId = params['server']?.toLowerCase();
     final roomCode = params['room'];
     if (serverId != null && _inviteIdRegex.hasMatch(serverId)) {
       final owner = ownerOf(params);
@@ -333,7 +333,8 @@ HollowLink? classifyHollowLink(String url) {
 /// into a server-join field is not silently read as a server id; anything else
 /// falls back to the trimmed input. EVERY join or browse input bar goes through
 /// this rather than hand-parsing `Uri.queryParameters`, which never sees the
-/// FRAGMENT the web form carries its id in.
+/// FRAGMENT the web form carries its id in. A server id comes back lowercase,
+/// the only form Rust and the relay take.
 String inviteIdFromInput(String input, HollowLinkType type) =>
     inviteFromInput(input, type).id;
 
@@ -346,7 +347,10 @@ String inviteIdFromInput(String input, HollowLinkType type) =>
   if (link != null && link.type == type) {
     return (id: link.id, relay: link.relay, owner: link.owner, key: link.key);
   }
-  return (id: trimmed, relay: null, owner: null, key: null);
+  final id = type == HollowLinkType.serverInvite && isServerIdShape(trimmed)
+      ? trimmed.toLowerCase()
+      : trimmed;
+  return (id: id, relay: null, owner: null, key: null);
 }
 
 /// Whether [id] has the shape of a server id: 40 hex characters for a server

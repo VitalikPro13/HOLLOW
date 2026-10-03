@@ -24,7 +24,7 @@ The notice now carries the removal or ban op itself (a required field; an old ba
 
 ## Residual risk
 
-A member that is offline during the kick still never hears of it (follow-up).
+A member offline during the kick learns it when it next asks by sync or door ask (HOL-SEC-114).
 
 ## Test
 

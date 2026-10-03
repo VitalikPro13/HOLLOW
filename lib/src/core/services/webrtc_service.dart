@@ -12,6 +12,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../rust/api/network.dart' as network_api;
 import 'ice_route_probe.dart';
 import 'rtc_signal_pairing.dart';
+import 'rtc_stream_intake.dart';
 import 'wire_transfer_id.dart';
 
 /// Chunk size for WebRTC data channel transfers: 64KB is safe across every
@@ -522,6 +523,7 @@ class WebRtcService {
 
     _armIdleTimer(conn, lane);
 
+    await conn.sendSlots.acquire();
     try {
       // Read entire file into memory (like WS path) to avoid per-chunk async
       // I/O. AtRest, not dart:io: a source under the data root is ciphertext,
@@ -607,6 +609,8 @@ class WebRtcService {
     } catch (e) {
       _log('[HOLLOW-WEBRTC-DART] Send failed: $transferId — $e');
       await _reportTransferFailed(transferId, peerId, lane, e.toString());
+    } finally {
+      conn.sendSlots.release();
     }
   }
 
@@ -1196,6 +1200,7 @@ class WebRtcService {
       return;
     }
 
+    final sender = _streamSender(peerId, lane);
     if (typeByte == _kTypeContinuation) {
       // Continuation chunk: [0xFF][id:64][payload...]
       if (data.length < 65) return;
@@ -1203,12 +1208,23 @@ class WebRtcService {
       if (id == null) return;
       final transfer = _transfers[id];
       if (transfer == null) return;
-      // A continuation must arrive on the same lane its first chunk did.
-      if (_laneForKind(transfer.kind) != lane) return;
+      final verdict = rtcChunkVerdict(transfer, sender, data.length - 65);
+      if (verdict == RtcChunk.drop) {
+        _log('[HOLLOW-SECURITY] Dropped a continuation of $id from $peerId '
+            '(${_tag(lane)}): another connection\'s stream');
+        return;
+      }
+      if (verdict == RtcChunk.overflow) {
+        _log('[HOLLOW-WEBRTC-DART] Dropped $id from $peerId: bytes past its '
+            'declared ${transfer.totalSize}');
+        _discardTransfer(id);
+        return;
+      }
 
       final payload = data.sublist(65);
       transfer.sink.add(payload);
       transfer.bytesReceived += payload.length;
+      transfer.lastFrameAt = DateTime.now();
 
       if (transfer.bytesReceived - transfer.lastProgressReport >= 512 * 1024
           || transfer.bytesReceived >= transfer.totalSize) {
@@ -1253,21 +1269,30 @@ class WebRtcService {
         kind = 'file';
       }
 
+      final now = DateTime.now();
+      final open = rtcStreamOpen(_transfers,
+          id: id,
+          sender: sender,
+          kind: kind,
+          totalSize: totalSize,
+          firstPayload: data.length - payloadStart,
+          now: now);
+      if (open.refusal != null) {
+        _log('[HOLLOW-SECURITY] Dropped stream $id from $peerId '
+            '(${_tag(lane)}): ${open.refusal}');
+        return;
+      }
+      // A stale copy of this id (re-sent with a new AES key, or idle past its
+      // holder) and whatever the caps evict.
+      for (final stale in open.evict) {
+        _discardTransfer(stale);
+      }
+
       final filesDir = _getFilesDir();
       // For share_chunk the sender packs chunk_index INTO the id, so
       // continuation messages route correctly with many parallel share
       // chunks in flight.
       final tempPath = '$filesDir/.webrtc_recv_$id.tmp';
-
-      // Discard a stale transfer that was re-sent with a new AES key.
-      if (_transfers.containsKey(id)) {
-        final old = _transfers.remove(id);
-        if (old != null) {
-          old.sink.close();
-          try { File(old.tempPath).deleteSync(); } catch (_) {}
-          _log('[HOLLOW-WEBRTC-DART] Discarded stale transfer $id (restarting with new key)');
-        }
-      }
 
       _log('[HOLLOW-WEBRTC-DART] Receiving $kind $id ($totalSize bytes) from $peerId');
 
@@ -1277,6 +1302,8 @@ class WebRtcService {
       final transfer = _IncomingTransfer(
         transferId: id,
         senderPeerId: peerId,
+        sender: sender,
+        lastFrameAt: now,
         totalSize: totalSize,
         kind: kind,
         shardIndex: shardIndex,
@@ -1297,6 +1324,20 @@ class WebRtcService {
         _completeIncomingTransfer(id);
       }
     }
+  }
+
+  /// The connection a stream frame arrived on, lane included: a peer's Share
+  /// and general channels are two senders.
+  static String _streamSender(String peerId, _Lane lane) =>
+      lane == _Lane.share ? '$peerId#share' : peerId;
+
+  /// Drops an incoming transfer with its temp file, telling Rust nothing.
+  void _discardTransfer(String id) {
+    final old = _transfers.remove(id);
+    if (old == null) return;
+    old.sink.close();
+    try { File(old.tempPath).deleteSync(); } catch (_) {}
+    _log('[HOLLOW-WEBRTC-DART] Discarded transfer $id from ${old.senderPeerId}');
   }
 
   void _completeIncomingTransfer(String transferId) {
@@ -1441,6 +1482,7 @@ class _PeerConn implements RtcSignalEndpoint {
   final _Lane lane;
   Timer? idleTimer;
   Timer? keepaliveTimer;
+  final RtcSendSlots sendSlots = RtcSendSlots();
 
   _PeerConn({
     required this.pc,
@@ -1451,21 +1493,29 @@ class _PeerConn implements RtcSignalEndpoint {
   });
 }
 
-class _IncomingTransfer {
+class _IncomingTransfer implements RtcIncomingStream {
   final String transferId;
   final String senderPeerId;
+  @override
+  final String sender;
+  @override
   final int totalSize;
   final String kind;
   final int shardIndex;
   final int chunkIndex;
   final String tempPath;
   final IOSink sink;
+  @override
   int bytesReceived = 0;
+  @override
+  DateTime lastFrameAt;
   int lastProgressReport = 0;
 
   _IncomingTransfer({
     required this.transferId,
     required this.senderPeerId,
+    required this.sender,
+    required this.lastFrameAt,
     required this.totalSize,
     required this.kind,
     required this.shardIndex,

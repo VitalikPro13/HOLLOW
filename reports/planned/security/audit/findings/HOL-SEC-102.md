@@ -24,7 +24,7 @@ Every new stream must fit a ceiling set by what we expect of it before a temp fi
 
 ## Residual risk
 
-The Dart WebRTC twin (`webrtc_service.dart`) still has no ceiling and no sender check on continuations (follow-up).
+None left on this lane; the Dart WebRTC twin (`webrtc_service.dart`) was fixed as HOL-SEC-116.
 
 ## Test
 

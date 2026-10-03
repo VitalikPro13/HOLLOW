@@ -108,6 +108,9 @@ impl ContentStore {
     /// `db_path` and `passphrase` connect to the same messages.db as other stores.
     /// `base_dir` is the root for shard file storage (e.g., ~/.hollow/vault/).
     pub fn open(db_path: &str, passphrase: &str, base_dir: &Path) -> Result<Self, String> {
+        // Harness nodes share one data dir; each keeps its own shards, as an install does.
+        #[cfg(test)]
+        let base_dir: &Path = &base_dir.join(&content_id(db_path.as_bytes())[..16]);
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open content store: {e}"))?;
 
@@ -1621,6 +1624,7 @@ mod tests {
             creator_peer_id: "peer_creator".to_string(),
             channel_id: channel_id.to_string(),
             message_id: String::new(),
+            shard_hashes: Vec::new(),
         }
     }
 

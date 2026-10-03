@@ -64,10 +64,13 @@ pub(crate) fn in_bundle_key(requester_master: &str) -> String {
     format!("friendreq_in:{requester_master}")
 }
 
+/// KV key prefix of the removal tombstones.
+const REMOVED_PREFIX: &str = "friend_removed:";
+
 /// KV key of the removal tombstone for `master`: when a friendship with them last
 /// ended, in ms. Never cleared; a re-add is newer than it. A legacy "1" bounds nothing.
 fn removed_key(master: &str) -> String {
-    format!("friend_removed:{master}")
+    format!("{REMOVED_PREFIX}{master}")
 }
 
 /// When a friendship with `master` last ended, 0 if never.
@@ -105,6 +108,86 @@ pub(crate) fn request_predates_removal(
         hollow_log!("[HOLLOW-SECURITY] Ignoring a FriendRequest from {sender} made before the last removal");
     }
     stale
+}
+
+/// Most removals one sibling list carries or is read for: the newest, the ones a device
+/// that was away can still be behind on.
+const MAX_SHARED_REMOVALS: usize = 256;
+
+/// The friendships we ended, newest first, as our own devices tell each other. A legacy
+/// tombstone holds no time and is left out.
+pub(crate) fn friend_removals(store: &crate::storage::MessageStore) -> Vec<FriendRemoval> {
+    let mut out: Vec<FriendRemoval> = store
+        .load_settings_with_prefix(REMOVED_PREFIX)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, at)| {
+            let peer_id = key.strip_prefix(REMOVED_PREFIX)?.to_string();
+            let at = at.parse::<i64>().ok().filter(|at| *at > 1)?;
+            Some(FriendRemoval { peer_id, at })
+        })
+        .collect();
+    out.sort_unstable_by_key(|r| std::cmp::Reverse(r.at));
+    out.truncate(MAX_SHARED_REMOVALS);
+    out
+}
+
+/// Tell our own online devices that the friendship with `master` ended at `at`. One that
+/// is away hears it in our friend list once it is back.
+pub(crate) fn share_removal_with_siblings(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    master: &str,
+    at: i64,
+) {
+    let msg = HavenMessage::FriendListSync {
+        friends: Vec::new(),
+        removed: vec![FriendRemoval { peer_id: master.to_string(), at }],
+    };
+    super::olm_lane::carry_to_own_siblings(
+        ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
+    );
+}
+
+/// Take the removals one of our own devices shared, each held to `ceiling`: it raises our
+/// removal mark and ends a friendship or request of ours made before it, so a re-add
+/// since outlives a late copy. Returns the friends dropped. Out of line so the swarm's
+/// request handler holds no store.
+pub(crate) fn take_sibling_removals(
+    removed: &[FriendRemoval],
+    ceiling: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Vec<String> {
+    let mut dropped = Vec::new();
+    if removed.is_empty() {
+        return dropped;
+    }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return dropped };
+    for removal in removed.iter().take(MAX_SHARED_REMOVALS) {
+        if removal.at <= 1 {
+            continue;
+        }
+        let master = super::resolver::resolve(&removal.peer_id);
+        let at = removal.at.min(ceiling);
+        note_removal(&store, &master, at);
+        match store.get_friend_row(&master) {
+            Ok(Some((status, _, since))) if status == "accepted" || status == "pending" => {
+                if since >= at {
+                    hollow_log!("[HOLLOW-FRIENDS] Kept {master}: the friendship is newer than a sibling's removal");
+                    continue;
+                }
+                if store.remove_friend(&master).is_ok() {
+                    hollow_log!("[HOLLOW-FRIENDS] Friendship with {master} ended on a sibling");
+                    dropped.push(master);
+                }
+            }
+            _ => {}
+        }
+    }
+    dropped
 }
 
 /// Build the `FriendRequest` for `target_master`, carrying the Olm prekey bundle
@@ -310,6 +393,7 @@ pub(crate) fn share_friend_with_siblings(
     };
     let msg = HavenMessage::FriendListSync {
         friends: vec![FriendListEntry { peer_id: master.to_string(), status, direction, requested_at }],
+        removed: Vec::new(),
     };
     super::olm_lane::carry_to_own_siblings(
         ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
@@ -771,6 +855,8 @@ pub(crate) async fn handle_remove_friend(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
     peer_id_str: String,
     pending_friend_removals: &mut std::collections::HashSet<String>,
     pending_friend_requests: &mut HashMap<String, i64>,
@@ -796,13 +882,15 @@ pub(crate) async fn handle_remove_friend(
     // Delete the local row up-front, unconditionally: removal is a local-first
     // action and must take effect whether or not the peer is online to hear about
     // it. Also clean up any legacy device-stranded row so no duplicate survives.
+    let ended_at = super::frame_auth::now_ms();
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        note_removal(&store, &master, super::frame_auth::now_ms());
+        note_removal(&store, &master, ended_at);
         let _ = store.remove_friend(&master);
         if master != peer_id_str {
             let _ = store.remove_friend(&peer_id_str);
         }
     }
+    share_removal_with_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &master, ended_at);
 
     // Notify the friend. The bare master authenticates as NO socket, so fan the
     // FriendRemove to every online device of theirs. If none are reachable, queue
@@ -2452,6 +2540,59 @@ mod tests {
         assert!(!super::older_than_removal(&store, "f", ended - skew), "within the clock skew of it");
         assert!(!super::older_than_removal(&store, "f", ended + 1), "made after it");
         assert!(!super::older_than_removal(&store, "g", 0), "another person's removal bounds nothing");
+    }
+
+    /// HOL-SEC-115: what our own devices tell each other of the friendships we ended, and
+    /// what one such removal ends here.
+    #[test]
+    fn a_siblings_removal_ends_only_what_was_made_before_it() {
+        use super::super::types::FriendRemoval;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sibling_removal.db").to_str().unwrap().to_string();
+        let pass = "ef".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let ended = 1_800_000_000_000;
+
+        store.save_setting(&super::removed_key("legacy"), "1").unwrap();
+        super::note_removal(&store, "first", ended);
+        let shared: Vec<String> = super::friend_removals(&store).into_iter().map(|r| r.peer_id).collect();
+        assert_eq!(shared, ["first"], "a legacy mark holds no time to share");
+        for i in 1..=super::MAX_SHARED_REMOVALS as i64 {
+            super::note_removal(&store, &format!("p{i}"), ended + i);
+        }
+        let shared = super::friend_removals(&store);
+        assert_eq!(shared.len(), super::MAX_SHARED_REMOVALS, "the shared list is bounded");
+        assert_eq!(shared[0].at, ended + super::MAX_SHARED_REMOVALS as i64, "newest first");
+        assert!(shared.iter().all(|r| r.peer_id != "first"), "the oldest was shared past the bound");
+
+        for (peer, status, since) in [
+            ("old", "accepted", ended - 1),
+            ("asked", "pending", ended - 1),
+            ("readded", "accepted", ended),
+            ("declined", "declined", ended - 1),
+            ("zero", "accepted", 0),
+            ("ahead", "accepted", ended + 5_000),
+        ] {
+            store.save_friend(peer, status, "", since).unwrap();
+        }
+        let removal = |peer: &str, at: i64| FriendRemoval { peer_id: peer.to_string(), at };
+        let removed = [
+            removal("old", ended),
+            removal("asked", ended),
+            removal("readded", ended),
+            removal("declined", ended),
+            removal("zero", 1),
+            removal("ahead", ended + 3_600_000),
+        ];
+        let dropped = super::take_sibling_removals(&removed, ended + 1_000, &db, &pass);
+        assert_eq!(dropped, ["old", "asked"], "only a friendship or request made before the removal ends");
+        assert!(store.get_friend_row("readded").unwrap().is_some(), "a friendship made since was ended");
+        assert!(store.get_friend_row("declined").unwrap().is_some(), "a decline is not a friendship to end");
+        assert!(store.get_friend_row("zero").unwrap().is_some(), "a legacy mark ended a friendship");
+        assert!(store.get_friend_row("ahead").unwrap().is_some(), "a stamp past its frame ended a friendship made after the frame");
+        assert_eq!(super::removed_at(&store, "ahead"), ended + 1_000, "the mark is held to the frame");
+        assert_eq!(super::removed_at(&store, "zero"), 0, "a legacy mark was recorded");
     }
 
     /// HOL-SEC-038 (N1, N2). The avatar is signed by hash only, and a plaintext

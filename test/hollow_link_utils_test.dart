@@ -396,6 +396,39 @@ void main() {
     });
   });
 
+  group('server id case', () {
+    const lower = '8f3d5c37a26835ddf04b07f2c91da5569e1b2c3d';
+    final upper = lower.toUpperCase();
+
+    test('an uppercase server id reaches Rust lowercase in every form', () {
+      expect(inviteFromInput('  $upper  ', HollowLinkType.serverInvite).id, lower);
+      expect(
+          inviteFromInput('hollow://join?server=$upper', HollowLinkType.serverInvite)
+              .id,
+          lower);
+      expect(
+          inviteFromInput('https://hollow.anonlisten.com/join#server=$upper',
+                  HollowLinkType.serverInvite)
+              .id,
+          lower);
+      final link = classifyHollowLink('hollow://join?server=$upper')!;
+      expect(link.id, lower);
+      expect(link.fullUrl, 'hollow://join?server=$lower',
+          reason: 'a link card joins with the canonical form');
+    });
+
+    test('a real id is unchanged', () {
+      expect(inviteFromInput(lower, HollowLinkType.serverInvite).id, lower);
+      expect(inviteFromInput('a' * 32, HollowLinkType.serverInvite).id, 'a' * 32);
+    });
+
+    test('only a server id is lowercased', () {
+      expect(inviteFromInput('AbC123', HollowLinkType.serverInvite).id, 'AbC123',
+          reason: 'not an id: the dialog shows it back as pasted');
+      expect(inviteFromInput(upper, HollowLinkType.roomInvite).id, upper);
+    });
+  });
+
   group('isServerIdShape', () {
     test('takes both the old and the self-certifying id', () {
       expect(isServerIdShape('a' * 32), isTrue);

@@ -525,7 +525,10 @@ roster along), runs every scenario and journey with its own log in
 under it). After each item it collects every peer log line matching
 `[HOLLOW-SECURITY]|REJECTED|Dropped|Refused|Ignored` stamped after the item began into
 `<name>-refusals.txt`: the honest-traffic check. Windows writes `hollow_debug.log` beside
-the staged exe (`build\fleet\<peer>`), not in the data dir. Opt-in only (`-Only`):
+the staged exe (`build\fleet\<peer>`), not in the data dir, and `-Build`'s robocopy /MIR
+copies the build dir's own stale `runner\Debug\hollow_debug.log` into every peer, so a fresh
+peer's log starts with thousands of lines that are not its own: take a line mark before
+reading one (session 31). Opt-in only (`-Only`):
 `fleet_relay_restart` (restarts PRODUCTION), `fleet_relay_switch` (needs a self-hosted
 relay), `fleet_at_rest` (seeds from an older build). Items take `args` (`-Keep`, `-Attach`)
 and `keepUp` so `calls_after_vc` attaches to `calls_after`'s fleet. About 75 minutes for all.

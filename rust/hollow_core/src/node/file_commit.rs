@@ -324,7 +324,8 @@ mod tests {
         }
         let vault = production(&read("node/vault_ops.rs"));
         assert_eq!(
-            vault.matches("reconstruct_file(").count(), vault.matches("vault_bytes_checked(&content_id").count(),
+            vault.matches("reconstruct_file(").count(),
+            vault.matches("vault_bytes_checked(").count() - vault.matches("fn vault_bytes_checked(").count(),
             "node/vault_ops.rs: every reconstruction is checked against its cards",
         );
     }

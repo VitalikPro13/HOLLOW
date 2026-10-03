@@ -24,7 +24,7 @@ Every shard pull records the device asked (bounded, five-minute life); an answer
 
 ## Residual risk
 
-Shard stores and migrations are unasked by design, so a member can still plant a first copy, and a holder we did ask can return bad bytes that block the rebuild; deleting a shard on a failed rebuild is a follow-up.
+Shard stores and migrations are unasked by design, so a member can still plant a first copy, and a holder we did ask can return bad bytes; HOL-SEC-117 refuses a copy the manifest contradicts and deletes and re-pulls bad copies after a failed rebuild.
 
 ## Test
 

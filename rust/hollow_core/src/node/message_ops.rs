@@ -708,8 +708,7 @@ fn encrypt_dm_wire(
     envelope_json: &str,
     log_prekey: bool,
 ) -> Result<String, String> {
-    let (msg_type, ciphertext) = olm
-        .encrypt(device_peer, envelope_json.as_bytes())
+    let (msg_type, ciphertext) = super::olm_lane::encrypt_in_turn(olm, device_peer, envelope_json.as_bytes())
         .map_err(|e| e.to_string())?;
     super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
     if log_prekey && msg_type == 0 {

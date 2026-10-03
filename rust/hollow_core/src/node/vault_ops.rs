@@ -11,6 +11,85 @@ use super::types::*;
 
 // ── 1. VaultDownloadFile ─────────────────────────────────────────────
 
+/// What our own store can do for a download.
+enum LocalShards {
+    /// The file is in the cache now, at this path.
+    Done(String),
+    /// `have` of the `need` shards a rebuild takes; each missing index with its holders
+    /// (placement identity, shard key).
+    Need { have: usize, need: usize, missing: Vec<(u16, Vec<(String, String)>)> },
+}
+
+/// Rebuild `content_id` from the shards we hold, or say which to pull and from whom.
+fn local_shards(
+    server_states: &HashMap<String, ServerState>,
+    vault_dir: &std::path::Path,
+    server_id: &str,
+    content_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Result<LocalShards, String> {
+    let cs = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, vault_dir)?;
+    let manifest = cs.load_manifest(content_id)?
+        .ok_or_else(|| format!("Manifest not found for {content_id}"))?;
+    let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
+    if let Some(cached_path) = crate::vault::pipeline::check_cache(content_id, &ext) {
+        return Ok(LocalShards::Done(cached_path.to_string_lossy().to_string()));
+    }
+
+    // Replication keeps the whole ciphertext as shard 0, so one copy rebuilds it.
+    let need = (manifest.k as usize).max(1);
+    let (mut packed, _) = gather_vault_shards(&cs, &manifest);
+    if packed.iter().flatten().count() >= need {
+        match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
+            Ok(plaintext) => {
+                vault_bytes_checked(content_id, &plaintext, db_path, db_passphrase)?;
+                let path = crate::vault::pipeline::write_to_cache(content_id, &ext, &plaintext)?;
+                return Ok(LocalShards::Done(path.to_string_lossy().to_string()));
+            }
+            Err(e) => {
+                if drop_unpinned_shards(&cs, &manifest, &packed) == 0 {
+                    return Err(e);
+                }
+                hollow_log!("[HOLLOW-VAULT] Rebuild of {content_id} failed ({e}): pulling its shards again");
+                packed = gather_vault_shards(&cs, &manifest).0;
+            }
+        }
+    }
+
+    // Non-uploaders hold no placements: recompute them as the uploader did.
+    let mut placements = cs.load_placements(content_id).unwrap_or_default();
+    if placements.is_empty() && let Some(state) = server_states.get(server_id) {
+        let members: Vec<String> = state.members_list().iter().map(|m| m.peer_id.clone()).collect();
+        let pledges: std::collections::HashMap<String, u64> = members.iter()
+            .map(|pid| (pid.clone(), state.get_storage_pledge(pid)))
+            .collect();
+        let mode = crate::vault::adaptive::compute_adaptive_params(members.len());
+        let computed = crate::vault::placement::place(content_id, &mode, &members, &pledges);
+        placements = computed.iter().map(|sp| crate::vault::content_store::PlacementRecord {
+            content_id: content_id.to_string(),
+            shard_index: sp.shard_index,
+            target_peer: sp.target_peer.clone(),
+            server_id: server_id.to_string(),
+            shard_key: sp.shard_key.clone(),
+            stored_at: 0,
+            confirmed: false,
+        }).collect();
+    }
+    let missing = (0..packed.len())
+        .filter(|idx| packed[*idx].is_none())
+        .map(|idx| {
+            let holders = placements.iter()
+                .filter(|p| p.shard_index as usize == idx)
+                .map(|p| (p.target_peer.clone(), p.shard_key.clone()))
+                .collect();
+            (idx as u16, holders)
+        })
+        .collect();
+    Ok(LocalShards::Need { have: packed.iter().flatten().count(), need, missing })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_vault_download_file(
     server_states: &mut HashMap<String, crate::crdt::server_state::ServerState>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
@@ -24,173 +103,66 @@ pub(crate) async fn handle_vault_download_file(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     content_id: String,
+    // The person asked, so the download gets a fresh budget of pulls of its own.
+    user_asked: bool,
     db_path: &str,
     db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-VAULT] VaultDownloadFile: cid={content_id} in {server_id}");
+    if user_asked && let Some(book) = vault_shard_asks.pulls.get_mut(&content_id) {
+        book.repulls = 0;
+    }
 
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let vault_dir = data_dir.join("vault");
-
-    let result: Result<String, String> = (|| {
-        let cs = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir)?;
-
-        // Load manifest
-        let manifest = cs.load_manifest(&content_id)?
-            .ok_or_else(|| format!("Manifest not found for {content_id}"))?;
-
-        let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
-
-        // Check cache first
-        if let Some(cached_path) = crate::vault::pipeline::check_cache(&content_id, &ext) {
-            return Ok(cached_path.to_string_lossy().to_string());
-        }
-
-        // Collect local shards
-        let local_shards = cs.list_content_shards(&server_id, &content_id)?;
-
-        if manifest.k == 0 && manifest.m == 0 {
-            // Replication mode — need just one shard (the full ciphertext)
-            if let Some(record) = local_shards.first() {
-                let shard_data = cs.read_shard_unchecked(&server_id, &record.shard_key)?;
-                let packed: Vec<Option<Vec<u8>>> = vec![Some(shard_data)];
-                let plaintext = crate::vault::pipeline::reconstruct_file(&manifest, &packed)?;
-                vault_bytes_checked(&content_id, &plaintext, db_path, db_passphrase)?;
-                let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
-                return Ok(path.to_string_lossy().to_string());
-            }
-            Err("No local shard available for replicated content".into())
-        } else {
-            // Erasure mode — need k of k+m shards
-            let k = manifest.k as usize;
-            let m = manifest.m as usize;
-            let n = k + m;
-            let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
-
-            for record in &local_shards {
-                let idx = record.shard_index as usize;
-                if idx < n {
-                    if let Ok(data) = cs.read_shard_unchecked(&server_id, &record.shard_key) {
-                        packed[idx] = Some(data);
-                    }
-                }
-            }
-
-            let available = packed.iter().filter(|s| s.is_some()).count();
-            if available >= k {
-                let plaintext = crate::vault::pipeline::reconstruct_file(&manifest, &packed)?;
-                vault_bytes_checked(&content_id, &plaintext, db_path, db_passphrase)?;
-                let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
-                Ok(path.to_string_lossy().to_string())
-            } else {
-                // Not enough local shards — collect placement info for network fetch.
-                // Try saved placements first; if empty (non-uploader), recompute deterministically.
-                let mut placements = cs.load_placements(&content_id).unwrap_or_default();
-                if placements.is_empty() {
-                    // Recompute from server state using the same deterministic algorithm
-                    if let Some(state) = server_states.get(&server_id) {
-                        let members: Vec<String> = state.members_list().iter().map(|m| m.peer_id.clone()).collect();
-                        let pledges: std::collections::HashMap<String, u64> = members.iter()
-                            .map(|pid| (pid.clone(), state.get_storage_pledge(pid)))
-                            .collect();
-                        let mode = crate::vault::adaptive::compute_adaptive_params(members.len());
-                        let computed = crate::vault::placement::place(&content_id, &mode, &members, &pledges);
-                        placements = computed.iter().map(|sp| crate::vault::content_store::PlacementRecord {
-                            content_id: content_id.clone(),
-                            shard_index: sp.shard_index,
-                            target_peer: sp.target_peer.clone(),
-                            server_id: server_id.clone(),
-                            shard_key: sp.shard_key.clone(),
-                            stored_at: 0,
-                            confirmed: false,
-                        }).collect();
-                    }
-                }
-                let missing_indices: Vec<usize> = (0..n)
-                    .filter(|i| packed[*i].is_none())
-                    .collect();
-                // Encode placement info into error string for post-closure processing
-                let placement_info: Vec<String> = missing_indices.iter()
-                    .filter_map(|idx| {
-                        placements.iter()
-                            .find(|p| p.shard_index as usize == *idx)
-                            .map(|p| format!("{}:{}:{}", idx, p.target_peer, p.shard_key))
-                    })
-                    .collect();
-                Err(format!("__NEED_SHARDS__:{}:{}:{}", available, k, placement_info.join("|")))
-            }
-        }
-    })();
-
-    match result {
-        Ok(disk_path) => {
+    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+    match local_shards(server_states, &vault_dir, &server_id, &content_id, db_path, db_passphrase) {
+        Ok(LocalShards::Done(disk_path)) => {
             hollow_log!("[HOLLOW-VAULT] Download complete: {disk_path}");
             let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
                 server_id, content_id, disk_path,
             }).await;
         }
-        Err(e) if e.starts_with("__NEED_SHARDS__:") => {
-            // Parse placement info and request shards from connected peers
-            let parts: Vec<&str> = e.splitn(4, ':').collect();
-            if parts.len() >= 4 {
-                let available: usize = parts[1].parse().unwrap_or(0);
-                let k: usize = parts[2].parse().unwrap_or(3);
-                let needed = k - available;
-                let placement_entries: Vec<&str> = parts[3].split('|').filter(|s| !s.is_empty()).collect();
+        Ok(LocalShards::Need { have, need, missing }) => {
+            let mut requested = 0usize;
+            for (si, holders) in &missing {
+                if have + requested >= need { break; }
+                // Placements are MASTER-keyed: ask one concrete online DEVICE of the
+                // first holder that never answered this content with a wrong shard.
+                let holder = holders.iter()
+                    .filter(|(peer, _)| !holder_refuted(vault_shard_asks, &content_id, peer))
+                    .find_map(|(peer, sk)| preferred_online_device(ws_room_peers, peer).map(|dev| (peer, sk, dev)));
+                let Some((target_peer, shard_key, dev)) = holder else { continue };
+                let envelope = MessageEnvelope::ShardRequest {
+                    sid: server_id.clone(),
+                    cid: content_id.clone(),
+                    si: *si,
+                    sk: shard_key.clone(),
+                    target: None,
+                };
+                let json = serde_json::to_string(&envelope).unwrap_or_default();
+                stamp_shard_ask(vault_shard_asks, &content_id, *si, &dev);
+                send_encrypted_message(
+                    &mut *olm, crypto_store,
+                    &dev, &json, event_tx,
+                    ws_cmd_tx, ws_room_peers,
+                ).await;
+                hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer} (device {dev})");
+                requested += 1;
+            }
 
-                let mut requested = 0usize;
-                for entry in &placement_entries {
-                    if requested >= needed { break; }
-                    let ep: Vec<&str> = entry.splitn(3, ':').collect();
-                    if ep.len() == 3 {
-                        let si: u16 = ep[0].parse().unwrap_or(0);
-                        let target_peer = ep[1];
-                        let shard_key = ep[2];
-                            // Placements are MASTER-keyed (server members), so
-                            // resolve to a concrete online DEVICE: an Olm send to a
-                            // bare master has no session or socket.
-                            if let Some(dev) = preferred_online_device(&ws_room_peers, target_peer) {
-                                let envelope = MessageEnvelope::ShardRequest {
-                                    sid: server_id.clone(),
-                                    cid: content_id.clone(),
-                                    si,
-                                    sk: shard_key.to_string(),
-                                    target: None,
-                                };
-                                let json = serde_json::to_string(&envelope).unwrap_or_default();
-                                stamp_shard_ask(vault_shard_asks, &content_id, si, &dev);
-                                send_encrypted_message(
-                                    &mut *olm, crypto_store,
-                                    &dev, &json, &event_tx,
-                                    &ws_cmd_tx, &ws_room_peers,
-                                ).await;
-                                hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer} (device {dev})");
-                                requested += 1;
-                            }
-                    }
-                }
-
-                let total_available = available + requested;
-                if total_available >= k && requested > 0 {
-                    // Enough shards reachable — request and wait for them.
-                    pending_vault_downloads.insert(
-                        content_id.clone(),
-                        (server_id.clone(), k, requested),
-                    );
-                    hollow_log!("[HOLLOW-VAULT] Requested {requested} shards for {content_id} (have {available}, need {k})");
-                    let _ = event_tx.send(NetworkEvent::VaultDownloadProgress {
-                        server_id, content_id,
-                        phase: "Fetching shards from peers...".into(),
-                        progress: 0.1,
-                    }).await;
-                } else {
-                    // Not enough shard holders online — fail fast.
-                    let online_holders = available + requested;
-                    let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
-                        server_id, content_id,
-                        error: format!("{online_holders}/{k} shard holders online, need at least {k}. Try again later."),
-                    }).await;
-                }
+            if requested > 0 && have + requested >= need {
+                pending_vault_downloads.insert(content_id.clone(), (server_id.clone(), need, requested));
+                hollow_log!("[HOLLOW-VAULT] Requested {requested} shards for {content_id} (have {have}, need {need})");
+                let _ = event_tx.send(NetworkEvent::VaultDownloadProgress {
+                    server_id, content_id,
+                    phase: "Fetching shards from peers...".into(),
+                    progress: 0.1,
+                }).await;
+            } else {
+                let online_holders = have + requested;
+                let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+                    server_id, content_id,
+                    error: format!("{online_holders}/{need} shard holders online, need at least {need}. Try again later."),
+                }).await;
             }
         }
         Err(e) => {
@@ -200,6 +172,54 @@ pub(crate) async fn handle_vault_download_file(
             }).await;
         }
     }
+}
+
+/// A download whose rebuild dropped shards it has to pull again, with the holder whose
+/// answer was not the shard, when one was.
+pub(crate) struct VaultRepull {
+    pub server_id: String,
+    pub content_id: String,
+    pub refuted: Option<String>,
+}
+
+/// Pull a download's missing shards afresh: at most `MAX_VAULT_REPULLS` times on its own,
+/// never again from a holder that answered it with a wrong shard.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_vault_repull(
+    server_states: &mut HashMap<String, crate::crdt::server_state::ServerState>,
+    pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    vault_shard_asks: &mut ShardAsks,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    repull: VaultRepull,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let VaultRepull { server_id, content_id, refuted } = repull;
+    if let Some(holder) = &refuted {
+        refute_holder(vault_shard_asks, &content_id, holder);
+    }
+    pending_vault_downloads.remove(&content_id);
+    if !take_repull(vault_shard_asks, &content_id) {
+        hollow_log!("[HOLLOW-VAULT] Gave up on {content_id} after {MAX_VAULT_REPULLS} fresh pulls");
+        let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+            server_id, content_id,
+            error: "The copies of this file online are damaged. Try again later.".into(),
+        }).await;
+        return;
+    }
+    hollow_log!("[HOLLOW-VAULT] Pulling the shards of {content_id} afresh");
+    Box::pin(handle_vault_download_file(
+        server_states, pending_vault_downloads, vault_shard_asks, olm, crypto_store, mls,
+        event_tx, ws_cmd_tx, ws_room_peers, bundle_keypair,
+        server_id, content_id, false, db_path, db_passphrase,
+    ))
+    .await;
 }
 
 // ── 2. VaultUploadFile ───────────────────────────────────────────────
@@ -868,17 +888,35 @@ pub(crate) fn our_pledge(server_states: &HashMap<String, ServerState>, sid: &str
     server_states.get(sid).map_or(0, |state| state.get_storage_pledge(local_peer))
 }
 
-/// Shard pulls we sent and not yet heard back on: "cid:si" -> (device asked, sent at).
-pub(crate) type ShardAsks = HashMap<String, (String, std::time::Instant)>;
+/// Our shard pulls: the device asked for each shard we have not heard back on ("cid:si"
+/// -> device, sent at), and per content id what its downloads learned.
+#[derive(Default)]
+pub(crate) struct ShardAsks {
+    asks: HashMap<String, (String, std::time::Instant)>,
+    pulls: HashMap<String, PullBook>,
+}
 
-/// Outstanding shard pulls kept at once; the oldest goes first.
+/// One content id's pulls: the holders that answered with a wrong shard, and the fresh
+/// pulls its rebuilds made on their own since the person last asked.
+struct PullBook {
+    refuted: std::collections::HashSet<String>,
+    repulls: u8,
+    at: std::time::Instant,
+}
+
+/// Outstanding shard pulls (and content ids with a pull book) kept at once; the oldest
+/// goes first.
 const MAX_SHARD_ASKS: usize = 512;
 
 /// How long a shard pull waits for its answer.
 const SHARD_ASK_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Fresh pulls a download makes on its own after its shards fail their manifest.
+const MAX_VAULT_REPULLS: u8 = 3;
+
 /// Record that `device` was asked for shard `si` of `cid`.
 pub(crate) fn stamp_shard_ask(asks: &mut ShardAsks, cid: &str, si: u16, device: &str) {
+    let asks = &mut asks.asks;
     asks.retain(|_, (_, at)| at.elapsed() < SHARD_ASK_TTL);
     asks.insert(format!("{cid}:{si}"), (device.to_string(), std::time::Instant::now()));
     while asks.len() > MAX_SHARD_ASKS {
@@ -891,14 +929,116 @@ pub(crate) fn stamp_shard_ask(asks: &mut ShardAsks, cid: &str, si: u16, device: 
 /// one answer per ask, only from the device asked, and only while it is fresh.
 pub(crate) fn take_shard_ask(asks: &mut ShardAsks, cid: &str, si: u16, device: &str) -> bool {
     let key = format!("{cid}:{si}");
-    match asks.get(&key) {
+    match asks.asks.get(&key) {
         Some((asked, at)) if asked == device => {
             let fresh = at.elapsed() < SHARD_ASK_TTL;
-            asks.remove(&key);
+            asks.asks.remove(&key);
             fresh
         }
         _ => false,
     }
+}
+
+fn pull_book<'a>(asks: &'a mut ShardAsks, cid: &str) -> &'a mut PullBook {
+    if !asks.pulls.contains_key(cid)
+        && asks.pulls.len() >= MAX_SHARD_ASKS
+        && let Some(stalest) = asks.pulls.iter().min_by_key(|(_, book)| book.at).map(|(key, _)| key.clone())
+    {
+        asks.pulls.remove(&stalest);
+    }
+    let book = asks.pulls.entry(cid.to_string()).or_insert_with(|| PullBook {
+        refuted: Default::default(),
+        repulls: 0,
+        at: std::time::Instant::now(),
+    });
+    book.at = std::time::Instant::now();
+    book
+}
+
+/// Never ask `holder` (a device; its identity is kept) for shards of `cid` again: it
+/// answered with bytes that are not the shard.
+pub(crate) fn refute_holder(asks: &mut ShardAsks, cid: &str, holder: &str) {
+    pull_book(asks, cid).refuted.insert(super::resolver::resolve(holder));
+}
+
+/// Whether `holder` once answered a pull of `cid` with bytes that are not the shard.
+pub(crate) fn holder_refuted(asks: &ShardAsks, cid: &str, holder: &str) -> bool {
+    asks.pulls.get(cid).is_some_and(|book| book.refuted.contains(&super::resolver::resolve(holder)))
+}
+
+/// Whether a download of `cid` may make one more fresh pull on its own, counting it.
+pub(crate) fn take_repull(asks: &mut ShardAsks, cid: &str) -> bool {
+    let book = pull_book(asks, cid);
+    book.repulls = book.repulls.saturating_add(1);
+    book.repulls <= MAX_VAULT_REPULLS
+}
+
+/// Why `bytes` may not be stored as shard `si` of `cid`, `None` when they may: once we
+/// hold the manifest, a shard must be the one it names, since a held shard is never
+/// replaced and a wrong first copy would refuse the real one.
+pub(crate) fn shard_bytes_refused(
+    cs: &crate::vault::content_store::ContentStore,
+    cid: &str,
+    si: u16,
+    bytes: &[u8],
+) -> Option<&'static str> {
+    let manifest = cs.load_manifest(cid).ok().flatten()?;
+    let expected = manifest.shard_hash(si)?;
+    (crate::vault::content_store::content_id(bytes) != expected).then_some("not the shard its manifest names")
+}
+
+/// The shards of `manifest`'s content we hold, by index, and how many copies were
+/// deleted for not being the shard the manifest names (or no longer the bytes we
+/// stored). A held shard is never replaced, so a wrong copy would refuse the real one
+/// forever; this is where a download deletes one.
+pub(crate) fn gather_vault_shards(
+    cs: &crate::vault::content_store::ContentStore,
+    manifest: &crate::vault::pipeline::VaultManifest,
+) -> (Vec<Option<Vec<u8>>>, usize) {
+    let n = (manifest.k as usize + manifest.m as usize).max(1);
+    let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
+    let mut dropped = 0;
+    for (si, slot) in packed.iter_mut().enumerate() {
+        // The key is global: a copy planted under another server blocks this one too.
+        let key = crate::vault::content_store::shard_key(&manifest.content_id, si as u16);
+        let Ok(Some(record)) = cs.get_shard_record(&key) else { continue };
+        let expected = manifest.shard_hash(si as u16).unwrap_or(&record.data_hash);
+        match cs.read_shard_unchecked(&record.server_id, &key) {
+            Ok(bytes) if crate::vault::content_store::content_id(&bytes) == expected => *slot = Some(bytes),
+            _ => {
+                hollow_log!("[HOLLOW-SECURITY] Deleted shard {si} of {}: not the shard its manifest names", manifest.content_id);
+                let _ = cs.delete_shard(&record.server_id, &key);
+                dropped += 1;
+            }
+        }
+    }
+    (packed, dropped)
+}
+
+/// After the shards in `packed` failed to rebuild `manifest`'s content, delete those the
+/// manifest pins no hash for and return how many: one of them is bad and nothing tells
+/// which, so they are pulled again.
+pub(crate) fn drop_unpinned_shards(
+    cs: &crate::vault::content_store::ContentStore,
+    manifest: &crate::vault::pipeline::VaultManifest,
+    packed: &[Option<Vec<u8>>],
+) -> usize {
+    let mut dropped = 0;
+    for si in (0..packed.len()).filter(|si| packed[*si].is_some()) {
+        if manifest.shard_hash(si as u16).is_some() {
+            continue;
+        }
+        let key = crate::vault::content_store::shard_key(&manifest.content_id, si as u16);
+        if let Ok(Some(record)) = cs.get_shard_record(&key)
+            && cs.delete_shard(&record.server_id, &key).is_ok()
+        {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        hollow_log!("[HOLLOW-SECURITY] Deleted {dropped} shard(s) of {} its manifest cannot vouch for after a failed rebuild", manifest.content_id);
+    }
+    dropped
 }
 
 /// Why `requester` may not pull a shard of `cid` in `sid`, `None` when it may. When
@@ -1095,7 +1235,7 @@ mod tests {
     #[test]
     fn an_unasked_shard_response_is_dropped() {
         let cid = "c1".repeat(32);
-        let mut asks = ShardAsks::new();
+        let mut asks = ShardAsks::default();
         assert!(!take_shard_ask(&mut asks, &cid, 0, "bob"), "A-V6: an answer nobody asked for was taken");
         stamp_shard_ask(&mut asks, &cid, 0, "bob");
         assert!(!take_shard_ask(&mut asks, &cid, 0, "mallory"), "A-V6: another device answered for bob");
@@ -1103,13 +1243,168 @@ mod tests {
         assert!(take_shard_ask(&mut asks, &cid, 0, "bob"), "the device we asked was refused");
         assert!(!take_shard_ask(&mut asks, &cid, 0, "bob"), "A-V6: a second answer to one ask was taken");
         if let Some(old) = std::time::Instant::now().checked_sub(SHARD_ASK_TTL) {
-            asks.insert(format!("{cid}:2"), ("bob".into(), old));
+            asks.asks.insert(format!("{cid}:2"), ("bob".into(), old));
             assert!(!take_shard_ask(&mut asks, &cid, 2, "bob"), "an expired ask was answered");
         }
         for si in 0..(MAX_SHARD_ASKS as u16 + 8) {
             stamp_shard_ask(&mut asks, &cid, si, "bob");
         }
-        assert_eq!(asks.len(), MAX_SHARD_ASKS);
+        assert_eq!(asks.asks.len(), MAX_SHARD_ASKS);
+    }
+
+    // ── HOL-SEC-117: a bad shard never blocks a download for good ──
+
+    fn manifest_for(cid: &str, k: u16, m: u16, shard_hashes: Vec<String>) -> crate::vault::pipeline::VaultManifest {
+        crate::vault::pipeline::VaultManifest {
+            content_id: cid.to_string(),
+            encryption_key: "00".repeat(32),
+            nonce: "00".repeat(12),
+            original_size: 40,
+            k,
+            m,
+            shard_count: k + m,
+            file_name: "a.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            storage_tier: "standard".into(),
+            created_at: 1,
+            creator_peer_id: "creator".into(),
+            channel_id: "srv-general".into(),
+            message_id: String::new(),
+            shard_hashes,
+        }
+    }
+
+    /// Once we hold its manifest, a shard lands only as the bytes the manifest names: a
+    /// held shard is never replaced, so a wrong first copy refused the real one forever.
+    #[test]
+    fn a_shard_must_be_the_one_its_manifest_names() {
+        let (tmp, db, pass) = temp_db();
+        let cs = ContentStore::open(&db, &pass, &tmp.path().join("vault")).unwrap();
+        let ciphertext = b"the whole ciphertext".to_vec();
+        let whole = crate::vault::content_store::content_id(&ciphertext);
+        assert_eq!(shard_bytes_refused(&cs, &whole, 0, b"junk"), None, "no manifest yet, nothing to judge by");
+        cs.save_manifest("srv", "srv-general", &manifest_for(&whole, 0, 0, Vec::new())).unwrap();
+        assert!(
+            shard_bytes_refused(&cs, &whole, 0, b"junk").is_some(),
+            "HOL-SEC-117: a replicated copy that is not the ciphertext was taken",
+        );
+        assert_eq!(shard_bytes_refused(&cs, &whole, 0, &ciphertext), None);
+
+        let shards: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i; 8]).collect();
+        let hashes = shards.iter().map(|s| crate::vault::content_store::content_id(s)).collect();
+        let erasure = "e1".repeat(32);
+        cs.save_manifest("srv", "srv-general", &manifest_for(&erasure, 3, 2, hashes)).unwrap();
+        assert!(
+            shard_bytes_refused(&cs, &erasure, 1, &shards[2]).is_some(),
+            "HOL-SEC-117: another index's bytes were taken as shard 1",
+        );
+        assert_eq!(shard_bytes_refused(&cs, &erasure, 1, &shards[1]), None);
+        let legacy = "e2".repeat(32);
+        cs.save_manifest("srv", "srv-general", &manifest_for(&legacy, 3, 2, Vec::new())).unwrap();
+        assert_eq!(shard_bytes_refused(&cs, &legacy, 1, b"junk"), None, "a manifest without hashes pins nothing");
+    }
+
+    /// A rebuild deletes each copy its manifest refutes (wherever it was filed), keeps the
+    /// rest, and after a failed rebuild deletes only the copies nothing vouches for.
+    #[test]
+    fn a_rebuild_deletes_the_copies_its_manifest_refutes() {
+        let (tmp, db, pass) = temp_db();
+        let cs = ContentStore::open(&db, &pass, &tmp.path().join("vault")).unwrap();
+        let shards: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i; 8]).collect();
+        let cid = "e1".repeat(32);
+        let key = |si: u16| crate::vault::content_store::shard_key(&cid, si);
+        let pinned = manifest_for(&cid, 3, 2, shards.iter().map(|s| crate::vault::content_store::content_id(s)).collect());
+        cs.store_shard("srv", &cid, 0, 3, 2, 40, StorageTier::Standard, &shards[0]).unwrap();
+        cs.store_shard("srv", &cid, 1, 3, 2, 40, StorageTier::Standard, b"planted").unwrap();
+        // The shard key is global, so a copy filed under another server blocks this one too.
+        cs.store_shard("other-srv", &cid, 2, 3, 2, 40, StorageTier::Standard, b"planted elsewhere").unwrap();
+        let (packed, dropped) = gather_vault_shards(&cs, &pinned);
+        assert_eq!(dropped, 2, "HOL-SEC-117: a planted copy survived the rebuild");
+        assert_eq!(packed[0].as_deref(), Some(&shards[0][..]));
+        assert!(packed[1].is_none() && packed[2].is_none());
+        assert!(
+            !cs.has_shard(&key(1)).unwrap() && !cs.has_shard(&key(2)).unwrap(),
+            "HOL-SEC-117: a refuted copy is still held and refuses the real one",
+        );
+        assert!(cs.has_shard(&key(0)).unwrap(), "the real shard was deleted");
+        assert_eq!(drop_unpinned_shards(&cs, &pinned, &packed), 0, "every copy left is pinned, so a failed rebuild is not theirs");
+
+        let legacy = manifest_for(&cid, 3, 2, Vec::new());
+        cs.store_shard("srv", &cid, 1, 3, 2, 40, StorageTier::Standard, b"planted again").unwrap();
+        let (packed, dropped) = gather_vault_shards(&cs, &legacy);
+        assert_eq!(dropped, 0, "an unpinned copy that is still the bytes we stored waits for a rebuild");
+        assert_eq!(
+            drop_unpinned_shards(&cs, &legacy, &packed),
+            2,
+            "HOL-SEC-117: a failed rebuild kept the copies nothing vouches for",
+        );
+        assert!(!cs.has_shard(&key(0)).unwrap() && !cs.has_shard(&key(1)).unwrap());
+
+        let ciphertext = b"the whole ciphertext".to_vec();
+        let whole = crate::vault::content_store::content_id(&ciphertext);
+        cs.store_shard("srv", &whole, 0, 0, 0, 0, StorageTier::Standard, b"junk").unwrap();
+        let (packed, dropped) = gather_vault_shards(&cs, &manifest_for(&whole, 0, 0, Vec::new()));
+        assert_eq!((packed.len(), dropped), (1, 1), "HOL-SEC-117: a planted replicated copy survived");
+    }
+
+    /// A rebuild that fails on copies its manifest cannot vouch for deletes them and pulls
+    /// afresh; replicated content with no copy here is pulled from a holder.
+    #[test]
+    fn a_failed_local_rebuild_pulls_afresh() {
+        let _g = super::super::resolver::test_lock();
+        let (tmp, db, pass) = temp_db();
+        let vault = tmp.path().join("vault");
+        let cs = ContentStore::open(&db, &pass, &vault).unwrap();
+        let (states, _) = server_with(&[], 0);
+        let ciphertext = b"an erasure-coded ciphertext long enough to split in three".to_vec();
+        let cid = crate::vault::content_store::content_id(&ciphertext);
+        let shards = crate::vault::erasure::encode(&ciphertext, 3, 2, &cid).unwrap();
+        cs.save_manifest("srv", "srv-general", &manifest_for(&cid, 3, 2, Vec::new())).unwrap();
+        for si in 0..2u16 {
+            cs.store_shard("srv", &cid, si, 3, 2, 0, StorageTier::Standard, &shards[si as usize]).unwrap();
+        }
+        cs.store_shard("srv", &cid, 2, 3, 2, 0, StorageTier::Standard, b"planted").unwrap();
+        let planned = local_shards(&states, &vault, "srv", &cid, &db, &pass);
+        assert!(
+            matches!(&planned, Ok(LocalShards::Need { have: 0, need: 3, missing }) if missing.len() == 5),
+            "HOL-SEC-117: a failed rebuild kept the copies nothing vouches for: {:?}",
+            planned.as_ref().err(),
+        );
+        for si in 0..3u16 {
+            assert!(!cs.has_shard(&crate::vault::content_store::shard_key(&cid, si)).unwrap());
+        }
+
+        let whole = "c3".repeat(32);
+        cs.save_manifest("srv", "srv-general", &manifest_for(&whole, 0, 0, Vec::new())).unwrap();
+        let planned = local_shards(&states, &vault, "srv", &whole, &db, &pass);
+        assert!(
+            matches!(&planned, Ok(LocalShards::Need { have: 0, need: 1, .. })),
+            "HOL-SEC-117: replicated content with no copy here is never pulled: {:?}",
+            planned.as_ref().err(),
+        );
+    }
+
+    /// A holder whose answer was not the shard is not asked for that content again, and a
+    /// download pulls afresh on its own only `MAX_VAULT_REPULLS` times.
+    #[test]
+    fn a_refuted_holder_is_skipped_and_fresh_pulls_are_capped() {
+        let _g = super::super::resolver::test_lock();
+        let (cid, other) = ("c1".repeat(32), "c2".repeat(32));
+        let mut asks = ShardAsks::default();
+        assert!(!holder_refuted(&asks, &cid, "mallory"));
+        refute_holder(&mut asks, &cid, "mallory");
+        assert!(holder_refuted(&asks, &cid, "mallory"), "HOL-SEC-117: a holder that answered with a wrong shard is asked again");
+        assert!(!holder_refuted(&asks, &cid, "bob"));
+        assert!(!holder_refuted(&asks, &other, "mallory"), "a wrong shard of one file says nothing of another");
+        for _ in 0..MAX_VAULT_REPULLS {
+            assert!(take_repull(&mut asks, &cid));
+        }
+        assert!(!take_repull(&mut asks, &cid), "HOL-SEC-117: a download pulls afresh without end");
+        assert!(take_repull(&mut asks, &other), "another file's pulls are its own");
+        for i in 0..(MAX_SHARD_ASKS + 8) {
+            refute_holder(&mut asks, &format!("{i:064}"), "mallory");
+        }
+        assert!(asks.pulls.len() <= MAX_SHARD_ASKS, "the pull books are bounded");
     }
 
     /// H13: a restricted channel's file never enters the vault, whose manifest (and
@@ -1195,6 +1490,33 @@ mod tests {
         let done = &done[..done.find("store_shard(").expect("its store")];
         assert!(done.contains("vault_ops::pledge_refused("), "A-V1: a streamed shard is stored past the pledge");
         assert!(done.contains("p.sender.as_deref()"), "A-V6: any device completes a shard stream registered for another");
+
+        assert!(done.contains("vault_ops::shard_bytes_refused("), "HOL-SEC-117: a streamed shard lands unchecked against its manifest");
+        for from in [
+            "Ok(MessageEnvelope::ShardStore { inner }) => {",
+            "Ok(MessageEnvelope::ShardResponse {",
+            "Ok(MessageEnvelope::ShardMigrate {",
+        ] {
+            let body = arm(from);
+            let checked = body.find("vault_ops::shard_bytes_refused(").unwrap_or_else(|| panic!("HOL-SEC-117: {from} skips the manifest check"));
+            assert!(checked < body.find("store_shard(").expect("its store"), "HOL-SEC-117: {from} checks the bytes after storing them");
+        }
+        for (src, from) in [
+            (handler.as_str(), "async fn attempt_vault_reconstruction("),
+            (ops, "fn local_shards("),
+        ] {
+            let body = &src[src.find(from).expect("a rebuild site")..];
+            let body = &body[..body.find("\n}").expect("its end")];
+            let rebuild = body.find("reconstruct_file(").expect("its rebuild");
+            let gathered = body.find("gather_vault_shards(").unwrap_or(usize::MAX);
+            assert!(gathered < rebuild, "HOL-SEC-117: {from} rebuilds from copies its manifest refutes");
+            assert!(body[rebuild..].contains("drop_unpinned_shards("), "HOL-SEC-117: {from} keeps unvouched copies after a failed rebuild");
+        }
+        assert_eq!(
+            swarm.matches("vault_ops::handle_vault_repull(").count(),
+            2,
+            "HOL-SEC-117: a shard completion's fresh pull is dropped on the floor",
+        );
     }
 
     /// H15: a manifest carries the file's key and names the card it backs, so it lands
@@ -1222,6 +1544,7 @@ mod tests {
                 creator_peer_id: creator.to_string(),
                 channel_id: "srv-general".into(),
                 message_id: mid.to_string(),
+                shard_hashes: Vec::new(),
             })
             .unwrap()
         };
