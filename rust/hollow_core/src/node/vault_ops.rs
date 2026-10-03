@@ -14,6 +14,7 @@ use super::types::*;
 pub(crate) async fn handle_vault_download_file(
     server_states: &mut HashMap<String, crate::crdt::server_state::ServerState>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    vault_shard_asks: &mut ShardAsks,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     mls: &mut Option<MlsManager>,
@@ -157,6 +158,7 @@ pub(crate) async fn handle_vault_download_file(
                                     target: None,
                                 };
                                 let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                stamp_shard_ask(vault_shard_asks, &content_id, si, &dev);
                                 send_encrypted_message(
                                     &mut *olm, crypto_store,
                                     &dev, &json, &event_tx,
@@ -564,6 +566,7 @@ pub(crate) async fn handle_delete_vault_content(
 // ── 4. RequestShardFromPeer ──────────────────────────────────────────
 
 pub(crate) async fn handle_request_shard_from_peer(
+    vault_shard_asks: &mut ShardAsks,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     mls: &mut Option<MlsManager>,
@@ -591,12 +594,13 @@ pub(crate) async fn handle_request_shard_from_peer(
             Some(dev) => {
                 let envelope = MessageEnvelope::ShardRequest {
                     sid: server_id.clone(),
-                    cid: content_id,
+                    cid: content_id.clone(),
                     si: shard_index,
                     sk: shard_key,
                     target: None,
                 };
                 let json = serde_json::to_string(&envelope).unwrap_or_default();
+                stamp_shard_ask(vault_shard_asks, &content_id, shard_index, &dev);
                 send_encrypted_message(
                     &mut *olm, crypto_store,
                     &dev, &json, &event_tx,
@@ -837,18 +841,64 @@ pub(crate) fn shard_write_refused(
     local_peer: &str,
     incoming_bytes: u64,
 ) -> Option<&'static str> {
+    if !crate::vault::content_store::is_content_id(cid) {
+        return Some("not a content id");
+    }
     let Some(state) = server_states.get(sid).filter(|s| s.is_member(sender)) else {
         return Some("not a member of the server");
     };
     if cs.has_shard(&crate::vault::content_store::shard_key(cid, si)).unwrap_or(true) {
         return Some("that shard is already held");
     }
-    let pledge = state.get_storage_pledge(local_peer);
     let used = cs.total_storage_used(sid).unwrap_or(0);
-    if pledge > 0 && used.saturating_add(incoming_bytes) > pledge {
+    if pledge_refused(state.get_storage_pledge(local_peer), used, incoming_bytes) {
         return Some("our storage pledge for the server is full");
     }
     None
+}
+
+/// Whether `incoming` more bytes would take a server's vault on our disk past our
+/// pledge for it (0 pledges no limit).
+pub(crate) fn pledge_refused(pledge: u64, used: u64, incoming: u64) -> bool {
+    pledge > 0 && used.saturating_add(incoming) > pledge
+}
+
+/// Our storage pledge for `sid`, snapshotted into a shard stream when it registers.
+pub(crate) fn our_pledge(server_states: &HashMap<String, ServerState>, sid: &str, local_peer: &str) -> u64 {
+    server_states.get(sid).map_or(0, |state| state.get_storage_pledge(local_peer))
+}
+
+/// Shard pulls we sent and not yet heard back on: "cid:si" -> (device asked, sent at).
+pub(crate) type ShardAsks = HashMap<String, (String, std::time::Instant)>;
+
+/// Outstanding shard pulls kept at once; the oldest goes first.
+const MAX_SHARD_ASKS: usize = 512;
+
+/// How long a shard pull waits for its answer.
+const SHARD_ASK_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Record that `device` was asked for shard `si` of `cid`.
+pub(crate) fn stamp_shard_ask(asks: &mut ShardAsks, cid: &str, si: u16, device: &str) {
+    asks.retain(|_, (_, at)| at.elapsed() < SHARD_ASK_TTL);
+    asks.insert(format!("{cid}:{si}"), (device.to_string(), std::time::Instant::now()));
+    while asks.len() > MAX_SHARD_ASKS {
+        let Some(oldest) = asks.iter().min_by_key(|(_, (_, at))| *at).map(|(key, _)| key.clone()) else { break };
+        asks.remove(&oldest);
+    }
+}
+
+/// Whether a ShardResponse from `device` answers a pull of ours, consuming the ask:
+/// one answer per ask, only from the device asked, and only while it is fresh.
+pub(crate) fn take_shard_ask(asks: &mut ShardAsks, cid: &str, si: u16, device: &str) -> bool {
+    let key = format!("{cid}:{si}");
+    match asks.get(&key) {
+        Some((asked, at)) if asked == device => {
+            let fresh = at.elapsed() < SHARD_ASK_TTL;
+            asks.remove(&key);
+            fresh
+        }
+        _ => false,
+    }
 }
 
 /// Why `requester` may not pull a shard of `cid` in `sid`, `None` when it may. When
@@ -1009,16 +1059,57 @@ mod tests {
         let cs = ContentStore::open(&db, &pass, &tmp.path().join("vault")).unwrap();
         let (bob, stranger) = (keys(2).1, keys(3).1);
         let (states, local) = server_with(&[&bob], 64);
+        let cid = "c1".repeat(32);
         let refused = |who: &str, sid: &str, si: u16, bytes: u64| {
-            shard_write_refused(&states, &cs, who, sid, "cid-1", si, &local, bytes)
+            shard_write_refused(&states, &cs, who, sid, &cid, si, &local, bytes)
         };
         assert_eq!(refused(&stranger, "srv", 0, 8), Some("not a member of the server"));
         assert_eq!(refused(&bob, "other-srv", 0, 8), Some("not a member of the server"));
         assert_eq!(refused(&bob, "srv", 0, 8), None);
-        cs.store_shard("srv", "cid-1", 0, 0, 0, 8, StorageTier::Standard, b"realbyte").unwrap();
+        cs.store_shard("srv", &cid, 0, 0, 0, 8, StorageTier::Standard, b"realbyte").unwrap();
         assert_eq!(refused(&bob, "srv", 0, 8), Some("that shard is already held"));
         assert_eq!(refused(&bob, "srv", 1, 60), Some("our storage pledge for the server is full"));
         assert_eq!(refused(&bob, "srv", 1, 8), None);
+        // A-R4: the id names files on our disk.
+        for bad in ["C:\\a\\b\\c", "../../x", &"C1".repeat(32)] {
+            assert_eq!(
+                shard_write_refused(&states, &cs, &bob, "srv", bad, 1, &local, 8),
+                Some("not a content id"),
+                "A-R4: a shard under {bad:?} was taken",
+            );
+        }
+    }
+
+    /// A-V1: a streamed shard is judged by its real size at completion, against the
+    /// pledge snapshotted when its stream registered.
+    #[test]
+    fn pledge_refused_counts_the_real_size() {
+        assert!(!pledge_refused(0, u64::MAX, u64::MAX), "pledge 0 is no limit");
+        assert!(!pledge_refused(64, 56, 8));
+        assert!(pledge_refused(64, 56, 9));
+        assert!(pledge_refused(64, u64::MAX, 1), "no overflow past the pledge");
+    }
+
+    /// A-V6: a shard is never replaced once held, so only the device we asked may
+    /// answer, once, and only for the shard we asked it for.
+    #[test]
+    fn an_unasked_shard_response_is_dropped() {
+        let cid = "c1".repeat(32);
+        let mut asks = ShardAsks::new();
+        assert!(!take_shard_ask(&mut asks, &cid, 0, "bob"), "A-V6: an answer nobody asked for was taken");
+        stamp_shard_ask(&mut asks, &cid, 0, "bob");
+        assert!(!take_shard_ask(&mut asks, &cid, 0, "mallory"), "A-V6: another device answered for bob");
+        assert!(!take_shard_ask(&mut asks, &cid, 1, "bob"), "A-V6: an answer for another shard was taken");
+        assert!(take_shard_ask(&mut asks, &cid, 0, "bob"), "the device we asked was refused");
+        assert!(!take_shard_ask(&mut asks, &cid, 0, "bob"), "A-V6: a second answer to one ask was taken");
+        if let Some(old) = std::time::Instant::now().checked_sub(SHARD_ASK_TTL) {
+            asks.insert(format!("{cid}:2"), ("bob".into(), old));
+            assert!(!take_shard_ask(&mut asks, &cid, 2, "bob"), "an expired ask was answered");
+        }
+        for si in 0..(MAX_SHARD_ASKS as u16 + 8) {
+            stamp_shard_ask(&mut asks, &cid, si, "bob");
+        }
+        assert_eq!(asks.len(), MAX_SHARD_ASKS);
     }
 
     /// H13: a restricted channel's file never enters the vault, whose manifest (and
@@ -1073,6 +1164,37 @@ mod tests {
         let mls = &mls[..mls.find("// -- Voice channel signaling --").expect("end of the MLS vault arms")];
         assert!(mls.contains("vault_ops::handle_shard_delete(") && mls.contains("vault_ops::ingest_vault_manifest("));
         assert!(!mls.contains("store_shard(") && !mls.contains("pending_shard_streams"), "an MLS arm writes shards again");
+
+        let response = arm("Ok(MessageEnvelope::ShardResponse {");
+        let asked = response.find("vault_ops::take_shard_ask(").expect("A-V6: the ShardResponse arm takes no ask");
+        assert!(asked < response.find("if !found").expect("the found branch"), "A-V6: an unasked miss is heard before the ask check");
+        let plan = &swarm[swarm.find("HavenMessage::RecoveryTransferPlan { plan_json } =>").expect("the plan arm")..];
+        let plan = &plan[..plan.find("RecoveryShardReceived {").expect("the plan arm's end")];
+        let check = plan.find("is_content_id(&assignment.content_id)").expect("A-R4: the plan arm takes any content id");
+        assert!(check < plan.find("pending_shard_streams.insert(").expect("its registration"), "A-R4: the id is checked too late");
+        assert!(!plan.contains("clip_bytes(&assignment.content_id"), "A-R4: a temp is named from the plan's id");
+
+        let ops = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/vault_ops.rs"))
+            .expect("read vault_ops.rs");
+        let ops = &ops[..ops.find("#[cfg(test)]").expect("the tests")];
+        let mut sends = 0;
+        for src in [swarm.as_str(), ops] {
+            for request in src.split("= MessageEnvelope::ShardRequest {").skip(1) {
+                let until_sent = &request[..request.find("send_encrypted_message(").expect("its send")];
+                assert!(until_sent.contains("stamp_shard_ask("), "A-V6: a ShardRequest goes out with no ask recorded");
+                sends += 1;
+            }
+        }
+        assert_eq!(sends, 4, "every ShardRequest send site is scanned");
+
+        let handler = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/file_handler.rs"),
+        )
+        .expect("read file_handler.rs");
+        let done = &handler[handler.find("async fn handle_shard_stream_complete(").expect("the shard completion")..];
+        let done = &done[..done.find("store_shard(").expect("its store")];
+        assert!(done.contains("vault_ops::pledge_refused("), "A-V1: a streamed shard is stored past the pledge");
+        assert!(done.contains("p.sender.as_deref()"), "A-V6: any device completes a shard stream registered for another");
     }
 
     /// H15: a manifest carries the file's key and names the card it backs, so it lands

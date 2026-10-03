@@ -33,6 +33,9 @@ std::string hmac_sha1_base64(const std::string& secret,
 
 std::string hex_encode(const uint8_t* data, size_t len);
 
+// Standard padded base64 to bytes; false on anything else.
+bool base64_decode(const std::string& text, std::string& out);
+
 // Lowercase hex SHA-256 of `message`.
 std::string sha256_hex(const std::string& message);
 

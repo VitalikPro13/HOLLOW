@@ -42,7 +42,8 @@ sha2 = "0.10"
 bip39 = "2.2"
 dirs = "6"
 getrandom = "0.3"
-vodozemac = "0.9"
+# low-level-api: `Account::remove_one_time_key`, so a KeyRequest's key leaves with its slot.
+vodozemac = { version = "0.9", features = ["low-level-api"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 crdts = "7.3"

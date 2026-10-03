@@ -67,6 +67,14 @@ pub(crate) fn valid_emote_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// Channel id rules: 1-64 bytes of `[A-Za-z0-9_-]`, checked at every ingest. An id
+/// names relay ring topics (`{owner}.{id}` must fit the relay's 128 bytes) and MLS
+/// subgroups (`{server}#{id}`), so `~`, `.`, `#` and `:` never appear in one.
+pub(crate) fn valid_channel_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Emote hashes are full SHA-256 hex (content addressing IS the integrity
 /// check — receivers verify bytes against this before caching).
 pub(crate) fn valid_emote_hash(hash: &str) -> bool {

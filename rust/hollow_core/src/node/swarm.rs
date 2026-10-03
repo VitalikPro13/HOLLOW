@@ -644,8 +644,8 @@ async fn run_event_loop(
     // -- Pending stream transfer state --
     let mut pending_file_streams: HashMap<String, PendingFileStream> = HashMap::new();
     // Early-arrival file streams: WebRTC bytes arrived before the FileHeader.
-    // Key: file_id, Value: (temp_path, size, sender_peer_id)
-    let mut early_file_streams: HashMap<String, (std::path::PathBuf, u64, String)> = HashMap::new();
+    // Key: file_id. Parked only through `file_handler::park_early_stream`.
+    let mut early_file_streams: HashMap<String, EarlyStream> = HashMap::new();
     let mut pending_shard_streams: HashMap<String, PendingShardStream> = HashMap::new();
 
     // Pending multi-device link snapshots awaiting reassembly. Key: link session id,
@@ -655,6 +655,8 @@ async fn run_event_loop(
     // Pending vault downloads waiting for remote shards.
     // Key: content_id, Value: (server_id, shards_needed: k, shards_requested: count)
     let mut pending_vault_downloads: HashMap<String, (String, usize, usize)> = HashMap::new();
+    // Shard pulls awaiting their answer: only the device asked may answer, once.
+    let mut vault_shard_asks: vault_ops::ShardAsks = HashMap::new();
 
     // -- WebSocket relay peer tracking --
     // Tracks which peers are in which WS rooms. Key: room_code, Value: set of peer_id strings.
@@ -1604,7 +1606,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::KillAck => {
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillAck { issued_at_ms: None });
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillAck { signal: None });
                     }
 
                     NodeCommand::DepositKillSignal { targets, issued_at_ms, blob } => {
@@ -2513,7 +2515,7 @@ async fn run_event_loop(
                     // -- Vault shard distribution --
                     NodeCommand::VaultDownloadFile { server_id, content_id } => {
                         vault_ops::handle_vault_download_file(
-                            &mut server_states, &mut pending_vault_downloads,
+                            &mut server_states, &mut pending_vault_downloads, &mut vault_shard_asks,
                             &mut olm, &crypto_store, &mut mls,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair,
@@ -2564,6 +2566,7 @@ async fn run_event_loop(
 
                     NodeCommand::RequestShardFromPeer { server_id, content_id, shard_index, shard_key, target_peer } => {
                         vault_ops::handle_request_shard_from_peer(
+                            &mut vault_shard_asks,
                             &mut olm, &crypto_store, &mut mls,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair,
@@ -3101,6 +3104,7 @@ async fn run_event_loop(
                                 &mut pending_file_streams,
                                 &mut pending_shard_streams, &mut early_file_streams,
                                 &mut pending_link_snapshots,
+                                &mut vault_shard_asks,
                                 &mut link,
                                 &mut decrypt_fail_cooldown,
                                 &mut pending_mls_key_packages, &mut pending_mls_removals,
@@ -3267,6 +3271,7 @@ async fn run_event_loop(
                         }
                         snap.room_peers = peers.into_iter().collect();
                         snap.carried = carry_log.clone();
+                        snap.olm_one_time_keys = olm.stored_one_time_key_count();
                         let _ = reply.send(snap);
                     }
                 }
@@ -4617,6 +4622,9 @@ async fn run_event_loop(
                         };
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
                             &mut pending_ws_transfers, &from, &data,
+                            |kind, id| file_handler::stream_ceiling(
+                                kind, id, &from, &pending_file_streams, &requested_file_receipts, &pending_link_snapshots,
+                            ),
                         ) {
                             // Auto-download gate (issue #41): the sender queues its push before our
                             // decline could reach it, so bytes for a declined file are deleted here
@@ -4648,10 +4656,10 @@ async fn run_event_loop(
                             }
                         }
                     }
-                    WsEvent::KillSignal { blob, issued_at_ms } => {
-                        hollow_log!("[HOLLOW-DESTROY] Relay parked order issued_at={issued_at_ms}");
+                    WsEvent::KillSignal { blob, signal } => {
+                        hollow_log!("[HOLLOW-DESTROY] Relay parked order issued_at={}", signal.issued_at_ms);
                         destroy::handle_kill_signal(
-                            &event_tx, &ws_cmd_tx, &blob, issued_at_ms,
+                            &event_tx, &ws_cmd_tx, &blob, signal,
                             &master_peer_str, &device_peer_id, &db_path, &db_passphrase,
                         ).await;
                     }
@@ -4731,6 +4739,7 @@ async fn run_event_loop(
                                 &mut pending_file_streams,
                                 &mut pending_shard_streams, &mut early_file_streams,
                                 &mut pending_link_snapshots,
+                                &mut vault_shard_asks,
                                 &mut link,
                                 &mut decrypt_fail_cooldown,
                                 &mut pending_mls_key_packages, &mut pending_mls_removals,
@@ -5140,6 +5149,11 @@ async fn run_event_loop(
 
                                                         if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir_r) {
                                                             for assignment in &plan {
+                                                                // The id names our shard files and temps.
+                                                                if !crate::vault::content_store::is_content_id(&assignment.content_id) {
+                                                                    hollow_log!("[HOLLOW-SECURITY] Skipped a transfer assignment from {from}: not a content id");
+                                                                    continue;
+                                                                }
                                                                 if assignment.dest_peer == local_peer_str {
                                                                     if let Some(meta) = pool.manifest_meta.get(&assignment.content_id) {
                                                                         let key = format!("{}:{}", assignment.content_id, assignment.shard_index);
@@ -5156,6 +5170,8 @@ async fn run_event_loop(
                                                                             m: meta.m,
                                                                             total_size: meta.total_data_size,
                                                                             tier: meta.storage_tier.clone(),
+                                                                            sender: None,
+                                                                            pledge: vault_ops::our_pledge(&server_states, &pool.server_id, &local_peer_str),
                                                                         });
                                                                         // Register for auto-reconstruction after shard arrives.
                                                                         pending_vault_downloads.entry(assignment.content_id.clone())
@@ -5170,9 +5186,7 @@ async fn run_event_loop(
                                                                     if let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) {
                                                                         let temp_dir = std::env::temp_dir().join("hollow_recovery");
                                                                         let _ = tokio::fs::create_dir_all(&temp_dir).await;
-                                                                        let temp_path = temp_dir.join(format!("{}_{}.shard",
-                                                                            crypto_handler::clip_bytes(&assignment.content_id, 8),
-                                                                            assignment.shard_index));
+                                                                        let temp_path = temp_dir.join(format!("{sk}.shard"));
                                                                         if tokio::fs::write(&temp_path, &shard_bytes).await.is_ok() {
                                                                             let total_size = shard_bytes.len() as u64;
                                                                             hollow_log!("[RECOVERY-POOL] Sending shard {}:{} ({} bytes) to {}",
@@ -5302,6 +5316,9 @@ async fn run_event_loop(
                                     };
                                     let mut next = Some((Box::new(msg), frame_ts));
                                     while let Some((msg, frame_ts)) = next.take() {
+                                        if !super::mls_authority::frame_names_a_group(&msg, &from) {
+                                            continue;
+                                        }
                                         #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                                         let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
                                         #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
@@ -5323,6 +5340,7 @@ async fn run_event_loop(
                                             &mut pending_file_streams,
                                             &mut pending_shard_streams, &mut early_file_streams,
                                             &mut pending_link_snapshots,
+                                            &mut vault_shard_asks,
                                             &mut link,
                                             &mut decrypt_fail_cooldown,
                                             &mut pending_mls_key_packages, &mut pending_mls_removals,
@@ -5799,8 +5817,8 @@ async fn run_event_loop(
                     channel_sync_sent.retain(|_, instant| instant.elapsed() < Duration::from_secs(30));
                     // Clean up orphaned early-arrival file streams (5 min TTL).
                     let mut stale_early: Vec<String> = Vec::new();
-                    for (id, (tp, _, _)) in early_file_streams.iter() {
-                        let stale = match tokio::fs::metadata(tp).await.and_then(|m| m.modified()) {
+                    for (id, early) in early_file_streams.iter() {
+                        let stale = match tokio::fs::metadata(&early.temp_path).await.and_then(|m| m.modified()) {
                             Ok(t) => t.elapsed().unwrap_or_default() >= Duration::from_secs(300),
                             Err(_) => true,
                         };
@@ -5809,8 +5827,8 @@ async fn run_event_loop(
                         }
                     }
                     for id in &stale_early {
-                        if let Some((tp, _, _)) = early_file_streams.remove(id) {
-                            let _ = tokio::fs::remove_file(&tp).await;
+                        if let Some(early) = early_file_streams.remove(id) {
+                            let _ = tokio::fs::remove_file(&early.temp_path).await;
                         }
                     }
                     if !stale_early.is_empty() {
@@ -6074,6 +6092,7 @@ async fn run_event_loop(
                                         // source_peer may be a MASTER (placements are
                                         // master-keyed) — Olm/sockets are per-device.
                                         if let Some(dev) = crate::node::crypto_handler::preferred_online_device(&ws_room_peers, source_peer) {
+                                            vault_ops::stamp_shard_ask(&mut vault_shard_asks, &item.content_id, *shard_idx, &dev);
                                             send_encrypted_message(
                                                 &mut olm, &crypto_store, &dev, &env_json,
                                                 &event_tx, &ws_cmd_tx, &ws_room_peers,
@@ -6195,6 +6214,7 @@ async fn run_event_loop(
                                                 // source_peer may be a MASTER (placements
                                                 // are master-keyed) — resolve to a device.
                                                 if let Some(dev) = crate::node::crypto_handler::preferred_online_device(&ws_room_peers, source_peer) {
+                                                    vault_ops::stamp_shard_ask(&mut vault_shard_asks, &item.content_id, *shard_idx, &dev);
                                                     send_encrypted_message(
                                                         &mut olm, &crypto_store, &dev, &env_json,
                                                         &event_tx, &ws_cmd_tx, &ws_room_peers,
@@ -6653,14 +6673,88 @@ pub(crate) fn install_op_signer(
     state.set_signer(master.clone(), pk_b64);
 }
 
+/// Drop a server our own state no longer lists us in: the state and its stored
+/// rows, the MLS group and its channel subgroups, the room, and the UI's entry.
+async fn leave_evicted_server(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    crdt_store: &super::crdt_store::CrdtStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_id: &str,
+) {
+    hollow_log!("[HOLLOW-CRDT] Our state no longer lists us in {server_id}: durable teardown");
+    let sub_cids: Vec<String> = server_states.get(server_id)
+        .map(|s| s.subgroup_channel_ids())
+        .unwrap_or_default();
+    server_states.remove(server_id);
+    crdt_store.delete_server(server_id.to_string());
+    if let Some(mls_mgr) = mls.as_mut() {
+        if mls_mgr.has_group(server_id) {
+            mls_mgr.remove_group(server_id);
+        }
+        for cid in &sub_cids {
+            let gk = crate::crypto::subgroup_id(server_id, cid);
+            if mls_mgr.has_group(&gk) {
+                mls_mgr.remove_group(&gk);
+            }
+        }
+        persist_mls_state(mls_mgr, crypto_store);
+    }
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+        room_code: server_id.to_string(),
+    });
+    let _ = event_tx.send(NetworkEvent::ServerDeleted {
+        server_id: server_id.to_string(),
+    }).await;
+}
+
 /// Apply ONE remotely-authored CRDT op: the single ingest path for a
 /// `CrdtOpBroadcast` and for the `MemberAdded` op a `ServerJoinResolved` carries.
 /// Author-validated by `op_allowed`, never sender-validated (the sender may
 /// legitimately be relaying), persisted through `insert_crdt_op`, re-flooded
 /// once, and turned into the per-payload UI events. ONE path, so a join
 /// resolution can never become a SECOND ingest with its own weaker gates.
+///
+/// Boxed, so the swarm arms that await it do not each carry its large future on
+/// the worker stack (0xc00000fd).
 #[allow(clippy::too_many_arguments)]
 async fn apply_remote_crdt_op(
+    server_states: &mut HashMap<String, ServerState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    db_path: &str,
+    db_passphrase: &str,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    peer_str: &str,
+    server_id: String,
+    op_json: String,
+) {
+    Box::pin(apply_remote_crdt_op_inner(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+        mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
+        voice_channel_participants, voice_channel_gossip_mode,
+        pending_server_joins, bundle_keypair,
+        db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+        server_id, op_json,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_remote_crdt_op_inner(
     server_states: &mut HashMap<String, ServerState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -6744,7 +6838,7 @@ async fn apply_remote_crdt_op(
             }
 
             // Emit specific events based on op payload so Dart UI updates correctly.
-            // Set when a MemberRemoved op evicts OUR OWN identity — the durable
+            // Set when a MemberRemoved or MemberBanned op evicts OUR OWN identity — the durable
             // teardown runs AFTER the match (the `state` borrow spans the match).
             let mut self_evict_teardown = false;
             match &op.payload {
@@ -6810,8 +6904,14 @@ async fn apply_remote_crdt_op(
                     }).await;
                 }
                 CrdtPayload::MemberBanned { peer_id } => {
-                    let local_peer = local_peer_str.to_string();
-                    if *peer_id == local_peer {
+                    // A ban of our identity takes us out as a removal does.
+                    let us = super::resolver::same_identity(peer_id, local_peer_str);
+                    if us && !pending_server_joins.contains_key(&server_id) && !state.is_member(local_peer_str) {
+                        self_evict_teardown = true;
+                        let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                            server_id: server_id.clone(),
+                        }).await;
+                    } else if us {
                         let _ = event_tx.send(NetworkEvent::MemberLeft {
                             server_id: server_id.clone(),
                             peer_id: peer_id.clone(),
@@ -6889,7 +6989,7 @@ async fn apply_remote_crdt_op(
             // runs here because the `state` borrow spans the match). Removing the
             // state FIRST also makes the subgroup reconcile below skip the server.
             if self_evict_teardown {
-                hollow_log!("[HOLLOW-CRDT] Self MemberRemoved for {server_id} — durable teardown (sibling leave / kick)");
+                hollow_log!("[HOLLOW-CRDT] Self removal or ban for {server_id} — durable teardown (sibling leave / kick / ban)");
                 let sub_cids: Vec<String> = server_states.get(&server_id)
                     .map(|s| s.subgroup_channel_ids())
                     .unwrap_or_default();
@@ -7137,8 +7237,9 @@ async fn handle_incoming_request(
     relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
-    early_file_streams: &mut HashMap<String, (std::path::PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     pending_link_snapshots: &mut HashMap<String, file_handler::LinkSnapshotState>,
+    vault_shard_asks: &mut vault_ops::ShardAsks,
     link: &mut link_handler::LinkState,
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
@@ -7243,12 +7344,13 @@ async fn handle_incoming_request(
                     olm.retire_session(peer_str);
                     decrypt_fail_cooldown.insert(peer_str.to_string(), now);
                 }
-                let otk = olm.generate_one_time_key();
+                // One key per requesting device, so a stranger's flood never pushes out
+                // the key a friend request carries.
+                let (otk, minted) = olm.key_for_requester(peer_str);
                 let identity_key = olm.identity_key_base64();
-                if let Ok(pickle) = olm.account_pickle_json() {
-                    crypto_store.save_account(pickle);
+                if minted {
+                    persist_crypto_state(olm, crypto_store, peer_str);
                 }
-                persist_crypto_state(olm, crypto_store, peer_str);
                 key_bundle_sent_to.insert(peer_str.to_string());
                 send_message_to_peer(
                     ws_cmd_tx, ws_room_peers, peer_str,
@@ -7605,7 +7707,7 @@ async fn handle_incoming_request(
                     if !crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), peer_str, &cid) {
                         return;
                     }
-                    messages.retain(|m| crypto_handler::backfill_author_allowed(server_states.get(&sid), &m.s, m.ts));
+                    crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
                     let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
@@ -7995,18 +8097,8 @@ async fn handle_incoming_request(
                                 }).await;
                             }
 
-                            // Sync reactions for this message (INSERT OR IGNORE — idempotent).
-                            // Signature-checked per reaction; see the channel batch.
                             if let Some(mid) = &msg.mid {
-                                for r in &msg.reactions {
-                                    if !message_ops::sync_reaction_accepted(mid, r) {
-                                        continue;
-                                    }
-                                    let _ = store.add_reaction(
-                                        mid, &r.e, &r.p, r.ts,
-                                        r.sig.as_deref(), r.pk.as_deref(),
-                                    );
-                                }
+                                message_ops::store_synced_dm_reactions(&store, mid, &msg.reactions, &local_peer);
                             }
                         }
                         let _ = store.commit_transaction();
@@ -8241,18 +8333,8 @@ async fn handle_incoming_request(
                                 }).await;
                             }
 
-                            // Reactions (INSERT OR IGNORE — idempotent).
-                            // Signature-checked per reaction; see the channel batch.
                             if let Some(mid) = &msg.mid {
-                                for r in &msg.reactions {
-                                    if !message_ops::sync_reaction_accepted(mid, r) {
-                                        continue;
-                                    }
-                                    let _ = store.add_reaction(
-                                        mid, &r.e, &r.p, r.ts,
-                                        r.sig.as_deref(), r.pk.as_deref(),
-                                    );
-                                }
+                                message_ops::store_synced_dm_reactions(&store, mid, &msg.reactions, &local_peer);
                             }
                         }
                         let _ = store.commit_transaction();
@@ -8434,27 +8516,16 @@ async fn handle_incoming_request(
                     // The answer to a queued pull arrived: the ask is over.
                     file_asks::retire(pending_file_asks, &fid);
 
-                    // SECURITY: validate file size against the server limit (34MB default for
-                    // DMs). Skipped for share-backed files, which Share delivers with no size
-                    // limit, and for explicit pulls, whose fallback re-serve carries no share_ref.
-                    if share_ref.is_none() && !explicitly_requested {
-                        let max_bytes: u64 = if let Some(ref s) = sid {
-                            if let Some(state) = server_states.get(s) {
-                                let max_mb_str = state.settings.get("max_file_size_mb")
-                                    .map(|r| r.read().clone())
-                                    .unwrap_or_else(|| "34".to_string());
-                                let max_mb = max_mb_str.parse::<u64>().unwrap_or(34);
-                                max_mb * 1024 * 1024
-                            } else {
-                                34 * 1024 * 1024
-                            }
-                        } else {
-                            34 * 1024 * 1024
-                        };
-                        if size > max_bytes {
-                            hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader from {peer_str} — size {size} exceeds max {max_bytes} bytes");
-                            return;
-                        }
+                    // SECURITY: validate file size against the server limit (the send limit for
+                    // DMs). Explicit pulls skip it: their fallback re-serve carries no share_ref.
+                    if !explicitly_requested
+                        && let Some(reason) = file_handler::header_size_refused(
+                            server_states, sid.as_deref(), size, share_ref.is_some(),
+                            inline_bytes.as_ref().map_or(0, String::len),
+                        )
+                    {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {fid} from {peer_str} (size {size}): {reason}");
+                        return;
                     }
 
                     // Moderation trio (receive-side, channel files only): drop files
@@ -8544,8 +8615,8 @@ async fn handle_incoming_request(
                         // stop — no re-request, no re-register. Still emit FileHeaderReceived
                         // below so the sender-side UI/late-joiner stays consistent.
                         pending_file_streams.remove(&fid);
-                        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-                            let _ = tokio::fs::remove_file(&temp_path).await;
+                        if let Some(early) = early_file_streams.remove(&fid) {
+                            let _ = tokio::fs::remove_file(&early.temp_path).await;
                         }
                         hollow_log!("[HOLLOW-FILE] FileHeader for {fid} ignored — already complete on disk");
                     }
@@ -8682,8 +8753,8 @@ async fn handle_incoming_request(
                         && share_ref.is_none() && aes_key.is_some()
                     {
                         declined_file_ids.insert(fid.clone());
-                        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-                            let _ = tokio::fs::remove_file(&temp_path).await;
+                        if let Some(early) = early_file_streams.remove(&fid) {
+                            let _ = tokio::fs::remove_file(&early.temp_path).await;
                         }
                         hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed file {fid} ({size} bytes, {auto_dl_key}) — metadata kept, manual download available");
                         // Tell Dart NOW, at header time: the transfer provider flags
@@ -8719,11 +8790,12 @@ async fn handle_incoming_request(
                             width: w,
                             height: h,
                             retry_count: carried_retry,
+                            size,
                         });
                         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (streamed transfer)");
 
                         // Check if WebRTC bytes already arrived before this FileHeader (race condition).
-                        if let Some((temp_path, file_size, sender)) = early_file_streams.remove(&fid) {
+                        if let Some(EarlyStream { temp_path, size: file_size, sender, .. }) = early_file_streams.remove(&fid) {
                             hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} — processing now");
                             let request = super::ws_stream_transfer::StreamRequest {
                                 kind: super::ws_stream_transfer::StreamKind::File,
@@ -8795,6 +8867,8 @@ async fn handle_incoming_request(
                             pending_shard_streams.entry(key.clone()).or_insert(PendingShardStream {
                                 server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
                                 shard_key: sk, k, m, total_size, tier,
+                                sender: Some(peer_str.to_string()),
+                                pledge: vault_ops::our_pledge(server_states, &sid, local_peer_str),
                             });
                             hollow_log!("[HOLLOW-VAULT] Registered pending shard stream: {key}");
                             return;
@@ -8910,6 +8984,12 @@ async fn handle_incoming_request(
 
                 Ok(MessageEnvelope::ShardResponse { sid, cid, si, data, chunks, found, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardResponse: cid={cid} si={si} found={found} chunks={chunks} from {peer_str}");
+                    // A held shard is never replaced, so an answer we never asked for
+                    // would block the real one for good.
+                    if !vault_ops::take_shard_ask(vault_shard_asks, &cid, si, peer_str) {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED ShardResponse for {cid}/{si} from {peer_str}: we did not ask it for that shard");
+                        return;
+                    }
                     if !found {
                         let _ = event_tx.send(NetworkEvent::ShardRequestFailed {
                             server_id: sid, content_id: cid, shard_index: si,
@@ -8934,6 +9014,8 @@ async fn handle_incoming_request(
                             server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
                             shard_key: String::new(), k: 0, m: 0, total_size: 0,
                             tier: "standard".to_string(),
+                            sender: Some(peer_str.to_string()),
+                            pledge: vault_ops::our_pledge(server_states, &sid, local_peer_str),
                         });
                         hollow_log!("[HOLLOW-VAULT] Registered pending shard stream for response: {key}");
                     } else {
@@ -9023,6 +9105,11 @@ async fn handle_incoming_request(
                 | Ok(MessageEnvelope::VoiceChannelRecordingState { .. }) => {
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
                 }
+
+                // Targeted VC signals ride Olm, so they take the same bucket as the MLS arm.
+                Ok(ref env)
+                    if voice_handler::is_vc_signal(env)
+                        && !voice_handler::vc_rate_check(vc_signal_rate_tokens, peer_str) => {}
 
                 // Voice SDP/ICE Olm fallback handlers: these arrive via Olm when MLS
                 // encrypt failed on the sender side (its epoch may be stale after a
@@ -10286,47 +10373,24 @@ async fn handle_incoming_request(
                 pending_server_joins, event_tx, crdt_store_actor, server_id, reason,
             ).await;
         }
-        HavenMessage::MemberKickBroadcast { server_id } => {
-            hollow_log!("[HOLLOW-CRDT] MemberKickBroadcast from {peer_str} — kicked from server {server_id}");
-            
-
-            // SECURITY: Verify sender has KICK_MEMBERS permission and outranks us.
-            if let Some(state) = server_states.get(&server_id) {
-                let sender_role = state.get_role(&peer_str);
-                // Override-aware — must match the kicker's own has_permission gate.
-                let sender_perms = state.get_permissions(&peer_str);
-                let local_peer = local_peer_str.to_string();
-                let our_role = state.get_role(&local_peer);
-                if (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) == 0 {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED MemberKickBroadcast from {peer_str} — no KICK_MEMBERS permission (role: {:?})", sender_role);
-                    return;
-                }
-                if !sender_role.outranks(&our_role) {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED MemberKickBroadcast from {peer_str} — does not outrank us ({:?} vs {:?})", sender_role, our_role);
-                    return;
-                }
-                if super::sync_handler::kick_predates_membership(state, &local_peer, frame_ts_ms) {
-                    hollow_log!("[HOLLOW-SECURITY] Ignored a kick from {peer_str} sealed before we joined {server_id}");
-                    return;
-                }
-            } else {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED MemberKickBroadcast for unknown server {server_id}");
-                return;
-            }
-
-            if server_states.remove(&server_id).is_some() {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.delete_server_state(&server_id);
-                }
-
-                if let Some(mls_mgr) = mls {
-                    mls_mgr.remove_group(&server_id);
-                    persist_mls_state(mls_mgr, crypto_store);
-                }
-
-                let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                    server_id,
-                }).await;
+        HavenMessage::MemberKickBroadcast { server_id, op_json } => {
+            hollow_log!("[HOLLOW-CRDT] MemberKickBroadcast from {peer_str} for server {server_id}");
+            // A notice never acts alone: the removal it carries enters through the one
+            // ingest, which judges its author, and we leave only once our own state no
+            // longer lists us. A removal from before a rejoin folds before the rejoin.
+            apply_remote_crdt_op(
+                server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+                mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
+                voice_channel_participants, voice_channel_gossip_mode,
+                pending_server_joins, bundle_keypair,
+                db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+                server_id.clone(), op_json,
+            ).await;
+            let evicted = !pending_server_joins.contains_key(&server_id)
+                && server_states.get(&server_id)
+                    .is_some_and(|s| !s.is_member(local_peer_str) && !s.is_deleted());
+            if evicted {
+                leave_evicted_server(server_states, mls, crypto_store, crdt_store, ws_cmd_tx, event_tx, &server_id).await;
             }
         }
 
@@ -10515,6 +10579,9 @@ async fn handle_incoming_request(
             // a stranger can't pull us into a server this way.
             if !super::resolver::same_identity(&peer_str, local_peer_str) {
                 hollow_log!("[HOLLOW-SECURITY] Ignored SiblingServerAnnounce from non-sibling {peer_str}");
+                return;
+            }
+            if !sync_handler::joinable_server_id(&server_id) {
                 return;
             }
             // Already joining → nothing to do (a SyncResponse will complete it and
@@ -10811,30 +10878,8 @@ async fn handle_incoming_request(
                                         .map(|s| !s.is_member(&local_peer_str) && !s.is_deleted())
                                         .unwrap_or(false);
                                 if self_evicted {
-                                    hollow_log!("[HOLLOW-CRDT] Self-eviction via MLS CrdtOp for {sid} — durable teardown");
-                                    let sub_cids: Vec<String> = server_states.get(&sid)
-                                        .map(|s| s.subgroup_channel_ids())
-                                        .unwrap_or_default();
-                                    server_states.remove(&sid);
-                                    crdt_store.delete_server(sid.clone());
-                                    if let Some(mls_mgr) = mls.as_mut() {
-                                        if mls_mgr.has_group(&sid) {
-                                            mls_mgr.remove_group(&sid);
-                                        }
-                                        for cid in &sub_cids {
-                                            let gk = crate::crypto::subgroup_id(&sid, cid);
-                                            if mls_mgr.has_group(&gk) {
-                                                mls_mgr.remove_group(&gk);
-                                            }
-                                        }
-                                        persist_mls_state(mls_mgr, crypto_store);
-                                    }
-                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-                                        room_code: sid.clone(),
-                                    });
-                                    let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                                        server_id: sid.clone(),
-                                    }).await;
+                                    hollow_log!("[HOLLOW-CRDT] Self-eviction via MLS CrdtOp for {sid}");
+                                    leave_evicted_server(server_states, mls, crypto_store, crdt_store, ws_cmd_tx, event_tx, &sid).await;
                                 }
 
                                 if affects_subgroups {
@@ -10911,7 +10956,7 @@ async fn handle_incoming_request(
 
                             MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, .. } => {
                                 if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
-                                    messages.retain(|m| crypto_handler::backfill_author_allowed(server_states.get(&sid), &m.s, m.ts));
+                                    crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
                                     sync_handler::handle_envelope_channel_sync_batch(
                                         olm, bundle_keypair, event_tx, ws_cmd_tx,
                                         ws_room_peers, &local_peer, &sender_peer_id,
@@ -10950,25 +10995,9 @@ async fn handle_incoming_request(
 
                             // -- Voice channel signaling --
                             // SECURITY (Phase 6.25): VC signal sub-rate-limiter (drop on rate-limit).
-                            MessageEnvelope::VoiceChannelJoin { .. }
-                            | MessageEnvelope::VoiceChannelLeave { .. }
-                            | MessageEnvelope::VoiceChannelSdpOffer { .. }
-                            | MessageEnvelope::VoiceChannelSdpAnswer { .. }
-                            | MessageEnvelope::VoiceChannelIce { .. }
-                            | MessageEnvelope::VoiceChannelAudioState { .. }
-                            | MessageEnvelope::VoiceChannelScreenOffer { .. }
-                            | MessageEnvelope::VoiceChannelScreenAnswer { .. }
-                            | MessageEnvelope::VoiceChannelScreenIce { .. }
-                            | MessageEnvelope::VoiceChannelScreenState { .. }
-                            | MessageEnvelope::VoiceChannelScreenWatch { .. }
-                            | MessageEnvelope::VoiceChannelScreenAssign { .. }
-                            | MessageEnvelope::VoiceChannelScreenFeedState { .. }
-                            | MessageEnvelope::VoiceChannelRenegOffer { .. }
-                            | MessageEnvelope::VoiceChannelRenegAnswer { .. }
-                            | MessageEnvelope::VoiceChannelLegRestart { .. }
-                            | MessageEnvelope::VoiceChannelCameraState { .. }
-                            | MessageEnvelope::VoiceChannelRecordingState { .. }
-                            if !voice_handler::vc_rate_check(vc_signal_rate_tokens, peer_str) => {
+                            ref env
+                                if voice_handler::is_vc_signal(env)
+                                    && !voice_handler::vc_rate_check(vc_signal_rate_tokens, peer_str) => {
                                 // Rate limited — drop silently (already logged).
                             }
 
@@ -11665,6 +11694,14 @@ async fn handle_incoming_request(
             if super::blocklist::is_blocked(peer_str) {
                 return;
             }
+            // A device its identity removed still holds its key, and needs no roster
+            // to ask in its own name.
+            if super::resolver::is_revoked(peer_str) {
+                return;
+            }
+            // A request is no newer than its seal, so a held-back one cannot claim to
+            // postdate a removal.
+            let requested_at = requested_at.min(super::frame_auth::stamp_ceiling(frame_ts_ms));
 
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
@@ -11781,6 +11818,12 @@ async fn handle_incoming_request(
                     // "removed", or no row at all falls through to the new-request path.
                     _ => {}
                 }
+            }
+
+            // Made before the friendship last ended, so neither a new request nor an
+            // answer to ours: the TTL mailbox or a relay held it back.
+            if social::request_predates_removal(peer_str, &req_master_early, requested_at, db_path, db_passphrase) {
+                return;
             }
 
             // A stranger's request holds no profile in our DB and the sender is often
@@ -12102,7 +12145,7 @@ async fn handle_incoming_request(
                 return;
             }
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
-            let _ = store.save_setting(&social::removed_key(&master), "1");
+            social::note_removal(&store, &master, frame_ts_ms);
             let _ = store.remove_friend(&master);
             if master != peer_str {
                 let _ = store.remove_friend(&peer_str);
@@ -12154,8 +12197,8 @@ async fn handle_incoming_request(
 
             let mut inserted: u32 = 0;
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                // Existing friends (any status) so we don't clobber a relationship
-                // we already track or re-add a removed one within the same session.
+                // Existing friends (any status), so a relationship we already track is
+                // never clobbered; a removed one is kept out by its tombstone below.
                 let existing: HashMap<String, String> = store
                     .load_friends(None)
                     .map(|rows| rows.into_iter().map(|(pid, status, ..)| (pid, status)).collect())
@@ -12180,6 +12223,11 @@ async fn handle_incoming_request(
                     // which of the friend's removals are older than the friendship, so it
                     // never runs ahead of the frame (the friendship itself is real).
                     let since = entry.requested_at.min(super::frame_auth::stamp_ceiling(frame_ts_ms));
+                    // A sibling that missed our removal still lists the friendship it
+                    // ended, whose stamp is frozen from before it; a re-add is newer.
+                    if social::older_than_removal(&store, &fmaster, since) {
+                        continue;
+                    }
                     if store
                         .save_friend(&fmaster, "accepted", "", since)
                         .is_ok()

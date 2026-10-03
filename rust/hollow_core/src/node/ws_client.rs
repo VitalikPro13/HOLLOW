@@ -38,6 +38,21 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // -- Public types --
 
+/// One signal parked on the relay's kill list: who deposited it, and its stamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KillSignalId {
+    pub issuer: String,
+    pub issued_at_ms: i64,
+}
+
+/// The `kill_ack` frame: the one signal turned away, or (`None`, after a wipe) all.
+pub(crate) fn kill_ack_frame(signal: Option<&KillSignalId>) -> serde_json::Value {
+    match signal {
+        Some(s) => serde_json::json!({ "type": "kill_ack", "issuer": s.issuer, "issued_at_ms": s.issued_at_ms }),
+        None => serde_json::json!({ "type": "kill_ack" }),
+    }
+}
+
 /// Commands sent from the swarm to the WebSocket client.
 #[derive(Debug, Clone)]
 pub enum WsCommand {
@@ -149,9 +164,9 @@ pub enum WsCommand {
     KillDeposit { targets: Vec<String>, issued_at_ms: i64, blob: String },
     /// Delete OUR OWN parked entry. Sent after a wipe and after a PERMANENT
     /// rejection: without it the relay re-sends on every auth for a year.
-    /// `issued_at_ms` names the one signal answered, so turning away a junk
-    /// deposit never takes a genuine order with it; `None` clears them all.
-    KillAck { issued_at_ms: Option<i64> },
+    /// `signal` names the one turned away, so junk never takes a genuine order
+    /// sharing its stamp with it; `None` clears them all.
+    KillAck { signal: Option<KillSignalId> },
     /// Drop this device's push token from the relay (wipe step 5). No reply.
     UnregisterPushToken,
     /// Ask the relay for the join lock chains of these servers, as (server id, owner
@@ -226,7 +241,7 @@ pub enum WsEvent {
     LinkCodeResolved { code: String, peer_id: String },
     /// A destruction order the relay parked for this device, handed over right
     /// after auth. Opaque here: the swarm verifies it against OUR master.
-    KillSignal { blob: String, issued_at_ms: i64 },
+    KillSignal { blob: String, signal: KillSignalId },
     /// The join lock chain the relay holds for a server (empty when none). `put` is
     /// set on the answer to our own `LockPut`: whether its newest lock is now the
     /// relay's. Unverified here: whoever reads it checks it back to the owner.
@@ -352,7 +367,7 @@ enum ServerMsg {
     LinkCodeReleased,
     LinkCodeError { error: String, #[serde(default)] code: String },
     LinkCodeResolved { code: String, peer_id: String },
-    KillSignal { #[serde(default)] blob: String, #[serde(default)] issued_at_ms: i64 },
+    KillSignal { #[serde(default)] blob: String, #[serde(default)] issued_at_ms: i64, #[serde(default)] issuer: String },
     KillDeposited { #[serde(default)] stored: u32 },
     LockChain {
         server: String,
@@ -1366,11 +1381,8 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::KillAck { issued_at_ms } => {
-            let mut msg = serde_json::json!({ "type": "kill_ack" });
-            if let Some(stamp) = issued_at_ms {
-                msg["issued_at_ms"] = serde_json::json!(stamp);
-            }
+        WsCommand::KillAck { signal } => {
+            let msg = kill_ack_frame(signal.as_ref());
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] KillAck send failed: {e}");
                 return false;
@@ -1602,11 +1614,11 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             hollow_log!("[HOLLOW-LINK] Link code resolved: {code} -> {peer_id}");
             WsEvent::LinkCodeResolved { code, peer_id }
         }
-        ServerMsg::KillSignal { blob, issued_at_ms } => {
+        ServerMsg::KillSignal { blob, issued_at_ms, issuer } => {
             // Nothing identifying: the blob is somebody's signed payload and the
             // target is us.
             hollow_log!("[HOLLOW-DESTROY] Kill signal received from the relay");
-            WsEvent::KillSignal { blob, issued_at_ms }
+            WsEvent::KillSignal { blob, signal: KillSignalId { issuer, issued_at_ms } }
         }
         ServerMsg::KillDeposited { stored } => {
             hollow_log!("[HOLLOW-DESTROY] Relay parked {stored} destruction order(s)");
@@ -1624,6 +1636,31 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D5: the relay names who parked each kill signal, and turning one away echoes it.
+    #[tokio::test]
+    async fn a_kill_signal_keeps_its_issuer_for_the_ack() {
+        let state = WsClientState {
+            joined_rooms: Arc::new(RwLock::new(HashSet::new())),
+            last_join_attempt: Arc::new(RwLock::new(None)),
+            subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            offline_optin: Arc::new(RwLock::new(None)),
+            inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            doors: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            relay_host: String::new(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let frame = r#"{"type":"kill_signal","blob":"b","issued_at_ms":5,"issuer":"12D3KooWJunk"}"#;
+        handle_server_message(&tx, serde_json::from_str(frame).unwrap(), &state).await;
+        let Ok(WsEvent::KillSignal { signal, .. }) = rx.try_recv() else { panic!("no kill signal") };
+        assert_eq!(signal, KillSignalId { issuer: "12D3KooWJunk".into(), issued_at_ms: 5 });
+        assert_eq!(
+            kill_ack_frame(Some(&signal)),
+            serde_json::json!({ "type": "kill_ack", "issuer": "12D3KooWJunk", "issued_at_ms": 5 }),
+            "a stamp alone cannot tell junk from an order sharing it",
+        );
+        assert_eq!(kill_ack_frame(None), serde_json::json!({ "type": "kill_ack" }), "only a wipe acks everything");
+    }
 
     #[test]
     fn test_auth_message_format() {

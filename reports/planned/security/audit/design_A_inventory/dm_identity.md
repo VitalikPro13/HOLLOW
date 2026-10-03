@@ -88,7 +88,9 @@ Paths are relative to `rust/hollow_core/src/` unless they start with `relay-uws/
 5. **Timing.** Live; a buffered copy older than 300 s is refused.
 6. **Replay.** Within 300 s a captured request re-runs the teardown: gated only by
    `decrypt_fail_cooldown` 5 s when a CONFIRMED session exists (`:6725-6730`); with an
-   unconfirmed or no session every replay mints another OTK. Tracked as L6, ACCEPTED AR-09.
+   unconfirmed or no session every replay mints another OTK. Tracked as L6; AR-09 is CLOSED:
+   the replay half by HOL-SEC-054 (live-frame guard), the minting half by HOL-SEC-111 (one
+   key per requesting device, bounded slot table).
    Re-route to another device fails `to`.
 7. **Session.** None by definition (this is how sessions start).
 8. **Metadata.** `to`, `ts`, the sender device pubkey (already inside the peer id).

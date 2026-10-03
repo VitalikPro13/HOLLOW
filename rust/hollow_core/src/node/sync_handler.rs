@@ -368,8 +368,8 @@ fn other_member_targets(state: &ServerState, local_peer: &str) -> Vec<String> {
 
 /// Fan a member-removal CRDT op to the remaining members (collected before the
 /// removal applied) and to our OWN online siblings, which the master-keyed member
-/// list excludes. `skip` = the removed identity, which gets a
-/// `MemberKickBroadcast` instead; `None` for a voluntary leave.
+/// list excludes. `skip` = the removed identity, which gets the op inside a
+/// `MemberKickBroadcast` instead ([`carry_kick_notice`]); `None` for a voluntary leave.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_removal_op(
     ws_cmd_tx: &WsCmdTx,
@@ -391,6 +391,22 @@ fn broadcast_removal_op(
     super::olm_lane::carry_to_own_siblings(
         ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, &msg, super::olm_lane::NoSession::Queue,
     );
+}
+
+/// Tell every online device of the removed `identity` with the removal op itself:
+/// a device leaves only once its own fold drops it, never on a bare notice.
+fn carry_kick_notice(
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    server_id: &str,
+    identity: &str,
+    op: &crate::crdt::operations::CrdtOp,
+) {
+    let Ok(op_json) = serde_json::to_string(op) else { return };
+    let msg = HavenMessage::MemberKickBroadcast { server_id: server_id.to_string(), op_json };
+    if let Some(json) = super::olm_lane::carried_json(&msg) {
+        super::olm_lane::carry_to_identity(ws_cmd_tx, ws_room_peers, identity, &json, super::olm_lane::NoSession::Queue);
+    }
 }
 
 /// Remove EVERY MLS leaf of `identity` from the server group (epoch rotation for
@@ -1418,6 +1434,16 @@ pub(crate) fn send_join_rejection(
     }
 }
 
+/// Whether a join may start for `server_id`, logging a refusal: it becomes a room, a
+/// pending row and an MLS group key, so only a server's own id shape.
+pub(crate) fn joinable_server_id(server_id: &str) -> bool {
+    let ok = crate::crdt::anchor::valid_server_id(server_id);
+    if !ok {
+        hollow_log!("[HOLLOW-SECURITY] Not joining {server_id:?}: it is no server id");
+    }
+    ok
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_join_server(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
@@ -1443,6 +1469,9 @@ pub(crate) async fn handle_join_server(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    if !joinable_server_id(&server_id) {
+        return;
+    }
     hollow_log!("[HOLLOW-CRDT] Joining server {server_id}");
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
@@ -1963,11 +1992,7 @@ pub(crate) async fn handle_kick_member(
             ws_cmd_tx, ws_room_peers, &targets, Some(&peer_id),
             local_peer_str, local_device_id, &server_id, &op,
         );
-
-        // Tell EVERY online device of the kicked identity.
-        if let Some(json) = super::olm_lane::carried_json(&HavenMessage::MemberKickBroadcast { server_id: server_id.clone() }) {
-            super::olm_lane::carry_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, &json, super::olm_lane::NoSession::Queue);
-        }
+        carry_kick_notice(ws_cmd_tx, ws_room_peers, &server_id, &peer_id, &op);
 
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
@@ -2258,11 +2283,7 @@ pub(crate) async fn handle_ban_member(
             ws_cmd_tx, ws_room_peers, &targets, Some(&peer_id),
             local_peer_str, local_device_id, &server_id, &op,
         );
-
-        // Tell every online device of the banned identity.
-        if let Some(json) = super::olm_lane::carried_json(&HavenMessage::MemberKickBroadcast { server_id: server_id.clone() }) {
-            super::olm_lane::carry_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, &json, super::olm_lane::NoSession::Queue);
-        }
+        carry_kick_notice(ws_cmd_tx, ws_room_peers, &server_id, &peer_id, &op);
 
         if let Some(mls_mgr) = mls {
             mls_remove_identity_and_broadcast(
@@ -3523,13 +3544,6 @@ async fn emit_crdt_apply_event(
             }
         }
     }
-}
-
-/// Whether a kick sealed at `frame_ts_ms` predates our current membership: a relay
-/// holding back or replaying a kick from before we rejoined.
-pub(crate) fn kick_predates_membership(state: &ServerState, local_master: &str, frame_ts_ms: i64) -> bool {
-    let sealed = frame_ts_ms.saturating_add(super::frame_auth::LIVE_SKEW_MS).max(0) as u64;
-    state.member_since(local_master).is_some_and(|since| sealed < since)
 }
 
 /// Handle `MessageEnvelope::ChannelSyncBatch` (MLS path).

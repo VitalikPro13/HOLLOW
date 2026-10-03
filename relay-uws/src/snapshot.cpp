@@ -84,8 +84,11 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
     for (const auto& [peer, tok] : st.push_tokens) d.push_tokens.push_back({peer, tok.token, tok.platform});
     for (const auto& [target, list] : st.kill_list.entries) {
         for (const auto& e : list) {
-            d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now), e.share});
+            d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now), e.share, false});
         }
+    }
+    for (const auto& [target, e] : st.kill_list.proven) {
+        d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now), e.share, true});
     }
     for (const auto* master : by_last_use(st.device_list_max_version, st.mark_ledger)) {
         d.marks.push_back({*master, st.device_list_max_version.at(*master),
@@ -168,7 +171,13 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
     std::sort(d.kills.begin(), d.kills.end(),
               [](const snapshot::Kill& a, const snapshot::Kill& b) { return a.age_secs > b.age_secs; });
     for (auto& k : d.kills) {
-        st.kill_list.restore(k.target, k.issuer, share(k.share), k.blob, k.issued_at_ms, at_from_age(k.age_secs, now));
+        if (k.proven) {
+            st.kill_list.restore_proven(k.target, k.issuer, share(k.share), k.blob, k.issued_at_ms,
+                                        at_from_age(k.age_secs, now));
+        } else {
+            st.kill_list.restore(k.target, k.issuer, share(k.share), k.blob, k.issued_at_ms,
+                                 at_from_age(k.age_secs, now));
+        }
     }
     for (auto& m : d.marks) {
         if (st.device_list_max_version.emplace(m.master, m.version).second) {

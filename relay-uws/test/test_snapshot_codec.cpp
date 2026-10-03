@@ -69,7 +69,7 @@ static snapshot::Data sample() {
     d.push_prefs.push_back(p);
 
     d.kills.push_back({"12D3KooWTargetOne", "12D3KooWSenderA", "Y2lwaGVy", 1757000000000, 900, 106});
-    d.kills.push_back({"12D3KooWTargetTwo", "12D3KooWSenderA", std::string(2048, 'k'), 1757000001000, 0, 107});
+    d.kills.push_back({"12D3KooWTargetTwo", "12D3KooWSenderA", std::string(2048, 'k'), 1757000001000, 0, 107, true});
 
     d.marks.push_back({"12D3KooWMasterOne", 7, 108});
     d.marks.push_back({"12D3KooWMasterTwo", 1ull << 40, 109});
@@ -238,7 +238,8 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
         const auto& x = a.kills[i];
         const auto& y = b.kills[i];
         if (x.target != y.target || x.issuer != y.issuer || x.blob != y.blob ||
-            x.issued_at_ms != y.issued_at_ms || x.age_secs != y.age_secs || x.share != y.share) return false;
+            x.issued_at_ms != y.issued_at_ms || x.age_secs != y.age_secs || x.share != y.share ||
+            x.proven != y.proven) return false;
     }
     if (a.marks.size() != b.marks.size()) return false;
     for (size_t i = 0; i < a.marks.size(); i++) {
@@ -295,8 +296,18 @@ static size_t rosters_bytes(const snapshot::Data& d) {
     return n;
 }
 
-// `d` without what v7 added, as a v6 build held it.
+// The bytes of the v8 `proven` section.
+static size_t proven_bytes(const snapshot::Data& d) { return d.kills.size(); }
+
+// `d` without what v8 added, as a v7 build held it.
+static snapshot::Data without_proven(snapshot::Data d) {
+    for (auto& k : d.kills) k.proven = false;
+    return d;
+}
+
+// `d` without what v7 and v8 added, as a v6 build held it.
 static snapshot::Data without_rosters(snapshot::Data d) {
+    d = without_proven(std::move(d));
     d.rosters.clear();
     return d;
 }
@@ -332,7 +343,8 @@ static snapshot::Data without_ring_meta(snapshot::Data d) {
 static std::string as_v5(const snapshot::Data& d, const std::string& owner) {
     std::string bytes = snapshot::encode(d);
     snapshot::detail::Writer w;
-    w.out = bytes.substr(0, bytes.size() - 4 - rosters_bytes(d) - shares_bytes(d) - ring_meta_bytes(d));
+    w.out = bytes.substr(0, bytes.size() - 4 - proven_bytes(d) - rosters_bytes(d) - shares_bytes(d) -
+                                ring_meta_bytes(d));
     w.out[4] = 5;
     w.count(d.topics.size());
     for (const auto& t : d.topics) {
@@ -361,6 +373,7 @@ int main() {
                                       out.kills[0].issuer == "12D3KooWSenderA" &&
                                       out.kills[1].blob.size() == 2048 &&
                                       out.kills[1].issued_at_ms == 1757000001000);
+        check("a proven kill stays proven", out.kills[1].proven && !out.kills[0].proven);
         check("device-list marks survive, in order", out.marks.size() == 2 &&
                                                      out.marks[0].master == "12D3KooWMasterOne" &&
                                                      out.marks[1].version == (1ull << 40));
@@ -381,12 +394,25 @@ int main() {
         check("re-encode is byte-identical", snapshot::encode(out) == bytes);
     }
 
+    // The relay that holds proven kill slots takes back what the v7 build running
+    // before it handed over: the same bytes, less the flags, under version 7.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        std::string v7 = bytes.substr(0, bytes.size() - 4 - proven_bytes(in)) + bytes.substr(bytes.size() - 4);
+        v7[4] = 7;
+        snapshot::Data out;
+        check("a v7 snapshot decodes under this reader", snapshot::decode(v7, out));
+        check("and every kill comes back opaque", same(without_proven(in), out));
+    }
+
     // The relay that holds rosters takes back what the v6 build running before it
     // handed over: the same bytes, less the rosters, under version 6.
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        std::string v6 = bytes.substr(0, bytes.size() - 4 - rosters_bytes(in)) + bytes.substr(bytes.size() - 4);
+        std::string v6 = bytes.substr(0, bytes.size() - 4 - proven_bytes(in) - rosters_bytes(in)) +
+                         bytes.substr(bytes.size() - 4);
         v6[4] = 6;
         snapshot::Data out;
         check("a v6 snapshot decodes under this reader", snapshot::decode(v6, out));
@@ -408,7 +434,7 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in);
         std::string v4 = bytes.substr(0, bytes.size() - 4 - meta) + bytes.substr(bytes.size() - 4);
         v4[4] = 4;
         snapshot::Data out;
@@ -422,7 +448,7 @@ int main() {
         snapshot::Data in = sample();
         in.locks.clear();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in);
         std::string v3 = bytes.substr(0, bytes.size() - 8 - meta) + bytes.substr(bytes.size() - 4);
         v3[4] = 3;
         snapshot::Data out;
@@ -434,7 +460,7 @@ int main() {
     {
         snapshot::Data in = sample();
         std::string bytes = snapshot::encode(in);
-        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in);
+        size_t meta = ring_meta_bytes(in) + shares_bytes(in) + rosters_bytes(in) + proven_bytes(in);
         std::string bad = bytes;
         bad[bytes.size() - 4 - meta] = 3;  // claims three rings where there are two
         snapshot::Data out;

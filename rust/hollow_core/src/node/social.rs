@@ -64,10 +64,47 @@ pub(crate) fn in_bundle_key(requester_master: &str) -> String {
     format!("friendreq_in:{requester_master}")
 }
 
-/// KV key of the removal tombstone for `master`. Written by every removal, read only
-/// when no friend row exists, so it never needs clearing: a re-add writes a row.
-pub(crate) fn removed_key(master: &str) -> String {
+/// KV key of the removal tombstone for `master`: when a friendship with them last
+/// ended, in ms. Never cleared; a re-add is newer than it. A legacy "1" bounds nothing.
+fn removed_key(master: &str) -> String {
     format!("friend_removed:{master}")
+}
+
+/// When a friendship with `master` last ended, 0 if never.
+fn removed_at(store: &crate::storage::MessageStore, master: &str) -> i64 {
+    store.load_setting(&removed_key(master)).ok().flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Record that a friendship with `master` ended at `at_ms`; a late older removal
+/// never moves the mark back.
+pub(crate) fn note_removal(store: &crate::storage::MessageStore, master: &str, at_ms: i64) {
+    let at = at_ms.max(removed_at(store, master));
+    let _ = store.save_setting(&removed_key(master), &at.to_string());
+}
+
+/// Whether a request or friendship with `master` stamped `requested_at` was made
+/// before the friendship last ended, so it belongs to the one that ended.
+pub(crate) fn older_than_removal(store: &crate::storage::MessageStore, master: &str, requested_at: i64) -> bool {
+    requested_at.saturating_add(super::frame_auth::LIVE_SKEW_MS) < removed_at(store, master)
+}
+
+/// [`older_than_removal`] for a friend request from `sender`, logged. Out of line so
+/// the swarm's request handler, near the worker stack's limit, holds no store.
+pub(crate) fn request_predates_removal(
+    sender: &str,
+    master: &str,
+    requested_at: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return false };
+    let stale = older_than_removal(&store, master, requested_at);
+    if stale {
+        hollow_log!("[HOLLOW-SECURITY] Ignoring a FriendRequest from {sender} made before the last removal");
+    }
+    stale
 }
 
 /// Build the `FriendRequest` for `target_master`, carrying the Olm prekey bundle
@@ -760,7 +797,7 @@ pub(crate) async fn handle_remove_friend(
     // action and must take effect whether or not the peer is online to hear about
     // it. Also clean up any legacy device-stranded row so no duplicate survives.
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let _ = store.save_setting(&removed_key(&master), "1");
+        note_removal(&store, &master, super::frame_auth::now_ms());
         let _ = store.remove_friend(&master);
         if master != peer_id_str {
             let _ = store.remove_friend(&peer_id_str);
@@ -2391,6 +2428,30 @@ mod tests {
             .is_some(),
             "the same bytes are inside the banner cap",
         );
+    }
+
+    /// Section 2 item 9 (A-DM-09, S14): what a friendship's end bounds. A request or
+    /// a sibling's entry made before it is from the friendship that ended.
+    #[test]
+    fn a_removal_bounds_only_what_was_made_before_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("removal.db").to_str().unwrap().to_string();
+        let pass = "ef".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let skew = crate::node::frame_auth::LIVE_SKEW_MS;
+        let ended = 1_800_000_000_000;
+
+        assert!(!super::older_than_removal(&store, "f", 0), "no removal bounds nothing");
+        store.save_setting(&super::removed_key("f"), "1").unwrap();
+        assert!(!super::older_than_removal(&store, "f", 0), "a legacy mark bounds nothing");
+
+        super::note_removal(&store, "f", ended);
+        super::note_removal(&store, "f", ended - 3_600_000);
+        assert!(super::older_than_removal(&store, "f", ended - skew - 1), "made before the removal");
+        assert!(!super::older_than_removal(&store, "f", ended - skew), "within the clock skew of it");
+        assert!(!super::older_than_removal(&store, "f", ended + 1), "made after it");
+        assert!(!super::older_than_removal(&store, "g", 0), "another person's removal bounds nothing");
     }
 
     /// HOL-SEC-038 (N1, N2). The avatar is signed by hash only, and a plaintext

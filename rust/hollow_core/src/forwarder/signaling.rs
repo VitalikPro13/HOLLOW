@@ -26,6 +26,7 @@ use crate::node::crypto_handler::{
     key_request_signing_payload, persist_crypto_state, persist_olm_session, signed_key_bundle,
     verify_key_exchange, KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
 };
+use crate::node::frame_auth::ReplayGuard;
 use crate::node::types::{HavenMessage, MessageEnvelope};
 use crate::node::ws_client;
 
@@ -69,7 +70,7 @@ pub(crate) async fn run(
 
     // Peers we hold a session-teardown cooldown for (KeyRequest re-key storms).
     let mut rekey_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
-    let mut sealing = Sealing { keypair: keypair.clone(), sealed: HashSet::new() };
+    let mut sealing = Sealing::new(keypair.clone());
     let mut backoff: u64 = 1;
 
     loop {
@@ -112,6 +113,7 @@ pub(crate) async fn run(
                         hollow_log!("[HOLLOW-FWD] no relay traffic for {}s — reconnecting", last_recv.elapsed().as_secs());
                         break 'session;
                     }
+                    sealing.replays.prune(crate::node::frame_auth::now_ms());
                     if bounded_send(&mut write, Message::Ping(vec![0x01].into())).await.is_err() {
                         break 'session;
                     }
@@ -220,37 +222,49 @@ fn parse_direct_frame(body: &[u8]) -> Option<(String, String, &[u8])> {
     Some((room, sender, &after_room[sender_end + 1..]))
 }
 
-/// Which clients speak sealed frames (`node::frame_auth`). A client that ever sealed
-/// is answered sealed and its unsealed frames are refused; a client older than 0.12
-/// keeps the old format, which is safe here because everything the forwarder acts on
-/// is device-signed key exchange or Olm.
+/// The forwarder's side of `node::frame_auth`, as the main node judges frames: only
+/// sealed frames come in, never our own, a live-only message only while fresh and
+/// once, and every frame goes out sealed. Pre-0.12 clients are refused (HOL-SEC-053).
 struct Sealing {
     keypair: NativeKeypair,
-    sealed: HashSet<String>,
+    replays: ReplayGuard,
 }
 
 impl Sealing {
-    fn open(&mut self, room: &str, sender: &str, local: &str, frame: &[u8]) -> Option<Vec<u8>> {
-        use crate::node::frame_auth::{open, now_ms, Delivery, Refusal};
-        match open(frame, sender, room, Delivery::Direct { device: local, master: local }, now_ms()) {
-            Ok(opened) => {
-                self.sealed.insert(sender.to_string());
-                Some(opened.body.to_vec())
-            }
-            Err(Refusal::Unsealed) if !self.sealed.contains(sender) => Some(frame.to_vec()),
+    fn new(keypair: NativeKeypair) -> Self {
+        Self { keypair, replays: ReplayGuard::default() }
+    }
+
+    /// The message in a direct frame and its seal time, if the frame is admitted.
+    fn admit(&mut self, room: &str, sender: &str, local: &str, frame: &[u8], now_ms: i64) -> Option<(HavenMessage, i64)> {
+        use crate::node::frame_auth::{is_stale, open, Delivery};
+        if sender == local {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a frame stamped with the forwarder's own id");
+            return None;
+        }
+        let opened = match open(frame, sender, room, Delivery::Direct { device: local, master: local }, now_ms) {
+            Ok(opened) => opened,
             Err(refusal) => {
                 hollow_log!("[HOLLOW-FWD] inbound frame refused: {refusal:?}");
-                None
+                return None;
             }
+        };
+        let Ok(msg) = serde_json::from_slice::<HavenMessage>(opened.body) else {
+            hollow_log!("[HOLLOW-FWD] inbound {} B: unparseable HavenMessage — dropped", frame.len());
+            return None;
+        };
+        if msg.live_only()
+            && (is_stale(opened.ts_ms, now_ms)
+                || !self.replays.first_sight(sender, opened.nonce, opened.ts_ms, now_ms))
+        {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live frame at the forwarder");
+            return None;
         }
+        Some((msg, opened.ts_ms))
     }
 
     fn payload_for(&self, room: &str, target: &str, body: &[u8]) -> Vec<u8> {
-        if self.sealed.contains(target) {
-            crate::node::frame_auth::seal(&self.keypair, room, target, body)
-        } else {
-            body.to_vec()
-        }
+        crate::node::frame_auth::seal(&self.keypair, room, target, body)
     }
 }
 
@@ -299,11 +313,9 @@ async fn handle_binary_frame(
         hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: malformed direct frame — dropped");
         return;
     };
-    let Some(payload) = sealing.open(&frame_room, &sender, local_peer_id, frame) else {
-        return;
-    };
-    let Ok(haven) = serde_json::from_slice::<HavenMessage>(&payload) else {
-        hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: unparseable HavenMessage — dropped");
+    let Some((haven, frame_ts_ms)) =
+        sealing.admit(&frame_room, &sender, local_peer_id, frame, crate::node::frame_auth::now_ms())
+    else {
         return;
     };
 
@@ -332,15 +344,17 @@ async fn handle_binary_frame(
                 return;
             };
             persist_olm_session(olm, crypto_store, &sender);
-            let text = String::from_utf8_lossy(&plaintext);
-            match serde_json::from_str::<MessageEnvelope>(&text) {
-                Ok(env @ (MessageEnvelope::FwdStreamRegister { .. }
+            let Some(env) = open_envelope(&plaintext, frame_ts_ms, crate::node::frame_auth::now_ms()) else {
+                return;
+            };
+            match env {
+                env @ (MessageEnvelope::FwdStreamRegister { .. }
                 | MessageEnvelope::FwdStreamAuth { .. }
                 | MessageEnvelope::FwdStreamUnregister { .. }
                 | MessageEnvelope::FwdIngestOffer { .. }
                 | MessageEnvelope::FwdAttach { .. }
                 | MessageEnvelope::FwdDetach { .. }
-                | MessageEnvelope::FwdEgressAnswer { .. })) => {
+                | MessageEnvelope::FwdEgressAnswer { .. }) => {
                     hollow_log!(
                         "[HOLLOW-FWD] inbound {frame_len} B: {} → engine",
                         fwd_env_label(&env)
@@ -349,11 +363,8 @@ async fn handle_binary_frame(
                 }
                 // SessionAck confirms the peer's ratchet; anything else a client broadcasts at
                 // room peers is irrelevant to a forwarder.
-                Ok(_) => {
+                _ => {
                     hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd envelope — ignored");
-                }
-                Err(_) => {
-                    hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: undecodable envelope — ignored");
                 }
             }
         }
@@ -416,14 +427,28 @@ async fn handle_key_request(
         olm.retire_session(sender);
         rekey_cooldown.insert(sender.to_string(), now);
     }
-    let otk = olm.generate_one_time_key();
+    // One key per requesting device, as the node hands out (A-DM-01).
+    let (otk, minted) = olm.key_for_requester(sender);
     let identity_key = olm.identity_key_base64();
-    if let Ok(pickle) = olm.account_pickle_json() {
-        crypto_store.save_account(pickle);
+    if minted {
+        persist_crypto_state(olm, crypto_store, sender);
     }
-    persist_crypto_state(olm, crypto_store, sender);
     let bundle = signed_key_bundle(keypair, local_peer_id, sender, identity_key, otk);
     send_haven_direct(write, room, sender, &bundle, sealing).await;
+}
+
+/// The envelope in a decrypted body, unless it is live-only and its frame is stale:
+/// a ratchet stops a replay, never a relay that holds a frame back.
+fn open_envelope(plaintext: &[u8], frame_ts_ms: i64, now_ms: i64) -> Option<MessageEnvelope> {
+    let Ok(env) = serde_json::from_slice::<MessageEnvelope>(plaintext) else {
+        hollow_log!("[HOLLOW-FWD] undecodable envelope — ignored");
+        return None;
+    };
+    if env.live_only() && crate::node::frame_auth::is_stale(frame_ts_ms, now_ms) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a live signal at the forwarder that arrived too late");
+        return None;
+    }
+    Some(env)
 }
 
 /// Olm decrypt for an inbound Encrypted body: prekey messages try the existing
@@ -519,5 +544,87 @@ async fn send_haven_direct(write: &mut WsSink, room: &str, target: &str, msg: &H
     frame.extend_from_slice(payload);
     if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
         hollow_log!("[HOLLOW-FWD] direct send failed: {e}");
+    }
+}
+
+// -- A-MED-09: the standalone forwarder holds frames to HOL-SEC-053/054 --
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::frame_auth::{open, seal_at, Delivery, LIVE_SKEW_MS, NONCE_LEN};
+
+    const ROOM: &str = "fwd:forwarder";
+    const NOW: i64 = 1_790_000_000_000;
+
+    fn keypair(tag: u8) -> NativeKeypair {
+        NativeKeypair::from_secret_bytes(&[tag; 32])
+    }
+
+    fn key_request(to: &str) -> Vec<u8> {
+        serde_json::to_vec(&HavenMessage::KeyRequest {
+            to: Some(to.to_string()),
+            ts: Some(NOW / 1000),
+            sig: Some("sig".to_string()),
+            pk: Some("pk".to_string()),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn fwd_refuses_an_unsealed_frame_from_a_first_contact() {
+        let (fwd, alice) = (keypair(1), keypair(2));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let mut sealing = Sealing::new(fwd);
+        assert!(
+            sealing.admit(ROOM, &from, &local, &key_request(&local), NOW).is_none(),
+            "an unsealed frame was admitted from a sender the forwarder never saw seal"
+        );
+        let sealed = seal_at(&alice, ROOM, &local, NOW, [1; NONCE_LEN], &key_request(&local));
+        assert!(sealing.admit(ROOM, &from, &local, &sealed, NOW).is_some());
+    }
+
+    #[test]
+    fn fwd_refuses_its_own_frames_echoed_back() {
+        let fwd = keypair(1);
+        let local = fwd.peer_id();
+        let echoed = seal_at(&fwd, ROOM, &local, NOW, [1; NONCE_LEN], &key_request(&local));
+        let mut sealing = Sealing::new(fwd);
+        assert!(sealing.admit(ROOM, &local, &local, &echoed, NOW).is_none(), "the forwarder took its own frame");
+    }
+
+    #[test]
+    fn fwd_takes_a_key_request_once_and_only_while_fresh() {
+        let (fwd, alice) = (keypair(1), keypair(2));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let mut sealing = Sealing::new(fwd);
+        let frame = seal_at(&alice, ROOM, &local, NOW, [1; NONCE_LEN], &key_request(&local));
+        assert!(sealing.admit(ROOM, &from, &local, &frame, NOW).is_some());
+        assert!(
+            sealing.admit(ROOM, &from, &local, &frame, NOW + 1_000).is_none(),
+            "a replayed KeyRequest was taken a second time"
+        );
+        let late = seal_at(&alice, ROOM, &local, NOW - LIVE_SKEW_MS - 1_000, [2; NONCE_LEN], &key_request(&local));
+        assert!(sealing.admit(ROOM, &from, &local, &late, NOW).is_none(), "a KeyRequest sealed 301 s ago was taken");
+    }
+
+    #[test]
+    fn fwd_acts_on_a_stream_signal_only_while_its_frame_is_fresh() {
+        let detach = serde_json::to_vec(&MessageEnvelope::FwdDetach { origin: Box::default() }).unwrap();
+        assert!(open_envelope(&detach, NOW, NOW).is_some());
+        assert!(
+            open_envelope(&detach, NOW - LIVE_SKEW_MS - 1_000, NOW).is_none(),
+            "a stream signal in a frame sealed 301 s ago reached the engine"
+        );
+    }
+
+    #[test]
+    fn fwd_answers_every_peer_sealed() {
+        let (fwd, alice) = (keypair(1), keypair(2));
+        let (local, to) = (fwd.peer_id(), alice.peer_id());
+        let sealing = Sealing::new(fwd);
+        let out = sealing.payload_for(ROOM, &to, b"{}");
+        let opened = open(&out, &local, ROOM, Delivery::Direct { device: &to, master: &to }, crate::node::frame_auth::now_ms())
+            .expect("a reply to a peer never seen sealed left unsealed");
+        assert_eq!(opened.body, b"{}");
     }
 }

@@ -11,6 +11,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import 'ice_route_probe.dart';
+import 'rtc_signal_pairing.dart';
 import 'wire_transfer_id.dart';
 
 /// Chunk size for WebRTC data channel transfers: 64KB is safe across every
@@ -78,11 +79,12 @@ void _log(String msg) {
 class WebRtcService {
   final String localPeerId;
 
-  /// Resolves a (possibly per-device) peer_id to its MASTER identity, ONLY
-  /// for the glare tiebreaker, which must compare two ids of the same kind on
-  /// BOTH peers or it is not antisymmetric: a multi-device peer can surface as
-  /// different device ids on each side, so comparing raw ids lets both sides
-  /// pick "impolite", neither answers, and the data channel never opens.
+  /// Resolves a (possibly per-device) peer_id to its MASTER identity, for the
+  /// glare tiebreaker and for pairing an answer or ICE with our offer. The
+  /// tiebreaker must compare two ids of the same kind on BOTH peers or it is
+  /// not antisymmetric: a multi-device peer can surface as different device
+  /// ids on each side, so comparing raw ids lets both sides pick "impolite",
+  /// neither answers, and the data channel never opens.
   /// Sockets, sends and connection keys stay on the DEVICE id; never resolve
   /// those.
   final String Function(String peerId) resolveIdentity;
@@ -104,7 +106,7 @@ class WebRtcService {
   final Map<String, _IncomingTransfer> _transfers = {};
 
   /// Queued ICE candidates that arrived before the connection was created.
-  final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
+  final PendingRtcIce<RTCIceCandidate> _pendingIceCandidates = PendingRtcIce();
 
   /// Callback to request reconnection after a non-idle disconnect.
   void Function(String peerId)? onReconnectNeeded;
@@ -900,48 +902,29 @@ class WebRtcService {
         '(lane=${_tag(lane)}, conn=$connId)');
 
     // Flush any ICE candidates that arrived before the offer was processed.
-    await _flushPendingIce(connId, lane);
+    await _flushPendingIce(peerId, connId, lane);
   }
 
   Future<void> _handleAnswer(
       String peerId, String payload, String connId, _Lane lane) async {
-    // Match by peer_id first, then fall back to conn_id: a multi-device
-    // peer's answer can arrive tagged with a DIFFERENT device id than the
-    // offer went to, so `_connections[peerId]` misses even though the PC
-    // exists. conn_id is the stable, hop-invariant correlator. Searched
-    // within the LANE, since each lane holds a connection per peer and only
-    // conn_id tells them apart.
-    var conn = _connsFor(lane)[peerId];
-    if (conn == null || conn.connId != connId) {
-      final byConn = _findConnByConnId(connId, lane);
-      if (byConn != null) conn = byConn;
-    }
+    // A DM call dials a MASTER and the device that answers is another id, so
+    // pairing falls back from the peer_id to conn_id within that identity.
+    // Searched within the LANE, since each lane holds a connection per peer.
+    final conn = _pairSignal(peerId, connId, lane);
     if (conn == null) {
-      _log('[HOLLOW-WEBRTC-DART] Answer from $peerId but no ${_tag(lane)} '
-          'connection exists (conn=$connId)');
+      _log('[HOLLOW-WEBRTC-DART] Answer from $peerId matches no '
+          '${_tag(lane)} offer of ours (conn=$connId)');
       return;
     }
 
-    _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (lane=${_tag(lane)}, conn=$connId, ours=${conn.connId}, key=${conn.peerId})');
-
-    if (conn.connId != connId) {
-      _log('[HOLLOW-WEBRTC-DART] Ignoring stale answer from $peerId (conn=$connId, current=${conn.connId})');
-      return;
-    }
+    _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (lane=${_tag(lane)}, conn=$connId, key=${conn.peerId})');
 
     await conn.pc.setRemoteDescription(
         RTCSessionDescription(_stripRelayCandidates(payload, lane), 'answer'));
   }
 
-  /// Finds an active connection by [connId] whatever peer_id key it is stored
-  /// under, since a sibling device id can label a multi-device peer's answer
-  /// or ICE.
-  _PeerConn? _findConnByConnId(String connId, [_Lane lane = _Lane.general]) {
-    for (final c in _connsFor(lane).values) {
-      if (c.connId == connId) return c;
-    }
-    return null;
-  }
+  _PeerConn? _pairSignal(String peerId, String connId, _Lane lane) =>
+      pairRtcSignal(_connsFor(lane), peerId, connId, resolveIdentity);
 
   Future<void> _handleIce(
       String peerId, String payload, String connId, _Lane lane) async {
@@ -961,17 +944,9 @@ class WebRtcService {
       json['sdpMLineIndex'] as int?,
     );
 
-    // Match by peer_id, then by conn_id (a sibling-device-labelled candidate
-    // for the same PC). Queue only if neither finds the PC.
-    var conn = _connsFor(lane)[peerId];
-    if (conn == null || conn.connId != connId) {
-      final byConn = _findConnByConnId(connId, lane);
-      if (byConn != null) conn = byConn;
-    }
+    final conn = _pairSignal(peerId, connId, lane);
     if (conn == null) {
-      // Queue by conn_id so a sibling-device-labelled candidate still
-      // reunites with the right offer once its PC is created.
-      _pendingIceCandidates.putIfAbsent(connId, () => []).add(candidate);
+      _pendingIceCandidates.add(resolveIdentity(peerId), connId, candidate);
       _log('[HOLLOW-WEBRTC-DART] Queued ICE candidate for $peerId (conn=$connId, no connection yet)');
       return;
     }
@@ -979,12 +954,13 @@ class WebRtcService {
     await conn.pc.addCandidate(candidate);
   }
 
-  /// Flushes ICE candidates queued by conn_id before the connection for
-  /// [connId] existed.
-  Future<void> _flushPendingIce(String connId, [_Lane lane = _Lane.general]) async {
-    final queued = _pendingIceCandidates.remove(connId);
-    if (queued == null || queued.isEmpty) return;
-    final conn = _findConnByConnId(connId, lane);
+  /// Flushes the ICE candidates [offerer]'s identity queued for [connId]
+  /// before our answering connection existed.
+  Future<void> _flushPendingIce(
+      String offerer, String connId, _Lane lane) async {
+    final queued = _pendingIceCandidates.take(resolveIdentity(offerer), connId);
+    if (queued.isEmpty) return;
+    final conn = _pairSignal(offerer, connId, lane);
     if (conn == null) return;
     _log('[HOLLOW-WEBRTC-DART] Flushing ${queued.length} queued ICE candidates for conn=$connId');
     for (final candidate in queued) {
@@ -1421,7 +1397,7 @@ class WebRtcService {
   }
 
   String _generateConnId() {
-    final r = Random();
+    final r = Random.secure();
     return List.generate(
             16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
         .join();
@@ -1454,10 +1430,12 @@ class WebRtcService {
   }
 }
 
-class _PeerConn {
+class _PeerConn implements RtcSignalEndpoint {
   final RTCPeerConnection pc;
   RTCDataChannel? dataChannel;
+  @override
   String connId;
+  @override
   final String peerId;
   final bool isOfferer;
   final _Lane lane;

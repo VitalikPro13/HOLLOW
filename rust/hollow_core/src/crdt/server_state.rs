@@ -1311,6 +1311,7 @@ impl ServerState {
         } = base;
         self.name = name;
         self.channels = channels;
+        self.retain_well_formed_channels();
         self.members = members;
         self.roles = roles;
         self.nicknames = nicknames;
@@ -1336,6 +1337,12 @@ impl ServerState {
         // The owner is trusted with the values, never with timestamps that would
         // outrank every later honest write.
         self.clamp_future_hlcs(covers.physical_ms);
+    }
+
+    /// Drop channels a whole state handed us under an id no `ChannelAdded` may carry:
+    /// ring topics are built from the inner id, so it must also match its key.
+    pub(super) fn retain_well_formed_channels(&mut self) {
+        self.channels.retain(|id, ch| super::valid_channel_id(id) && ch.channel_id == *id);
     }
 
     /// Everything materialized back to the ownerless skeleton, keeping the anchor
@@ -1711,8 +1718,10 @@ impl ServerState {
         let has = |bits: u32| perms & bits != 0;
         match &op.payload {
             CrdtPayload::ServerCreated { .. } | CrdtPayload::ServerCheckpoint { .. } => false,
-            CrdtPayload::ChannelAdded { .. }
-            | CrdtPayload::ChannelRemoved { .. }
+            CrdtPayload::ChannelAdded { channel_id, .. } => {
+                has(Permission::MANAGE_CHANNELS) && super::valid_channel_id(channel_id)
+            }
+            CrdtPayload::ChannelRemoved { .. }
             | CrdtPayload::ChannelRenamed { .. }
             | CrdtPayload::ChannelLayoutUpdated { .. }
             | CrdtPayload::MessagePinned { .. }
@@ -4530,6 +4539,38 @@ mod tests {
         let both = s.channels.get_mut(&ch).unwrap();
         both.visibility = ChannelVisibility::ModeratorPlus;
         assert!(!s.is_channel_public(&ch), "a state holding both flags reads as restricted");
+    }
+
+    /// B-05: a channel id is 1 to 64 bytes of `[A-Za-z0-9_-]`, so none is the join
+    /// ring's topic, splits a subgroup key or makes the relay refuse the server's ring
+    /// control. A join snapshot or an owner's checkpoint carries no other.
+    #[test]
+    fn authz_channel_added_needs_a_channel_id_shape() {
+        use crate::node::types::JOIN_TOPIC;
+        let mut s = ranked_fixture();
+        let add = |id: &str| CrdtPayload::ChannelAdded {
+            channel_id: id.into(), name: "c".into(), category: None, channel_type: "text".into(),
+        };
+        let (longest, too_long) = ("x".repeat(64), "x".repeat(65));
+        for id in ["s1-general", "0123abcd-9f8e7d6c", "3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b", "general", "a_b", &longest] {
+            assert!(allowed(&mut s, "admin", add(id)), "{id} is an honest channel id");
+        }
+        for id in [JOIN_TOPIC, "~dm", "a#b", "conf:x", "o.general", "a b", "", &too_long, "é", "a/b"] {
+            assert!(!allowed(&mut s, "admin", add(id)), "{id:?} is refused");
+        }
+        assert!(s.author_checked(add(JOIN_TOPIC)).is_none(), "nor do we author one");
+        assert!(!s.channels.contains_key(JOIN_TOPIC));
+
+        let mut snap = ranked_fixture();
+        let general = snap.channels["s1-general"].clone();
+        snap.channels.insert(JOIN_TOPIC.into(), ChannelInfo { channel_id: JOIN_TOPIC.into(), ..general.clone() });
+        snap.channels.insert("s1-news".into(), ChannelInfo { channel_id: "a#b".into(), ..general });
+        let joined = ServerState::accept_join_snapshot(snap.clone(), "s1", None).unwrap();
+        assert_eq!(joined.channels.keys().collect::<Vec<_>>(), ["s1-general"], "a join snapshot");
+        let mut rebased = ranked_fixture();
+        let covers = rebased.horizon();
+        rebased.rebase_on(snap, "owner", &covers);
+        assert_eq!(rebased.channels.keys().collect::<Vec<_>>(), ["s1-general"], "a checkpoint");
     }
 
     /// E11: lifting a ban or mute needs the rank that set it, nickname-class edits of

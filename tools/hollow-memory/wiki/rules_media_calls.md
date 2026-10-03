@@ -35,8 +35,10 @@ whitelist) stay in CLAUDE.md.
   struct). Credentials arrive via the authed WS (`NetworkEvent::TurnCredentials` ->
   `iceConfigProvider`); never re-add a Dart HTTP fetch; WS `discover_peers` is discovery.
 - Multi-device data channels (`webrtc_service.dart`): the glare tiebreaker compares
-  MASTER identities; answer/ICE match by `conn_id`, never peer_id; sends/sockets/keys
-  stay DEVICE-keyed; `sendScreenAudio` drops over 256KB buffered. VC mesh glare is the
+  MASTER identities; answer/ICE match by `conn_id` AND identity (`pairRtcSignal`,
+  `rtc_signal_pairing.dart`), never peer_id alone, never conn_id alone (the relay reads
+  it); `conn_id` = `Random.secure()`; sends/sockets/keys stay DEVICE-keyed;
+  `sendScreenAudio` drops over 256KB buffered. VC mesh glare is the
   OPPOSITE (`feedback_vc_join_double_announce_race`).
 - Share WebRTC reconnection = receiver-initiates, sender-catches. `feedback_webrtc_patterns`.
 - Windows mid-call media: `addTrack`/`removeTrack` + renegotiate, NEVER `replaceTrack`.

@@ -4,6 +4,7 @@
 #include "ring_auth.h"
 #include "crypto.h"
 #include "device_list.h"
+#include "kill_order.h"
 #include "roster_crypto.h"
 #include "validate.h"
 #include "turn_uris.h"
@@ -429,18 +430,17 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
 
     // Out with the auth, before any join: a device whose identity is gone may
     // never join a room again, and a phone that only wakes for push (a fetch
-    // socket) has to act on it too.
-    // Every issuer's signal: the relay cannot tell the genuine order from junk,
-    // the device can.
-    if (const auto* kills = state.kill_list.find(peer_id)) {
-        for (const auto& kill : *kills) {
-            send_json(ws, {{"type", "kill_signal"},
-                           {"blob", kill.blob},
-                           {"issued_at_ms", kill.issued_at_ms}});
-        }
-        // Operational only: no peer id, no issuer, no blob.
-        fprintf(stderr, "[kill] kill_signal delivered\n");
+    // socket) has to act on it too. Every signal waiting: the device judges each,
+    // and its ack names the one it turned away by issuer and stamp.
+    const auto kills = state.kill_list.waiting(peer_id);
+    for (const auto* kill : kills) {
+        send_json(ws, {{"type", "kill_signal"},
+                       {"blob", kill->blob},
+                       {"issued_at_ms", kill->issued_at_ms},
+                       {"issuer", kill->issuer}});
     }
+    // Operational only: no peer id, no issuer, no blob.
+    if (!kills.empty()) fprintf(stderr, "[kill] kill_signal delivered\n");
     // privacy: no connection logging
 }
 
@@ -1360,9 +1360,33 @@ static void handle_unregister_push_token(PerSocketData* data, RelayState& state)
     // No logging - associating a peer_id with a push token is sensitive.
 }
 
-// Park a destroy signal for devices that are not connected. The blob is opaque:
-// the target verifies the signature itself, so a forged deposit dies there and
-// the relay learns nothing from one but which device ids to hand it to.
+// Whether a parked order is the identity's own (kill_order.h), judged once per
+// deposit against the roster the relay holds for its master.
+struct KillProof {
+    std::optional<kill_order::Order> order;
+    const roster::Roster* held = nullptr;
+    bool authorised = false;
+};
+
+static KillProof judge_kill_blob(const std::string& blob, int64_t issued_at_ms, RelayState& state) {
+    KillProof p;
+    std::string text;
+    if (!base64_decode(blob, text)) return p;
+    p.order = kill_order::from_json(json::parse(text, nullptr, false));
+    if (!p.order) return p;
+    const auto* held = state.roster_book.get(p.order->master_peer_id);
+    if (!held || held->roster.r_pub.empty()) return p;
+    p.held = &held->roster;
+    roster::State members;
+    if (p.order->delegation) members = state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto());
+    p.authorised = kill_order::authorised(*p.order, issued_at_ms, held->roster, members, relay_roster_crypto(),
+                                          derive_peer_id);
+    return p;
+}
+
+// Park a destroy signal for devices that are not connected. An order the target
+// identity's phrase stands behind takes the target's proven slot; any other blob
+// is opaque, and the target judges it itself, so a forged deposit dies there.
 //
 // Fields are type-checked rather than read through value(), which throws on a
 // type it did not expect.
@@ -1388,6 +1412,7 @@ static void handle_kill_deposit(SSLWebSocket* ws, PerSocketData* data, const jso
     auto now = std::chrono::steady_clock::now();
     const int64_t now_wall_ms = static_cast<int64_t>(now_unix_secs()) * 1000;
     const uint64_t share = socket_share(state, data);
+    const KillProof proof = judge_kill_blob(blob, issued_at_ms, state);
     size_t stored = 0, seen = 0;
     for (const auto& t : *targets_it) {
         if (++seen > KillList::MAX_TARGETS_PER_DEPOSIT) break;
@@ -1395,7 +1420,12 @@ static void handle_kill_deposit(SSLWebSocket* ws, PerSocketData* data, const jso
         const std::string& target = t.get_ref<const std::string&>();
         // The target is a map KEY, so it must be a peer id and not free text.
         if (!is_peer_id_shape(target)) continue;
-        if (state.kill_list.deposit(target, data->peer_id, share, blob, issued_at_ms, now, now_wall_ms)) stored++;
+        const bool ok = proof.authorised && kill_order::reaches(*proof.order, target, *proof.held)
+                            ? state.kill_list.deposit_proven(target, data->peer_id, share, blob, issued_at_ms, now,
+                                                             now_wall_ms)
+                            : state.kill_list.deposit(target, data->peer_id, share, blob, issued_at_ms, now,
+                                                      now_wall_ms);
+        if (ok) stored++;
     }
     send_json(ws, {{"type", "kill_deposited"}, {"stored", stored}});
     // No logging - the targets of a destroy are the social graph of an identity.
@@ -1496,16 +1526,21 @@ static void handle_lock_put(SSLWebSocket* ws, PerSocketData* data, const json& j
                    {"put", accepted}});
 }
 
-// The only removal a client can ask for, and always its own. `issued_at_ms`
-// names the one signal answered; without it (older clients, and a finished wipe)
-// every signal for the caller goes.
+// The only removal a client can ask for, and always its own: the one signal it
+// turned away, named by issuer and stamp, or every one after its wipe (a bare ack,
+// which 0.11 clients also send). An ack naming half a signal answers nothing, since
+// a stamp alone cannot tell junk from the order sharing it.
 static void handle_kill_ack(PerSocketData* data, const json& j, RelayState& state) {
     auto issued_it = j.find("issued_at_ms");
-    if (issued_it != j.end() && issued_it->is_number_integer()) {
-        state.kill_list.ack(data->peer_id, issued_it->get<int64_t>());
-    } else {
+    auto issuer_it = j.find("issuer");
+    if (issued_it == j.end() && issuer_it == j.end()) {
         state.kill_list.ack(data->peer_id);
+        return;
     }
+    if (issued_it == j.end() || issuer_it == j.end() || !issued_it->is_number_integer() || !issuer_it->is_string()) {
+        return;
+    }
+    state.kill_list.ack(data->peer_id, issuer_it->get_ref<const std::string&>(), issued_it->get<int64_t>());
 }
 
 // Store a peer's channel push prefs (RAM only, replaced wholesale). The app

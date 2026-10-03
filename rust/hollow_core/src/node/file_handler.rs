@@ -2146,7 +2146,7 @@ pub(crate) async fn handle_webrtc_transfer_complete(
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -2220,7 +2220,7 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     webrtc_peers: &mut std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
     pending_file_streams: &HashMap<String, PendingFileStream>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2265,7 +2265,118 @@ pub(crate) struct LinkSnapshotState {
     pub device: zeroize::Zeroizing<Vec<u8>>,
 }
 
+/// AES-256-GCM appends its tag to every file and shard ciphertext.
+const AES_GCM_TAG: u64 = 16;
+
+/// Room for a packed shard's own header (`erasure::pack_shard`) on top of its data.
+const SHARD_HEADER_SLACK: u64 = 4096;
+
+/// How long an explicit pull keeps its receipt (the header arms consume it).
+const RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The most bytes a stream `from` opens for `id` may declare: what we expect of it.
+/// A file without its sender's header or our own ask stays within the send limit; a
+/// share chunk never rides the WS lane, and a link snapshot comes only from its offerer.
+pub(crate) fn stream_ceiling(
+    kind: &ws_stream_transfer::StreamKind,
+    id: &str,
+    from: &str,
+    pending_file_streams: &HashMap<String, PendingFileStream>,
+    requested_file_receipts: &HashMap<String, std::time::Instant>,
+    pending_link_snapshots: &HashMap<String, LinkSnapshotState>,
+) -> u64 {
+    use ws_stream_transfer::StreamKind;
+    let send_limit = file_transfer::DEFAULT_MAX_FILE_SIZE + AES_GCM_TAG;
+    match kind {
+        StreamKind::File => match pending_file_streams.get(id) {
+            Some(header) if header.sender == from => header.size.saturating_add(AES_GCM_TAG),
+            _ if requested_file_receipts.get(id).is_some_and(|at| at.elapsed() < RECEIPT_TTL) => u64::MAX,
+            _ => send_limit,
+        },
+        StreamKind::Shard { .. } => send_limit + SHARD_HEADER_SLACK,
+        StreamKind::ShareChunk { .. } => 0,
+        StreamKind::LinkSnapshot => {
+            if pending_link_snapshots.get(id).is_some_and(|link| link.sender == from) {
+                u64::MAX
+            } else {
+                0
+            }
+        }
+    }
+}
+
+/// Early arrivals one sender may park, and the bytes all of them together may hold.
+const MAX_EARLY_STREAMS_PER_SENDER: usize = 16;
+const MAX_EARLY_STREAM_BYTES: u64 = 8 * file_transfer::DEFAULT_MAX_FILE_SIZE;
+/// What one parked stream counts against the budget at least, so tiny ones fill it too.
+const EARLY_STREAM_MIN_CHARGE: u64 = 1024 * 1024;
+
+/// Park a completed stream whose FileHeader has not landed, returning the temps the
+/// caller deletes. A sender past its count pays with its own oldest; past the byte
+/// budget the sender holding the most pays, so a flood only ever evicts its own.
+pub(crate) fn park_early_stream(
+    early: &mut HashMap<String, EarlyStream>,
+    file_id: String,
+    stream: EarlyStream,
+) -> Vec<PathBuf> {
+    let mut evicted = Vec::new();
+    let (sender, path) = (stream.sender.clone(), stream.temp_path.clone());
+    if let Some(replaced) = early.insert(file_id, stream)
+        && replaced.temp_path != path
+    {
+        evicted.push(replaced.temp_path);
+    }
+    let charge = |s: &EarlyStream| s.size.max(EARLY_STREAM_MIN_CHARGE);
+    let oldest_of = |early: &HashMap<String, EarlyStream>, who: &str| {
+        early.iter()
+            .filter(|(_, s)| s.sender == who)
+            .min_by_key(|(_, s)| s.parked_at)
+            .map(|(id, _)| id.clone())
+    };
+    while early.values().filter(|s| s.sender == sender).count() > MAX_EARLY_STREAMS_PER_SENDER {
+        let Some(id) = oldest_of(early, &sender) else { break };
+        evicted.extend(early.remove(&id).map(|s| s.temp_path));
+    }
+    while early.values().map(charge).sum::<u64>() > MAX_EARLY_STREAM_BYTES {
+        let mut held: HashMap<&str, u64> = HashMap::new();
+        for s in early.values() {
+            *held.entry(s.sender.as_str()).or_default() += charge(s);
+        }
+        let Some(heaviest) = held.into_iter().max_by_key(|(_, bytes)| *bytes).map(|(who, _)| who.to_string()) else { break };
+        let Some(id) = oldest_of(early, &heaviest) else { break };
+        evicted.extend(early.remove(&id).map(|s| s.temp_path));
+    }
+    evicted
+}
+
+/// Why a FileHeader's size may not land, `None` when it may: a declared size over
+/// the server's file limit (the send limit outside a server) unless Share delivers
+/// the file, or inline bytes too long to be such a file, judged before decoding.
+pub(crate) fn header_size_refused(
+    server_states: &HashMap<String, ServerState>,
+    sid: Option<&str>,
+    size: u64,
+    share_backed: bool,
+    inline_b64_len: usize,
+) -> Option<&'static str> {
+    let max_bytes = sid
+        .and_then(|s| server_states.get(s))
+        .and_then(|state| state.settings.get("max_file_size_mb"))
+        .and_then(|mb| mb.read().parse::<u64>().ok())
+        .map_or(file_transfer::DEFAULT_MAX_FILE_SIZE, |mb| mb.saturating_mul(1024 * 1024));
+    if !share_backed && size > max_bytes {
+        return Some("the file is over the size limit");
+    }
+    let max_inline_b64 = max_bytes.saturating_add(AES_GCM_TAG).div_ceil(3).saturating_mul(4);
+    if inline_b64_len as u64 > max_inline_b64 {
+        return Some("the inline bytes are over the size limit");
+    }
+    None
+}
+
 /// Handle a completed stream transfer (file, shard, or link snapshot).
+///
+/// Boxed: several swarm arms await it, and their futures sit near the worker stack.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_completed_stream(
     request: ws_stream_transfer::StreamRequest,
@@ -2273,7 +2384,31 @@ pub(crate) async fn handle_completed_stream(
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
+    pending_link_snapshots: &mut HashMap<String, LinkSnapshotState>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    Box::pin(completed_stream_inner(
+        request, sender_peer, pending_file_streams, pending_shard_streams, pending_vault_downloads,
+        early_file_streams, pending_link_snapshots, bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
+        db_path, db_passphrase,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn completed_stream_inner(
+    request: ws_stream_transfer::StreamRequest,
+    sender_peer: &str,
+    pending_file_streams: &mut HashMap<String, PendingFileStream>,
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     pending_link_snapshots: &mut HashMap<String, LinkSnapshotState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2387,7 +2522,7 @@ async fn handle_file_stream_complete(
     request: &ws_stream_transfer::StreamRequest,
     sender_peer: &str,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -2400,8 +2535,15 @@ async fn handle_file_stream_complete(
     let Some(pfs) = pending_file_streams.remove(&file_id) else {
         // WebRTC race: bytes arrived before FileHeader. Save for later.
         hollow_log!("[HOLLOW-STREAM] No pending FileHeader for stream {file_id} — saving as early arrival");
-        early_file_streams.insert(file_id, (request.temp_path.clone(), request.size, sender_peer.to_string()));
-        // Don't delete the temp file — FileHeader handler will pick it up.
+        let parked = EarlyStream {
+            temp_path: request.temp_path.clone(),
+            size: request.size,
+            sender: sender_peer.to_string(),
+            parked_at: std::time::Instant::now(),
+        };
+        for evicted in park_early_stream(early_file_streams, file_id, parked) {
+            let _ = tokio::fs::remove_file(&evicted).await;
+        }
         return;
     };
 
@@ -2520,17 +2662,22 @@ fn hold_early_arrival_and_retry(
     sender_peer: &str,
     pfs: PendingFileStream,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) {
     hollow_log!(
         "[HOLLOW-STREAM] File {file_id} {fail_reason} — bytes arrived before their header; holding as early-arrival for the matching key"
     );
-    early_file_streams.insert(
-        file_id.to_string(),
-        (request.temp_path.clone(), request.size, sender_peer.to_string()),
-    );
+    let parked = EarlyStream {
+        temp_path: request.temp_path.clone(),
+        size: request.size,
+        sender: sender_peer.to_string(),
+        parked_at: std::time::Instant::now(),
+    };
+    for evicted in park_early_stream(early_file_streams, file_id.to_string(), parked) {
+        let _ = std::fs::remove_file(&evicted);
+    }
     // Safety net: if NO matching header ever arrives (e.g. the Olm
     // header was genuinely lost, not just late), one bounded
     // re-request recovers it. Gated on retry_count so it can't loop.
@@ -2573,6 +2720,12 @@ async fn handle_shard_stream_complete(
     let key = format!("{content_id}:{shard_index}");
     hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
 
+    // Kept for the device it was registered for, whose own stream may still come.
+    if pending_shard_streams.get(&key).is_some_and(|p| p.sender.as_deref().is_some_and(|s| s != sender_peer)) {
+        hollow_log!("[HOLLOW-SECURITY] DROPPED shard stream {key} from {sender_peer}: registered for another device");
+        let _ = tokio::fs::remove_file(&request.temp_path).await;
+        return;
+    }
     let Some(pss) = pending_shard_streams.remove(&key) else {
         hollow_log!("[HOLLOW-STREAM] No pending ShardStore for stream {key} — ignoring");
         let _ = tokio::fs::remove_file(&request.temp_path).await;
@@ -2604,6 +2757,13 @@ async fn handle_shard_stream_complete(
             let key = crate::vault::content_store::shard_key(&pss.content_id, pss.shard_index);
             if content_store.has_shard(&key).unwrap_or(true) {
                 hollow_log!("[HOLLOW-VAULT] Shard {shard_index} of {content_id} from {sender_peer} dropped: already held");
+                let _ = tokio::fs::remove_file(&request.temp_path).await;
+                return;
+            }
+            // The envelope that registered the stream was judged before its size was known.
+            let used = content_store.total_storage_used(&pss.server_id).unwrap_or(0);
+            if super::vault_ops::pledge_refused(pss.pledge, used, shard_bytes.len() as u64) {
+                hollow_log!("[HOLLOW-VAULT] Shard {shard_index} of {content_id} from {sender_peer} dropped: our storage pledge for the server is full");
                 let _ = tokio::fs::remove_file(&request.temp_path).await;
                 return;
             }
@@ -2840,7 +3000,7 @@ pub(crate) async fn handle_envelope_file_header(
     server_states: &HashMap<String, ServerState>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_id: &str,
@@ -2950,8 +3110,8 @@ pub(crate) async fn handle_envelope_file_header(
     drop(store);
     if complete {
         pending_file_streams.remove(&fid);
-        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-            let _ = tokio::fs::remove_file(&temp_path).await;
+        if let Some(early) = early_file_streams.remove(&fid) {
+            let _ = tokio::fs::remove_file(&early.temp_path).await;
         }
         hollow_log!("[HOLLOW-FILE] MLS FileHeader for {fid} registers nothing: already complete on disk");
     }
@@ -2965,8 +3125,8 @@ pub(crate) async fn handle_envelope_file_header(
         || auto_download_allows(size, &name, &ext, &format!("server:{server_id}"), voice);
     if !complete && !auto_ok && share_ref.is_none() && aes_key.is_some() {
         declined_file_ids.insert(fid.clone());
-        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-            let _ = tokio::fs::remove_file(&temp_path).await;
+        if let Some(early) = early_file_streams.remove(&fid) {
+            let _ = tokio::fs::remove_file(&early.temp_path).await;
         }
         hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed MLS file {fid} ({size} bytes, server:{server_id}) — metadata kept, manual download available");
         // Header-time decline signal — see the DM/Olm arm twin.
@@ -2981,7 +3141,7 @@ pub(crate) async fn handle_envelope_file_header(
     if !complete && auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
         register_pending_file_stream_and_reprocess(
             &fid, ak, an, &name, &ext, &sender_peer_id, server_id,
-            &sid, &cid, &mid, img, w, h,
+            &sid, &cid, &mid, img, w, h, size,
             pending_file_streams, pending_shard_streams, early_file_streams,
             bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
             db_path, db_passphrase,
@@ -3014,17 +3174,13 @@ fn mls_file_header_exceeds_cap(
     size: u64,
     sender_peer_id: &str,
 ) -> bool {
-    let max_mb_str = if let Some(state) = server_states.get(server_id) {
-        state.settings.get("max_file_size_mb")
-            .map(|r| r.read().clone())
-            .unwrap_or_else(|| "34".to_string())
-    } else { "34".to_string() };
-    let max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
-    if size > max_bytes {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
-        return true;
+    match header_size_refused(server_states, Some(server_id), size, false, 0) {
+        Some(reason) => {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} (size {size}): {reason}");
+            true
+        }
+        None => false,
     }
-    false
 }
 
 /// Moderation trio (receive-side) for an MLS FileHeader: drop files from
@@ -3080,9 +3236,10 @@ async fn register_pending_file_stream_and_reprocess(
     img: bool,
     w: Option<u32>,
     h: Option<u32>,
+    size: u64,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
-    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    early_file_streams: &mut HashMap<String, EarlyStream>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -3103,11 +3260,12 @@ async fn register_pending_file_stream_and_reprocess(
         width: w,
         height: h,
         retry_count: 0,
+        size,
     });
     hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (MLS streamed transfer)");
 
     // Check if WebRTC bytes already arrived before this FileHeader.
-    if let Some((temp_path, file_size, sender)) = early_file_streams.remove(fid) {
+    if let Some(EarlyStream { temp_path, size: file_size, sender, .. }) = early_file_streams.remove(fid) {
         hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} (MLS path) — processing now");
         let request = ws_stream_transfer::StreamRequest {
             kind: ws_stream_transfer::StreamKind::File,
@@ -3186,6 +3344,113 @@ mod tests {
         assert!(olm.contains("file_handler::file_header_refused("), "swarm.rs: the Olm header arm skips the gate");
         let push = arm(&fetch, "fn handle_file_header(", "inline_bytes.is_some()");
         assert!(push.contains("file_header_refused(") && push.contains("file_bytes_on_disk("), "fetch.rs: the push header skips the gate");
+        let sized = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "insert_file_metadata(");
+        assert!(sized.contains("file_handler::header_size_refused("), "A-T06: the Olm header arm skips the size gate");
+        assert!(push.contains("header_size_refused("), "A-T06: the push header skips the size gate");
+        let mls = arm(&read("file_handler.rs"), "fn mls_file_header_exceeds_cap(", "\n}");
+        assert!(mls.contains("header_size_refused("), "A-T06: the MLS header skips the size gate");
+    }
+
+    /// A-T06: one size gate for every header arm. Inline bytes are judged by their
+    /// encoded length before anything decodes them, whatever size the header claims.
+    #[test]
+    fn header_size_gate_judges_inline_bytes_before_decoding() {
+        let none = HashMap::new();
+        let limit = file_transfer::DEFAULT_MAX_FILE_SIZE;
+        let b64_len = |ciphertext: u64| (ciphertext.div_ceil(3) * 4) as usize;
+        assert_eq!(header_size_refused(&none, None, limit, false, b64_len(limit + 16)), None);
+        assert_eq!(header_size_refused(&none, None, limit + 1, false, 0), Some("the file is over the size limit"));
+        assert_eq!(header_size_refused(&none, None, limit + 1, true, 0), None, "Share delivers any size");
+        let one_group_over = b64_len(limit + 16) + 4;
+        assert_eq!(
+            header_size_refused(&none, None, 1, false, one_group_over),
+            Some("the inline bytes are over the size limit"),
+            "A-T06: inline bytes past the limit under a claimed size of 1",
+        );
+        assert_eq!(header_size_refused(&none, None, 1, true, one_group_over), Some("the inline bytes are over the size limit"));
+    }
+
+    fn pending_header(sender: &str, size: u64) -> PendingFileStream {
+        PendingFileStream {
+            aes_key: String::new(), aes_nonce: String::new(), file_name: "a.bin".into(), ext: "bin".into(),
+            sender: sender.into(), server_id: String::new(), channel_id: String::new(), message_id: String::new(),
+            is_image: false, width: None, height: None, retry_count: 0, size,
+        }
+    }
+
+    /// A-F7: what a stream may declare follows what we expect of it: its own header's
+    /// size, anything for a file we asked for, a link snapshot only from the device
+    /// that offered it, and the send limit otherwise.
+    #[test]
+    fn a_stream_ceiling_follows_the_header_the_ask_or_the_link() {
+        use ws_stream_transfer::StreamKind;
+        let headers = HashMap::from([("hdr".to_string(), pending_header("bob", 100 << 20))]);
+        let mut receipts = HashMap::from([("asked".to_string(), std::time::Instant::now())]);
+        if let Some(old) = std::time::Instant::now().checked_sub(RECEIPT_TTL) {
+            receipts.insert("stale".to_string(), old);
+        }
+        let link = LinkSnapshotState {
+            passphrase: zeroize::Zeroizing::new("k".into()),
+            sender: "bob".into(),
+            device: zeroize::Zeroizing::new(Vec::new()),
+        };
+        let links = HashMap::from([("link_ab".to_string(), link)]);
+        let ceiling = |kind: &StreamKind, id: &str, from: &str| stream_ceiling(kind, id, from, &headers, &receipts, &links);
+        let send_limit = file_transfer::DEFAULT_MAX_FILE_SIZE + 16;
+        assert_eq!(ceiling(&StreamKind::File, "hdr", "bob"), (100 << 20) + 16);
+        assert_eq!(ceiling(&StreamKind::File, "hdr", "mallory"), send_limit, "another device rode bob's header");
+        assert_eq!(ceiling(&StreamKind::File, "asked", "mallory"), u64::MAX);
+        assert_eq!(ceiling(&StreamKind::File, "stale", "mallory"), send_limit, "an expired ask");
+        assert_eq!(ceiling(&StreamKind::File, "unknown", "mallory"), send_limit);
+        assert_eq!(ceiling(&StreamKind::LinkSnapshot, "link_ab", "bob"), u64::MAX);
+        assert_eq!(ceiling(&StreamKind::LinkSnapshot, "link_ab", "mallory"), 0, "another device's link snapshot");
+        assert_eq!(ceiling(&StreamKind::LinkSnapshot, "link_xy", "bob"), 0, "a link we never registered");
+        assert_eq!(ceiling(&StreamKind::ShareChunk { chunk_index: 0 }, "x", "bob"), 0);
+        let shard = ceiling(&StreamKind::Shard { shard_index: 0 }, "x", "bob");
+        assert!(shard > send_limit && shard < send_limit + 64 * 1024, "{shard}");
+    }
+
+    /// A-F7, A-T20: a completed stream with no header yet parks, but one sender holds
+    /// at most its share and pays with its own oldest, and past the byte budget the
+    /// heaviest sender pays, so another peer's early arrival outlives the flood.
+    #[test]
+    fn early_streams_cap_each_sender_and_evict_its_own_oldest() {
+        let base = std::time::Instant::now();
+        let parked = |who: &str, size: u64, n: u64| EarlyStream {
+            temp_path: PathBuf::from(format!("{who}_{n}.tmp")),
+            size,
+            sender: who.into(),
+            parked_at: base + std::time::Duration::from_millis(n),
+        };
+        let mut early = HashMap::new();
+        assert!(park_early_stream(&mut early, "bob-0".into(), parked("bob", 10, 0)).is_empty());
+        let mut evicted = Vec::new();
+        for n in 1..=20 {
+            evicted.extend(park_early_stream(&mut early, format!("mal-{n}"), parked("mallory", 10, n)));
+        }
+        let oldest: Vec<PathBuf> = (1..=4).map(|n| PathBuf::from(format!("mallory_{n}.tmp"))).collect();
+        assert_eq!(evicted, oldest, "A-T20: a sender kept more than its share, or paid with the wrong ones");
+        assert_eq!(early.values().filter(|s| s.sender == "mallory").count(), MAX_EARLY_STREAMS_PER_SENDER);
+
+        let big = MAX_EARLY_STREAM_BYTES / 4;
+        let mut evicted = Vec::new();
+        for n in 21..=26 {
+            evicted.extend(park_early_stream(&mut early, format!("mal-{n}"), parked("mallory", big, n)));
+        }
+        let held: u64 = early.values().map(|s| s.size.max(EARLY_STREAM_MIN_CHARGE)).sum();
+        assert!(held <= MAX_EARLY_STREAM_BYTES, "A-T20: {held} bytes parked past the budget");
+        assert!(evicted.iter().all(|p| p.to_string_lossy().starts_with("mallory_")), "{evicted:?}");
+        assert!(early.contains_key("bob-0"), "A-T20: another sender's early arrival paid for the flood");
+
+        let replaced = park_early_stream(&mut early, "bob-0".into(), parked("bob", 10, 30));
+        assert_eq!(replaced, vec![PathBuf::from("bob_0.tmp")], "a re-parked id leaked its old temp");
+
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let direct_park = ["early_file_streams", ".insert("].concat();
+        for f in ["file_handler.rs", "swarm.rs"] {
+            let src = std::fs::read_to_string(node.join(f)).expect("read node source");
+            assert!(!src.contains(&direct_park), "A-T20: {f} parks a stream past park_early_stream");
+        }
     }
 
     /// H1, H2, H6: a FileHeader registers the key its file's bytes decrypt under,
@@ -3232,7 +3497,7 @@ mod tests {
         );
 
         deliver_header(&states, &mut pending, &bob, "f1", &path, &pass).await;
-        assert_eq!(pending.remove("f1").map(|p| p.sender), Some(bob.clone()));
+        assert_eq!(pending.remove("f1").map(|p| (p.sender, p.size)), Some((bob.clone(), 10)), "A-F7: the header's size bounds its stream");
 
         let bytes = tmp.path().join("f1.png");
         std::fs::write(&bytes, b"done").unwrap();

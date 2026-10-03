@@ -653,6 +653,9 @@ pub fn get_server_banner(server_id: String) -> Result<Option<ServerBannerData>, 
     Ok(Some(ServerBannerData { hash, animated, bytes }))
 }
 
+/// What a join or a browse answers for an id that cannot name a server.
+const NOT_A_SERVER_ID: &str = "That link does not name a server.";
+
 /// Join a server via invite link. Connects to the server's signaling room and
 /// requests membership from existing members. `owner_pin` is the `owner=` a link to
 /// a pre-0.12 server carries: the only owner the joiner will accept its state from.
@@ -664,6 +667,9 @@ pub fn join_server(
     owner_pin: Option<String>,
     join_key: Option<String>,
 ) -> Result<(), String> {
+    if !crate::crdt::anchor::valid_server_id(&server_id) {
+        return Err(NOT_A_SERVER_ID.into());
+    }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
@@ -1201,6 +1207,9 @@ pub fn set_channel_public(server_id: String, channel_id: String, is_public: bool
 /// Joins the WS room and broadcasts a list request to online members.
 #[frb]
 pub fn request_public_channels(server_id: String) -> Result<(), String> {
+    if !crate::crdt::anchor::valid_server_id(&server_id) {
+        return Err(NOT_A_SERVER_ID.into());
+    }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
@@ -1844,4 +1853,20 @@ pub fn vault_download_file(server_id: String, content_id: String) -> Result<Stri
     Ok(String::new()) // Async — Dart watches VaultDownloadComplete event
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    /// A join or a guest browse refuses an id no server has before it reaches the node.
+    #[test]
+    fn a_join_or_browse_needs_a_server_id() {
+        let sid = "ab".repeat(20);
+        let refused = Err(NOT_A_SERVER_ID.to_string());
+        for bad in [format!("{sid}#c"), format!("conf:{sid}"), sid.to_uppercase()] {
+            assert_eq!(join_server(bad.clone(), None, false, None, None), refused, "{bad}");
+            assert_eq!(request_public_channels(bad.clone()), refused, "{bad}");
+        }
+        assert_ne!(join_server(sid.clone(), None, false, None, None), refused, "a server id gets past it");
+        assert_ne!(request_public_channels(sid), refused);
+    }
+}

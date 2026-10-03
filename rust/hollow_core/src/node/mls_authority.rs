@@ -268,6 +268,36 @@ pub(crate) fn judge_commit(
     }
 }
 
+/// Whether a server and channel id can name an MLS group: a server's or a pinned
+/// meeting's id, and a channel id of the CRDT's shape, so `{server}#{channel}` reads
+/// one way only.
+pub(crate) fn names_a_group(server_id: &str, channel_id: Option<&str>) -> bool {
+    let room = crate::crdt::anchor::valid_server_id(server_id)
+        || super::conference::conf_id_from_sid(server_id).is_some_and(super::conference::is_pinned_conf_id);
+    room && channel_id.is_none_or(crate::crdt::valid_channel_id)
+}
+
+/// [`names_a_group`] for an inbound MLS frame from `from`, logging a refusal; any
+/// other frame passes. Checked once in the event loop's frame dispatch, not in the
+/// MLS arms: their poll frame sits at the edge of the worker stack.
+pub(crate) fn frame_names_a_group(msg: &super::types::HavenMessage, from: &str) -> bool {
+    use super::types::HavenMessage as H;
+    let ok = match msg {
+        H::MlsChannelMessage { server_id, channel_id, .. }
+        | H::MlsKeyPackage { server_id, channel_id, .. }
+        | H::MlsWelcome { server_id, channel_id, .. }
+        | H::MlsCommit { server_id, channel_id, .. }
+        | H::MlsKeyPackageRequest { server_id, channel_id }
+        | H::MlsEpochProbe { server_id, channel_id, .. }
+        | H::MlsCommitCatchup { server_id, channel_id, .. } => names_a_group(server_id, channel_id.as_deref()),
+        _ => true,
+    };
+    if !ok {
+        crate::hollow_log!("[HOLLOW-SECURITY] REJECTED an MLS frame from {from}: its server or channel id names no group");
+    }
+    ok
+}
+
 /// Leaves a coordinator sweeps before it adds anyone: unbound leaves, revoked
 /// devices, and leaves of masters who are no longer members or cannot see the
 /// subgroup's channel. Never our own.
@@ -570,5 +600,64 @@ mod tests {
         assert!(adds.is_empty(), "an unparseable KeyPackage is never added");
         assert_eq!(removals, vec!["gone-d".to_string(), "legacy".to_string()]);
         assert_eq!(stale_leaves(&leaves, "owner-d", &rules), vec!["gone-d".to_string(), "legacy".to_string()]);
+    }
+
+    /// Every inbound MLS frame names its group by a server's or a meeting's id and a
+    /// well-formed channel id: `S#chan` as a server id would read as the subgroup of
+    /// (S, chan), and `conf:` without a pinned id names no meeting.
+    #[test]
+    fn an_mls_frame_names_a_group_only_by_real_ids() {
+        use super::super::types::HavenMessage as H;
+        let frames = |sid: &str, cid: Option<&str>| {
+            let (server_id, channel_id, s) = (sid.to_string(), cid.map(str::to_string), String::new());
+            vec![
+                H::MlsChannelMessage { server_id: server_id.clone(), body: s.clone(), channel_id: channel_id.clone() },
+                H::MlsKeyPackage { server_id: server_id.clone(), key_package: s.clone(), channel_id: channel_id.clone() },
+                H::MlsWelcome { server_id: server_id.clone(), welcome: s.clone(), channel_id: channel_id.clone(), conf_nonce: None },
+                H::MlsCommit { server_id: server_id.clone(), commit: s, channel_id: channel_id.clone(), epoch: None },
+                H::MlsKeyPackageRequest { server_id: server_id.clone(), channel_id: channel_id.clone() },
+                H::MlsEpochProbe { server_id: server_id.clone(), channel_id: channel_id.clone(), epoch: 1, epoch_auth: None },
+                H::MlsCommitCatchup { server_id, channel_id, commits: Vec::new() },
+            ]
+        };
+        let sid = crate::crdt::anchor::derive_server_id("owner", "n1");
+        let conf = super::super::conference::conf_server_id(&super::super::conference::derive_conf_id("host", "n1"));
+        let legacy = "5e1f".repeat(8);
+        for (server, channel) in [
+            (sid.as_str(), None), (sid.as_str(), Some("s1-general")), (legacy.as_str(), None),
+            (conf.as_str(), None), (conf.as_str(), Some(super::super::conference::CONF_CHANNEL)),
+        ] {
+            for frame in frames(server, channel) {
+                assert!(frame_names_a_group(&frame, "peer"), "{frame:?}");
+            }
+        }
+        let aliased = format!("{sid}#s1-general");
+        let legacy_meeting = super::super::conference::conf_server_id(&legacy);
+        let inbox = format!("inbox:{sid}");
+        for (server, channel) in [
+            (aliased.as_str(), None), (legacy_meeting.as_str(), None), ("conf:x", None), (inbox.as_str(), None),
+            ("s1", None), (sid.as_str(), Some("a#b")), (sid.as_str(), Some(super::super::types::JOIN_TOPIC)),
+        ] {
+            for frame in frames(server, channel) {
+                assert!(!frame_names_a_group(&frame, "peer"), "{frame:?}");
+            }
+        }
+        assert!(frame_names_a_group(&H::TypingIndicator { server_id: "s1".into(), channel_id: "a#b".into() }, "peer"), "not an MLS frame");
+    }
+
+    /// The shape check runs where the event loop dispatches relay, meeting-lane and
+    /// carried frames, before any MLS arm builds a group key, and in the push fetch.
+    #[test]
+    fn mls_frames_are_shape_checked_before_dispatch() {
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let read = |f: &str| std::fs::read_to_string(node.join(f)).expect("read node source").replace("\r\n", "\n");
+        let swarm = read("swarm.rs");
+        let at = swarm.find("while let Some((msg, frame_ts)) = next.take() {").expect("frame dispatch loop");
+        let lead = &swarm[at..at + swarm[at..].find("handle_incoming_request(").expect("dispatch")];
+        assert!(lead.contains("mls_authority::frame_names_a_group(&msg, &from)"), "swarm.rs: MLS frames take any server id");
+        let fetch = read("fetch.rs");
+        let arm = fetch.find("HavenMessage::MlsChannelMessage { server_id, body, channel_id } => {").expect("fetch arm");
+        let arm = &fetch[arm..arm + fetch[arm..].find("subgroup_id(").expect("group key")];
+        assert!(arm.contains("mls_authority::names_a_group("), "fetch.rs: the push fetch takes any server id");
     }
 }

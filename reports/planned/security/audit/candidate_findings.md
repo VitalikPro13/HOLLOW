@@ -278,7 +278,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | L3 | Blocklist missing on edit, delete, react, link preview, friend accept/reject/remove, typing, status, key exchange, raw fallback, MLS twins | dm:S-19 | Medium | FIXED HOL-SEC-036 for edits, cards, deletions, reactions and accepts (the rest: typing already gated, reject/remove/status harmless, key exchange opens nothing, raw fallback gone) |
 | L4 | Legacy raw-text fallback shows an unsigned message with no block or revoked check | dm:S-04, transport:S-15 | Medium | FIXED HOL-SEC-013: an unparseable decrypted payload is dropped, as on the push path |
 | L5 | MLS accepts DM-shaped `LinkPreviewSet`, reactions and typing from any server member | dm:S-20 | Low | FIXED HOL-SEC-008 (cards, reactions) and HOL-SEC-010 (typing) |
-| L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | ACCEPTED AR-09 (2026-09-27); a replay rule broke honest session setup and was reverted |
+| L6 | OTK minting on `KeyRequest` has no cooldown without a session; a captured request replays for 300 s | dm:S-21 | Low | FIXED. AR-09 is CLOSED: the replay half by HOL-SEC-054 (sealed frames carry a nonce, the live-frame guard refuses a replay), the minting half by HOL-SEC-111 (one key per requesting device, a bounded slot table that survives restarts, so a flood never pushes out a carried key) |
 
 ## Class M. Calls
 

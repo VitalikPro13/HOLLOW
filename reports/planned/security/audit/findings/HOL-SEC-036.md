@@ -60,8 +60,11 @@ the L2 guard in `authz_a_carried_list_attributes_only_a_bound_sender`
 - L6 (a captured KeyRequest can be replayed within the 300 s window, and one-time
   keys are minted without a cooldown) was tried and reverted: honest peers send
   several identical KeyRequests within one second, which a replay rule cannot
-  tell apart. Accepted as AR-09 (a relay that replays can also drop frames;
-  minted keys only push carried bundles back to the live key exchange).
+  tell apart. Accepted as AR-09 at the time; AR-09 is now CLOSED. The replay
+  half is fixed by HOL-SEC-054 (sealed frames carry a nonce and the live-frame
+  guard refuses a replayed KeyRequest), the minting half by HOL-SEC-111 (one
+  key per requesting device from a bounded slot table, so a flood never pushes
+  out a carried key).
 
 ## Test
 

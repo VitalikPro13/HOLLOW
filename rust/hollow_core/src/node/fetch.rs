@@ -261,11 +261,15 @@ async fn handle_kill_frame(
     }
     let blob = value.get("blob").and_then(|v| v.as_str()).unwrap_or("");
     // A bare ack clears every order parked for this device, so it follows only a
-    // wipe; turning one away names that one, or a junk deposit takes a genuine
-    // order down with it.
-    let ack = serde_json::json!({ "type": "kill_ack" }).to_string();
+    // wipe; turning one away names that one by issuer and stamp, or a junk deposit
+    // takes a genuine order sharing its stamp down with it.
+    let ack = crate::node::ws_client::kill_ack_frame(None).to_string();
     let ack_this = match value.get("issued_at_ms").and_then(|v| v.as_i64()) {
-        Some(stamp) => serde_json::json!({ "type": "kill_ack", "issued_at_ms": stamp }).to_string(),
+        Some(issued_at_ms) => {
+            let issuer = value.get("issuer").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let signal = crate::node::ws_client::KillSignalId { issuer, issued_at_ms };
+            crate::node::ws_client::kill_ack_frame(Some(&signal)).to_string()
+        }
         None => String::new(),
     };
 
@@ -478,6 +482,10 @@ fn try_process_channel_msg(
 
     match haven {
         HavenMessage::MlsChannelMessage { server_id, body, channel_id } => {
+            if !super::mls_authority::names_a_group(&server_id, channel_id.as_deref()) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED push MLS frame: its server or channel id names no group");
+                return None;
+            }
             let mls_mgr = mls.as_mut()?;
             // Restricted channel (Option B): decrypt under the per-channel subgroup.
             let group_key = match &channel_id {
@@ -1299,6 +1307,13 @@ fn handle_file_header(
     if p.sid.is_some() {
         return None;
     }
+    if let Some(reason) = crate::node::file_handler::header_size_refused(
+        &std::collections::HashMap::new(), None, p.size, p.share_ref.is_some(),
+        p.inline_bytes.as_ref().map_or(0, String::len),
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader for {} from {convo} in fetch (size {}): {reason}", p.fid, p.size);
+        return None;
+    }
     {
         let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
         if let Some(reason) = crate::node::file_handler::file_header_refused(
@@ -1516,7 +1531,8 @@ mod tests {
     #[tokio::test]
     async fn a_junk_kill_deposit_is_acked_alone() {
         let mut sink: Vec<Message> = Vec::new();
-        let junk = serde_json::json!({ "type": "kill_signal", "blob": "not-an-order", "issued_at_ms": 42 }).to_string();
+        let junk = serde_json::json!({ "type": "kill_signal", "blob": "not-an-order", "issued_at_ms": 42, "issuer": "12D3KooWJunk" })
+            .to_string();
         let wiped = handle_kill_frame(&junk, &mut sink, "device", "master", "no-db", "no-pass").await;
         assert!(!wiped);
         let sent: Vec<String> = sink
@@ -1526,6 +1542,7 @@ mod tests {
         assert_eq!(sent.len(), 1, "one ack, for the junk signal only: {sent:?}");
         let ack: serde_json::Value = serde_json::from_str(&sent[0]).unwrap();
         assert_eq!(ack["issued_at_ms"], 42, "a bare ack would clear every order parked for us");
+        assert_eq!(ack["issuer"], "12D3KooWJunk", "a stamp alone cannot tell the junk from an order sharing it");
     }
 
     fn pk_b64(k: &NativeKeypair) -> String {
@@ -1622,6 +1639,43 @@ mod tests {
             });
         }
         state
+    }
+
+    /// A-T06: the push process holds a DM header to the same send limit as the live
+    /// node, before it decodes or writes anything.
+    #[test]
+    fn fetch_refuses_a_dm_header_over_the_send_limit() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = temp_store();
+        let me = kp(197).peer_id();
+        let bob = kp(198).peer_id();
+        let enc = crate::vault::pipeline::aes_encrypt(b"a small image").unwrap();
+        let header = |fid: &str, size: u64| -> FileHeaderPayload {
+            serde_json::from_value(serde_json::json!({
+                "fid": fid, "name": "a.png", "ext": "png", "mime": "image/png", "size": size,
+                "chunks": 0, "img": true, "ts": 1_000,
+                "aes_key": hex::encode(enc.key), "aes_nonce": hex::encode(enc.nonce),
+                "inline_bytes": base64::engine::general_purpose::STANDARD.encode(&enc.ciphertext),
+            }))
+            .unwrap()
+        };
+        let landed = |fid: &str| {
+            let disk = crate::node::file_transfer::final_file_path(fid, "png");
+            let written = disk.exists();
+            let _ = std::fs::remove_file(&disk);
+            let row = crate::storage::MessageStore::open(&path, &pass).unwrap().get_file_metadata(fid).unwrap();
+            written || row.is_some()
+        };
+
+        let over = crate::node::file_transfer::generate_file_id();
+        let fetched = handle_file_header(&bob, &me, header(&over, crate::node::file_transfer::DEFAULT_MAX_FILE_SIZE + 1), &path, &pass);
+        let wrote = landed(&over);
+        assert!(fetched.is_none() && !wrote, "A-T06: the push process took a DM header over the send limit");
+
+        let within = crate::node::file_transfer::generate_file_id();
+        let fetched = handle_file_header(&bob, &me, header(&within, 13), &path, &pass);
+        let wrote = landed(&within);
+        assert!(fetched.is_some_and(|f| f.image_path.is_some()) && wrote, "a header within the limit no longer lands");
     }
 
     /// HOL-SEC-035 (K1). The push fetch node and the iOS extension are fresh

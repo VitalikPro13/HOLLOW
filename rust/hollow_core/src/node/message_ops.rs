@@ -1735,7 +1735,7 @@ pub(crate) fn channel_reaction_target_ok(
     ok
 }
 
-/// Whether a LIVE DM reaction from `reactor` may attach to `mid`: only to a row of
+/// Whether a DM reaction from `reactor`, live or synced, may attach to `mid`: only to a row of
 /// the reactor's conversation with us, in either direction, or to any DM row when
 /// the reactor is our own sibling.
 pub(crate) fn dm_reaction_target_ok(
@@ -2664,16 +2664,33 @@ pub(crate) fn live_channel_post_refusal(
     has_file: bool,
     now_ms: u64,
 ) -> Option<&'static str> {
-    if !state.is_member(sender) {
-        Some("not a member")
-    } else if !state.can_see_channel(sender, cid) {
-        Some("cannot see the channel")
+    if let Some(reason) = live_channel_change_refusal(state, sender, cid, now_ms) {
+        Some(reason)
     } else if !state.can_post_in_channel_at(sender, cid, now_ms) {
         Some("may not post in the channel")
-    } else if state.is_muted(sender, now_ms) {
-        Some("muted")
     } else if state.is_channel_media_only(cid) && !has_file {
         Some("text in a media-only channel")
+    } else {
+        None
+    }
+}
+
+/// Why a LIVE edit, card or reaction by `sender` (a MASTER) on a row in `cid` must
+/// be dropped, judged by OUR state, or `None`: the sender must still be a member who
+/// can see the channel and is not muted. The first rungs of the post ladder; deletes
+/// and unreactions never ask, nor does sync backfill.
+pub(crate) fn live_channel_change_refusal(
+    state: &ServerState,
+    sender: &str,
+    cid: &str,
+    now_ms: u64,
+) -> Option<&'static str> {
+    if !state.is_member(sender) {
+        Some("not a member")
+    } else if !state.can_see_channel_at(sender, cid, now_ms) {
+        Some("cannot see the channel")
+    } else if state.is_muted(sender, now_ms) {
+        Some("muted")
     } else {
         None
     }
@@ -2782,21 +2799,19 @@ pub(crate) fn public_frame_accepted(
     ok
 }
 
-/// LIVE-ingest mute gate shared by the edit and add-reaction envelope handlers:
-/// true = drop, because the sender is muted (master-keyed, lazy expiry, every
-/// call site resolving the sender to its MASTER first). Deletes and reaction
-/// removals stay allowed, and sync backfill never routes through these handlers.
-pub(crate) fn live_muted_ingest_drop(server_state: Option<&ServerState>, sender: &str, action: &str) -> bool {
+/// LIVE gate shared by the edit, card and add-reaction handlers: true = drop, by
+/// [`live_channel_change_refusal`] on the server the frame names, where the handler
+/// then requires the row to sit. With no state for it (a guest) nothing is judged,
+/// as for posts. Deletes and reaction removals stay allowed.
+fn live_change_dropped(server_state: Option<&ServerState>, sender: &str, cid: &str, action: &str) -> bool {
     let Some(state) = server_state else { return false; };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    if state.is_muted(sender, now_ms) {
-        hollow_log!("[HOLLOW-MOD] DROPPED {action} from muted member {sender}");
-        return true;
-    }
-    false
+    let Some(reason) = live_channel_change_refusal(state, sender, cid, now_ms) else { return false; };
+    hollow_log!("[HOLLOW-MOD] DROPPED {action} from {sender} in {cid}: {reason}");
+    true
 }
 
 /// Persist one incoming channel message with message-id dedup. The content UNIQUE
@@ -2865,14 +2880,14 @@ pub(crate) async fn handle_envelope_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // Moderation (LIVE ingest only): drop edits from muted members, so a modified
-    // client cannot author content through the edit path while muted.
-    if live_muted_ingest_drop(server_state, peer_str, "edit") {
-        return;
-    }
-    // The row must sit where the edit says, or the mute gate above read a server
+    // The row must sit where the edit says, or the gate below would read a server
     // the sender picked.
     let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) else { return };
+    // LIVE only: a modified client cannot author through the edit path once removed,
+    // out of the channel's sight, or muted.
+    if live_change_dropped(server_state, peer_str, c, "edit") {
+        return;
+    }
     let mut edit_applied = false;
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
@@ -2940,9 +2955,8 @@ pub(crate) async fn handle_envelope_link_preview_set(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // Moderation (LIVE ingest): a muted member can't author card content
-    // either, mirroring the edit gate.
-    if live_muted_ingest_drop(server_state, &super::resolver::resolve(peer_str), "link preview") {
+    // LIVE: a card is authored content too, so it takes the edit gate.
+    if cid.as_deref().is_some_and(|c| live_change_dropped(server_state, &super::resolver::resolve(peer_str), c, "link preview")) {
         return;
     }
 
@@ -3181,13 +3195,8 @@ pub(crate) async fn handle_envelope_add_reaction(
         return;
     }
     let (Some(s_id), Some(c_id)) = (sid, cid) else { return };
-    if server_state.is_some_and(|s| !s.is_member(peer_str)) {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED reaction from {peer_str}: not a member of {s_id}");
-        return;
-    }
-    // Moderation (LIVE ingest only): drop reactions from muted members,
-    // mirroring the new-message ingest gate; reaction REMOVALS stay allowed.
-    if live_muted_ingest_drop(server_state, peer_str, "reaction") {
+    // LIVE only, mirroring the post gate; reaction REMOVALS stay allowed.
+    if live_change_dropped(server_state, peer_str, &c_id, "reaction") {
         return;
     }
     // SECURITY: a LIVE reaction must carry a signature that verifies. On plaintext
@@ -3233,6 +3242,21 @@ pub(crate) fn sync_reaction_accepted(mid: &str, r: &super::types::SyncReactionIt
         if r.sig.is_none() && r.pk.is_none() { "NO signature" } else { "signature INVALID" }
     );
     false
+}
+
+/// Store the reactions riding one backfilled DM row (INSERT OR IGNORE): each signed
+/// by its reactor, who must be one of the two parties of the row's conversation.
+pub(crate) fn store_synced_dm_reactions(
+    store: &crate::storage::MessageStore,
+    mid: &str,
+    reactions: &[super::types::SyncReactionItem],
+    local_master: &str,
+) {
+    for r in reactions {
+        if sync_reaction_accepted(mid, r) && dm_reaction_target_ok(store, mid, &r.p, local_master) {
+            let _ = store.add_reaction(mid, &r.e, &r.p, r.ts, r.sig.as_deref(), r.pk.as_deref());
+        }
+    }
 }
 
 /// SECURITY: true = drop this LIVE reaction add or remove, signature missing or
@@ -4191,6 +4215,120 @@ mod tests {
         assert!(!store.channel_message_exists("from-stranger"));
         assert!(!store.channel_message_exists("into-admin-only"));
         assert!(store.channel_message_exists("fine"));
+    }
+
+    // ── Section 2 items 5 and 6: live changes need a member who can see the channel ──
+
+    /// "srv-r" with bob and us as members, "general" open to all and "staff" for
+    /// admins only, bob's row "r1" in general and the owner's row "r2" in staff.
+    fn change_fixture(path: &str, pass: &str, bob: &NativeKeypair, us: &NativeKeypair) -> ServerState {
+        use crate::crdt::operations::CrdtPayload;
+        let (mut state, owner) = crate::crdt::testkeys::owned_state("srv-r", "R", 221);
+        for op in [
+            CrdtPayload::MemberAdded { peer_id: bob.peer_id(), display_name: "b".into(), follow: None, ask: None },
+            CrdtPayload::MemberAdded { peer_id: us.peer_id(), display_name: "a".into(), follow: None, ask: None },
+            CrdtPayload::ChannelAdded {
+                channel_id: "general".into(), name: "general".into(), category: None, channel_type: "text".into(),
+            },
+            CrdtPayload::ChannelAdded {
+                channel_id: "staff".into(), name: "staff".into(), category: None, channel_type: "text".into(),
+            },
+            CrdtPayload::ChannelVisibilityChanged { channel_id: "staff".into(), visibility: "admin".into() },
+        ] {
+            let op = state.create_op(op);
+            state.apply_op(&op).unwrap();
+        }
+        let store = open(path, pass);
+        for (cid, author, mid) in [("general", bob.peer_id(), "r1"), ("staff", owner, "r2")] {
+            store.insert_channel_message(
+                "srv-r", cid, &author, "hello", false, 1_000, None, None, Some(mid), None, None, Some(1_000_000), None,
+            ).unwrap();
+        }
+        state
+    }
+
+    /// Section 2 item 5: a live edit or card on an author's own post needs an author
+    /// who is still a member, as a new post does. The same edit lands while it is one.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_removed_author_no_longer_edits_or_recards_live() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (bob, us) = (kp(224), kp(225));
+        let b = bob.peer_id();
+        let mut state = change_fixture(&path, &pass, &bob, &us);
+        let (tx, _rx) = mpsc::channel(16);
+        let row = || open(&path, &pass).get_channel_message_sig_row("r1").unwrap();
+        let place = || (Some("srv-r".to_string()), Some("general".to_string()));
+
+        let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-r:general", "r1", 5_000, "edited as a member");
+        let (s, c) = place();
+        handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited as a member".into(), 5_000, sig, pk, s, c, &path, &pass).await;
+        assert_eq!(row().text, "edited as a member");
+
+        let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: b.clone() });
+        state.apply_op(&op).unwrap();
+        let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-r:general", "r1", 6_000, "edited once removed");
+        let (s, c) = place();
+        handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited once removed".into(), 6_000, sig, pk, s, c, &path, &pass).await;
+        assert_eq!(row().text, "edited as a member", "a removed author rewrote its post live");
+
+        let att = card_sig(&path, &pass, true, &bob, "srv-r:general", "r1");
+        let (s, c) = place();
+        handle_envelope_link_preview_set(
+            &tx, Some(&state), &b, &us.peer_id(), "r1".into(), Some(Box::new(evil_card())),
+            att.ts, att.sig, att.pk, s, c, crate::node::frame_auth::now_ms(), &path, &pass,
+        ).await;
+        assert_eq!(row().link_preview, None, "a removed author re-carded its post live");
+    }
+
+    /// Section 2 item 6: a live reaction needs a reactor who can see the channel, on
+    /// every transport and not only where the channel's subgroup keeps it out.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_reaction_needs_a_reactor_who_can_see_the_channel() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (bob, us) = (kp(226), kp(227));
+        let b = bob.peer_id();
+        let state = change_fixture(&path, &pass, &bob, &us);
+        let (tx, _rx) = mpsc::channel(16);
+        for (cid, mid) in [("staff", "r2"), ("general", "r1")] {
+            let (sig, pk) = sign_message(&bob, &pk_b64(&bob), &format!("reaction:{mid}:\u{1F44D}:7000"));
+            handle_envelope_add_reaction(
+                &tx, &us, Some(&state), &b, mid.into(), "\u{1F44D}".into(), 7_000, sig, pk,
+                Some("srv-r".into()), Some(cid.into()), &path, &pass,
+            ).await;
+        }
+        let reactions = open(&path, &pass).load_reactions_for_messages(&["r1".to_string(), "r2".to_string()]).unwrap();
+        assert!(reactions.contains_key("r1"), "a reaction in a channel bob can see lands");
+        assert!(!reactions.contains_key("r2"), "a member reacted in a channel it cannot see");
+    }
+
+    /// Section 2 item 6: a reaction riding a backfilled DM row counts only from one of
+    /// the conversation's two parties, however validly a third one signed it.
+    #[test]
+    fn authz_a_synced_dm_reaction_comes_only_from_a_party() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let (alice, bob, mallory) = (kp(231), kp(232), kp(233));
+        let (a, b, m) = (alice.peer_id(), bob.peer_id(), mallory.peer_id());
+        store.insert(&b, "from bob", false, 1_000, None, None, Some("b1"), None, None, None, None).unwrap();
+        let items: Vec<_> = [(&alice, &a), (&bob, &b), (&mallory, &m)]
+            .into_iter()
+            .map(|(k, id)| reaction_item(Some(k), id, "b1", "\u{1F44D}", 2_000))
+            .collect();
+        store_synced_dm_reactions(&store, "b1", &items, &a);
+        let reactors: Vec<String> = store
+            .load_reactions_for_messages(&["b1".to_string()])
+            .unwrap()
+            .remove("b1")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, reactor, _)| reactor)
+            .collect();
+        assert!(reactors.contains(&a) && reactors.contains(&b), "both parties' reactions land");
+        assert!(!reactors.contains(&m), "a third party's reaction rode a DM backfill in");
     }
 
     /// C7: slow mode judges a fresh post by our own clock, so spacing future stamps

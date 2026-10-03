@@ -3,8 +3,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::{Deserialize, Serialize};
 use vodozemac::olm::{
-    Account, InboundCreationResult, OlmMessage, Session, SessionConfig,
+    Account, AccountPickle, InboundCreationResult, OlmMessage, Session, SessionConfig,
 };
 use vodozemac::Curve25519PublicKey;
 
@@ -29,6 +30,27 @@ pub(crate) struct OlmManager {
     /// key fails to decrypt again, and that failure tears the session down, so a relay
     /// replaying a genuine frame must be recognised before it is ever tried.
     decrypted: HashMap<String, std::collections::VecDeque<[u8; 16]>>,
+    /// Who holds each key [`Self::key_for_requester`] handed out, oldest first. Saved
+    /// with the account: a restart that forgot it would orphan every key in it.
+    key_slots: VecDeque<KeySlot>,
+}
+
+/// A requesting device and the one-time key it was handed.
+#[derive(Clone, Serialize, Deserialize)]
+struct KeySlot {
+    requester: String,
+    key: String,
+}
+
+/// The account row: vodozemac's pickle plus the slot table, which an older build
+/// reading the row ignores. The pickle stays a JSON map here because its integer map
+/// keys do not survive serde's flatten buffer.
+#[derive(Serialize, Deserialize)]
+struct StoredAccount {
+    #[serde(flatten)]
+    account: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    key_slots: VecDeque<KeySlot>,
 }
 
 /// Ciphertexts remembered per peer; more than the frames a session sees between two
@@ -38,6 +60,10 @@ const DECRYPTED_REMEMBERED: usize = 512;
 /// Retired sessions kept per peer. Glare puts two sessions in play; the rest is room
 /// for a re-key that crosses it.
 const RETIRED_KEPT: usize = 4;
+
+/// Requesters holding a key from [`OlmManager::key_for_requester`]; far below the
+/// 5000 keys vodozemac keeps before it drops the oldest, a carried one included.
+const KEY_SLOTS_KEPT: usize = 256;
 
 /// What decrypting one message did to a peer's sessions.
 #[derive(Debug)]
@@ -68,6 +94,7 @@ impl OlmManager {
             session_last_used: HashMap::new(),
             identity_proof: None,
             decrypted: HashMap::new(),
+            key_slots: VecDeque::new(),
         }
     }
 
@@ -76,7 +103,9 @@ impl OlmManager {
         account_json: &str,
         sessions: Vec<(String, String)>,
     ) -> Result<Self, String> {
-        let account_pickle = serde_json::from_str(account_json)
+        let stored: StoredAccount = serde_json::from_str(account_json)
+            .map_err(|e| format!("Failed to deserialize account pickle: {e}"))?;
+        let account_pickle: AccountPickle = serde_json::from_value(serde_json::Value::Object(stored.account))
             .map_err(|e| format!("Failed to deserialize account pickle: {e}"))?;
         let account = Account::from_pickle(account_pickle);
 
@@ -102,6 +131,7 @@ impl OlmManager {
             session_last_used,
             identity_proof: None,
             decrypted: HashMap::new(),
+            key_slots: stored.key_slots,
         })
     }
 
@@ -137,7 +167,11 @@ impl OlmManager {
     /// Generate a fresh one-time key and return it as unpadded base64.
     /// Marks the key as published so it won't be returned again.
     pub fn generate_one_time_key(&mut self) -> String {
-        self.account.generate_one_time_keys(1);
+        // A key dropped for room answers no one, so no slot may keep re-sending it.
+        for gone in self.account.generate_one_time_keys(1).removed {
+            let gone = gone.to_base64();
+            self.key_slots.retain(|s| s.key != gone);
+        }
         let keys = self.account.one_time_keys();
         let otk = keys
             .values()
@@ -146,6 +180,49 @@ impl OlmManager {
         let otk_b64 = otk.to_base64();
         self.account.mark_keys_as_published();
         otk_b64
+    }
+
+    /// The one-time key that answers a `KeyRequest` from `requester`, and whether it
+    /// was minted now (the account changed and needs saving).
+    ///
+    /// A repeat gets the same key: its private half dies with the first session built
+    /// on it. A full table drops its oldest slot's key, never a key minted elsewhere.
+    pub(crate) fn key_for_requester(&mut self, requester: &str) -> (String, bool) {
+        if let Some(slot) = self.key_slots.iter().find(|s| s.requester == requester) {
+            return (slot.key.clone(), false);
+        }
+        if self.key_slots.len() >= KEY_SLOTS_KEPT
+            && let Some(oldest) = self.key_slots.pop_front()
+        {
+            self.drop_one_time_key(&oldest.key);
+        }
+        let key = self.generate_one_time_key();
+        self.key_slots.push_back(KeySlot { requester: requester.to_string(), key: key.clone() });
+        (key, true)
+    }
+
+    /// A PreKey from `requester` built a session on our key `spent`: the slot holding
+    /// it ends, and so does the requester's own, whose unused key goes with it.
+    fn release_key_slots(&mut self, requester: &str, spent: &str) {
+        let (done, kept): (VecDeque<KeySlot>, VecDeque<KeySlot>) = std::mem::take(&mut self.key_slots)
+            .into_iter()
+            .partition(|s| s.requester == requester || s.key == spent);
+        self.key_slots = kept;
+        for slot in done.iter().filter(|s| s.key != spent) {
+            self.drop_one_time_key(&slot.key);
+        }
+    }
+
+    fn drop_one_time_key(&mut self, key_b64: &str) {
+        if let Ok(key) = Curve25519PublicKey::from_base64(key_b64) {
+            self.account.remove_one_time_key(key);
+        }
+    }
+
+    /// TEST-ONLY: how many one-time keys the account holds a private half for.
+    #[cfg(test)]
+    pub(crate) fn stored_one_time_key_count(&self) -> usize {
+        self.account.stored_one_time_key_count()
     }
 
     /// Create an outbound session using the peer's identity key + one-time key,
@@ -227,6 +304,7 @@ impl OlmManager {
             .account
             .create_inbound_session(their_identity_key, &message)
             .map_err(|e| format!("Failed to create inbound session: {e}"))?;
+        self.release_key_slots(peer_id, &message.one_time_key().to_base64());
 
         if self.has_unconfirmed_session(peer_id) && local_device < peer_id {
             self.push_retired(peer_id, session);
@@ -389,10 +467,15 @@ impl OlmManager {
         self.session_last_used.insert(peer_id.to_string(), Instant::now());
     }
 
-    /// Serialize the Account for DB storage.
+    /// Serialize the Account, with who holds which requested key, for DB storage.
     pub fn account_pickle_json(&self) -> Result<String, String> {
-        let pickle = self.account.pickle();
-        serde_json::to_string(&pickle)
+        let account = match serde_json::to_value(self.account.pickle()) {
+            Ok(serde_json::Value::Object(map)) => map,
+            Ok(_) => return Err("Failed to serialize account pickle: not a map".to_string()),
+            Err(e) => return Err(format!("Failed to serialize account pickle: {e}")),
+        };
+        let stored = StoredAccount { account, key_slots: self.key_slots.clone() };
+        serde_json::to_string(&stored)
             .map_err(|e| format!("Failed to serialize account pickle: {e}"))
     }
 
@@ -784,6 +867,101 @@ mod tests {
             alice.create_outbound_session(BOB, &peer.identity_key_base64(), &otk).unwrap();
         }
         assert_eq!(alice.retired.get(BOB).map(VecDeque::len), Some(RETIRED_KEPT));
+    }
+
+    // Section 2 item 9a (A-DM-01): a KeyRequest from a device we never met mints a
+    // key, so minting is bounded per requester and in total.
+
+    /// Bob opens Alice's first message on a session she built from `bob_key`.
+    fn opens_on(bob: &mut OlmManager, bob_key: &str) -> Result<Opened, String> {
+        let mut alice = OlmManager::new();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), bob_key)?;
+        let hello = alice.encrypt(BOB, b"hello").unwrap();
+        bob.open_prekey(ALICE, &alice.identity_key_base64(), &hello.1, BOB)
+    }
+
+    #[test]
+    fn a_key_request_flood_never_spends_a_carried_key() {
+        let mut bob = OlmManager::new();
+        // What Bob's friend request carries, minted before any request arrives.
+        let carried = bob.generate_one_time_key();
+        for i in 0..5_100 {
+            bob.key_for_requester(&format!("stranger-{i}"));
+        }
+        let opened = opens_on(&mut bob, &carried);
+        assert!(opened.is_ok(), "a KeyRequest flood spent the carried key: {:?}", opened.err());
+        assert!(bob.stored_one_time_key_count() <= KEY_SLOTS_KEPT + 1, "the flood kept {} keys", bob.stored_one_time_key_count());
+    }
+
+    #[test]
+    fn one_requester_holds_one_key_across_repeats() {
+        let mut bob = OlmManager::new();
+        let (first, minted) = bob.key_for_requester(ALICE);
+        assert!(minted);
+        for _ in 0..10 {
+            assert_eq!(bob.key_for_requester(ALICE), (first.clone(), false), "a repeat must re-send the requester's key");
+        }
+        assert_eq!(bob.stored_one_time_key_count(), 1);
+
+        opens_on(&mut bob, &first).expect("the requester's key opens its session");
+        let (next, minted) = bob.key_for_requester(ALICE);
+        assert!(minted && next != first, "a spent key frees its requester's slot");
+        assert_eq!(bob.stored_one_time_key_count(), 1);
+    }
+
+    #[test]
+    fn a_requester_that_keys_us_another_way_keeps_no_key_of_ours() {
+        let mut bob = OlmManager::new();
+        let carried = bob.generate_one_time_key();
+        bob.key_for_requester(ALICE);
+        opens_on(&mut bob, &carried).expect("the carried key opens");
+        assert_eq!(bob.stored_one_time_key_count(), 0, "the requester's unused key outlived its session");
+    }
+
+    #[test]
+    fn a_slot_never_re_sends_a_key_the_account_dropped() {
+        let mut bob = OlmManager::new();
+        let (first, _) = bob.key_for_requester(ALICE);
+        // Enough keys minted elsewhere that vodozemac drops the oldest, the slot's.
+        for _ in 0..5_000 {
+            bob.generate_one_time_key();
+        }
+        let (next, minted) = bob.key_for_requester(ALICE);
+        assert!(minted && next != first, "a slot re-sent a key the account no longer holds");
+        opens_on(&mut bob, &next).expect("the requester's new key opens");
+    }
+
+    #[test]
+    fn key_request_slots_survive_a_restart() {
+        let mut bob = OlmManager::new();
+        let (key, _) = bob.key_for_requester(ALICE);
+        let mut bob = OlmManager::from_pickles(&bob.account_pickle_json().unwrap(), vec![]).unwrap();
+        assert_eq!(bob.key_for_requester(ALICE), (key, false), "a restart forgot who holds which key");
+
+        for round in 0..3 {
+            for i in 0..KEY_SLOTS_KEPT {
+                bob.key_for_requester(&format!("stranger-{round}-{i}"));
+            }
+            bob = OlmManager::from_pickles(&bob.account_pickle_json().unwrap(), vec![]).unwrap();
+        }
+        assert!(
+            bob.stored_one_time_key_count() <= KEY_SLOTS_KEPT,
+            "restarts orphaned keys: {} held",
+            bob.stored_one_time_key_count()
+        );
+    }
+
+    #[test]
+    fn the_account_row_reads_across_versions() {
+        let mut bob = OlmManager::new();
+        bob.key_for_requester(ALICE);
+        let row = bob.account_pickle_json().unwrap();
+        serde_json::from_str::<AccountPickle>(&row).expect("an older build reads the row, slot table ignored");
+
+        let legacy = serde_json::to_string(&bob.account.pickle()).unwrap();
+        let restored = OlmManager::from_pickles(&legacy, vec![]).expect("a row an older build wrote");
+        assert!(restored.key_slots.is_empty());
+        assert_eq!(restored.identity_key_base64(), bob.identity_key_base64());
     }
 
     #[test]

@@ -21,9 +21,11 @@ namespace snapshot {
 // retention (`ring_meta`), 6 the address share every entry is charged to
 // (`shares`, fair_share.h) and dropped the owner binding, 7 every identity's
 // roster with when the relay first saw each pending join (`rosters`, design
-// ID-1R). An older snapshot still decodes, without the newer fields, so a relay
-// coming up on this build keeps the buffers the previous one handed over.
-static constexpr uint32_t VERSION = 7;
+// ID-1R), 8 which parked destroy signals the target identity's phrase stands
+// behind (`proven`, D5). An older snapshot still decodes, without the newer
+// fields, so a relay coming up on this build keeps the buffers the previous one
+// handed over.
+static constexpr uint32_t VERSION = 8;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -91,6 +93,7 @@ struct Kill {
     int64_t issued_at_ms = 0;
     uint32_t age_secs = 0;
     uint64_t share = NO_SHARE;  // v6
+    bool proven = false;        // v8
 };
 struct Mark {
     std::string master;
@@ -349,6 +352,9 @@ inline std::string encode(const Data& d) {
         }
     }
 
+    // proven: one flag per kill above, in the same order.
+    for (const auto& k : d.kills) w.flag(k.proven);
+
     w.out.append("HRSE", 4);
     return w.out;
 }
@@ -506,6 +512,12 @@ inline bool decode(std::string_view bytes, Data& out) {
                 ro.seen.push_back(std::move(s));
             }
             d.rosters.push_back(std::move(ro));
+        }
+    }
+
+    if (version >= 8) {
+        for (auto& k : d.kills) {
+            if (!r.flag(k.proven)) return false;
         }
     }
 

@@ -25,8 +25,9 @@ pub(crate) const MAX_PEER_EXCHANGE_SIZE: usize = 50;
 /// Maximum allowed TTL on an incoming gossip broadcast.
 pub(crate) const MAX_BROADCAST_TTL: u8 = 8;
 
-/// VC signaling sub-rate-limiter: burst capacity (per peer).
-pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 30;
+/// VC signaling sub-rate-limiter: burst capacity (per peer). Targeted SDP and ICE
+/// count too, so it holds one join's ICE trickle from a machine with many adapters.
+pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 50;
 /// VC signaling sub-rate-limiter: refill rate (tokens per second per peer).
 pub(crate) const VC_SIGNAL_RATE_REFILL: u32 = 10;
 
@@ -883,9 +884,9 @@ pub(crate) const REDEPOSIT_INTERVAL_MS: i64 = 12 * 3600 * 1000;
 
 /// The pseudo-channel the server room's join ring is keyed under.
 ///
-/// Never a channel id: `~` is not in the channel-id alphabet, so this cannot
-/// collide with a real channel's ring. The relay validates topic strings for
-/// LENGTH only, so no registration beyond the ordinary `set_topic_buffer`.
+/// Never a channel id: `crdt::valid_channel_id` keeps `~` out of every one, so this
+/// cannot collide with a real channel's ring. The relay's topic shape admits it, so
+/// it needs no registration beyond the ordinary `set_topic_buffer`.
 pub(crate) const JOIN_TOPIC: &str = "~join";
 
 /// Wall-clock unix MILLISECONDS. Wall clock rather than a monotonic instant
@@ -1511,6 +1512,8 @@ pub(crate) struct DebugSnapshotReply {
     /// Every envelope this node aimed at a device over the Olm lane, oldest first, as
     /// (device, envelope JSON), whether or not a session let it go out.
     pub carried: Vec<(String, String)>,
+    /// One-time keys our Olm account holds a private half for.
+    pub olm_one_time_keys: usize,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1739,10 +1742,12 @@ pub(crate) enum HavenMessage {
         ct: String,
     },
 
-    /// Sent to the kicked member so they remove themselves from the server.
+    /// Hands a removed or banned member the signed op that removes it: it leaves
+    /// once its own fold no longer lists it, never on the notice alone.
     #[serde(rename = "member_kick")]
     MemberKickBroadcast {
         server_id: String,
+        op_json: String,
     },
 
     #[serde(rename = "ch_sync_req")]
@@ -4451,6 +4456,16 @@ pub(crate) struct PendingFileStream {
     /// assembly. Bounded by FILE_DECRYPT_MAX_RETRIES so a genuinely corrupt source
     /// can't loop forever. In-memory only; reset whenever a fresh FileHeader arrives.
     pub retry_count: u32,
+    /// The plaintext size the header declared: its stream may carry this plus the GCM tag.
+    pub size: u64,
+}
+
+/// A completed file stream whose FileHeader has not landed yet.
+pub(crate) struct EarlyStream {
+    pub temp_path: std::path::PathBuf,
+    pub size: u64,
+    pub sender: String,
+    pub parked_at: std::time::Instant,
 }
 
 /// Pending streamed shard transfer — metadata stored here until stream bytes arrive.
@@ -4463,6 +4478,11 @@ pub(crate) struct PendingShardStream {
     pub m: u16,
     pub total_size: u64,
     pub tier: String,
+    /// The device whose stream completes it: the one that sent the store, or the holder
+    /// we asked. `None` for a recovery transfer, whose source the pool's plan names.
+    pub sender: Option<String>,
+    /// Our storage pledge for the server when it was registered, judged again at completion.
+    pub pledge: u64,
 }
 
 /// A public post's author as a guest is shown it: the author's own signed card, and the

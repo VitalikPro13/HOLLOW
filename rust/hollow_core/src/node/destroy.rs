@@ -270,13 +270,13 @@ pub(crate) async fn handle_kill_signal(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &WsCmdTx,
     blob: &str,
-    issued_at_ms: i64,
+    signal: super::ws_client::KillSignalId,
     local_master: &str,
     local_device: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let ack = super::ws_client::WsCommand::KillAck { issued_at_ms: Some(issued_at_ms) };
+    let ack = super::ws_client::WsCommand::KillAck { signal: Some(signal) };
     let Some(order) = decode_kill_blob(blob) else {
         hollow_log!("[HOLLOW-DESTROY] Kill signal blob is not a destruction order, acked and dropped");
         let _ = ws_cmd_tx.send(ack);

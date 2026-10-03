@@ -216,6 +216,18 @@ uint64_t now_unix_secs() {
     );
 }
 
+bool base64_decode(const std::string& text, std::string& out) {
+    std::string bytes(text.size() / 4 * 3 + 3, '\0');
+    size_t len = 0;
+    if (sodium_base642bin(reinterpret_cast<unsigned char*>(bytes.data()), bytes.size(), text.c_str(), text.size(),
+                          nullptr, &len, nullptr, sodium_base64_VARIANT_ORIGINAL) != 0) {
+        return false;
+    }
+    bytes.resize(len);
+    out = std::move(bytes);
+    return true;
+}
+
 static std::string b64url(const unsigned char* data, size_t len) {
     std::string out(sodium_base64_encoded_len(len, sodium_base64_VARIANT_URLSAFE_NO_PADDING), '\0');
     sodium_bin2base64(out.data(), out.size(), data, len, sodium_base64_VARIANT_URLSAFE_NO_PADDING);

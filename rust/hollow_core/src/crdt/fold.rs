@@ -157,6 +157,7 @@ impl ServerState {
         snap.muted_members.clear();
         snap.label_assignments.clear();
         snap.channel_grants.clear();
+        snap.retain_well_formed_channels();
         for channel in snap.channels.values_mut() {
             channel.is_public = false;
         }

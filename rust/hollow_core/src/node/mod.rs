@@ -57,6 +57,8 @@ pub(crate) mod ws_client;
 pub(crate) mod webp_anim;
 
 #[cfg(test)]
+mod kill_vectors;
+#[cfg(test)]
 mod test_harness;
 
 pub(crate) use crdt_store::CrdtStore;

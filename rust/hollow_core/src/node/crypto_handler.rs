@@ -1540,6 +1540,18 @@ pub(crate) fn backfill_author_allowed(
     allowed
 }
 
+/// E4 over one backfilled page: a post stays only if its author was a member when
+/// it was written, and a reaction riding it only if its reactor was one at its own time.
+pub(crate) fn backfill_filter(
+    state: Option<&crate::crdt::server_state::ServerState>,
+    messages: &mut Vec<SyncMessageItem>,
+) {
+    messages.retain(|m| backfill_author_allowed(state, &m.s, m.ts));
+    for m in messages.iter_mut() {
+        m.reactions.retain(|r| backfill_author_allowed(state, &r.p, r.ts));
+    }
+}
+
 /// Collapse online MLS leaf credential ids (device ids, or master ids for legacy
 /// leaves) into the sorted, deduped set of distinct MASTER identities that are
 /// online; `local_peer` always counts. Coordinator elections use it so a human
@@ -4788,6 +4800,28 @@ mod tests {
         assert!(mls.contains("resolver::disowns("), "fetch.rs: MLS posts from a disowned leaf are kept");
         let live = between(&swarm, "mls_envelope_fits_group(", "match envelope {");
         assert!(live.contains("resolver::disowns("), "swarm.rs: MLS envelopes from a disowned leaf are read");
+        // Section 2 items 5 and 6: an edit, card or reaction asks the change ladder,
+        // a post asks it first, and both batch arms filter authors and reactors.
+        for handler in ["edit_message(", "link_preview_set(", "add_reaction("] {
+            let body = between(&ops, &format!("pub(crate) async fn handle_envelope_{handler}"), "MessageStore::open(");
+            assert!(body.contains("live_change_dropped("), "message_ops.rs: {handler} skips the live change gate");
+        }
+        assert!(between(&ops, "fn live_change_dropped(", "\n}").contains("live_channel_change_refusal("));
+        assert!(between(&ops, "pub(crate) fn live_channel_post_refusal(", "\n}").contains("live_channel_change_refusal("));
+        for (arm, until) in [
+            ("Ok(MessageEnvelope::ChannelSyncBatch {", "ingest_synced_channel_item("),
+            (" MessageEnvelope::ChannelSyncBatch {", "handle_envelope_channel_sync_batch("),
+        ] {
+            let body = between(&swarm, arm, until);
+            assert!(body.contains("channel_backfill_allowed_from("), "swarm.rs: {arm} takes backfill from anyone");
+            assert!(body.contains("backfill_filter("), "swarm.rs: {arm} skips the author and reactor filter");
+        }
+        for (arm, until) in [
+            ("Ok(MessageEnvelope::DmSyncBatch {", "Ok(MessageEnvelope::DmSiblingSyncBatch {"),
+            ("Ok(MessageEnvelope::DmSiblingSyncBatch {", "Ok(MessageEnvelope::EditMessage {"),
+        ] {
+            assert!(between(&swarm, arm, until).contains("store_synced_dm_reactions("), "swarm.rs: {arm} stores reactions unjudged");
+        }
     }
 
     /// D1, D7, D10: a KeyPackage is seated only when its leaf is bound to the device

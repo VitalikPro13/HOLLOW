@@ -350,10 +350,13 @@ fn abandon(pending: &mut HashMap<String, WsTransferState>, id: &str) {
 /// Process a received WS binary chunk from `from`. Called from the swarm when
 /// BinaryDirect arrives. Returns `Some(StreamRequest)` when the transfer is complete
 /// (all bytes received).
+///
+/// `ceiling` names the most bytes a new stream of that kind and id may declare.
 pub fn ws_stream_receive(
     pending: &mut HashMap<String, WsTransferState>,
     from: &str,
     data: &[u8],
+    ceiling: impl Fn(&StreamKind, &str) -> u64,
 ) -> Option<StreamRequest> {
     if data.is_empty() {
         return None;
@@ -425,6 +428,11 @@ pub fn ws_stream_receive(
             return None;
         }
         if payload.len() as u64 > total_size {
+            return None;
+        }
+        let limit = ceiling(&kind, &id);
+        if total_size > limit {
+            hollow_log!("[HOLLOW-SECURITY] Dropped stream {id} from {from}: it declares {total_size} bytes, {limit} allowed");
             return None;
         }
 
@@ -583,6 +591,57 @@ mod tests {
         frame
     }
 
+    /// No ceiling, for the tests that are not about it.
+    fn open(_: &StreamKind, _: &str) -> u64 {
+        u64::MAX
+    }
+
+    /// A-F7: a stream may not declare more than we expect of it. With no header and no
+    /// ask of ours a file stream stays within the send limit, and a share chunk never
+    /// rides this lane; a refused stream leaves no temp behind.
+    #[test]
+    fn a_stream_cannot_declare_past_its_ceiling() {
+        use super::super::file_transfer::DEFAULT_MAX_FILE_SIZE;
+        let ceiling = |kind: &StreamKind, id: &str| {
+            super::super::file_handler::stream_ceiling(
+                kind, id, "mallory", &HashMap::new(), &HashMap::new(), &HashMap::new(),
+            )
+        };
+        let temp = |id: &str| files_dir().join(format!(".ws_recv_{id}.tmp"));
+        let mut pending = HashMap::new();
+
+        let huge = "f7_unasked_huge";
+        let _ = std::fs::remove_file(temp(huge));
+        ws_stream_receive(&mut pending, "mallory", &first_frame(huge, DEFAULT_MAX_FILE_SIZE + 17, &[1u8; 8]), ceiling);
+        let (opened, left) = (pending.contains_key(huge), temp(huge).exists());
+        abandon(&mut pending, huge);
+        assert!(!opened && !left, "A-F7: a stream declaring past the send limit was opened");
+
+        let mut share = vec![TYPE_SHARE_CHUNK];
+        share.extend_from_slice(&pad_id("f7_share"));
+        share.extend_from_slice(&64u64.to_le_bytes());
+        share.extend_from_slice(&7u32.to_le_bytes());
+        share.extend_from_slice(&[2u8; 8]);
+        ws_stream_receive(&mut pending, "mallory", &share, ceiling);
+        let opened = pending.contains_key("f7_share");
+        abandon(&mut pending, "f7_share");
+        assert!(!opened, "A-F7: a share chunk opened a stream on this lane");
+
+        let within = "f7_within_limit";
+        ws_stream_receive(&mut pending, "mallory", &first_frame(within, DEFAULT_MAX_FILE_SIZE + 16, &[1u8; 8]), ceiling);
+        let opened = pending.contains_key(within);
+        abandon(&mut pending, within);
+        assert!(opened, "a stream inside the send limit was refused");
+
+        let swarm = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"))
+            .expect("read swarm.rs");
+        let call = &swarm[swarm.find("ws_stream_transfer::ws_stream_receive(").expect("the stream lane")..];
+        assert!(
+            call[..call.find(") {").expect("its call")].contains("file_handler::stream_ceiling("),
+            "A-F7: the stream lane opens streams with no ceiling",
+        );
+    }
+
     /// H8, H9: a stream belongs to the peer that opened it. Another peer's frames
     /// for its id are dropped while it is live, nobody writes past the size it
     /// declared, and one peer cannot hold more than its share of open streams.
@@ -591,20 +650,20 @@ mod tests {
         let id = "h8_owned_stream";
         let data = vec![0x5Au8; 1000];
         let mut pending = HashMap::new();
-        assert!(ws_stream_receive(&mut pending, "bob", &first_frame(id, 1000, &data[..500])).is_none());
-        assert!(ws_stream_receive(&mut pending, "mallory", &continuation(id, &[0u8; 500])).is_none(), "another peer appended");
-        assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(id, 500, &[0u8; 500])).is_none(), "another peer reopened it");
-        let done = ws_stream_receive(&mut pending, "bob", &continuation(id, &data[500..])).expect("the opener completes it");
+        assert!(ws_stream_receive(&mut pending, "bob", &first_frame(id, 1000, &data[..500]), open).is_none());
+        assert!(ws_stream_receive(&mut pending, "mallory", &continuation(id, &[0u8; 500]), open).is_none(), "another peer appended");
+        assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(id, 500, &[0u8; 500]), open).is_none(), "another peer reopened it");
+        let done = ws_stream_receive(&mut pending, "bob", &continuation(id, &data[500..]), open).expect("the opener completes it");
         assert_eq!(std::fs::read(&done.temp_path).unwrap(), data);
         let _ = std::fs::remove_file(&done.temp_path);
 
         let over = "h9_past_declared";
-        assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(over, 10, &[1u8; 5])).is_none());
-        assert!(ws_stream_receive(&mut pending, "mallory", &continuation(over, &[1u8; 4096])).is_none(), "wrote past its size");
+        assert!(ws_stream_receive(&mut pending, "mallory", &first_frame(over, 10, &[1u8; 5]), open).is_none());
+        assert!(ws_stream_receive(&mut pending, "mallory", &continuation(over, &[1u8; 4096]), open).is_none(), "wrote past its size");
         assert!(!pending.contains_key(over));
 
         for i in 0..MAX_RECV_STREAMS_PER_SENDER + 4 {
-            ws_stream_receive(&mut pending, "mallory", &first_frame(&format!("h9_open_{i}"), 1 << 20, &[1u8; 8]));
+            ws_stream_receive(&mut pending, "mallory", &first_frame(&format!("h9_open_{i}"), 1 << 20, &[1u8; 8]), open);
         }
         let held = pending.len();
         for (_, state) in pending.drain() {
@@ -628,7 +687,7 @@ mod tests {
         chunk.extend_from_slice(file_data);
 
         let mut pending = HashMap::new();
-        let result = ws_stream_receive(&mut pending, "peer", &chunk);
+        let result = ws_stream_receive(&mut pending, "peer", &chunk, open);
         assert!(result.is_some());
         let req = result.unwrap();
         assert_eq!(req.id, id);
@@ -657,7 +716,7 @@ mod tests {
         chunk.extend_from_slice(shard_data);
 
         let mut pending = HashMap::new();
-        let result = ws_stream_receive(&mut pending, "peer", &chunk);
+        let result = ws_stream_receive(&mut pending, "peer", &chunk, open);
         assert!(result.is_some());
         let req = result.unwrap();
         assert_eq!(req.id, id);
@@ -683,7 +742,7 @@ mod tests {
         first.extend_from_slice(&file_data[..500]);
 
         let mut pending = HashMap::new();
-        let result = ws_stream_receive(&mut pending, "peer", &first);
+        let result = ws_stream_receive(&mut pending, "peer", &first, open);
         assert!(result.is_none()); // Not complete yet.
         assert!(pending.contains_key(id));
 
@@ -693,7 +752,7 @@ mod tests {
         cont.extend_from_slice(&id_padded);
         cont.extend_from_slice(&file_data[500..]);
 
-        let result = ws_stream_receive(&mut pending, "peer", &cont);
+        let result = ws_stream_receive(&mut pending, "peer", &cont, open);
         assert!(result.is_some());
         let req = result.unwrap();
         assert_eq!(req.id, id);

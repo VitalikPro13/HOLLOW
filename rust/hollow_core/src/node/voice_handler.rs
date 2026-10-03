@@ -1695,6 +1695,31 @@ pub(crate) async fn check_voice_mode_transition(
     }
 }
 
+/// Whether an envelope is VC signaling, which every lane charges to [`vc_rate_check`].
+pub(crate) fn is_vc_signal(envelope: &MessageEnvelope) -> bool {
+    matches!(
+        envelope,
+        MessageEnvelope::VoiceChannelJoin { .. }
+            | MessageEnvelope::VoiceChannelLeave { .. }
+            | MessageEnvelope::VoiceChannelSdpOffer { .. }
+            | MessageEnvelope::VoiceChannelSdpAnswer { .. }
+            | MessageEnvelope::VoiceChannelIce { .. }
+            | MessageEnvelope::VoiceChannelAudioState { .. }
+            | MessageEnvelope::VoiceChannelScreenOffer { .. }
+            | MessageEnvelope::VoiceChannelScreenAnswer { .. }
+            | MessageEnvelope::VoiceChannelScreenIce { .. }
+            | MessageEnvelope::VoiceChannelScreenState { .. }
+            | MessageEnvelope::VoiceChannelScreenWatch { .. }
+            | MessageEnvelope::VoiceChannelScreenAssign { .. }
+            | MessageEnvelope::VoiceChannelScreenFeedState { .. }
+            | MessageEnvelope::VoiceChannelRenegOffer { .. }
+            | MessageEnvelope::VoiceChannelRenegAnswer { .. }
+            | MessageEnvelope::VoiceChannelLegRestart { .. }
+            | MessageEnvelope::VoiceChannelCameraState { .. }
+            | MessageEnvelope::VoiceChannelRecordingState { .. }
+    )
+}
+
 /// Rate-limit gate for VC signaling envelopes (token bucket per peer).
 /// Returns `true` if the call is allowed, `false` if rate-limited.
 pub(crate) fn vc_rate_check(
@@ -2278,6 +2303,34 @@ mod tests {
 
     fn origin(peer: &str) -> Box<StreamOrigin> {
         Box::new(StreamOrigin { peer: peer.into(), kind: "screen".into(), stream: "abcd1234".into() })
+    }
+
+    /// Section 2 item 8c. Both lanes charge the VC bucket through `is_vc_signal`, so
+    /// a new VoiceChannel* envelope it does not name would go unlimited.
+    #[test]
+    fn is_vc_signal_covers_every_voice_channel_envelope() {
+        let read = |f: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f))
+                .expect("read node source")
+                .replace("\r\n", "\n")
+        };
+        let types = read("src/node/types.rs");
+        let start = types.find("enum MessageEnvelope {").expect("MessageEnvelope");
+        let end = start + types[start..].find("\n}\n").expect("end of MessageEnvelope");
+        let variants: Vec<&str> = types[start..end]
+            .lines()
+            .filter_map(|l| l.trim_start().split([' ', '{', ',']).next())
+            .filter(|name| name.starts_with("VoiceChannel"))
+            .collect();
+        assert!(variants.len() >= 18, "found only {variants:?}");
+
+        let vh = read("src/node/voice_handler.rs");
+        let vh = &vh[..vh.find("#[cfg(test)]\nmod tests").expect("test module")];
+        let at = vh.find("pub(crate) fn is_vc_signal(").expect("voice_handler.rs has no is_vc_signal");
+        let body = &vh[at..at + vh[at..].find("\n}\n").expect("end of is_vc_signal")];
+        for name in variants {
+            assert!(body.contains(&format!("::{name} {{")), "{name} is missing from is_vc_signal");
+        }
     }
 
     /// HOL-SEC-040 (J1, J2, J3, J6). Anyone who joined a room with us (our inbox is
