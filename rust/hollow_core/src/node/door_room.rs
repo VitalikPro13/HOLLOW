@@ -63,9 +63,8 @@ pub(crate) fn forget_heard() {
 const GRANT_DOMAIN: &[u8] = b"hollow-door-grant1";
 /// Between two asks for one room's door, and two answers to one device.
 const ASK_GAP: Duration = Duration::from_secs(20);
-/// Between two removal notices to one former member's device: one is enough to leave
-/// on, and each also tells it a member is online.
-const TOLD_GAP: Duration = Duration::from_secs(600);
+/// Former members' devices we remember telling: past it the oldest is forgotten.
+const TOLD_CAP: usize = 4096;
 /// How many of the members who see an ask answer it.
 const ANSWERERS: usize = 3;
 
@@ -90,8 +89,9 @@ pub(crate) struct DoorRooms {
     asked: HashMap<String, Instant>,
     /// (room, asker) -> the door we last handed it, and when.
     answered: HashMap<(String, String), (u64, Instant)>,
-    /// (room, asker) -> when we last told that former member's device of its removal.
-    told: HashMap<(String, String), Instant>,
+    /// (room, asker) -> the removal we told that former member's device of. Once per
+    /// removal: one notice is enough to leave on, and each tells it we are online.
+    told: HashMap<(String, String), crate::crdt::hlc::HlcTimestamp>,
 }
 
 fn grant_aad(server_id: &str, n: u64, asker: &str, granter: &str) -> Vec<u8> {
@@ -175,13 +175,15 @@ impl DoorRooms {
     /// A device the relay hides in `room` asked for its door. We answer when it is a
     /// device of a current member, we hold a door, and we are among the first few of
     /// the members who see the room by a per-asker order (so not everyone answers). A
-    /// former member's device is told of its removal instead.
+    /// former member's device is told of its removal instead, when an Olm session
+    /// with it can carry the notice.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn answer_ask(
         &mut self,
         room: &str,
         server_id: &str,
         asker: &str,
+        olm: &crate::crypto::OlmManager,
         server_states: &ServerStates,
         ws_room_peers: &WsRoomPeers,
         local_master: &str,
@@ -196,7 +198,7 @@ impl DoorRooms {
             return false;
         };
         if !state.is_member(&master) {
-            return self.tell_removal(room, asker, &master, state, ws_room_peers, our_device, ws_cmd_tx);
+            return olm.has_session(asker) && self.tell_removal(room, asker, &master, state, ws_room_peers, our_device, ws_cmd_tx);
         }
         let Some((n, _, secret)) = state.join_lock.newest_door() else { return false };
         if !self.first_to_answer(room, asker, ws_room_peers, our_device) {
@@ -234,8 +236,8 @@ impl DoorRooms {
     }
 
     /// A former member's device asked: hand it the op that removed it, with what its
-    /// own fold needs to admit that op, so it leaves. Never a door, and nothing to
-    /// anyone our log never shows as a member.
+    /// own fold needs to admit that op, so it leaves. Never a door, nothing to anyone
+    /// our log never shows as a member, and one notice per removal and device.
     #[allow(clippy::too_many_arguments)]
     fn tell_removal(
         &mut self,
@@ -250,19 +252,22 @@ impl DoorRooms {
         // A door ask carries no state vector, so the notice reaches back to the anchor.
         let nothing_held = crate::crdt::sync::StateVector { server_id: room.to_string(), entries: HashMap::new() };
         let notice = crate::crdt::sync::removal_notice(state, master, &nothing_held);
-        if notice.is_empty() {
+        let Some(removal) = notice.last().map(|op| op.hlc.clone()) else {
             hollow_log!("[HOLLOW-SECURITY] Not answering a door ask in {room} from {asker}: no device of a member");
             return false;
-        }
+        };
         let key = (room.to_string(), asker.to_string());
-        if self.told.get(&key).is_some_and(|t| t.elapsed() < TOLD_GAP)
-            || !self.first_to_answer(room, asker, ws_room_peers, our_device)
-        {
+        if self.told.get(&key) == Some(&removal) || !self.first_to_answer(room, asker, ws_room_peers, our_device) {
             return false;
         }
         let Ok(ops_json) = serde_json::to_string(&notice) else { return false };
-        self.told.retain(|_, t| t.elapsed() < TOLD_GAP);
-        self.told.insert(key, Instant::now());
+        if self.told.len() >= TOLD_CAP
+            && !self.told.contains_key(&key)
+            && let Some(oldest) = self.told.iter().min_by(|a, b| a.1.cmp(b.1)).map(|(k, _)| k.clone())
+        {
+            self.told.remove(&oldest);
+        }
+        self.told.insert(key, removal);
         hollow_log!("[HOLLOW-WS] Telling {asker}, a former member the relay hides in {room}, of its removal");
         super::olm_lane::carry(
             ws_cmd_tx,
@@ -344,7 +349,9 @@ mod tests {
     }
 
     /// HOL-SEC-114: a kicked member's device that asks for the door is handed its
-    /// removal, once in a while and never the door; a stranger's ask gets nothing.
+    /// removal and never the door; a stranger's ask gets nothing. Each notice also
+    /// tells the asker we are online, so a device hears of one removal once, and only
+    /// when our session with it can carry the notice.
     #[test]
     fn a_former_member_asking_for_the_door_is_told_its_removal_once() {
         let _g = resolver::test_lock();
@@ -354,26 +361,33 @@ mod tests {
         let sid = founding.server_id.clone();
         let t = founding.hlc.physical_ms;
         let kicked = keys(2).1;
-        let admit = CrdtPayload::MemberAdded {
+        let admit = |at: i64| CrdtPayload::MemberAdded {
             peer_id: kicked.clone(),
             display_name: "m".into(),
             follow: None,
-            ask: Some(JoinAsk::sign(&sid, 1, &keys(2).0)),
+            ask: Some(JoinAsk::sign(&sid, at, &keys(2).0)),
         };
         let mut state = ServerState::skeleton(sid.clone());
         state.ingest_remote(&[
             founding,
-            op_at(1, &sid, t + 1, admit),
+            op_at(1, &sid, t + 1, admit(1)),
             op_at(1, &sid, t + 2, CrdtPayload::MemberRemoved { peer_id: kicked.clone() }),
         ]);
-        let states = std::collections::HashMap::from([(sid.clone(), state)]);
+        let mut states = std::collections::HashMap::from([(sid.clone(), state)]);
         resolver::update("kicked-device", &kicked);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut doors = DoorRooms::default();
         let peers = std::collections::HashMap::new();
-        let ask = |doors: &mut DoorRooms, asker: &str| doors.answer_ask(&sid, &sid, asker, &states, &peers, &owner, "our-device", &tx);
+        let mut olm = crate::crypto::OlmManager::new();
+        let ask = |doors: &mut DoorRooms, states: &std::collections::HashMap<String, ServerState>, olm: &crate::crypto::OlmManager, asker: &str| {
+            doors.answer_ask(&sid, &sid, asker, olm, states, &peers, &owner, "our-device", &tx)
+        };
 
-        assert!(ask(&mut doors, "kicked-device"), "a kicked member's device asked and was not told");
+        assert!(!ask(&mut doors, &states, &olm, "kicked-device") && rx.try_recv().is_err(), "told with no session to carry it");
+        let mut theirs = crate::crypto::OlmManager::new();
+        let otk = theirs.generate_one_time_key();
+        olm.create_outbound_session("kicked-device", &theirs.identity_key_base64(), &otk).unwrap();
+        assert!(ask(&mut doors, &states, &olm, "kicked-device"), "a kicked member's device asked and was not told");
         match rx.try_recv() {
             Ok(WsCommand::Carry { device, room, json, .. }) => {
                 assert_eq!((device.as_str(), room.as_deref()), ("kicked-device", Some(sid.as_str())));
@@ -391,8 +405,16 @@ mod tests {
             }
             other => panic!("no removal notice went out: {other:?}"),
         }
-        assert!(!ask(&mut doors, "kicked-device") && rx.try_recv().is_err(), "told again inside the gap");
-        assert!(!ask(&mut doors, &keys(9).1) && rx.try_recv().is_err(), "a stranger was told something");
+        assert!(!ask(&mut doors, &states, &olm, "kicked-device") && rx.try_recv().is_err(), "told of the same removal again");
+        assert!(!ask(&mut doors, &states, &olm, &keys(9).1) && rx.try_recv().is_err(), "a stranger was told something");
+
+        // Admitted again on a newer ask and removed again: that removal is news.
+        states.get_mut(&sid).unwrap().ingest_remote(&[
+            op_at(1, &sid, t + 3, admit(2)),
+            op_at(1, &sid, t + 4, CrdtPayload::MemberRemoved { peer_id: kicked.clone() }),
+        ]);
+        assert!(ask(&mut doors, &states, &olm, "kicked-device"), "a second removal was never told");
+        assert!(matches!(rx.try_recv(), Ok(WsCommand::Carry { .. })));
         resolver::clear_for_test();
     }
 

@@ -2798,6 +2798,21 @@ pub(crate) fn public_frame_accepted(
     ok
 }
 
+/// True = drop an Olm channel change (edit, card, delete, reaction) for a server we
+/// hold no state for: one we never joined or have left keeps its rows as history, and
+/// its posts are refused the same way.
+pub(crate) fn olm_change_for_unknown_server(
+    server_states: &HashMap<String, ServerState>,
+    sid: Option<&str>,
+    action: &str,
+) -> bool {
+    let unknown = sid.is_some_and(|s| !server_states.contains_key(s));
+    if unknown {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED {action} for unknown server {}", sid.unwrap_or_default());
+    }
+    unknown
+}
+
 /// LIVE gate shared by the edit, card and add-reaction handlers: true = drop, by
 /// [`live_channel_change_refusal`] on the server the frame names, where the handler
 /// then requires the row to sit. With no state for it (a guest) nothing is judged,
@@ -3055,30 +3070,30 @@ pub(crate) async fn handle_envelope_delete_message(
     db_passphrase: &str,
 ) {
     let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) else { return };
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let scope = RowScope::Channel { sid: s, cid: c, signer: sender_peer_id };
-        if !store.channel_message_exists(&mid) || !change_may_touch_row(&store, &scope, Some(&mid)) {
-            return;
-        }
-        // SECURITY: a LIVE delete must carry a signature that verifies. On
-        // plaintext PUBLIC channels the transport-reported sender is
-        // relay-controlled, and an unauthenticated delete is a censorship
-        // primitive. A receiver whose text lags rejects and converges via sync.
-        let ctx = format!("{s}:{c}");
-        let row = RowExtras::load_channel(&store, &mid);
-        let current_text = row.text.clone().unwrap_or_default();
-        if !verify_message_signature_v2(
-            sender_peer_id, sig.as_deref(), pk.as_deref(), "ch-delete", &ctx,
-            ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
-        ) {
-            hollow_log!("[HOLLOW-SECURITY] REJECTED channel delete of {mid} from {sender_peer_id} — signature verification FAILED");
-            return;
-        }
-        let _ = store.hide_channel_message(
-            &mid, ts,
-            sig.as_deref(), pk.as_deref(),
-        );
+    // Dart hears of a delete only once every check below passed: no store, no event.
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
+    let scope = RowScope::Channel { sid: s, cid: c, signer: sender_peer_id };
+    if !store.channel_message_exists(&mid) || !change_may_touch_row(&store, &scope, Some(&mid)) {
+        return;
     }
+    // SECURITY: a LIVE delete must carry a signature that verifies. On
+    // plaintext PUBLIC channels the transport-reported sender is
+    // relay-controlled, and an unauthenticated delete is a censorship
+    // primitive. A receiver whose text lags rejects and converges via sync.
+    let ctx = format!("{s}:{c}");
+    let row = RowExtras::load_channel(&store, &mid);
+    let current_text = row.text.clone().unwrap_or_default();
+    if !verify_message_signature_v2(
+        sender_peer_id, sig.as_deref(), pk.as_deref(), "ch-delete", &ctx,
+        ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED channel delete of {mid} from {sender_peer_id} — signature verification FAILED");
+        return;
+    }
+    if store.hide_channel_message(&mid, ts, sig.as_deref(), pk.as_deref()).is_err() {
+        return;
+    }
+    drop(store);
     if let (Some(s_id), Some(c_id)) = (sid, cid) {
         let _ = event_tx.send(NetworkEvent::ChannelMessageDeleted {
             server_id: s_id,
@@ -3208,10 +3223,12 @@ pub(crate) async fn handle_envelope_add_reaction(
     if !channel_reaction_target_ok(&store, &mid, &s_id, &c_id) {
         return;
     }
-    let _ = store.add_reaction(
-        &mid, &emoji, peer_str, ts,
-        sig.as_deref(), pk.as_deref(),
-    );
+    // A refused add (a replay older than its own removal, the per-reactor cap) shows
+    // nothing either, as a removal that removed nothing.
+    if store.add_reaction(&mid, &emoji, peer_str, ts, sig.as_deref(), pk.as_deref()) != Ok(true) {
+        return;
+    }
+    drop(store);
     let _ = event_tx.send(NetworkEvent::ChannelReactionAdded {
         server_id: s_id,
         channel_id: c_id,
@@ -4160,6 +4177,76 @@ mod tests {
         let (s, c) = named(Some((sid, cid)));
         handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "hello again".into(), 5_000, sig, pk, s, c, &path, &pass).await;
         assert_eq!(text(), "hello again");
+    }
+
+    /// Phase B re-check A-CH04, A-CH05. Dart hears of a channel delete or reaction
+    /// only once it was checked and stored: a delete whose store will not open, and a
+    /// replayed add older than its reactor's own removal, show nothing.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_channel_change_reaches_dart_only_once_stored() {
+        let _g = crate::node::resolver::test_lock();
+        let (_tmp, path, pass) = file_db();
+        let (bob, mallory) = (kp(154), kp(155));
+        let (b, m) = (bob.peer_id(), mallory.peer_id());
+        let (sid, cid) = ("srv-a", "chan-a");
+        open(&path, &pass).insert_channel_message(
+            sid, cid, &b, "hello", false, 1_000, None, None, Some("c1"), None, None, Some(1_000_000), None,
+        ).unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let place = || (Some(sid.to_string()), Some(cid.to_string()));
+
+        let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch-delete", &format!("{sid}:{cid}"), "c1", 6_000, "hello");
+        let (s, c) = place();
+        let unopenable = format!("{path}-gone/no/such.db");
+        handle_envelope_delete_message(&tx, &bob, &b, "c1".into(), 6_000, sig, pk, s, c, &unopenable, &pass).await;
+        assert!(rx.try_recv().is_err(), "a delete nobody could check reached Dart");
+
+        let react = |kind: &str, ts: i64| sign_message(&mallory, &pk_b64(&mallory), &format!("{kind}:c1:here:{ts}"));
+        let (sig, pk) = react("reaction", 7_000);
+        let (s, c) = place();
+        handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 7_000, sig.clone(), pk.clone(), s, c, &path, &pass).await;
+        let (usig, upk) = react("unreaction", 8_000);
+        let (s, c) = place();
+        handle_envelope_remove_reaction(&tx, &mallory, &m, "c1".into(), "here".into(), 8_000, usig, upk, s, c, &path, &pass).await;
+        let (s, c) = place();
+        handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 7_000, sig, pk, s, c, &path, &pass).await;
+
+        let mut added = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, NetworkEvent::ChannelReactionAdded { .. }) {
+                added += 1;
+            }
+        }
+        assert_eq!(added, 1, "a replayed reaction the store refused still reached Dart");
+        assert!(!open(&path, &pass).load_reactions_for_messages(&["c1".to_string()]).unwrap().contains_key("c1"));
+    }
+
+    /// Phase B re-check A-CH05. Over Olm, a change for a server we hold no state for
+    /// (never joined, or left with its rows kept) is refused before any handler, as
+    /// its posts are; every Olm change arm asks.
+    #[test]
+    fn authz_olm_channel_changes_need_a_server_we_hold() {
+        let held: HashMap<String, ServerState> =
+            HashMap::from([("srv-a".to_string(), crate::crdt::testkeys::owned_state("srv-a", "A", 191).0)]);
+        assert!(olm_change_for_unknown_server(&held, Some("srv-gone"), "edit"));
+        assert!(!olm_change_for_unknown_server(&held, Some("srv-a"), "edit"));
+        assert!(!olm_change_for_unknown_server(&held, None, "edit"), "a DM change has no server");
+
+        let swarm = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"))
+            .expect("read swarm.rs")
+            .replace("\r\n", "\n");
+        for (arm, handler) in [
+            ("Ok(MessageEnvelope::EditMessage {", "handle_envelope_edit_message("),
+            ("Ok(MessageEnvelope::LinkPreviewSet {", "handle_envelope_link_preview_set("),
+            ("Ok(MessageEnvelope::DeleteMessage {", "handle_envelope_delete_message("),
+            ("Ok(MessageEnvelope::AddReaction {", "handle_envelope_add_reaction("),
+            ("Ok(MessageEnvelope::RemoveReaction {", "handle_envelope_remove_reaction("),
+        ] {
+            let start = swarm.find(arm).unwrap_or_else(|| panic!("missing {arm}"));
+            let body = &swarm[start..start + swarm[start..].find(handler).unwrap_or_else(|| panic!("{arm}: no {handler}"))];
+            assert!(body.contains("olm_change_for_unknown_server("), "{arm} takes a change for a server we do not hold");
+        }
     }
 
     /// C1, C4, C5 at handler level: the Olm, MLS and public arms all run this ingest

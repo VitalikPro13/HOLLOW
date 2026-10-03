@@ -1544,6 +1544,25 @@ pub(crate) fn sync_partner(
         && state.is_some_and(|s| s.is_member(&master) && channel.is_none_or(|c| s.can_see_channel(&master, c)))
 }
 
+/// Whom the sync requests an MLS commit or Welcome triggers go to, with the master its
+/// channel reads are judged by: the leaf that made it when its certified master is a
+/// current member whose roster does not refuse it (a joiner cannot place co-members'
+/// devices yet), else the device that delivered it when that is a [`sync_partner`].
+/// Anyone can re-seal a member's commit or Welcome, and the requests name what we hold.
+pub(crate) fn mls_sync_partner<'a>(
+    state: Option<&crate::crdt::server_state::ServerState>,
+    leaf: Option<&'a crate::crypto::LeafIdentity>,
+    frame_sender: Option<&'a str>,
+) -> Option<(&'a str, String)> {
+    let state = state?;
+    if let Some(leaf) = leaf.filter(|l| state.is_member(&l.master) && !super::mls_authority::refused(l)) {
+        return Some((leaf.device.as_str(), leaf.master.clone()));
+    }
+    frame_sender
+        .filter(|d| sync_partner(Some(state), d, None))
+        .map(|d| (d, super::resolver::resolve(d)))
+}
+
 /// E4: backfill never brings in a post whose author (master) was not a member when
 /// it was written, going by the membership record. A legacy-anchored server has no
 /// record to prove it by yet and is not judged.
@@ -2559,7 +2578,9 @@ pub(crate) async fn handle_mls_commit_frame(
     };
 
     let meeting_host = mls_mgr.pinned_committer(&group_key).map(str::to_string);
+    let mut committer = None;
     let judged = mls_mgr.process_commit_judged(&group_key, &commit_bytes, |facts| {
+        committer = facts.committer.as_ref().and_then(crate::crypto::LeafView::bound).cloned();
         super::mls_authority::judge_commit(
             server_states, server_id, channel_id.as_deref(), meeting_host.as_deref(), facts,
         )
@@ -2581,13 +2602,15 @@ pub(crate) async fn handle_mls_commit_frame(
             // Processing spent the commit's key, so persist the ratchet as for any receive.
             persist_mls_state(mls_mgr, crypto_store);
             hollow_log!("[HOLLOW-MLS] Holding commit for {group_key} from {frame_sender}: {reason}");
-            if let Some(state) = server_states.get(server_id)
+            // The committer's view is ahead of ours: pull its ops so the batch tick's
+            // retry can pass.
+            let state = server_states.get(server_id);
+            if let (Some(state), Some((partner, _))) = (state, mls_sync_partner(state, committer.as_ref(), Some(frame_sender)))
                 && let Ok(sv) = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state))
             {
-                // The committer's view is ahead of ours: pull its ops so the batch
-                // tick's retry can pass. No epoch hint, we already hold its commit.
+                // No epoch hint, we already hold its commit.
                 super::olm_lane::carry(
-                    ws_cmd_tx, frame_sender, None,
+                    ws_cmd_tx, partner, None,
                     &HavenMessage::SyncRequest {
                         server_id: server_id.to_string(),
                         state_vector_json: sv,
@@ -4814,6 +4837,11 @@ mod tests {
         ] {
             assert!(between(src, arm, "voice_channel_participants.entry(").contains("voice_join_refusal("), "{name}: a voice join skips the seat gate");
         }
+        assert!(
+            between(&swarm, "HavenMessage::VoiceChannelJoin { server_id, channel_id } => {", "voice_channel_participants.entry(")
+                .contains("conference::seated("),
+            "swarm.rs: a meeting voice join skips the roster's seat rule",
+        );
         let olm = between(&swarm, "Ok(MessageEnvelope::ChannelMessage { inner }) => {", "Ok(MessageEnvelope::ChannelSyncBatch");
         assert!(olm.contains("message_ops::handle_envelope_channel_message("), "swarm.rs: the Olm arm has its own ingest again");
         let public = between(&fetch, "HavenMessage::PublicChannelMessage {", "insert_channel_row(");
@@ -4848,6 +4876,21 @@ mod tests {
         }
     }
 
+    /// HOL-SEC-089: the channel sync requests a Welcome triggers name our marks for each
+    /// channel, so each goes only to a partner who can read that channel. No harness
+    /// shape makes a Welcome's only partner a member who cannot.
+    #[test]
+    fn welcome_channel_syncs_stay_gated() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node").join("swarm.rs");
+        let swarm = std::fs::read_to_string(path).expect("read swarm.rs").replace("\r\n", "\n");
+        let start = swarm.find("async fn after_welcome_joined(").expect("after_welcome_joined");
+        let body = &swarm[start..start + swarm[start..].find("\n}\n").expect("its end")];
+        assert!(
+            body.contains("state.can_see_channel(&peer_master, c)"),
+            "swarm.rs: a Welcome's channel syncs go to a partner who cannot read the channel",
+        );
+    }
+
     /// D1, D7, D10: a KeyPackage is seated only when its leaf is bound to the device
     /// that sent it, on the live, parked-join and meeting paths. The binding is the
     /// device key itself, so not even the relay can name another sender.
@@ -4862,13 +4905,19 @@ mod tests {
         };
         let live = arm("HavenMessage::MlsKeyPackage { server_id, key_package, channel_id: kp_channel_id } => {", "pending_mls_key_packages");
         assert!(live.contains("key_package_identity(") && live.contains("id.device == peer_str"), "live KeyPackage arm");
+        // D8: the committer's planner applies the same rule, so only this scan sees the
+        // arm stop asking it.
+        assert!(live.contains("rules.membership(&sender_leaf.master"), "live KeyPackage arm queues a non-member's or a banned identity's leaf");
         let parked = arm("if parked && let Some(kp_b64) = key_package.as_ref() {", "pending_mls_key_packages");
         assert!(parked.contains("key_package_identity(") && parked.contains("id.device != peer_str"), "parked-join KeyPackage");
         let conf = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/conference.rs"))
             .expect("read conference.rs");
         let knock = &conf[conf.find("if super::blocklist::is_blocked(sender_peer)").expect("knock handler")..];
         let knock = &knock[..knock.find("host_state.pending.insert(").expect("waiting room")];
-        assert!(knock.contains("key_package_identity(") && knock.contains("id.device == sender_peer"), "meeting knock");
+        assert!(knock.contains("seat_of(&key_package_b64, sender_peer)"), "meeting knock");
+        let seat = &conf[conf.find("fn seat_of(").expect("seat_of")..];
+        let seat = &seat[..seat.find("\n}").expect("its end")];
+        assert!(seat.contains("key_package_identity(") && seat.contains("id.device == device"), "meeting knock's seat");
     }
 
     /// L4: the live node shows a DM only after its signature verified. A decrypted

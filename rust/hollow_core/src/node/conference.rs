@@ -29,9 +29,10 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
-use crate::crypto::{CryptoStore, MlsManager};
+use crate::crypto::{CryptoStore, LeafView, MlsManager};
 
 use super::crypto_handler::{broadcast_mls_commit, persist_mls_state};
+use super::mls_authority::refused;
 use super::types::{ConfHost, HavenMessage, Lane, NetworkEvent};
 use super::ws_client::WsCommand;
 
@@ -78,14 +79,22 @@ pub(crate) fn new_conf_nonce() -> Result<String, String> {
 }
 
 /// The host master a host frame proves, `None` when it proves nothing: the meeting
-/// id must hash from the named master and nonce, and the certificate must bind the
-/// device that sealed the frame to that master.
+/// id must hash from the named master and nonce, the certificate must bind the
+/// device that sealed the frame to that master, and the master's roster, where we
+/// hold it, must count that device (the master key alone certifies anything).
 pub(crate) fn verified_host(conf_id: &str, sender_device: &str, host: &ConfHost) -> Option<String> {
     if !hosts_meeting(conf_id, &host.master, Some(&host.nonce)) {
         return None;
     }
     let identity = crate::crypto::certified_device(&host.cert)?;
-    (identity.device == sender_device && identity.master == host.master).then(|| host.master.clone())
+    (identity.device == sender_device && identity.master == host.master && !refused(&identity))
+        .then(|| host.master.clone())
+}
+
+/// Whether `device` holds a seat among a meeting group's `leaves`: a leaf bound to it
+/// that its master's roster does not refuse.
+pub(crate) fn seated(leaves: &[LeafView], device: &str) -> bool {
+    leaves.iter().filter_map(LeafView::bound).any(|leaf| leaf.device == device && !refused(leaf))
 }
 
 /// Whether `master` founded the meeting `conf_id` with `nonce`.
@@ -589,13 +598,12 @@ pub(crate) async fn handle_inbound_join_request(
     // Chat is attributed by the leaf, so the knocker is seated only under a leaf
     // bound to its own device: never as the host or another participant, and the
     // relay cannot swap in a KeyPackage of its own (D7).
-    let names_sender = base64::engine::general_purpose::STANDARD
-        .decode(&key_package_b64)
-        .ok()
-        .and_then(|kp| MlsManager::key_package_identity(&kp).ok())
-        .is_some_and(|leaf| leaf.bound().is_some_and(|id| id.device == sender_peer));
-    if !names_sender {
+    let Some(knocker) = seat_of(&key_package_b64, sender_peer) else {
         hollow_log!("[HOLLOW-SECURITY] Dropped a join request for {conf_id} from {sender_peer}: its KeyPackage is not bound to that device");
+        return;
+    };
+    if refused(&knocker) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a join request for {conf_id} from {sender_peer}: its master's roster does not count it");
         return;
     }
 
@@ -635,6 +643,12 @@ pub(crate) async fn handle_inbound_join_request(
     }).await;
 }
 
+/// The leaf a knock's KeyPackage would seat, when it is bound to the knocking device.
+fn seat_of(key_package_b64: &str, device: &str) -> Option<crate::crypto::LeafIdentity> {
+    let kp = base64::engine::general_purpose::STANDARD.decode(key_package_b64).ok()?;
+    MlsManager::key_package_identity(&kp).ok()?.bound().filter(|id| id.device == device).cloned()
+}
+
 /// Host accepted a waiting joiner (or the waiting room is off): commit the MLS
 /// add, Welcome the joiner directly (with the nonce that proves us its host),
 /// broadcast the commit to the room with the Tier-1 epoch guard, and rotate our
@@ -652,6 +666,11 @@ pub(crate) async fn admit_peer(
     key_package_b64: &str,
 ) {
     let sid = conf_server_id(conf_id);
+    // The roster may have dropped the device since it knocked.
+    if seat_of(key_package_b64, peer_id).is_none_or(|leaf| refused(&leaf)) {
+        hollow_log!("[HOLLOW-SECURITY] Not admitting {peer_id} to {conf_id}: its master's roster does not count it");
+        return;
+    }
     let Some(mls_mgr) = mls.as_mut() else { return; };
     let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(key_package_b64) {
         Ok(b) => b,
@@ -901,6 +920,10 @@ pub(crate) async fn handle_inbound_chat(
     };
     // Receive ratchet advanced — same persist rule as every MLS decrypt site.
     persist_mls_state(mls_mgr, crypto_store);
+    if refused(&sender) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a group line in {conf_id} from leaf {}: its master's roster does not count it", sender.device);
+        return;
+    }
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&plaintext) else { return; };
 
     if let Some(card) = parsed.get("card").and_then(|c| serde_json::from_value::<super::types::SignedCard>(c.clone()).ok()) {
@@ -1030,6 +1053,8 @@ mod tests {
     /// and the certificate binds the device that sealed the frame to that master.
     #[test]
     fn a_host_frame_proves_its_host_only_from_the_hosts_device() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
         let (host_master, host_device, rogue) = (kp(1), kp(2), kp(3));
         let conf_id = derive_conf_id(&host_master.peer_id(), "n1");
         let proof = ConfHost {
@@ -1048,6 +1073,58 @@ mod tests {
         assert_eq!(verified_host(&conf_id, &rogue.peer_id(), &own), None, "a rogue's own proof names another meeting");
         let forged = ConfHost { cert: crate::crypto::certificate_for_test(&rogue, &rogue), ..proof.clone() };
         assert_eq!(verified_host(&conf_id, &rogue.peer_id(), &forged), None, "a certificate for another master");
+    }
+
+    /// G1 (design ID-1): the host's master key certifies any device, so where we hold
+    /// the host's roster a device it does not count, or a removed one, proves no host.
+    /// Holding none (a stranger's meeting, AR-15), the certificate is all there is.
+    #[test]
+    fn a_host_frame_counts_only_from_a_device_the_hosts_roster_counts() {
+        use crate::node::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let (host_master, host_device, minted) = (kp(11), kp(12), kp(13));
+        let conf_id = derive_conf_id(&host_master.peer_id(), "n1");
+        let proof = |device: &NativeKeypair| ConfHost {
+            master: host_master.peer_id(),
+            nonce: "n1".into(),
+            cert: crate::crypto::certificate_for_test(device, &host_master),
+        };
+        let host = Some(host_master.peer_id());
+        assert_eq!(verified_host(&conf_id, &minted.peer_id(), &proof(&minted)), host, "first contact: the certificate decides");
+
+        resolver::note_roster(&host_master.peer_id());
+        resolver::update_many(&host_master.peer_id(), [host_device.peer_id().as_str()]);
+        assert_eq!(verified_host(&conf_id, &minted.peer_id(), &proof(&minted)), None, "a device the host's roster leaves out");
+        assert_eq!(verified_host(&conf_id, &host_device.peer_id(), &proof(&host_device)), host);
+
+        resolver::mark_revoked(&[host_device.peer_id()]);
+        assert_eq!(verified_host(&conf_id, &host_device.peer_id(), &proof(&host_device)), None, "a removed device");
+        resolver::clear_for_test();
+    }
+
+    /// A meeting seat (the voice arm's membership check) is a leaf bound to the device
+    /// that its master's roster, where we hold it, counts.
+    #[test]
+    fn a_meeting_seat_needs_a_leaf_its_masters_roster_counts() {
+        use crate::crypto::LeafIdentity;
+        use crate::node::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let leaves = [
+            LeafView::Bound(LeafIdentity { device: "dev-a".into(), master: "m-a".into() }),
+            LeafView::Unbound("dev-u".into()),
+        ];
+        assert!(seated(&leaves, "dev-a"), "a stranger's leaf, judged by its certificate");
+        assert!(!seated(&leaves, "dev-u"), "an unbound leaf");
+        assert!(!seated(&leaves, "dev-x"), "no leaf");
+        resolver::note_roster("m-a");
+        assert!(!seated(&leaves, "dev-a"), "a leaf the roster does not count");
+        resolver::update_many("m-a", ["dev-a"]);
+        assert!(seated(&leaves, "dev-a"));
+        resolver::mark_revoked(&["dev-a".to_string()]);
+        assert!(!seated(&leaves, "dev-a"), "a removed device");
+        resolver::clear_for_test();
     }
 
     /// S-26: the knock proves the code for its own device and meeting, so a proof

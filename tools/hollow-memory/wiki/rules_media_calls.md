@@ -56,6 +56,13 @@ whitelist) stay in CLAUDE.md.
 - Always `await` WebRTC disposal (renderer/PC/stream); unawaited leaks ~200MB/session.
   Fork native: per-PC EventChannel teardown in Dispose (after Dart cancels), NEVER Close.
   `feedback_webrtc_close_dispose_eventchannel`.
+- VC leave: Rust reports OUR OWN leave (`onLocalLeft`) while `leaveChannel` is still
+  tearing down, so `_teardownCall` is SINGLE-FLIGHT (`_teardownInFlight`, every caller
+  awaits it), reads `watchingScreenShares` BEFORE its first await (each watch's forwarder
+  offer must be withdrawn), guards every phase (one throw never skips closing the mesh),
+  and empties share maps before closing them. Two racing teardowns double-disposed natives
+  and leaked the mesh with its watchdogs still dialing (HOL-SEC-120,
+  `test/vc_leave_teardown_test.dart`).
 - Forked `flutter_webrtc` (`packages/flutter_webrtc/`, pubspec `path:`): when iterating
   native C++, delete `build/windows/x64/plugins/flutter_webrtc/` first; test from Release
   with `--release`.

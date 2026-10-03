@@ -33,8 +33,11 @@ remembered it, and it passed key exchange and the Olm identity check again.
 
 ## Reproduction
 
-`authz_a_revoked_sibling_is_not_re_bound_by_the_proof` (node/swarm.rs tests),
-`authz_a_revoked_device_stays_refused_after_a_restart` (node/crypto_handler.rs tests).
+`authz_only_a_roster_member_gets_sibling_state` (node/swarm.rs tests),
+`authz_a_removed_device_stays_refused_after_a_restart` (node/roster_book.rs tests).
+Design ID-1 replaced the original two tests (`authz_a_revoked_sibling_is_not_re_bound_by_the_proof`,
+`authz_a_revoked_device_stays_refused_after_a_restart`) when the sibling proof and
+device lists became the roster.
 
 ## Fix
 

@@ -702,24 +702,6 @@ impl ServerState {
             .map(|(pid, _)| pid.clone())
     }
 
-    /// One op's whole judgment against the current state (signature, clock bound,
-    /// permission matrix), as `ingest_remote` makes it op by op. Test-only: remote ops
-    /// enter through `ingest_remote`, which judges each at its own point in the fold.
-    #[cfg(test)]
-    pub fn admit_remote_op(&self, op: &CrdtOp) -> Result<(), OpReject> {
-        if op.server_id != self.server_id {
-            return Err(OpReject::WrongServer);
-        }
-        op.verify_author()?;
-        if op.hlc.physical_ms > super::hlc::wall_clock_ms() + super::hlc::MAX_DRIFT_MS {
-            return Err(OpReject::FutureHlc);
-        }
-        if !self.op_allowed(op) {
-            return Err(OpReject::NotAllowed);
-        }
-        Ok(())
-    }
-
     /// Pull every LWW register in this state back inside the clock bound.
     ///
     /// A `ServerStateSnapshot` is adopted wholesale from one responder during a join, so
@@ -2165,7 +2147,7 @@ mod tests {
 
     /// A state with a signer installed, so `create_op` works. The owner id stays the
     /// caller's readable string: these tests drive `op_allowed` and `apply_op`, neither
-    /// of which verifies a signature. Anything going through `admit_remote_op` uses
+    /// of which verifies a signature. Anything going through `ingest_remote` uses
     /// `owned_state`, where the owner id is DERIVED from the key.
     fn test_state(server_id: String, name: String, owner: String) -> ServerState {
         let mut s = ServerState::new(server_id, name, owner);
@@ -2221,6 +2203,9 @@ mod tests {
         let ch = |cid: &str| CrdtPayload::ChannelRenamed {
             channel_id: cid.into(),
             new_name: "n".into(),
+        };
+        let sticker = |hash: String, name: &str, pack: &str, side: u32| CrdtPayload::StickerAdded {
+            hash, name: name.into(), pack: pack.into(), animated: false, w: side, h: 64,
         };
         let cases: Vec<(&str, CrdtPayload, bool)> = vec![
             // Channel management (MANAGE_CHANNELS): admin yes, moderator/member no.
@@ -2304,6 +2289,19 @@ mod tests {
             ("alice", CrdtPayload::EmojiAdded { name: "pog".into(), hash: "a".repeat(64), animated: false }, false),
             ("admin", CrdtPayload::EmojiRemoved { name: "pog".into() }, true),
             ("alice", CrdtPayload::EmojiRemoved { name: "pog".into() }, false),
+            // Stickers: MANAGE_EMOTES + hash, both labels and the token's dimensions.
+            ("admin", sticker("a".repeat(64), "wave", "pack", 128), true),
+            ("alice", sticker("a".repeat(64), "wave", "pack", 128), false),
+            ("admin", sticker("zz".into(), "wave", "pack", 128), false),
+            ("admin", sticker("a".repeat(64), "wa\u{7}ve", "pack", 128), false),
+            ("admin", sticker("a".repeat(64), "wave", &"p".repeat(33), 128), false),
+            ("admin", sticker("a".repeat(64), "wave", "pack", 0), false),
+            ("admin", sticker("a".repeat(64), "wave", "pack", 4097), false),
+            ("admin", CrdtPayload::StickerAdded {
+                hash: "a".repeat(64), name: "wave".into(), pack: "pack".into(), animated: false, w: 64, h: 0,
+            }, false),
+            ("admin", CrdtPayload::StickerRemoved { hash: "a".repeat(64) }, true),
+            ("alice", CrdtPayload::StickerRemoved { hash: "a".repeat(64) }, false),
             // Tombstone: Owner only.
             ("owner", CrdtPayload::ServerDeleted { deleted_at: 1 }, true),
             ("admin", CrdtPayload::ServerDeleted { deleted_at: 1 }, false),
@@ -3230,6 +3228,40 @@ mod tests {
         assert!(allowed(Some(&s), "vipper", "ch"));
     }
 
+    /// HOL-SEC-089, held commits and Welcomes: the sync requests they trigger name what
+    /// we hold, so they go to the device of the leaf that made them when it speaks for
+    /// a member, else to a member that delivered them, never to a stranger.
+    #[test]
+    fn authz_mls_syncs_ask_only_a_member_device() {
+        use crate::node::resolver;
+        let _g = resolver::test_lock();
+        resolver::clear_for_test();
+        let partner = |leaf: Option<&crate::crypto::LeafIdentity>, sender: Option<&str>| {
+            crate::node::crypto_handler::mls_sync_partner(Some(&label_gate_fixture()), leaf, sender)
+                .map(|(device, master)| (device.to_string(), master))
+        };
+        let leaf = |device: &str, master: &str| crate::crypto::LeafIdentity { device: device.into(), master: master.into() };
+        let pair = |device: &str, master: &str| Some((device.to_string(), master.to_string()));
+        let (members, strangers) = (leaf("member-dev", "member"), leaf("stranger-dev", "stranger"));
+
+        assert_eq!(partner(Some(&members), Some("relay")), pair("member-dev", "member"), "the leaf, by its certificate, never the re-sealer");
+        assert_eq!(partner(Some(&strangers), Some("vipper")), pair("vipper", "vipper"), "a leaf we do not count: the member that delivered it");
+        assert_eq!(partner(Some(&strangers), Some("relay")), None, "nobody outside the server");
+        assert_eq!(partner(None, Some("relay")), None);
+        assert_eq!(partner(Some(&members), None), pair("member-dev", "member"));
+        assert_eq!(crate::node::crypto_handler::mls_sync_partner(None, Some(&members), Some("member")), None, "a server we do not hold");
+
+        resolver::note_roster("member");
+        assert_eq!(partner(Some(&members), Some("vipper")), pair("vipper", "vipper"), "a device the member's roster does not count");
+        resolver::update_many("member", ["member-dev"]);
+        assert_eq!(partner(Some(&members), Some("relay")), pair("member-dev", "member"));
+        resolver::mark_revoked(&["member-dev".to_string()]);
+        assert_eq!(partner(Some(&members), Some("relay")), None, "a removed device a stranger delivered");
+        resolver::mark_revoked(&["vipper".to_string()]);
+        assert_eq!(partner(Some(&strangers), Some("vipper")), None, "a removed device that delivered it");
+        resolver::clear_for_test();
+    }
+
     /// Stored channel content is served only to a current member who can see the
     /// channel, or to anyone for a public one; an unknown peer's role resolves to
     /// plain Member, so membership is the first rung.
@@ -4069,8 +4101,16 @@ mod tests {
     //
     // These are the inverted regression tests for the 2026-09 audit's Critical
     // CRDT findings. Each one describes an op a hostile member could put on
-    // the wire before the fix; `admit_remote_op` is the single gate that now
+    // the wire before the fix; `ingest_remote` is the single entry that now
     // refuses it, and every remote ingest path calls it.
+
+    /// What the real ingest makes of one remote op: the verdict of its stateless
+    /// checks, and whether the op entered the log of a copy of `state`.
+    fn judge(state: &ServerState, op: &CrdtOp) -> (Result<(), OpReject>, bool) {
+        let mut replica = state.clone();
+        let admitted = !replica.ingest_remote(std::slice::from_ref(op)).admitted.is_empty();
+        (state.stateless_check(op, hlc_now()), admitted)
+    }
 
     /// One server, owner = tag 1, member = tag 2, both able to sign as
     /// themselves. Returns (state, owner id, member keys).
@@ -4090,11 +4130,12 @@ mod tests {
     /// An op the owner would have authored, minus the proof. Every op on the
     /// wire before this fix looked exactly like this.
     #[test]
-    fn admit_remote_rejects_unsigned_op() {
+    fn ingest_rejects_unsigned_op() {
         let (state, owner_id, member) = admitting_server();
         let op = CrdtOp {
             server_id: "s1".into(),
-            hlc: HlcTimestamp { physical_ms: hlc_now(), counter: 0, actor: owner_id.clone() },
+            // Off the clock of the admission just authored, which dedup would match first.
+            hlc: HlcTimestamp { physical_ms: hlc_now() + 1_000, counter: 0, actor: owner_id.clone() },
             author: owner_id.clone(),
             payload: CrdtPayload::RoleChanged {
                 peer_id: member.1.clone(),
@@ -4103,13 +4144,24 @@ mod tests {
             },
             auth: None,
         };
-        assert_eq!(state.admit_remote_op(&op), Err(OpReject::MissingSignature));
+        assert_eq!(judge(&state, &op), (Err(OpReject::MissingSignature), false));
+    }
+
+    /// The owner's own signed op, for another server: it says nothing about this one.
+    #[test]
+    fn ingest_rejects_another_servers_op() {
+        let (mut state, _owner_id, _member) = admitting_server();
+        let mut op = state.create_op(CrdtPayload::ServerRenamed { new_name: "Elsewhere".into() });
+        op.server_id = "s2".into();
+        let (kp, _, pk) = keys(1);
+        op.sign(&kp, &pk);
+        assert_eq!(judge(&state, &op), (Err(OpReject::WrongServer), false));
     }
 
     /// E14: the member signs its own op correctly but stamps the owner's name into
     /// the clock, which breaks LWW ties and the dedup key in the owner's name.
     #[test]
-    fn admit_remote_rejects_a_clock_naming_another_author() {
+    fn ingest_rejects_a_clock_naming_another_author() {
         let (state, owner_id, member) = admitting_server();
         let mut op = CrdtOp {
             server_id: "s1".into(),
@@ -4122,13 +4174,13 @@ mod tests {
             auth: None,
         };
         op.sign(&member.0, &member.2);
-        assert_eq!(state.admit_remote_op(&op), Err(OpReject::ActorMismatch));
+        assert_eq!(judge(&state, &op), (Err(OpReject::ActorMismatch), false));
     }
 
     /// The member signs with its OWN key but writes the owner's id into
     /// `author` — the author-spoof that promoted anyone to Admin.
     #[test]
-    fn admit_remote_rejects_author_mismatch() {
+    fn ingest_rejects_author_mismatch() {
         let (state, owner_id, member) = admitting_server();
         let mut op = CrdtOp {
             server_id: "s1".into(),
@@ -4142,13 +4194,13 @@ mod tests {
             auth: None,
         };
         op.sign(&member.0, &member.2);
-        assert_eq!(state.admit_remote_op(&op), Err(OpReject::AuthorMismatch));
+        assert_eq!(judge(&state, &op), (Err(OpReject::AuthorMismatch), false));
     }
 
     /// A real owner-authored op whose PAYLOAD was rewritten in flight. The
     /// key still derives the author, so only the signature catches it.
     #[test]
-    fn admit_remote_rejects_bad_signature() {
+    fn ingest_rejects_bad_signature() {
         let (mut state, _owner_id, member) = admitting_server();
         let mut op = state.create_op(CrdtPayload::RoleChanged {
             peer_id: member.1.clone(),
@@ -4160,13 +4212,13 @@ mod tests {
             role: MemberRole::Admin,
             priority: MemberRole::Admin.priority(),
         };
-        assert_eq!(state.admit_remote_op(&op), Err(OpReject::BadSignature));
+        assert_eq!(judge(&state, &op), (Err(OpReject::BadSignature), false));
     }
 
     /// CRDT-2: a validly signed op stamped at the end of time. It would win
     /// every future LWW comparison and lock the field against its real owner.
     #[test]
-    fn admit_remote_rejects_future_hlc() {
+    fn ingest_rejects_future_hlc() {
         let (mut state, owner_id, _member) = admitting_server();
         let mut op = state.create_op(CrdtPayload::ServerRenamed { new_name: "PWNED".into() });
         op.hlc.physical_ms = u64::MAX;
@@ -4175,19 +4227,19 @@ mod tests {
         op.sign(&kp, &pk);
         assert_eq!(op.author, owner_id, "authored by the real owner");
         assert!(op.verify_author().is_ok(), "signature itself is valid");
-        assert_eq!(state.admit_remote_op(&op), Err(OpReject::FutureHlc));
+        assert_eq!(judge(&state, &op), (Err(OpReject::FutureHlc), false));
     }
 
     /// The honest case still passes all three checks.
     #[test]
-    fn admit_remote_accepts_valid_signed_op() {
+    fn ingest_accepts_valid_signed_op() {
         let (mut state, _owner_id, member) = admitting_server();
         let op = state.create_op(CrdtPayload::RoleChanged {
             peer_id: member.1.clone(),
             role: MemberRole::Admin,
             priority: MemberRole::Admin.priority(),
         });
-        assert_eq!(state.admit_remote_op(&op), Ok(()));
+        assert_eq!(judge(&state, &op), (Ok(()), true));
 
         // And a member's own self-write is admitted too (no privilege needed).
         let mut replica = state.clone();
@@ -4197,7 +4249,7 @@ mod tests {
             peer_id: member.1.clone(),
             nickname: "Em".into(),
         });
-        assert_eq!(state.admit_remote_op(&self_op), Ok(()));
+        assert_eq!(judge(&state, &self_op), (Ok(()), true));
     }
 
     /// CRDT-1: the takeover. A plain member signs a perfectly valid
@@ -4217,7 +4269,7 @@ mod tests {
             nonce: String::new(),
         });
         assert!(op.verify_author().is_ok(), "the attacker really does hold this key");
-        assert_eq!(state.admit_remote_op(&op), Err(OpReject::NotAllowed));
+        assert_eq!(judge(&state, &op), (Ok(()), false), "signed, and refused on the merits");
 
         // Belt and braces: apply_op is a no-op even without the gate.
         state.apply_op(&op).unwrap();
@@ -4312,7 +4364,7 @@ mod tests {
         // `u64::MAX` no write ever could.
         state.set_hlc(Hlc::from_saved(bound, 0, owner_id.clone()));
         let rename = state.create_op(CrdtPayload::ServerRenamed { new_name: "Fine".into() });
-        assert_eq!(state.admit_remote_op(&rename), Ok(()));
+        assert_eq!(judge(&state, &rename), (Ok(()), true));
         state.apply_op(&rename).unwrap();
         assert_eq!(state.name(), "Fine", "an honest write must be able to win again");
         assert_eq!(state.current_owner().as_deref(), Some(owner_id.as_str()));

@@ -64,8 +64,10 @@ pub struct RecoveryPoolState {
     token: String,
     room: String,
     pub is_initiator: bool,
-    pub local_peer_id: String,
-    /// All members in the pool: peer_id → their inventory.
+    /// Our DEVICE id. Every member is keyed by the device that seals its frames, ours
+    /// too, so all members elect the same coordinator and read a plan's ids alike.
+    pub local_device: String,
+    /// All members in the pool: device id → their inventory.
     pub members: HashMap<String, MemberInventory>,
     /// Union of all manifest content_ids known to any member.
     pub all_manifest_ids: HashSet<String>,
@@ -84,7 +86,7 @@ impl RecoveryPoolState {
         server_id: String,
         token: String,
         is_initiator: bool,
-        local_peer_id: String,
+        local_device: String,
         local_inventory: MemberInventory,
     ) -> Self {
         let mut all_manifest_ids = HashSet::new();
@@ -93,14 +95,14 @@ impl RecoveryPoolState {
         }
 
         let mut members = HashMap::new();
-        members.insert(local_peer_id.clone(), local_inventory);
+        members.insert(local_device.clone(), local_inventory);
 
         Self {
             room: pool_room(&server_id, &token),
             server_id,
             token,
             is_initiator,
-            local_peer_id,
+            local_device,
             members,
             all_manifest_ids,
             file_k_values: HashMap::new(),
@@ -110,12 +112,12 @@ impl RecoveryPoolState {
         }
     }
 
-    /// Add a new member to the pool with their inventory.
-    pub fn add_member(&mut self, peer_id: String, inventory: MemberInventory) {
+    /// Add a member with its inventory, or refresh one we hold. Whether it is new.
+    pub fn add_member(&mut self, peer_id: String, inventory: MemberInventory) -> bool {
         for id in &inventory.manifest_ids {
             self.all_manifest_ids.insert(id.clone());
         }
-        self.members.insert(peer_id, inventory);
+        self.members.insert(peer_id, inventory).is_none()
     }
 
     /// Remove a member from the pool.
@@ -280,9 +282,19 @@ impl RecoveryPoolState {
         self.members.keys().cloned().collect()
     }
 
-    /// Whether this peer is the coordinator (lowest peer_id among all members).
+    /// Our own inventory, as the pool holds it.
+    pub fn own_inventory(&self) -> Option<&MemberInventory> {
+        self.members.get(&self.local_device)
+    }
+
+    /// The member that plans the pool's transfers: the lowest device id.
+    pub fn coordinator(&self) -> Option<&str> {
+        self.members.keys().min().map(String::as_str)
+    }
+
+    /// Whether we are the coordinator.
     pub fn is_coordinator(&self) -> bool {
-        self.members.keys().min().map_or(false, |min| min == &self.local_peer_id)
+        self.coordinator() == Some(self.local_device.as_str())
     }
 
     /// Populate manifest metadata from the local ContentStore.

@@ -1323,12 +1323,28 @@ pub(crate) enum NodeCommand {
         device: String,
         msg: Box<HavenMessage>,
     },
+    /// TEST-ONLY: any envelope, already serialized, to one device through this node's
+    /// own Olm carry lane. Absent in release builds.
+    #[cfg(test)]
+    TestEnvelopeJson {
+        device: String,
+        json: String,
+    },
     /// TEST-ONLY: a raw plaintext line into a meeting's MLS group, as a participant
     /// with a modified client could send it. Absent in release builds.
     #[cfg(test)]
     TestConferenceLine {
         conf_id: String,
         line: String,
+    },
+    /// TEST-ONLY: send any envelope over Olm to `olm_device`, or else MLS-encrypted to
+    /// `mls_server`'s group, as a member with a modified client could. Absent in release
+    /// builds.
+    #[cfg(test)]
+    TestEnvelope {
+        olm_device: Option<String>,
+        mls_server: Option<String>,
+        envelope: Box<MessageEnvelope>,
     },
 }
 
@@ -1496,7 +1512,11 @@ impl NodeCommand {
             #[cfg(test)]
             Self::TestCarry { .. } => "TestCarry",
             #[cfg(test)]
+            Self::TestEnvelopeJson { .. } => "TestEnvelopeJson",
+            #[cfg(test)]
             Self::TestConferenceLine { .. } => "TestConferenceLine",
+            #[cfg(test)]
+            Self::TestEnvelope { .. } => "TestEnvelope",
         }
     }
 }
@@ -4493,13 +4513,15 @@ pub(crate) struct PendingShardStream {
     pub m: u16,
     pub total_size: u64,
     pub tier: String,
-    /// The device whose stream completes it: the one that sent the store, or the holder
-    /// we asked. `None` for a recovery transfer, whose source the pool's plan names.
-    pub sender: Option<String>,
+    /// The device whose stream completes it: the one that sent the store, the holder we
+    /// asked, or the source a recovery plan names.
+    pub sender: String,
     /// Our storage pledge for the server when it was registered, judged again at completion.
     pub pledge: u64,
     /// It answers a shard pull of ours, so wrong bytes refute the holder that sent them.
     pub asked: bool,
+    /// A recovery plan's transfer: awaited, so never a store nobody asked for.
+    pub recovery: bool,
 }
 
 /// A public post's author as a guest is shown it: the author's own signed card, and the

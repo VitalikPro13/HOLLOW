@@ -25,7 +25,9 @@ The creator's manifest pins each stored shard's SHA-256 (the content id under re
 
 ## Residual risk
 
-Older erasure manifests carry no hashes: a failed rebuild deletes every participating copy (a genuine one we held for others too) and a bad holder cannot be named, so it can use up the three automatic pulls. The first manifest for a content id still wins (pre-existing), so a member who lands a manifest before the creator's sets the hashes. An unasked ShardStore registered first for a shard still makes the asked holder's stream drop until the person retries.
+Older erasure manifests carry no hashes, so a bad holder cannot be named and can use up the three automatic pulls; since session 32 a failed rebuild of such a manifest keeps the copies at indices our placement names (the ones we hold for others), which also keeps a bad copy at one of our own indices until the person retries. The first manifest for a content id still wins (pre-existing): the manifest is unsigned and the content id names no author, so a member who lands a manifest before the creator's sets the hashes, and its false hashes make that receiver refuse genuine copies of that one content id (availability only). Binding the content id into the file's own commitment would close it (a protocol change, about one session).
+
+Closed in session 32: an unasked ShardStore registered first no longer drops the asked holder's stream (the answer we asked for takes the slot), and while we pull a content id an unasked copy lands only as the bytes the manifest pins. Tests `the_holder_we_asked_wins_over_unasked_stores_of_a_shard`, `a_failed_legacy_rebuild_keeps_the_copies_we_hold_for_others`, `a_pull_waits_only_for_its_own_content`; mutation 14/14 killed (`tmp_s32_files_mutate.py`).
 
 ## Test
 

@@ -1958,4 +1958,97 @@ mod tests {
         assert!(push("over", &over).is_none());
         assert_eq!(stored("over"), None);
     }
+
+    /// A-T02. A session the push process builds is the one the app loads later, so a
+    /// PreKey whose identity key its sending device did not sign opens nothing.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn authz_a_push_prekey_opens_only_with_its_senders_own_proof() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let (alice, bob, carol) = (kp(174), kp(175), kp(176));
+        let (a, b) = (alice.peer_id(), bob.peer_id());
+        let mut alice_olm = OlmManager::new();
+        let otk = alice_olm.generate_one_time_key();
+        let mut bob_olm = OlmManager::new();
+        bob_olm.create_outbound_session(&a, &alice_olm.identity_key_base64(), &otk).unwrap();
+        let extras = SignedExtras { mid: Some("t02"), order_us: Some(1_000_000), ..SignedExtras::default() };
+        let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "dm", &a, &b, 1_000, &extras, "hi");
+        let envelope = serde_json::to_string(&MessageEnvelope::DirectMessage {
+            inner: Box::new(DirectMessagePayload {
+                text: "hi".into(), ts: 1_000, sig, pk, mid: Some("t02".into()), reply_to: None,
+                file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+            }),
+        })
+        .unwrap();
+        let (message_type, ciphertext) = bob_olm.encrypt(&a, envelope.as_bytes()).unwrap();
+        assert_eq!(message_type, 0, "the first message is a PreKey");
+        let key = bob_olm.identity_key_base64();
+        let frame = |proof: (Option<String>, Option<String>)| {
+            serde_json::to_string(&HavenMessage::Encrypted {
+                message_type,
+                body: OlmManager::encode_base64(&ciphertext),
+                identity_key: Some(key.clone()),
+                identity_sig: proof.0,
+                identity_pk: proof.1,
+            })
+            .unwrap()
+        };
+        let payload = crate::node::crypto_handler::olm_identity_signing_payload(&b, &key);
+        let by = |k: &NativeKeypair| crate::node::crypto_handler::sign_message(k, &pk_b64(k), &payload);
+
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let now = crate::node::frame_auth::now_ms();
+        for (proof, what) in [((None, None), "no proof"), (by(&carol), "another device's proof")] {
+            assert!(
+                try_decrypt_dm(&b, &frame(proof), now, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_none(),
+                "a push PreKey with {what} was opened",
+            );
+            assert!(!alice_olm.has_session(&b), "a push PreKey with {what} built a session");
+        }
+        assert!(
+            try_decrypt_dm(&b, &frame(by(&bob)), now, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_some(),
+            "the sender's own proof opens the same PreKey",
+        );
+        crate::node::resolver::clear_all();
+    }
+
+    /// A-T08. Meeting chat is never stored, so a public frame naming a meeting is
+    /// dropped even where a state held for that id would take it.
+    #[test]
+    fn a_public_frame_naming_a_meeting_is_never_stored() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let (author, me) = (kp(177), kp(178));
+        let (a, m) = (author.peer_id(), me.peer_id());
+        let meeting = format!("{}{}", crate::node::conference::CONF_SID_PREFIX, "ab".repeat(16));
+        assert!(crate::node::conference::is_conference_sid(&meeting));
+        let posted = |sid: &str, mid: &str| {
+            let mut state = server_with(sid, &[(&a, "Ann"), (&m, "Me")]);
+            let cid = state.channels.keys().next().expect("the founder's channel").clone();
+            state.channels.get_mut(&cid).unwrap().is_public = true;
+            store.save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+            let ts = crate::node::frame_auth::now_ms();
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(ts * 1000), ..SignedExtras::default() };
+            let context = format!("{sid}:{cid}");
+            let (sig, pk) = sign_message_versioned(&author, &pk_b64(&author), "ch", &context, &a, ts, &extras, "hello");
+            let frame = serde_json::to_string(&HavenMessage::PublicChannelMessage {
+                server_id: sid.into(), channel_id: cid, text: "hello".into(), ts, sig, pk, mid: mid.into(),
+                reply_to: None, file_id: None, link_preview: None, order_us: Some(ts * 1000), album: None,
+                file_meta: None,
+            })
+            .unwrap();
+            let mut mls = None;
+            let _ = try_process_channel_msg(&a, &frame, &mut mls, &mut false, &path, &pass, &m);
+            store.channel_message_exists(mid)
+        };
+        assert!(posted("srv-a-t08", "a-t08-server"), "the same public post in a server is stored");
+        assert!(!posted(&meeting, "a-t08-meeting"), "a meeting's public frame was stored");
+        crate::node::resolver::clear_all();
+    }
 }

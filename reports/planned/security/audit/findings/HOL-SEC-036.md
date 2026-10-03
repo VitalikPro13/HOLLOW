@@ -38,8 +38,11 @@ block check at all.
 
 `authz_a_friend_accept_lands_only_on_a_request_we_sent` (node/test_harness.rs),
 `authz_a_blocked_friend_changes_nothing_in_our_dms` (node/message_ops.rs tests),
-the L2 guard in `authz_a_carried_list_attributes_only_a_bound_sender`
-(node/crypto_handler.rs tests).
+and for L2 the harness test
+`authz_a_blocked_identitys_unknown_device_is_dropped_once_its_roster_binds` (session 32,
+cold resolver; the original guard inside
+`authz_a_carried_list_attributes_only_a_bound_sender` went with design ID-1, and the two
+older block tests survive a mutation of this check).
 
 ## Fix
 

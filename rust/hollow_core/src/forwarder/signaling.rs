@@ -627,4 +627,38 @@ mod tests {
             .expect("a reply to a peer never seen sealed left unsealed");
         assert_eq!(opened.body, b"{}");
     }
+
+    /// Media S-11: a PreKey whose identity key its sending device did not sign builds
+    /// no session at the forwarder, which would otherwise answer an impostor.
+    #[tokio::test]
+    async fn fwd_opens_a_prekey_only_with_its_senders_own_proof() {
+        use base64::Engine;
+        let _g = crate::node::resolver::test_lock();
+        let (fwd, alice, carol) = (keypair(1), keypair(2), keypair(3));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fwd.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let crypto_store = CryptoStore::open(path, pass).unwrap();
+        let mut fwd_olm = OlmManager::new();
+        let otk = fwd_olm.generate_one_time_key();
+        let mut alice_olm = OlmManager::new();
+        alice_olm.create_outbound_session(&local, &fwd_olm.identity_key_base64(), &otk).unwrap();
+        let (message_type, ciphertext) = alice_olm.encrypt(&local, b"{}").unwrap();
+        assert_eq!(message_type, 0, "the first message is a PreKey");
+        let key = alice_olm.identity_key_base64();
+        let payload = crate::node::crypto_handler::olm_identity_signing_payload(&from, &key);
+        let by = |k: &NativeKeypair| {
+            let pk = base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf());
+            crate::node::crypto_handler::sign_message(k, &pk, &payload)
+        };
+        let mut open_with = |(sig, pk): (Option<String>, Option<String>)| {
+            olm_decrypt(&from, message_type, Some(&key), sig.as_deref(), pk.as_deref(), &ciphertext, &mut fwd_olm, &crypto_store, &local)
+        };
+        for (proof, what) in [((None, None), "no proof"), (by(&carol), "another device's proof")] {
+            assert!(open_with(proof).is_none(), "the forwarder opened a PreKey with {what}");
+        }
+        assert_eq!(open_with(by(&alice)).as_deref(), Some(&b"{}"[..]), "the sender's own proof opens it");
+    }
 }

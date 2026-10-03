@@ -232,7 +232,12 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
 // Pre-0.12 clients sign only `hollow-ws-auth:{peer}:{ts}` and cannot ask for a
 // challenge. Turn this off once 0.12 is out: until then a v1 frame captured by
 // another relay still replays here, as it always has for 0.11 clients.
-static constexpr bool ACCEPT_AUTH_V1 = true;
+// This and the other three release-day switches take a -D override so
+// test/run_live.sh can run the relay with them off as well as on.
+#ifndef HOLLOW_ACCEPT_AUTH_V1
+#define HOLLOW_ACCEPT_AUTH_V1 1
+#endif
+static constexpr bool ACCEPT_AUTH_V1 = HOLLOW_ACCEPT_AUTH_V1;
 
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
 // minted once per socket; asking again gets the same one. `door_key` is what this
@@ -457,7 +462,10 @@ static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
 // 0.11 clients prove an inbox with a master-signed device list, which anyone
 // holding the master key can sign. Turn this off once 0.12 is out; until then
 // such a list opens only an inbox whose roster the phrase does not yet root.
-static constexpr bool ACCEPT_DEVICE_LIST_INBOX_PROOF = true;
+#ifndef HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF
+#define HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF 1
+#endif
+static constexpr bool ACCEPT_DEVICE_LIST_INBOX_PROOF = HOLLOW_ACCEPT_DEVICE_LIST_INBOX_PROOF;
 
 static const RosterCrypto& relay_roster_crypto() {
     static const RosterCrypto c = roster_crypto();
@@ -1617,7 +1625,10 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
 // Pre-0.12 members register rings unsigned. Turn this off once 0.12 is out: from
 // then on only the server's authority (ring_auth.h) creates, extends or stops a ring,
 // and an unsigned request only keeps existing rings from idling out.
-static constexpr bool ACCEPT_UNSIGNED_RING_CONTROL = true;
+#ifndef HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL
+#define HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL 1
+#endif
+static constexpr bool ACCEPT_UNSIGNED_RING_CONTROL = HOLLOW_ACCEPT_UNSIGNED_RING_CONTROL;
 
 // A new ring for `key` charged to `share`, within its server's cap. Past the
 // relay-wide cap the share that created the most rings loses its least recently
@@ -1875,8 +1886,8 @@ static void handle_binary_channel_direct(PerSocketData* data,
     // No per-minute gate here on purpose: one channel post legitimately fans
     // one 0x09 frame per OFFLINE member, so a flat cap would silently drop
     // delivery for large servers. Abuse is bounded per target instead — the
-    // per-sender channel share in buffer_offline_msg plus the channel push
-    // debounce below.
+    // channel cap in buffer_offline_msg, which evicts from the heaviest hashed
+    // address share (socket_share), plus the channel push debounce below.
     if (!payload.empty()) {
         buffer_offline_msg(target_str, room_str,
                            build_direct_frame(room_code, data->peer_id, payload), state,
@@ -2110,7 +2121,8 @@ static void handle_binary_direct_msg(PerSocketData* data,
         // branch with any room code and any target peer_id. That is deliberate
         // (a first DM to an offline peer legitimately has no live room), but it
         // makes this the widest deposit primitive on the relay. It carries the
-        // per-sender buffer share and the push budget, no rate limit (see
+        // per-target caps, which evict from the heaviest hashed address share
+        // (socket_share), and the push budget, no rate limit (see
         // buffer_offline_msg). The frame itself is ciphertext the target's
         // client verifies and drops if unwanted.
         if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
@@ -2324,7 +2336,10 @@ static bool nickname_binding_is_stale(RelayState& state, const std::string& nick
 // Pre-0.12 clients claim a nickname with a self-reported master and no signature.
 // Turn this off once 0.12 is out: from then on a claim counts only when the master
 // it names signed it for the claiming device.
-static constexpr bool ACCEPT_UNSIGNED_NICKNAME_CLAIMS = true;
+#ifndef HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS
+#define HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS 1
+#endif
+static constexpr bool ACCEPT_UNSIGNED_NICKNAME_CLAIMS = HOLLOW_ACCEPT_UNSIGNED_NICKNAME_CLAIMS;
 static constexpr int64_t NICKNAME_CLAIM_SKEW_MS = 300 * 1000;
 
 static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data, const json& j,

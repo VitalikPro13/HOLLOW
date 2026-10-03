@@ -18,7 +18,7 @@ pub(crate) enum GroupRules<'a> {
 impl GroupRules<'_> {
     /// Hold unless `master` is a current, unbanned member who can see a subgroup's
     /// channel: our view may simply not have caught up with a join or a role change.
-    fn membership(&self, master: &str, what: &str) -> Verdict {
+    pub(crate) fn membership(&self, master: &str, what: &str) -> Verdict {
         match self {
             GroupRules::Meeting { .. } => Verdict::Accept,
             GroupRules::Server { state, channel } => {
@@ -36,8 +36,8 @@ impl GroupRules<'_> {
 
 /// A leaf that holds no seat whatever its certificate says: a revoked device, or one
 /// its master's roster does not admit (design ID-1: the master key alone certifies
-/// nothing).
-fn refused(leaf: &LeafIdentity) -> bool {
+/// nothing). Meetings judge every device they attribute to a master by it.
+pub(crate) fn refused(leaf: &LeafIdentity) -> bool {
     super::resolver::is_revoked(&leaf.device) || super::resolver::disowns(&leaf.master, &leaf.device)
 }
 
@@ -491,6 +491,22 @@ mod tests {
             "a member still sweeps them",
         );
         crate::node::resolver::clear_all();
+    }
+
+    /// D8: the live KeyPackage arm, the sweep and the planner ask one rule, and it seats
+    /// neither a non-member nor a banned identity the member list still names (a
+    /// device-keyed ban adopted on a legacy server leaves it there).
+    #[test]
+    fn authz_a_banned_or_departed_identity_holds_no_seat() {
+        let mut state = server(&["owner", "alice", "mallory"]);
+        let ban = crate::crdt::admin_lww::AdminLwwReg::new(true, crate::crdt::hlc::HlcTimestamp::zero("owner"), 3);
+        state.banned_members.insert("mallory".into(), ban);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        assert_eq!(rules.membership("alice", "sender"), Verdict::Accept);
+        assert!(matches!(rules.membership("mallory", "sender"), Verdict::Hold(_)), "a banned identity still listed");
+        assert!(matches!(rules.membership("eve", "sender"), Verdict::Hold(_)), "a non-member");
+        let leaves = [leaf("owner-d", "owner"), leaf("alice-d", "alice"), leaf("mallory-d", "mallory")];
+        assert_eq!(stale_leaves(&leaves, "owner-d", &rules), vec!["mallory-d".to_string()]);
     }
 
     #[test]

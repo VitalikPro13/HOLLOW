@@ -245,7 +245,7 @@ impl ServerState {
 
     /// Server id, author signature and clock bound: everything that does not depend on
     /// the state.
-    fn stateless_check(&self, op: &CrdtOp, now_ms: u64) -> Result<(), OpReject> {
+    pub(super) fn stateless_check(&self, op: &CrdtOp, now_ms: u64) -> Result<(), OpReject> {
         if op.server_id != self.server_id {
             return Err(OpReject::WrongServer);
         }

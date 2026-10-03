@@ -114,7 +114,12 @@ int main(int argc, char** argv) {
     g_shutdown.state = &state;
     g_shutdown.app = &app;
 
+    // The live tests (test/run_live.sh) keep their relay on loopback.
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    app.listen("127.0.0.1", config.port, [&](auto* listen_socket) {
+#else
     app.listen(config.port, [&](auto* listen_socket) {
+#endif
         if (listen_socket) {
             fprintf(stderr, "[main] Listening on port %d (TLS)\n", config.port);
 

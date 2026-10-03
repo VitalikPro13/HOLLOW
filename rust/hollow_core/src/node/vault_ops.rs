@@ -21,11 +21,13 @@ enum LocalShards {
 }
 
 /// Rebuild `content_id` from the shards we hold, or say which to pull and from whom.
+/// `local` is our master id, the identity placements name.
 fn local_shards(
     server_states: &HashMap<String, ServerState>,
     vault_dir: &std::path::Path,
     server_id: &str,
     content_id: &str,
+    local: &str,
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<LocalShards, String> {
@@ -35,26 +37,6 @@ fn local_shards(
     let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
     if let Some(cached_path) = crate::vault::pipeline::check_cache(content_id, &ext) {
         return Ok(LocalShards::Done(cached_path.to_string_lossy().to_string()));
-    }
-
-    // Replication keeps the whole ciphertext as shard 0, so one copy rebuilds it.
-    let need = (manifest.k as usize).max(1);
-    let (mut packed, _) = gather_vault_shards(&cs, &manifest);
-    if packed.iter().flatten().count() >= need {
-        match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
-            Ok(plaintext) => {
-                vault_bytes_checked(content_id, &plaintext, db_path, db_passphrase)?;
-                let path = crate::vault::pipeline::write_to_cache(content_id, &ext, &plaintext)?;
-                return Ok(LocalShards::Done(path.to_string_lossy().to_string()));
-            }
-            Err(e) => {
-                if drop_unpinned_shards(&cs, &manifest, &packed) == 0 {
-                    return Err(e);
-                }
-                hollow_log!("[HOLLOW-VAULT] Rebuild of {content_id} failed ({e}): pulling its shards again");
-                packed = gather_vault_shards(&cs, &manifest).0;
-            }
-        }
     }
 
     // Non-uploaders hold no placements: recompute them as the uploader did.
@@ -75,6 +57,30 @@ fn local_shards(
             stored_at: 0,
             confirmed: false,
         }).collect();
+    }
+
+    // Replication keeps the whole ciphertext as shard 0, so one copy rebuilds it.
+    let need = (manifest.k as usize).max(1);
+    let (mut packed, _) = gather_vault_shards(&cs, &manifest);
+    if packed.iter().flatten().count() >= need {
+        match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
+            Ok(plaintext) => {
+                vault_bytes_checked(content_id, &plaintext, db_path, db_passphrase)?;
+                let path = crate::vault::pipeline::write_to_cache(content_id, &ext, &plaintext)?;
+                return Ok(LocalShards::Done(path.to_string_lossy().to_string()));
+            }
+            Err(e) => {
+                let ours: std::collections::HashSet<u16> = placements.iter()
+                    .filter(|p| super::resolver::resolve(&p.target_peer) == local)
+                    .map(|p| p.shard_index)
+                    .collect();
+                if drop_unpinned_shards(&cs, &manifest, &packed, &ours) == 0 {
+                    return Err(e);
+                }
+                hollow_log!("[HOLLOW-VAULT] Rebuild of {content_id} failed ({e}): pulling its shards again");
+                packed = gather_vault_shards(&cs, &manifest).0;
+            }
+        }
     }
     let missing = (0..packed.len())
         .filter(|idx| packed[*idx].is_none())
@@ -114,7 +120,7 @@ pub(crate) async fn handle_vault_download_file(
     }
 
     let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-    match local_shards(server_states, &vault_dir, &server_id, &content_id, db_path, db_passphrase) {
+    match local_shards(server_states, &vault_dir, &server_id, &content_id, &bundle_keypair.peer_id(), db_path, db_passphrase) {
         Ok(LocalShards::Done(disk_path)) => {
             hollow_log!("[HOLLOW-VAULT] Download complete: {disk_path}");
             let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
@@ -709,11 +715,12 @@ pub(crate) async fn handle_store_shard_on_peer(
 
 // ── 6. InitiateRecoveryPool ──────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_initiate_recovery_pool(
     recovery_pool_state: &mut Option<crate::node::recovery_pool::RecoveryPoolState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    local_peer_str: &str,
+    device_peer_id: &str,
     server_id: String,
     token: String,
     db_path: &str,
@@ -742,7 +749,7 @@ pub(crate) async fn handle_initiate_recovery_pool(
         server_id.clone(),
         token.clone(),
         true,
-        local_peer_str.to_string(),
+        device_peer_id.to_string(),
         inventory,
     );
     // Populate manifest metadata for transfer plan computation.
@@ -759,11 +766,11 @@ pub(crate) async fn handle_initiate_recovery_pool(
 
 // ── 7. JoinRecoveryPool ──────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_join_recovery_pool(
     recovery_pool_state: &mut Option<crate::node::recovery_pool::RecoveryPoolState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    local_peer_str: &str,
     device_peer_id: &str,
     server_id: String,
     token: String,
@@ -804,7 +811,7 @@ pub(crate) async fn handle_join_recovery_pool(
         server_id.clone(),
         token.clone(),
         false,
-        local_peer_str.to_string(),
+        device_peer_id.to_string(),
         inventory,
     );
     if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
@@ -844,6 +851,125 @@ pub(crate) async fn handle_stop_recovery_pool(
     let _ = event_tx.send(NetworkEvent::RecoveryPoolStopped {
         server_id,
     }).await;
+}
+
+/// Plan the pool's transfers when we are its coordinator. The room never echoes a frame
+/// to its sender, so we carry out our own part ourselves, after the plan is on its way so
+/// that a member we stream to holds the plan before our bytes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn coordinate_recovery(
+    pool: &crate::node::recovery_pool::RecoveryPoolState,
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    server_states: &HashMap<String, ServerState>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_peer_str: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if !pool.is_coordinator() || pool.members.len() < 2 {
+        return;
+    }
+    let plan = pool.compute_transfer_plan();
+    if plan.is_empty() {
+        return;
+    }
+    hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
+    let msg = HavenMessage::RecoveryTransferPlan { plan_json: serde_json::to_string(&plan).unwrap_or_default() };
+    if let Some(bytes) = pool.seal(&pool.local_device, &msg) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom { room_code: pool.room_code(), data: bytes });
+    }
+    apply_recovery_plan(
+        pool, &plan, pending_shard_streams, pending_vault_downloads, server_states, ws_cmd_tx, local_peer_str,
+        db_path, db_passphrase,
+    )
+    .await;
+}
+
+/// Our part of the coordinator's `plan`: wait for each shard planned for us, from its
+/// planned source alone, and stream each one we hold to the member it is planned for.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_recovery_plan(
+    pool: &crate::node::recovery_pool::RecoveryPoolState,
+    plan: &[crate::node::recovery_pool::TransferAssignment],
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    server_states: &HashMap<String, ServerState>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_peer_str: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    hollow_log!("[RECOVERY-POOL] Processing {} transfer assignments", plan.len());
+    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+    let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) else {
+        return;
+    };
+    for assignment in plan {
+        // The id names our shard files and temps.
+        if !crate::vault::content_store::is_content_id(&assignment.content_id) {
+            hollow_log!("[HOLLOW-SECURITY] Skipped a transfer assignment: not a content id");
+            continue;
+        }
+        let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
+        if assignment.dest_peer == pool.local_device
+            && let Some(meta) = pool.manifest_meta.get(&assignment.content_id)
+        {
+            if cs.has_shard(&sk).unwrap_or(false) {
+                continue;
+            }
+            let key = format!("{}:{}", assignment.content_id, assignment.shard_index);
+            pending_shard_streams.insert(key, PendingShardStream {
+                server_id: pool.server_id.clone(),
+                content_id: assignment.content_id.clone(),
+                shard_index: assignment.shard_index,
+                shard_key: sk.clone(),
+                k: meta.k,
+                m: meta.m,
+                total_size: meta.total_data_size,
+                tier: meta.storage_tier.clone(),
+                sender: assignment.source_peer.clone(),
+                pledge: our_pledge(server_states, &pool.server_id, local_peer_str),
+                asked: false,
+                recovery: true,
+            });
+            // Rebuild the file once enough of its shards are here.
+            pending_vault_downloads.entry(assignment.content_id.clone())
+                .or_insert((pool.server_id.clone(), meta.k as usize, 0));
+        }
+
+        if assignment.source_peer == pool.local_device && pool.members.contains_key(&assignment.dest_peer) {
+            let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) else { continue };
+            let temp_dir = std::env::temp_dir().join("hollow_recovery");
+            let _ = tokio::fs::create_dir_all(&temp_dir).await;
+            let temp_path = temp_dir.join(format!("{sk}.shard"));
+            if tokio::fs::write(&temp_path, &shard_bytes).await.is_err() {
+                continue;
+            }
+            let total_size = shard_bytes.len() as u64;
+            hollow_log!("[RECOVERY-POOL] Sending shard {}:{} ({} bytes) to {}",
+                assignment.content_id, assignment.shard_index, total_size, assignment.dest_peer);
+            super::ws_stream_transfer::ws_stream_send(
+                ws_cmd_tx,
+                &pool.room_code(),
+                &assignment.dest_peer,
+                &super::ws_stream_transfer::StreamKind::Shard { shard_index: assignment.shard_index },
+                &assignment.content_id,
+                &temp_path,
+                total_size,
+                0,
+            ).await;
+            let _ = tokio::fs::remove_file(&temp_path).await;
+
+            let received = HavenMessage::RecoveryShardReceived {
+                content_id: assignment.content_id.clone(),
+                shard_index: assignment.shard_index,
+            };
+            if let Some(bytes) = pool.seal(&pool.local_device, &received) {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom { room_code: pool.room_code(), data: bytes });
+            }
+        }
+    }
 }
 
 /// Why a peer may not put shard `si` of `cid` for `sid` on our disk, `None` when it
@@ -975,16 +1101,30 @@ pub(crate) fn take_repull(asks: &mut ShardAsks, cid: &str) -> bool {
 
 /// Why `bytes` may not be stored as shard `si` of `cid`, `None` when they may: once we
 /// hold the manifest, a shard must be the one it names, since a held shard is never
-/// replaced and a wrong first copy would refuse the real one.
+/// replaced and a wrong first copy would refuse the real one. An unasked copy that comes
+/// while we pull the content (`pulling`) lands only as the bytes its manifest pins: held,
+/// it would refuse the answer we asked for.
 pub(crate) fn shard_bytes_refused(
     cs: &crate::vault::content_store::ContentStore,
     cid: &str,
     si: u16,
     bytes: &[u8],
+    pulling: bool,
 ) -> Option<&'static str> {
-    let manifest = cs.load_manifest(cid).ok().flatten()?;
-    let expected = manifest.shard_hash(si)?;
-    (crate::vault::content_store::content_id(bytes) != expected).then_some("not the shard its manifest names")
+    let manifest = cs.load_manifest(cid).ok().flatten();
+    match manifest.as_ref().and_then(|m| m.shard_hash(si)) {
+        Some(expected) => {
+            (crate::vault::content_store::content_id(bytes) != expected).then_some("not the shard its manifest names")
+        }
+        None => pulling.then_some("an unasked copy its manifest does not pin, while we pull the content"),
+    }
+}
+
+/// Whether a pull of ours for any shard of `cid` waits for its answer.
+pub(crate) fn pull_waiting(asks: &ShardAsks, cid: &str) -> bool {
+    asks.asks.iter().any(|(key, (_, at))| {
+        key.strip_prefix(cid).is_some_and(|rest| rest.starts_with(':')) && at.elapsed() < SHARD_ASK_TTL
+    })
 }
 
 /// The shards of `manifest`'s content we hold, by index, and how many copies were
@@ -1015,17 +1155,25 @@ pub(crate) fn gather_vault_shards(
     (packed, dropped)
 }
 
+/// Whether `packed` holds a copy `manifest` pins no hash for, so a failed rebuild may be
+/// that copy's fault.
+pub(crate) fn holds_unpinned(manifest: &crate::vault::pipeline::VaultManifest, packed: &[Option<Vec<u8>>]) -> bool {
+    packed.iter().enumerate().any(|(si, copy)| copy.is_some() && manifest.shard_hash(si as u16).is_none())
+}
+
 /// After the shards in `packed` failed to rebuild `manifest`'s content, delete those the
 /// manifest pins no hash for and return how many: one of them is bad and nothing tells
-/// which, so they are pulled again.
+/// which, so they are pulled again. A copy at an index in `ours` stays: we hold it as a
+/// placement, and other members pull it from us.
 pub(crate) fn drop_unpinned_shards(
     cs: &crate::vault::content_store::ContentStore,
     manifest: &crate::vault::pipeline::VaultManifest,
     packed: &[Option<Vec<u8>>],
+    ours: &std::collections::HashSet<u16>,
 ) -> usize {
     let mut dropped = 0;
     for si in (0..packed.len()).filter(|si| packed[*si].is_some()) {
-        if manifest.shard_hash(si as u16).is_some() {
+        if manifest.shard_hash(si as u16).is_some() || ours.contains(&(si as u16)) {
             continue;
         }
         let key = crate::vault::content_store::shard_key(&manifest.content_id, si as u16);
@@ -1039,6 +1187,13 @@ pub(crate) fn drop_unpinned_shards(
         hollow_log!("[HOLLOW-SECURITY] Deleted {dropped} shard(s) of {} its manifest cannot vouch for after a failed rebuild", manifest.content_id);
     }
     dropped
+}
+
+/// The temp in `dir` a shard answer streams from. The cid is whatever a member stored the
+/// shard under, so only its alphanumerics name the file (a `\..\` walks out on Windows).
+pub(crate) fn shard_send_temp(dir: &std::path::Path, cid: &str, si: u16) -> std::path::PathBuf {
+    let prefix: String = cid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+    dir.join(format!(".stream_shard_{prefix}_{si}.tmp"))
 }
 
 /// Why `requester` may not pull a shard of `cid` in `sid`, `None` when it may. When
@@ -1282,26 +1437,67 @@ mod tests {
         let cs = ContentStore::open(&db, &pass, &tmp.path().join("vault")).unwrap();
         let ciphertext = b"the whole ciphertext".to_vec();
         let whole = crate::vault::content_store::content_id(&ciphertext);
-        assert_eq!(shard_bytes_refused(&cs, &whole, 0, b"junk"), None, "no manifest yet, nothing to judge by");
+        assert_eq!(shard_bytes_refused(&cs, &whole, 0, b"junk", false), None, "no manifest yet, nothing to judge by");
         cs.save_manifest("srv", "srv-general", &manifest_for(&whole, 0, 0, Vec::new())).unwrap();
         assert!(
-            shard_bytes_refused(&cs, &whole, 0, b"junk").is_some(),
+            shard_bytes_refused(&cs, &whole, 0, b"junk", false).is_some(),
             "HOL-SEC-117: a replicated copy that is not the ciphertext was taken",
         );
-        assert_eq!(shard_bytes_refused(&cs, &whole, 0, &ciphertext), None);
+        assert_eq!(shard_bytes_refused(&cs, &whole, 0, &ciphertext, false), None);
 
         let shards: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i; 8]).collect();
         let hashes = shards.iter().map(|s| crate::vault::content_store::content_id(s)).collect();
         let erasure = "e1".repeat(32);
         cs.save_manifest("srv", "srv-general", &manifest_for(&erasure, 3, 2, hashes)).unwrap();
         assert!(
-            shard_bytes_refused(&cs, &erasure, 1, &shards[2]).is_some(),
+            shard_bytes_refused(&cs, &erasure, 1, &shards[2], false).is_some(),
             "HOL-SEC-117: another index's bytes were taken as shard 1",
         );
-        assert_eq!(shard_bytes_refused(&cs, &erasure, 1, &shards[1]), None);
+        assert_eq!(shard_bytes_refused(&cs, &erasure, 1, &shards[1], false), None);
         let legacy = "e2".repeat(32);
         cs.save_manifest("srv", "srv-general", &manifest_for(&legacy, 3, 2, Vec::new())).unwrap();
-        assert_eq!(shard_bytes_refused(&cs, &legacy, 1, b"junk"), None, "a manifest without hashes pins nothing");
+        assert_eq!(shard_bytes_refused(&cs, &legacy, 1, b"junk", false), None, "a manifest without hashes pins nothing");
+
+        // While we pull the content, an unasked copy lands only as the bytes the manifest pins.
+        assert!(
+            shard_bytes_refused(&cs, &legacy, 1, b"junk", true).is_some(),
+            "HOL-SEC-117 residual: an unpinned unasked copy was taken while we pull its content",
+        );
+        assert!(shard_bytes_refused(&cs, &"e3".repeat(32), 1, b"junk", true).is_some(), "no manifest pins nothing");
+        assert_eq!(shard_bytes_refused(&cs, &erasure, 1, &shards[1], true), None, "a pinned copy still lands");
+        assert!(shard_bytes_refused(&cs, &erasure, 1, &shards[2], true).is_some());
+    }
+
+    /// V5-2: a shard answer's temp stays in its folder whatever id a member stored the
+    /// shard under, and a multi-byte id never panics the node.
+    #[test]
+    fn a_shard_answer_temp_stays_in_its_folder() {
+        let dir = std::path::Path::new("files");
+        for cid in ["..\\..\\x", "../../x", "C:\\Users\\x\\Startup", "/etc/passwd", &format!("a{}", "é".repeat(40)), &"a1".repeat(32)] {
+            let temp = shard_send_temp(dir, cid, 3);
+            assert_eq!(temp.parent(), Some(dir), "V5-2: the temp for {cid:?} left its folder: {temp:?}");
+            let name = temp.file_name().and_then(|n| n.to_str()).expect("a plain name");
+            assert!(name.starts_with(".stream_shard_") && name.ends_with("_3.tmp"), "{name}");
+            assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._".contains(&b)), "V5-2: {name:?} carries a path character");
+        }
+    }
+
+    /// A pull waits for the content it asked a shard of, only while its ask is fresh.
+    #[test]
+    fn a_pull_waits_only_for_its_own_content() {
+        let cid = "c1".repeat(32);
+        let mut asks = ShardAsks::default();
+        assert!(!pull_waiting(&asks, &cid));
+        stamp_shard_ask(&mut asks, &cid, 3, "bob");
+        assert!(pull_waiting(&asks, &cid), "HOL-SEC-117 residual: a waiting pull was not seen");
+        assert!(!pull_waiting(&asks, &"c2".repeat(32)), "another content's pull counted");
+        assert!(!pull_waiting(&asks, &cid[..63]), "a prefix of the id counted");
+        assert!(take_shard_ask(&mut asks, &cid, 3, "bob"));
+        assert!(!pull_waiting(&asks, &cid), "an answered pull still waits");
+        if let Some(old) = std::time::Instant::now().checked_sub(SHARD_ASK_TTL) {
+            asks.asks.insert(format!("{cid}:0"), ("bob".into(), old));
+            assert!(!pull_waiting(&asks, &cid), "an expired pull still waits");
+        }
     }
 
     /// A rebuild deletes each copy its manifest refutes (wherever it was filed), keeps the
@@ -1327,14 +1523,14 @@ mod tests {
             "HOL-SEC-117: a refuted copy is still held and refuses the real one",
         );
         assert!(cs.has_shard(&key(0)).unwrap(), "the real shard was deleted");
-        assert_eq!(drop_unpinned_shards(&cs, &pinned, &packed), 0, "every copy left is pinned, so a failed rebuild is not theirs");
+        assert_eq!(drop_unpinned_shards(&cs, &pinned, &packed, &Default::default()), 0, "every copy left is pinned, so a failed rebuild is not theirs");
 
         let legacy = manifest_for(&cid, 3, 2, Vec::new());
         cs.store_shard("srv", &cid, 1, 3, 2, 40, StorageTier::Standard, b"planted again").unwrap();
         let (packed, dropped) = gather_vault_shards(&cs, &legacy);
         assert_eq!(dropped, 0, "an unpinned copy that is still the bytes we stored waits for a rebuild");
         assert_eq!(
-            drop_unpinned_shards(&cs, &legacy, &packed),
+            drop_unpinned_shards(&cs, &legacy, &packed, &Default::default()),
             2,
             "HOL-SEC-117: a failed rebuild kept the copies nothing vouches for",
         );
@@ -1355,7 +1551,7 @@ mod tests {
         let (tmp, db, pass) = temp_db();
         let vault = tmp.path().join("vault");
         let cs = ContentStore::open(&db, &pass, &vault).unwrap();
-        let (states, _) = server_with(&[], 0);
+        let (states, local) = server_with(&[], 0);
         let ciphertext = b"an erasure-coded ciphertext long enough to split in three".to_vec();
         let cid = crate::vault::content_store::content_id(&ciphertext);
         let shards = crate::vault::erasure::encode(&ciphertext, 3, 2, &cid).unwrap();
@@ -1364,7 +1560,7 @@ mod tests {
             cs.store_shard("srv", &cid, si, 3, 2, 0, StorageTier::Standard, &shards[si as usize]).unwrap();
         }
         cs.store_shard("srv", &cid, 2, 3, 2, 0, StorageTier::Standard, b"planted").unwrap();
-        let planned = local_shards(&states, &vault, "srv", &cid, &db, &pass);
+        let planned = local_shards(&states, &vault, "srv", &cid, &local, &db, &pass);
         assert!(
             matches!(&planned, Ok(LocalShards::Need { have: 0, need: 3, missing }) if missing.len() == 5),
             "HOL-SEC-117: a failed rebuild kept the copies nothing vouches for: {:?}",
@@ -1376,10 +1572,46 @@ mod tests {
 
         let whole = "c3".repeat(32);
         cs.save_manifest("srv", "srv-general", &manifest_for(&whole, 0, 0, Vec::new())).unwrap();
-        let planned = local_shards(&states, &vault, "srv", &whole, &db, &pass);
+        let planned = local_shards(&states, &vault, "srv", &whole, &local, &db, &pass);
         assert!(
             matches!(&planned, Ok(LocalShards::Need { have: 0, need: 1, .. })),
             "HOL-SEC-117: replicated content with no copy here is never pulled: {:?}",
+            planned.as_ref().err(),
+        );
+    }
+
+    /// A failed rebuild of a manifest that pins no hashes deletes the copies pulled or
+    /// planted here and keeps the one we hold as a placement: other members pull it from us.
+    #[test]
+    fn a_failed_legacy_rebuild_keeps_the_copies_we_hold_for_others() {
+        let _g = super::super::resolver::test_lock();
+        let (tmp, db, pass) = temp_db();
+        let vault = tmp.path().join("vault");
+        let cs = ContentStore::open(&db, &pass, &vault).unwrap();
+        let (states, local) = server_with(&[], 0);
+        let ciphertext = b"an erasure-coded ciphertext long enough to split in three".to_vec();
+        let cid = crate::vault::content_store::content_id(&ciphertext);
+        let shards = crate::vault::erasure::encode(&ciphertext, 3, 2, &cid).unwrap();
+        cs.save_manifest("srv", "srv-general", &manifest_for(&cid, 3, 2, Vec::new())).unwrap();
+        let placements: Vec<_> = (0..5u16)
+            .map(|si| crate::vault::placement::ShardPlacement {
+                shard_index: si,
+                target_peer: if si == 0 { local.clone() } else { format!("holder-{si}") },
+                shard_key: crate::vault::content_store::shard_key(&cid, si),
+            })
+            .collect();
+        cs.save_placements("srv", &cid, &placements).unwrap();
+        for si in 0..2u16 {
+            cs.store_shard("srv", &cid, si, 3, 2, 0, StorageTier::Standard, &shards[si as usize]).unwrap();
+        }
+        cs.store_shard("srv", &cid, 2, 3, 2, 0, StorageTier::Standard, b"planted").unwrap();
+        let planned = local_shards(&states, &vault, "srv", &cid, &local, &db, &pass);
+        let held = |si: u16| cs.has_shard(&crate::vault::content_store::shard_key(&cid, si)).unwrap();
+        assert!(held(0), "HOL-SEC-117 residual: a failed legacy rebuild deleted the copy we hold for others");
+        assert!(!held(1) && !held(2), "the copies pulled or planted here were kept");
+        assert!(
+            matches!(&planned, Ok(LocalShards::Need { have: 1, need: 3, missing }) if missing.len() == 4),
+            "a failed rebuild must pull everything but our own copy: {:?}",
             planned.as_ref().err(),
         );
     }
@@ -1460,18 +1692,26 @@ mod tests {
         assert!(mls.contains("vault_ops::handle_shard_delete(") && mls.contains("vault_ops::ingest_vault_manifest("));
         assert!(!mls.contains("store_shard(") && !mls.contains("pending_shard_streams"), "an MLS arm writes shards again");
 
+        assert!(
+            arm("Ok(MessageEnvelope::ShardRequest {").contains("vault_ops::shard_send_temp("),
+            "V5-2: the ShardRequest arm names its temp from the member's id unsanitised",
+        );
         let response = arm("Ok(MessageEnvelope::ShardResponse {");
         let asked = response.find("vault_ops::take_shard_ask(").expect("A-V6: the ShardResponse arm takes no ask");
         assert!(asked < response.find("if !found").expect("the found branch"), "A-V6: an unasked miss is heard before the ask check");
-        let plan = &swarm[swarm.find("HavenMessage::RecoveryTransferPlan { plan_json } =>").expect("the plan arm")..];
-        let plan = &plan[..plan.find("RecoveryShardReceived {").expect("the plan arm's end")];
-        let check = plan.find("is_content_id(&assignment.content_id)").expect("A-R4: the plan arm takes any content id");
-        assert!(check < plan.find("pending_shard_streams.insert(").expect("its registration"), "A-R4: the id is checked too late");
-        assert!(!plan.contains("clip_bytes(&assignment.content_id"), "A-R4: a temp is named from the plan's id");
-
         let ops = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/vault_ops.rs"))
             .expect("read vault_ops.rs");
         let ops = &ops[..ops.find("#[cfg(test)]").expect("the tests")];
+
+        let plan_arm = &swarm[swarm.find("HavenMessage::RecoveryTransferPlan { plan_json } =>").expect("the plan arm")..];
+        let plan_arm = &plan_arm[..plan_arm.find("_ => {}").expect("the plan arm's end")];
+        assert!(plan_arm.contains("vault_ops::apply_recovery_plan("), "A-R4: the plan arm skips the plan's rules");
+        let plan = &ops[ops.find("async fn apply_recovery_plan(").expect("the plan's rules")..];
+        let plan = &plan[..plan.find("\n}").expect("their end")];
+        let check = plan.find("is_content_id(&assignment.content_id)").expect("A-R4: a plan takes any content id");
+        assert!(check < plan.find("pending_shard_streams.insert(").expect("its registration"), "A-R4: the id is checked too late");
+        assert!(!plan.contains("clip_bytes(&assignment.content_id"), "A-R4: a temp is named from the plan's id");
+
         let mut sends = 0;
         for src in [swarm.as_str(), ops] {
             for request in src.split("= MessageEnvelope::ShardRequest {").skip(1) {
@@ -1489,7 +1729,7 @@ mod tests {
         let done = &handler[handler.find("async fn handle_shard_stream_complete(").expect("the shard completion")..];
         let done = &done[..done.find("store_shard(").expect("its store")];
         assert!(done.contains("vault_ops::pledge_refused("), "A-V1: a streamed shard is stored past the pledge");
-        assert!(done.contains("p.sender.as_deref()"), "A-V6: any device completes a shard stream registered for another");
+        assert!(done.contains("p.sender != sender_peer"), "A-V6: any device completes a shard stream registered for another");
 
         assert!(done.contains("vault_ops::shard_bytes_refused("), "HOL-SEC-117: a streamed shard lands unchecked against its manifest");
         for from in [
@@ -1501,16 +1741,17 @@ mod tests {
             let checked = body.find("vault_ops::shard_bytes_refused(").unwrap_or_else(|| panic!("HOL-SEC-117: {from} skips the manifest check"));
             assert!(checked < body.find("store_shard(").expect("its store"), "HOL-SEC-117: {from} checks the bytes after storing them");
         }
-        for (src, from) in [
-            (handler.as_str(), "async fn attempt_vault_reconstruction("),
-            (ops, "fn local_shards("),
+        // A stream completion hands a failed rebuild to the fresh pull, which knows our placements.
+        for (src, from, after_failure) in [
+            (handler.as_str(), "async fn attempt_vault_reconstruction(", "vault_ops::holds_unpinned("),
+            (ops, "fn local_shards(", "drop_unpinned_shards("),
         ] {
             let body = &src[src.find(from).expect("a rebuild site")..];
             let body = &body[..body.find("\n}").expect("its end")];
             let rebuild = body.find("reconstruct_file(").expect("its rebuild");
             let gathered = body.find("gather_vault_shards(").unwrap_or(usize::MAX);
             assert!(gathered < rebuild, "HOL-SEC-117: {from} rebuilds from copies its manifest refutes");
-            assert!(body[rebuild..].contains("drop_unpinned_shards("), "HOL-SEC-117: {from} keeps unvouched copies after a failed rebuild");
+            assert!(body[rebuild..].contains(after_failure), "HOL-SEC-117: {from} keeps unvouched copies after a failed rebuild");
         }
         assert_eq!(
             swarm.matches("vault_ops::handle_vault_repull(").count(),

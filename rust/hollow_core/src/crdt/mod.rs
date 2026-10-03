@@ -31,7 +31,7 @@ pub(crate) fn resolve_identity(peer_id: &str) -> String {
 
 /// Deterministic keys for the CRDT unit tests: a signature binds an op to an
 /// author whose peer_id is DERIVED from the key, so a made-up author string
-/// like "alice" can never survive `admit_remote_op`.
+/// like "alice" can never survive `ingest_remote`.
 #[cfg(test)]
 pub(crate) mod testkeys {
     use crate::identity::native_identity::NativeKeypair;

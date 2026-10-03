@@ -1512,9 +1512,9 @@ pub(crate) fn sanitize_incoming_showcase(showcase_board: Option<&str>) -> Option
 ///
 /// Anything else is treated as ABSENT (`None` = preserve what we stored),
 /// which is also what an old client sends. This is the only place the value
-/// is validated, so the renderer can trust the three shapes: the field is
-/// plaintext on the `HavenMessage` fallback, and it is used to key a network
-/// PULL, so an unvalidated string is a request-anything primitive.
+/// is validated, so the renderer can trust the three shapes: it keys a network
+/// PULL, and the profile signature proves only who chose the string, so an
+/// unvalidated one is a request-anything primitive.
 pub(crate) fn sanitize_incoming_frame(avatar_frame: Option<&str>) -> Option<&str> {
     match avatar_frame {
         Some("") => Some(""),
@@ -1531,11 +1531,7 @@ pub(crate) fn sanitize_incoming_frame(avatar_frame: Option<&str>) -> Option<&str
 /// Anything else is ABSENT (`None` = preserve what we stored), which is also
 /// what an old client sends. Same reasoning as [`sanitize_incoming_frame`]:
 /// this value keys a network PULL, so an unvalidated string would be a
-/// request-anything primitive.
-///
-/// Deliberately NOT covered by the profile signature, matching `avatar_frame`:
-/// a rewritten hash swaps decoration the rewriter already holds, and the still
-/// avatar the signature DOES cover keeps rendering underneath.
+/// request-anything primitive. Signed like every profile field (`hollow-profile2`).
 pub(crate) fn sanitize_incoming_anim(anim: Option<&str>) -> Option<&str> {
     match anim {
         Some("") => Some(""),

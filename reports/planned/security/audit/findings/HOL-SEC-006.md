@@ -37,9 +37,11 @@ revoked mark to them.
 
 ## Reproduction
 
-`a_foreign_device_list_cannot_claim_a_master_id_or_silence_a_legacy_contact`
-(node/crypto_handler.rs tests): before the fix, a friend's master id resolved to
-the attacker's master and a legacy contact was marked revoked.
+`authz_a_foreign_roster_cannot_claim_or_remove_anyone_elses_devices`
+(node/roster_book.rs tests; it replaced the device-list test
+`a_foreign_device_list_cannot_claim_a_master_id_or_silence_a_legacy_contact` when
+design ID-1 turned device lists into rosters): before the fix, a friend's master
+id resolved to the attacker's master and a legacy contact was marked revoked.
 
 ## Fix
 
@@ -66,6 +68,7 @@ the attacker's master and a legacy contact was marked revoked.
 
 ## Test
 
-`a_foreign_device_list_cannot_claim_a_master_id_or_silence_a_legacy_contact`:
-failed before the fix, passes after; 89 device-list, revocation, sibling, friend
-and destroy tests pass, HOL-SEC-001's included.
+The original test failed before the fix and passed after; 89 device-list,
+revocation, sibling, friend and destroy tests passed, HOL-SEC-001's included. Its
+roster successor asserts the same three claims (a friend's device, a friend's
+master, our own device) and that the foreign removals revoke nobody.

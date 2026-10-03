@@ -1334,13 +1334,12 @@ async fn send_dm_file_to_device(
         // be online while a sibling is offline.
         let reachable = ws_room_for_peer(ws_room_peers, peer_str).is_some();
 
-        // CRITICAL, Olm ratchet ordering: `send_encrypted_message` ALWAYS calls
-        // olm.encrypt(), advancing and persisting the ratchet, BEFORE it checks
-        // reachability, and DISCARDS the ciphertext if the peer is offline. For an
-        // OFFLINE IMAGE that wasted encryption burns a ratchet slot the receiver
-        // never sees, a permanent gap that breaks decrypt of everything after it.
-        // So when offline-and-image the caption is sent exactly once inside
-        // send_offline_dm_image, AFTER the inlined FileHeader.
+        // `send_encrypted_message` encrypts BEFORE it checks reachability and
+        // DISCARDS the ciphertext for a peer in no room, so for an OFFLINE IMAGE the
+        // caption would never arrive. The skipped ratchet step costs the receiver
+        // nothing else: Olm steps over a gap, and only a key already used or
+        // discarded is missing. So when offline-and-image the caption is sent exactly
+        // once inside send_offline_dm_image, AFTER the inlined FileHeader.
         if reachable {
             send_encrypted_message(
                 olm, crypto_store,
@@ -2273,23 +2272,38 @@ const SHARD_HEADER_SLACK: u64 = 4096;
 /// How long an explicit pull keeps its receipt (the header arms consume it).
 const RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How long a guest's pull of a public file waits for its header.
+const GUEST_PULL_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether a public file header answers a guest pull made in `asked_sid` at `asked_at`:
+/// it names that server and the pull is still fresh.
+pub(crate) fn guest_answer_fresh(asked_sid: &str, asked_at: std::time::Instant, sid: &str) -> bool {
+    asked_sid == sid && asked_at.elapsed() <= GUEST_PULL_TTL
+}
+
 /// The most bytes a stream `from` opens for `id` may declare: what we expect of it.
-/// A file without its sender's header or our own ask stays within the send limit; a
-/// share chunk never rides the WS lane, and a link snapshot comes only from its offerer.
+/// A file without its sender's header, or our own fresh pull from that very device,
+/// stays within the send limit; a share chunk never rides the WS lane, and a link
+/// snapshot comes only from its offerer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_ceiling(
     kind: &ws_stream_transfer::StreamKind,
     id: &str,
     from: &str,
     pending_file_streams: &HashMap<String, PendingFileStream>,
     requested_file_receipts: &HashMap<String, std::time::Instant>,
+    pending_file_asks: &HashMap<String, super::file_asks::PendingFileAsk>,
+    pending_public_file_requests: &HashMap<String, (String, String, std::time::Instant)>,
     pending_link_snapshots: &HashMap<String, LinkSnapshotState>,
 ) -> u64 {
     use ws_stream_transfer::StreamKind;
     let send_limit = file_transfer::DEFAULT_MAX_FILE_SIZE + AES_GCM_TAG;
+    let asked_from = pending_file_asks.get(id).is_some_and(|ask| ask.asked.contains(from))
+        || pending_public_file_requests.get(id).is_some_and(|(_, asked, _)| asked == from);
     match kind {
         StreamKind::File => match pending_file_streams.get(id) {
             Some(header) if header.sender == from => header.size.saturating_add(AES_GCM_TAG),
-            _ if requested_file_receipts.get(id).is_some_and(|at| at.elapsed() < RECEIPT_TTL) => u64::MAX,
+            _ if asked_from && requested_file_receipts.get(id).is_some_and(|at| at.elapsed() < RECEIPT_TTL) => u64::MAX,
             _ => send_limit,
         },
         StreamKind::Shard { .. } => send_limit + SHARD_HEADER_SLACK,
@@ -2724,7 +2738,7 @@ async fn handle_shard_stream_complete(
     hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
 
     // Kept for the device it was registered for, whose own stream may still come.
-    if pending_shard_streams.get(&key).is_some_and(|p| p.sender.as_deref().is_some_and(|s| s != sender_peer)) {
+    if pending_shard_streams.get(&key).is_some_and(|p| p.sender != sender_peer) {
         hollow_log!("[HOLLOW-SECURITY] DROPPED shard stream {key} from {sender_peer}: registered for another device");
         let _ = tokio::fs::remove_file(&request.temp_path).await;
         return None;
@@ -2771,7 +2785,11 @@ async fn handle_shard_stream_complete(
                 let _ = tokio::fs::remove_file(&request.temp_path).await;
                 return None;
             }
-            if let Some(reason) = super::vault_ops::shard_bytes_refused(&content_store, &pss.content_id, pss.shard_index, &shard_bytes) {
+            // A store nobody asked for, of content our own download is pulling.
+            let pulling = !pss.asked && !pss.recovery && pending_vault_downloads.contains_key(&content_id);
+            if let Some(reason) = super::vault_ops::shard_bytes_refused(
+                &content_store, &pss.content_id, pss.shard_index, &shard_bytes, pulling,
+            ) {
                 hollow_log!("[HOLLOW-SECURITY] DROPPED vault shard {shard_index} for {content_id} from {sender_peer}: {reason}");
                 let _ = tokio::fs::remove_file(&request.temp_path).await;
                 // An answer to our own pull: its download asks someone else.
@@ -2812,7 +2830,8 @@ async fn handle_shard_stream_complete(
 /// Try to reconstruct a pending vault download after a new shard landed: gather
 /// local shards, reconstruct when enough are held, else re-register the pending
 /// download and keep waiting for more shards. Returns the download to pull afresh
-/// when shards were deleted on the way.
+/// when shards were deleted on the way, or its rebuild failed on copies the manifest
+/// cannot vouch for.
 ///
 /// Takes the ContentStore by VALUE (last use in the shard arm): an owned store is
 /// Send across .await points, while a `&ContentStore` is not.
@@ -2870,8 +2889,9 @@ async fn attempt_vault_reconstruction(
     }
     let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
     let rebuilt = crate::vault::pipeline::reconstruct_file(&manifest, &packed);
+    // The fresh pull decides which unvouched copies go: it knows what we hold for others.
     if let Err(e) = &rebuilt
-        && super::vault_ops::drop_unpinned_shards(&content_store, &manifest, &packed) > 0
+        && super::vault_ops::holds_unpinned(&manifest, &packed)
     {
         hollow_log!("[HOLLOW-VAULT] Rebuild of {content_id} failed ({e}): pulling its shards again");
         return Some(repull(dl_server_id));
@@ -3414,12 +3434,34 @@ mod tests {
             device: zeroize::Zeroizing::new(Vec::new()),
         };
         let links = HashMap::from([("link_ab".to_string(), link)]);
-        let ceiling = |kind: &StreamKind, id: &str, from: &str| stream_ceiling(kind, id, from, &headers, &receipts, &links);
+        let now = std::time::Instant::now();
+        let ask = |device: &str| super::super::file_asks::PendingFileAsk {
+            context: super::super::file_asks::FileAskContext::Dm { peer: "bob-master".into() },
+            sender: "bob-master".into(),
+            asked: std::collections::HashSet::from([device.to_string()]),
+            in_flight: Some((device.to_string(), now)),
+            negatives: Vec::new(),
+            first_asked_at: now,
+            last_asked_at: now,
+        };
+        let asks = HashMap::from([("asked".to_string(), ask("bob")), ("stale".to_string(), ask("bob"))]);
+        receipts.insert("guest".to_string(), now);
+        let guest = HashMap::from([("guest".to_string(), ("srv".to_string(), "carol".to_string(), now))]);
+        let ceiling = |kind: &StreamKind, id: &str, from: &str| {
+            stream_ceiling(kind, id, from, &headers, &receipts, &asks, &guest, &links)
+        };
         let send_limit = file_transfer::DEFAULT_MAX_FILE_SIZE + 16;
         assert_eq!(ceiling(&StreamKind::File, "hdr", "bob"), (100 << 20) + 16);
         assert_eq!(ceiling(&StreamKind::File, "hdr", "mallory"), send_limit, "another device rode bob's header");
-        assert_eq!(ceiling(&StreamKind::File, "asked", "mallory"), u64::MAX);
-        assert_eq!(ceiling(&StreamKind::File, "stale", "mallory"), send_limit, "an expired ask");
+        assert_eq!(ceiling(&StreamKind::File, "asked", "bob"), u64::MAX, "the device we asked outruns its header");
+        assert_eq!(
+            ceiling(&StreamKind::File, "asked", "mallory"),
+            send_limit,
+            "a device we never asked opened an unlimited stream for a file we pull",
+        );
+        assert_eq!(ceiling(&StreamKind::File, "guest", "carol"), u64::MAX, "the peer a guest pull went to");
+        assert_eq!(ceiling(&StreamKind::File, "guest", "mallory"), send_limit, "another peer answered a guest pull");
+        assert_eq!(ceiling(&StreamKind::File, "stale", "bob"), send_limit, "an expired ask");
         assert_eq!(ceiling(&StreamKind::File, "unknown", "mallory"), send_limit);
         assert_eq!(ceiling(&StreamKind::LinkSnapshot, "link_ab", "bob"), u64::MAX);
         assert_eq!(ceiling(&StreamKind::LinkSnapshot, "link_ab", "mallory"), 0, "another device's link snapshot");
@@ -3427,6 +3469,18 @@ mod tests {
         assert_eq!(ceiling(&StreamKind::ShareChunk { chunk_index: 0 }, "x", "bob"), 0);
         let shard = ceiling(&StreamKind::Shard { shard_index: 0 }, "x", "bob");
         assert!(shard > send_limit && shard < send_limit + 64 * 1024, "{shard}");
+    }
+
+    /// A-F5: a guest's public file header counts only for the server the pull was made
+    /// in, and only while the pull is fresh.
+    #[test]
+    fn a_guest_pull_is_answered_only_for_its_server_while_fresh() {
+        let now = std::time::Instant::now();
+        assert!(guest_answer_fresh("srv", now, "srv"));
+        assert!(!guest_answer_fresh("srv", now, "other-srv"), "A-F5: a header for another server answered the pull");
+        if let Some(old) = now.checked_sub(GUEST_PULL_TTL + std::time::Duration::from_secs(1)) {
+            assert!(!guest_answer_fresh("srv", old, "srv"), "A-F5: an expired pull was answered");
+        }
     }
 
     /// A-F7, A-T20: a completed stream with no header yet parks, but one sender holds
@@ -3642,8 +3696,8 @@ mod tests {
     }
 
     /// HOL-SEC-117: a shard landing for a download whose other copies fail their manifest
-    /// hands the download back for a fresh pull, with those copies deleted, instead of
-    /// failing it for good.
+    /// hands the download back for a fresh pull instead of failing it for good: refuted
+    /// copies deleted here, unvouched ones left to the pull, which knows our placements.
     #[tokio::test]
     async fn a_failed_rebuild_hands_back_a_fresh_pull() {
         use crate::vault::content_store::{ContentStore, StorageTier, content_id, shard_key};
@@ -3678,7 +3732,7 @@ mod tests {
         };
         let cs = ContentStore::open(&db, &pass, &vault).unwrap();
 
-        // No hashes to tell which copy is bad: every copy that took part goes.
+        // No hashes to tell which copy is bad: the fresh pull sorts them out.
         cs.save_manifest("srv", "srv-general", &manifest(&cid, Vec::new())).unwrap();
         for si in 0..2u16 {
             cs.store_shard("srv", &cid, si, 3, 2, 0, StorageTier::Standard, &shards[si as usize]).unwrap();
@@ -3689,7 +3743,10 @@ mod tests {
             repull.is_some_and(|r| r.content_id == cid && r.refuted.is_none()),
             "HOL-SEC-117: a rebuild that failed on unvouched copies was not pulled afresh",
         );
-        assert!((0..3u16).all(|si| !cs.has_shard(&shard_key(&cid, si)).unwrap()), "the unvouched copies are still held");
+        assert!(
+            (0..3u16).all(|si| cs.has_shard(&shard_key(&cid, si)).unwrap()),
+            "a stream completion deleted unvouched copies without knowing which we hold for others",
+        );
 
         // Hashes in the manifest: only the refuted copy goes, and the download pulls again.
         let pinned = "e1".repeat(32);
@@ -3698,5 +3755,14 @@ mod tests {
         cs.store_shard("srv", &pinned, 1, 3, 2, 0, StorageTier::Standard, b"planted").unwrap();
         assert!(rebuild(&pinned).await.is_some(), "HOL-SEC-117: a deleted copy was never asked for again");
         assert!(cs.has_shard(&shard_key(&pinned, 0)).unwrap() && !cs.has_shard(&shard_key(&pinned, 1)).unwrap());
+
+        // Every copy is the one its manifest pins: a failed rebuild is not theirs to pull again.
+        let vouched = "e2".repeat(32);
+        cs.save_manifest("srv", "srv-general", &manifest(&vouched, shards.iter().map(|s| content_id(s)).collect())).unwrap();
+        for si in 0..3u16 {
+            cs.store_shard("srv", &vouched, si, 3, 2, 0, StorageTier::Standard, &shards[si as usize]).unwrap();
+        }
+        assert!(rebuild(&vouched).await.is_none(), "a rebuild that failed on vouched copies was pulled again");
+        assert!((0..3u16).all(|si| cs.has_shard(&shard_key(&vouched, si)).unwrap()), "a vouched copy was deleted");
     }
 }

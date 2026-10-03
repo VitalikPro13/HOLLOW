@@ -29,7 +29,8 @@ device revoked this way stayed.
 
 ## Reproduction
 
-`authz_a_carried_list_attributes_only_a_bound_sender` (node/crypto_handler.rs tests).
+`authz_a_carried_roster_attributes_only_a_member` (node/roster_book.rs tests; the
+roster successor of `authz_a_carried_list_attributes_only_a_bound_sender`).
 
 ## Fix
 
@@ -38,7 +39,11 @@ device revoked this way stayed.
   otherwise the message is dropped.
 - All three arms pass the ingest's `newly_revoked` to `enforce_device_revocations`,
   like the profile arm.
-- A source guard in the same test keeps all three arms wired.
+- A source guard keeps the arms wired: today `carried_roster_arms_stay_wired`
+  (node/roster_book.rs tests, session 32) checks that ServerJoinRequest, FriendRequest,
+  FriendAccept and FriendReject each ingest the roster, enforce its removals and
+  attribute only via `roster_book::carried_master` (the original guard went with design
+  ID-1; mutation killed, `tmp_s32_lead_mutate.py`).
 
 ## Test
 

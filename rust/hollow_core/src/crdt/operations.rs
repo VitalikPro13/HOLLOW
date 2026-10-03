@@ -54,7 +54,7 @@ impl std::fmt::Display for OpReject {
 /// Each op is self-contained and both idempotent and commutative.
 ///
 /// SECURITY: `author` is a claim until `auth` proves it. Every remote ingest path runs
-/// `ServerState::admit_remote_op`, which rejects an op with no `auth`, an `auth` whose
+/// `ServerState::ingest_remote`, which rejects an op with no `auth`, an `auth` whose
 /// key derives a different peer_id, or a signature that does not verify. There is no
 /// tolerance branch: an `if auth.is_some()` gate would be the bypass.
 #[derive(Debug, Clone, Serialize, Deserialize)]

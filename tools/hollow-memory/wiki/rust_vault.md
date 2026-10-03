@@ -412,8 +412,8 @@ Manages cooperative shard gathering for ex-members of dead/disbanded servers. Me
 
 State of an active recovery pool:
 
-- `server_id`, `token`, `is_initiator`, `local_peer_id`
-- `members: HashMap<String, MemberInventory>` — all pool participants and their inventories
+- `server_id`, `token`, `room` (a hash of the token, HOL-SEC-067), `is_initiator`, `local_device`
+- `members: HashMap<String, MemberInventory>` — all pool participants and their inventories, keyed by DEVICE id (ours too; session 32: our own entry used to be keyed by master, so on real installs, device != master, nodes disagreed on the coordinator and no transfer ever ran)
 - `all_manifest_ids: HashSet<String>` — union of all known manifest content_ids
 - `file_k_values: HashMap<String, u16>` — k value needed for each file's reconstruction
 - `manifest_meta: HashMap<String, ManifestMeta>` — full metadata per file
@@ -423,14 +423,15 @@ State of an active recovery pool:
 ### RecoveryPoolState Methods
 
 - `recovery_pool:RecoveryPoolState::new()` — initializes with local peer's inventory. Sets up members map with self.
-- `recovery_pool:RecoveryPoolState::add_member(peer_id, inventory)` — adds peer, merges their manifest_ids into all_manifest_ids.
+- `recovery_pool:RecoveryPoolState::add_member(peer_id, inventory)` — adds peer, merges their manifest_ids into all_manifest_ids; returns whether the device is new (a joiner hears two welcomes per member, the UI lists it once).
+- `recovery_pool:RecoveryPoolState::own_inventory()` — our own entry.
 - `recovery_pool:RecoveryPoolState::remove_member(peer_id)` — removes peer from pool.
 - `recovery_pool:RecoveryPoolState::mark_shard_received(content_id, shard_index)` — records shard receipt.
 - `recovery_pool:RecoveryPoolState::mark_reconstructed(content_id)` — marks file as done.
 - `recovery_pool:RecoveryPoolState::compute_status()` — computes PoolStatus. Categorizes files as reconstructed, partial (at least one shard in pool), or no_shards (zero shards in pool).
 - `recovery_pool:RecoveryPoolState::compute_transfer_plan()` — determines which shards to send where. For each unreconstructed content_id, builds a map of shard_index -> holder peers. For each shard, the first holder is designated as source. Assigns transfers to every other pool member who doesn't have that shard (including peers with zero shards for this content). Returns Vec<TransferAssignment>.
-- `recovery_pool:RecoveryPoolState::room_code()` — returns `"recovery:{server_id}:{token}"`.
-- `recovery_pool:RecoveryPoolState::is_coordinator()` — lowest peer_id among all members. Deterministic coordinator election.
+- `recovery_pool:RecoveryPoolState::room_code()` — the pool room, named by a hash of the token (HOL-SEC-067), so the relay never sees the token.
+- `recovery_pool:RecoveryPoolState::coordinator()` / `is_coordinator()` — lowest DEVICE id among all members. Deterministic coordinator election.
 - `recovery_pool:RecoveryPoolState::populate_from_content_store(cs)` — reads all manifests for the server from ContentStore. Populates `manifest_meta` and `file_k_values` for erasure-coded files (skips full-replication files).
 
 ### recovery_pool:build_local_inventory()
@@ -480,7 +481,7 @@ All variants with `target: Option<String>` support MLS targeted delivery. Since 
 ### Pending State in swarm.rs
 
 - `pending_vault_downloads: HashMap<String, (String, usize, usize)>` — content_id -> (server_id, k, requested_count). Tracks in-progress downloads waiting for remote shards.
-- `pending_shard_streams: HashMap<String, PendingShardStream>` — key `"{cid}:{si}"`. Registered when ShardStore/ShardResponse metadata arrives with empty data, indicating binary stream follows. Contains server_id, content_id, shard_index, shard_key, k, m, total_size, tier.
+- `pending_shard_streams: HashMap<String, PendingShardStream>` — key `"{cid}:{si}"`. Registered when ShardStore/ShardResponse metadata arrives with empty data, indicating binary stream follows, or by a recovery plan. Contains server_id, content_id, shard_index, shard_key, k, m, total_size, tier, `sender` (the ONLY device whose stream completes it: the store's sender, the holder we asked, or the plan's source; never optional since session 32), `pledge`, `asked` (answers our pull: wrong bytes refute that holder), `recovery` (a planned transfer, never judged an unasked copy). The answer we asked for takes the slot over an unasked registration; while we pull a content id, an unasked copy lands only as the bytes the manifest pins (HOL-SEC-117 residuals).
 
 ---
 
@@ -516,7 +517,7 @@ All variants with `target: Option<String>` support MLS targeted delivery. Since 
 
 1. Initiator calls `handle_initiate_recovery_pool()`, joins `recovery:{server_id}:{token}` room.
 2. Participants call `handle_join_recovery_pool()`, send RecoveryHello with shard inventories.
-3. Pool coordinator (lowest peer_id) calls `compute_transfer_plan()` to determine shard transfers.
-4. Shards streamed between pool members as TransferAssignments.
+3. Pool coordinator (lowest DEVICE id) runs `vault_ops::coordinate_recovery` on every hello and welcome: `compute_transfer_plan()`, broadcast the plan FIRST (the member we stream to must hold it before our bytes), then apply its own part (the room never echoes a frame to its sender).
+4. Members apply a plan only from the coordinator (`vault_ops::apply_recovery_plan`: content-id shape, send only to pool members); each planned shard stream completes only from the plan's `source_peer`.
 5. When a member accumulates >= k shards for a file, reconstructs it locally.
 6. Initiator or any member can call `handle_stop_recovery_pool()` to end session.

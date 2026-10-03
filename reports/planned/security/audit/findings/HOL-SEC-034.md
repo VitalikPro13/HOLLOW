@@ -28,9 +28,10 @@ cleared the banner and raised "identity reappeared".
 ## Reproduction
 
 `authz_a_friend_destroy_order_applies_once_even_after_the_identity_returns`
-(node/destroy.rs tests), `authz_only_a_new_device_means_a_destroyed_identity_returned`
-(node/crypto_handler.rs tests), and the updated harness test
-`destroy_friend_announce_flips_verified_and_banner`.
+(node/destroy.rs tests), `authz_only_a_new_member_means_a_destroyed_identity_returned`
+(node/roster_book.rs tests; the roster successor of
+`authz_only_a_new_device_means_a_destroyed_identity_returned`), and the updated
+harness test `destroy_friend_announce_flips_verified_and_banner`.
 
 ## Fix
 

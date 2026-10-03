@@ -81,7 +81,7 @@ needed from Vitalik: which messages move, and the rollout rule.
 | A12 | Inject an `RtcAnswer` with its own DTLS fingerprint and sit in the data channel | media:S-10 | High | FIXED HOL-SEC-053 (traced: screen-share audio was plaintext to the relay); peer half HOL-SEC-058 |
 | A13 | Forge `PeerDisconnecting` to drop a voice leg or unconnected call | dm:S-22 | Low | FIXED HOL-SEC-053 (no sender existed; variant removed) |
 | A14 | Garbage PreKey/normal frame with a spoofed `from` tears down a working Olm session | dm:S-03, transport:S-16 | Medium | FIXED HOL-SEC-053 (spoofed) + 054 (a replayed genuine frame) |
-| A15 | Swap a waiting-room knocker's KeyPackage so the host admits the relay | server_mls:S-27 | High | FIXED HOL-SEC-017/041; host pinning FIXED HOL-SEC-061 |
+| A15 | Swap a waiting-room knocker's KeyPackage so the host admits the relay | server_mls:S-27, server_mls:S-17 | High | FIXED HOL-SEC-017/041; host pinning FIXED HOL-SEC-061 |
 | A16 | Conference lobby/host spoofing (`LobbyInfo`, `Ended`, `Kicked`, `JoinDenied`) | server_mls:S-29..S-32 | Medium | FIXED: relay half HOL-SEC-053, member half HOL-SEC-061 (ids name the host) |
 | A17 | Auth signature has no relay binding or nonce: replay to another relay within 60 s | relay:8 | Medium | FIXED HOL-SEC-063 (auth v2: relay nonce, relay domain and every flag signed; fetch sockets never take a full socket's slot, never listed) |
 | A18 | A relay reply containing "license_key" stops the reconnect loop for good | relay:22 | Low | FIXED HOL-SEC-066 (exact refusal codes only, the key never erased on a relay's word, one key per relay) |
@@ -116,7 +116,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 |---|---|---|---|---|
 | B1 | Rewrite, re-attribute, card and then delete ANY channel message by id through an unsolicited `ChannelSyncBatch` (Olm and MLS) | channel:S1 | High | FIXED HOL-SEC-004 |
 | B2 | Rewrite any DM row by id through a `DmSyncBatch`; graft a card and swap the signature | dm:S-09, dm:S-15 | High | FIXED HOL-SEC-004 (sibling batch too) |
-| B3 | Live DM edit: signer never compared to the row's author | dm:S-10, dm:S-05 | High | FIXED HOL-SEC-008 |
+| B3 | Live DM edit: signer never compared to the row's author or conversation | dm:S-10, transport:S-05 | High | FIXED HOL-SEC-008 |
 | B4 | Push-path DM edit has no `is_mine` check: a friend rewrites our own sent rows | dm:S-11, transport:S-04 | High | FIXED HOL-SEC-008 |
 | B5 | Live DM delete takes its signer from the sender, not the row (sync twin is right) | dm:S-12 | Medium | FIXED HOL-SEC-008 |
 | B6 | DM `AddReaction` attaches to any id, channel messages included, skipping mute | dm:S-13 | Low | FIXED HOL-SEC-008 (channel reactions also bound to the channel they name) |
@@ -132,7 +132,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 |---|---|---|---|---|
 | C1 | `PublicChannelMessage` is stored for ANY channel: a stranger posts into private or admin-only channels (live and push) | channel:S3, transport:S-09 | High | FIXED HOL-SEC-009 |
 | C2 | MLS inner `sid`/`cid` not bound to the decrypting group: a member of any shared group (a conference included) posts into another server or a restricted channel, deletes a real server, joins its voice | channel:S4, server_mls:S-10, transport:S-07, media:S-05 | High | FIXED HOL-SEC-010 |
-| C3 | `ChannelSyncBatch` accepted unsolicited from anyone, any server, skipping posting gates | channel:S2 | High | Sender half FIXED (decision 2: both arms accept a batch only from a current member who can see the channel, `channel_backfill_allowed_from`, test `authz_channel_backfill_only_from_a_member_who_can_read_it`); author half = candidate E4 (with E1) |
+| C3 | `ChannelSyncBatch` accepted unsolicited from anyone, any server, skipping posting gates | channel:S2 | High | Sender half FIXED (decision 2: both arms accept a batch only from a current member who can see the channel, `channel_backfill_allowed_from`, test `authz_channel_backfill_only_from_a_member_who_can_read_it`); author half FIXED HOL-SEC-048 (E4); reactions riding a batch FIXED HOL-SEC-101 |
 | C4 | `can_post_in_channel` enforced only on the sender's own client | channel:S5 | Medium | FIXED HOL-SEC-009 (posting checked at ingest on every live transport) |
 | C5 | Olm and push channel paths skip mute, slow mode, media-only | channel:S6, transport:S-08 | Medium | FIXED HOL-SEC-009 (Olm runs the shared ingest; push applies the same gate) |
 | C6 | Mute check keyed on the sender-supplied `sid`: omit it to bypass | channel:S7 | Medium | FIXED HOL-SEC-008 (edits, cards, reactions and deletions must name their row's own channel) |
@@ -149,14 +149,14 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 
 | ID | What an attacker can do | Evidence | Sev | Status |
 |---|---|---|---|---|
-| D1 | A member gets a leaf whose credential claims any identity, the owner included; no credential validation at Add, Welcome, Update or Commit | server_mls:S-13, A-14 | Critical | FIXED HOL-SEC-041 (design D, session 8): the MLS signing key is the device key and the credential carries the master's certificate, so every receiver proves a leaf's device and master from the leaf alone; KeyPackages are seated only when bound to the sending device (member half was HOL-SEC-017) |
+| D1 | A member gets a leaf whose credential claims any identity, the owner included; no credential validation at Add, Welcome, Update or Commit | server_mls:S-13, A-14, server_mls:S-09 | Critical | FIXED HOL-SEC-041 (design D, session 8): the MLS signing key is the device key and the credential carries the master's certificate, so every receiver proves a leaf's device and master from the leaf alone; KeyPackages are seated only when bound to the sending device (member half was HOL-SEC-017) |
 | D2 | Commits from any leaf merged with no role or membership check on Add/Remove | server_mls:S-19 | High | FIXED HOL-SEC-042: every commit is staged and judged before merging (`mls_authority::commit_verdict`): refused outright for non-member senders, foreign proposals, unbound or identity-changing leaves, revoked adds; held while our view may lag for unknown members and for evicting a current member unless the same commit re-adds that device. The coordinator plans with the same rules; a repair is one commit |
 | D3 | `MlsWelcome` from anyone drops the live group before validating; group substitution with a KeyPackage requested from the victim | server_mls:S-15, S-16, media:S-13 | High | FIXED HOL-SEC-043: Welcomes are staged (`replace_old_group`) and judged before anything is replaced; replacing a held group needs our own request, bound to its sender for an answered KeyPackage request (decision: any member, if asked) |
 | D4 | Garbage `MlsCommit`, `MlsCommitCatchup` or 3 garbage `MlsChannelMessage`s drop the victim's group | server_mls:S-18, S-21, S-24 | Medium | FIXED HOL-SEC-044: no failure drops a group; garbage is ignored, other failures probe, and probes carry an epoch-authenticator digest so the answering member repairs a same-epoch fork |
 | D5 | `MlsKeyPackageRequest` ungated: KeyPackages on demand, persisted storage grows | server_mls:S-22 | Low | FIXED HOL-SEC-043: KeyPackage requests answered only for our own server, to a current member, for a subgroup only if we qualify, once per group per 10 s, and while we hold a leaf only to the owner, our catch-up responder or the subgroup coordinator |
 | D6 | Subgroup membership decided on `resolve()` of the unvalidated credential | server_mls:S-25 | High | FIXED HOL-SEC-041/042: subgroup membership, the stale sweep and reconcile decide on the certified master; subgroup adds need a master that can see the channel |
 | D7 | Conference chat attributed by a credential the sender chose | server_mls:S-28 | Medium | FIXED: knocker half HOL-SEC-017, relay half HOL-SEC-041 (a knock's KeyPackage must be bound to the knocking device, so the relay cannot swap its own in; chat is attributed to the proven leaf). Host pinning from the invite and the lobby frames (S-26, S-29..S-32) go to class A |
-| D8 | `MlsKeyPackage` has no ban check | server_mls:S-14 | Medium | FIXED at the MLS layer (HOL-SEC-041/042): the KeyPackage arm refuses a banned master, and commits and Welcomes hold on a banned leaf; a `MemberAdded` that bypasses the ban itself stays E7 |
+| D8 | `MlsKeyPackage` has no ban check | server_mls:S-14 | Medium | FIXED at the MLS layer (HOL-SEC-041/042): the KeyPackage arm refuses a banned master, and commits and Welcomes hold on a banned leaf; a `MemberAdded` that bypasses the ban itself was E7 (FIXED HOL-SEC-049) |
 | D9 | VC frames over MLS attributed to relay `from`, never compared with the leaf | server_mls:S-23, media X-3 | Low | FIXED HOL-SEC-045: MLS `VoiceChannel*` envelopes are dropped unless the encrypting leaf is the relay-stamped device |
 | D10 | Parked-join KeyPackage check compares against the relay-stamped sender | server_mls:S-03 | High | FIXED HOL-SEC-041: the parked-join KeyPackage must be bound to the attributed device and the joiner's master |
 
@@ -172,7 +172,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | E6 | Unknown authors count as Member: strangers author self ops everyone persists and re-floods | crdt:S7 | Medium | FIXED HOL-SEC-050: every op but the founding op and a checkpoint needs an author who is a current member |
 | E7 | `MemberAdded` at ingest checks only that the author is a member: ban, private, cap, Twitch, owner-verify bypassed | crdt:S8, server_mls:S-02 | Medium | FIXED HOL-SEC-049 (decision 4): any member may admit, and every member re-checks ban, private, cap, owner-verify and the Twitch follow credential (now carried in the op) at the op's own time |
 | E8 | Admin targets an Owner device id the replica cannot resolve yet; canonicalisation later demotes, bans or mutes the Owner | crdt:S9 | Medium | FIXED HOL-SEC-051: anchored servers never fold device-keyed registers; on a legacy server the fold only adopts, never onto the Owner, never Owner, and no ban or mute onto a Moderator+ |
-| E9 | A device key authors with its master's authority through the process-global resolver; a revoked device keeps it where the revocation has not landed | crdt:S10 | Medium | FIXED HOL-SEC-050: an author acts by its own id, never through the resolver (clients sign ops with the master key). The stolen device holding the master key itself stays ID-1 |
+| E9 | A device key authors with its master's authority through the process-global resolver; a revoked device keeps it where the revocation has not landed | crdt:S10 | Medium | FIXED HOL-SEC-050: an author acts by its own id, never through the resolver (clients sign ops with the master key). The stolen device holding the master key itself was ID-1 (FIXED HOL-SEC-077, and HOL-SEC-083 for the bare master id) |
 | E10 | `ServerSettingChanged` has no key/value validation: an Admin sets `retention_files` to 0 and every member deletes channel files and vault content | crdt:S11 | Medium | FIXED HOL-SEC-021 (decision 2c): `setting_change_allowed` is the one rule for authoring and ingest; retention policies and their `_since` stamps from the Owner only, a policy only with an app value, and a reader treats any other value as keep-everything; the settings page shows retention read-only to non-Owners |
 | E11 | Unban/unmute check no target; Admin edits the Owner's nickname, pledge, twitch; `RolePermissionsChanged` unbounded; author/ingest gates disagree | crdt:S12 | Low | FIXED HOL-SEC-052: unban/unmute need the setter's rank; nickname/Twitch/pledge of others need Owner or Admin outranking a member; role permissions only for admin/moderator/member and only bits the author holds; authoring runs `op_allowed` (`author_checked`) |
 | E12 | Owner can create co-Owners or remove itself at ingest; an Owner-less server takes `ServerCreated` from anyone | crdt:S13 | Low | FIXED HOL-SEC-052 (decision 1): the owner is fixed; nothing makes anyone Owner or demotes, removes, bans, mutes or edits the Owner |
@@ -199,7 +199,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 |---|---|---|---|---|
 | G1 | Plaintext `ProfileUpdate` byte-slices free text (`display_name[..64]`) | identity:S7 | High | FIXED HOL-SEC-007 |
 | G2 | `&cid[..16]` on a sender string (vault manifest path) | files:V5-2 | High | FIXED HOL-SEC-007 |
-| G3 | `&content_id[..8]` in the recovery transfer plan | files:R-4b | Medium | FIXED HOL-SEC-007 |
+| G3 | `&content_id[..8]` in the recovery transfer plan | files:R-4b | Medium | FIXED HOL-SEC-007 (the panic); the same content id reaching a temp path unchecked FIXED HOL-SEC-106 (re-check A-R4) |
 | G4 | `link_handler.rs:166` byte-slices the relay-stamped `target_peer` | identity:S15 | Low | FIXED HOL-SEC-007 |
 
 ## Class H. Files, vault, recovery, share, assets
@@ -214,12 +214,12 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | H6 | No membership/post check on the announced `sid:cid` of a channel file | files:F1-4 | Medium | FIXED HOL-SEC-022 (Olm channel headers need a member who can read the channel; MLS already bound by HOL-SEC-010) |
 | H7 | `FileHeaderReceived` still carries the attacker's `share_ref` after the guard refused; Dart auto-starts that share | files:F1-6 | Medium | FIXED HOL-SEC-022 (Dart gets a share reference only from the card's owner) |
 | H8 | WS stream state keyed by id alone: any room peer appends to or completes another's transfer | files:F7-1, relay:16, transport:S-18 | Medium | FIXED HOL-SEC-023: a stream belongs to the device that opened it (takeover only after 10 s idle); the content-substitution half for channel files needs a signed content hash (class A) |
-| H9 | Unsolicited streams write unbounded `.ws_recv_` temps; ShareChunk temps never deleted | files:F7-2 | Medium | FIXED HOL-SEC-023: declared size enforced, 16 open streams per peer and 128 in all, share-chunk temps deleted, `.ws_recv_` swept at boot |
+| H9 | Unsolicited streams write unbounded `.ws_recv_` temps; ShareChunk temps never deleted | files:F7-2 | Medium | FIXED HOL-SEC-023: declared size enforced, 16 open streams per peer and 128 in all, share-chunk temps deleted, `.ws_recv_` swept at boot. Open halves found by the re-check, all fixed: no ceiling on the declared size (HOL-SEC-102), completed streams with no header parked without a limit (HOL-SEC-103), the Dart data-channel twin (HOL-SEC-116) |
 | H10 | FILE-3 shard hash check skipped when the registrant sets k = m = 0 | files:F7-3 | Medium | FIXED HOL-SEC-024 (the rebuilt ciphertext must hash to its content id, so the per-shard hash is no longer the only integrity check) |
-| H11 | Any member overwrites any shard Alice holds; pledge checked on one path only (storage exhaustion) | files:V1-1, V1-2, V11-1 | High | FIXED HOL-SEC-024: `shard_write_refused` on every write (member, shard not held, pledge) |
+| H11 | Any member overwrites any shard Alice holds; pledge checked on one path only (storage exhaustion) | files:V1-1, V1-2, V11-1 | High | FIXED HOL-SEC-024: `shard_write_refused` on every write (member, shard not held, pledge). Open halves found by the re-check, fixed: a streamed `ShardStore` skipped the pledge (HOL-SEC-104), a first copy planted by any member blocked the real shard (HOL-SEC-117) |
 | H12 | `ShardDelete` from an admin of ANY shared server wipes placement records of another server; MLS path ignores overrides and membership | files:V4-1, V4-2 | High | FIXED HOL-SEC-024: `handle_shard_delete` for both transports, override-aware, placements deleted only in the server named |
 | H13 | Restricted-channel files in 6+ member servers go to the vault: the key manifest reaches the whole server, shards served without `channel_readable_by` | files:V5-1 | High | FIXED HOL-SEC-025: restricted-channel files never enter the vault (Dart, node and send path); `shard_serve_refused` checks the channel |
-| H14 | Unsolicited `ShardResponse` stores or overwrites any shard | files:V6-1, V6-2 | High | FIXED HOL-SEC-024 (shard responses pass the write gate and never replace a pending registration) |
+| H14 | Unsolicited `ShardResponse` stores or overwrites any shard | files:V6-1, V6-2 | High | FIXED HOL-SEC-024 (shard responses pass the write gate and never replace a pending registration). Open halves found by the re-check, fixed: an unasked answer blocked the download for good (HOL-SEC-105), a wrong answer from a holder we asked was kept (HOL-SEC-117) |
 | H15 | `VaultManifestBroadcast` from anyone replaces any manifest, key included, and relinks any file row | files:V10-1 | High | FIXED HOL-SEC-024 (`ingest_vault_manifest`: creator only, never over another creator's, well-formed content id, relinks only the creator's cards; the cache path is sanitized, which closed a write outside the cache folder) |
 | H16 | Recovery pool accepts Hello/Welcome/ManifestSync/TransferPlan/Stop from anyone in any room: steer the plan, make us stream shards to a named peer, stop the pool | files:R-1..R-7, relay:15, transport:S-17 | High | FIXED HOL-SEC-026: recovery frames only from the pool room, plans only from the coordinator and only to members; `RecoveryManifestSync` deleted. The token-as-room-name half is HOL-SEC-002 class |
 | H17 | `.stream_shard_{cid}.tmp` with an unsanitised cid: write outside files/ on Windows | files:V5-3 | High? | FIXED HOL-SEC-007 |
@@ -244,7 +244,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | I9 | Offline-buffer global backstop evicted by throwaway identities | relay:18 | Low | FIXED HOL-SEC-070 (one byte budget over every waiting frame, weighed with its overhead and evicted by address share; the per-identity key caps are gone); AR-07 closed |
 | I10 | A revoked sibling reads the mailbox again after any relay restart (version marks in RAM only) | relay:19 | Medium | FIXED + DEPLOYED HOL-SEC-031: the device-list marks ride the restart snapshot (codec version 3) |
 | I11 | Guests deposit and trigger pushes through JSON `direct` | relay:20 | Low | FIXED + DEPLOYED HOL-SEC-030 (guests may not send JSON `direct`) |
-| I12 | Report counts inflated by throwaway identities; push wake-ups by any new identity | relay:21, relay:17 | Low | Report half ACCEPTED AR-08 (2026-09-27). Push half OPEN as K3: the wake is not silent, the app shows a fallback banner when the fetch finds nothing |
+| I12 | Report counts inflated by throwaway identities; push wake-ups by any new identity | relay:21, relay:17 | Low | Report half ACCEPTED AR-08 (2026-09-27). Push half = K3 (Android FIXED HOL-SEC-035; iOS waits on Apple's filtering entitlement) |
 | I13 | Stale security comments cite a rate limit and a constant that do not exist | relay:24 | Info | FIXED + DEPLOYED (comments corrected with HOL-SEC-030) |
 
 ## Class J. Reach, presence and metadata
@@ -267,7 +267,7 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 |---|---|---|---|---|
 | K1 | The push fetch node and the iOS NSE never load the block list: blocked senders' DMs are stored and shown | transport:S-01 | Medium | FIXED HOL-SEC-035 (`warm_from_store` loads the block list in every process; blocked members' posts never become banners; iOS hints leave blocked friends out) |
 | K2 | A key change first seen through push never raises the alert | transport:S-02 | Low | FIXED HOL-SEC-035 (`pin_olm_identity_key` on the fetch path) |
-| K3 | Anyone who knows a device id can make the relay wake that phone; an empty wake showed a fallback banner naming the sender | relay:A-22a | Low | FIXED HOL-SEC-035 on Android (`push_sender_known`); iOS residual: the APNs alert shows before the extension runs, needs Apple's filtering entitlement (decision for Vitalik) |
+| K3 | Anyone who knows a device id can make the relay wake that phone; an empty wake showed a fallback banner naming the sender | relay:A-22a | Low | FIXED HOL-SEC-035 on Android (`push_sender_known`); iOS residual: the APNs alert shows before the extension runs; Apple's notification filtering entitlement was requested 2026-09-27 and is awaited, the iOS suppression lands in phase G once it is granted |
 
 ## Class L. Friends, blocklist, DM edges
 
@@ -304,3 +304,65 @@ context before the write. B10 and B11 (ordering and replay) closed by HOL-SEC-03
 | O2 | Any peer pops the "your other device wants to sync" prompt; Accept sends the full backup encrypted with our public master id | identity:S6 | Critical (one click) | FIXED HOL-SEC-005 |
 | O3 | A hostile relay resolves a link code to its own device and hands the linking device an identity of its choosing | relay:3 | Medium | Folded into HOL-SEC-002 (the PAKE redesign) |
 | O4 | `hollow_push_decrypt` (exported, unused by Swift) builds first-contact sessions on an unauthenticated key | this session | Info | DELETED (session 3) |
+
+## Class P. Leftovers of the phase B re-check (2026-10-02)
+
+Ten agents re-checked every evidence section against the code of 2026-10-02
+(`phase_b_recheck/`); every FIXED row held, and these leftovers had never been
+filed. Decisions D1 to D7 are in tmp4.txt section 1. Evidence ids below are
+`<area>:<row>` of the re-check files.
+
+| ID | What an attacker can do | Evidence | Sev | Status |
+|---|---|---|---|---|
+| P1 | A master-key holder logs in as the bare master id and passes every sibling gate (friends, servers, DM history, the owner's profile) | identity:G1, A-12..A-19, A-40, A-41 | High | FIXED HOL-SEC-083 |
+| P2 | A removed device still holding an MLS leaf commits removals of its siblings' leaves | server_mls:A-10, A-12 | Low | FIXED HOL-SEC-084 |
+| P3 | Any member arms a gossip relay for any file id (`BroadcastMeta`); restricted-channel ciphertext pushed to members who cannot see the channel | new:BroadcastMeta | Medium | FIXED HOL-SEC-085 (the gossip file relay is deleted) |
+| P4 | A push wake from anyone moves the live Android node into a DM room with the sender | transport:A-T12 | Low | FIXED HOL-SEC-086 |
+| P5 | A blocked friend pulls our DM history with `DmSyncRequest` | dm:A-DM-19, A-DM-27 | Low | FIXED HOL-SEC-087 |
+| P6 | A refused server op still moves our clock | crdt:0.3 | Low | FIXED HOL-SEC-088 (D7) |
+| P7 | A frame that fails to decrypt makes us send our sync state to its sender | server_mls:A-15 | Low | FIXED HOL-SEC-089 (D7) |
+| P8 | Every server member learns who sits in a restricted voice channel | media (decision D4) | Low | FIXED HOL-SEC-090 |
+| P9 | Anyone holding a server id sees who is in its room and when | relay:0.2, A-06, A-07, suspicion 7 | Medium | FIXED HOL-SEC-091 (D1); residuals ACCEPTED AR-16 |
+| P10 | Any member lists anyone as a member of a server | server_mls:A-01 | Low | FIXED HOL-SEC-092 (D3) |
+| P11 | A member's snapshot of a pre-0.12 server sets a pinned joiner's roles and bans | crdt:A-06, CRDT-S1 | Low | FIXED HOL-SEC-093 (D2); the legacy replay and order half ACCEPTED AR-10 (extended) |
+| P12 | A channel restricted after it was public stays public | decision D6 check | Medium | FIXED HOL-SEC-094 |
+| P13 | A guest stores public posts unjudged and shows names any member chose | channel:A-CH10, A-CH15 | Low | FIXED HOL-SEC-095; the unauthenticated preview (A-CH14, A-CH16) ACCEPTED AR-17 |
+| P14 | Junk from a few addresses pushes a lost device's parked destroy order out | relay:A-12, identity:A-32 | Medium | FIXED HOL-SEC-096 (D5); residuals ACCEPTED AR-18 |
+| P15 | A kick notice makes a member drop a server with no removal behind it | crdt:A-09, server_mls:A-06 | Low | FIXED HOL-SEC-097 |
+| P16 | A channel id names the join ring or breaks every ring of a server | crdt:B-05 | Low | FIXED HOL-SEC-098 |
+| P17 | Rust takes any string as a server id | crdt:B-05 | Low | FIXED HOL-SEC-099 |
+| P18 | A removed author still rewrites and re-cards its old posts | channel:A-CH03, A-CH06 | Low | FIXED HOL-SEC-100 |
+| P19 | Reactions skip channel visibility live and membership in backfill | channel:A-CH02, A-CH05 | Low | FIXED HOL-SEC-101 |
+| P20 | A stream declares any size and gets a temp file for it | files:A-F7 | Medium | FIXED HOL-SEC-102 |
+| P21 | Completed streams with no header park without a limit | transport:A-T20, files:A-F7 | Medium | FIXED HOL-SEC-103 |
+| P22 | A streamed vault shard bypasses our storage pledge | files:A-V1 | Low | FIXED HOL-SEC-104 |
+| P23 | An unasked shard answer blocks a vault download for good | files:A-V6 | Medium | FIXED HOL-SEC-105 |
+| P24 | A recovery plan's content id reaches a temp path unchecked | files:A-R4 | Low | FIXED HOL-SEC-106 |
+| P25 | The push process has no file header size cap | transport:A-T06 | Low | FIXED HOL-SEC-107 |
+| P26 | Data channel answers pair with our offer by connection id alone | media:A-MED-08 | Low | FIXED HOL-SEC-108 |
+| P27 | The standalone forwarder takes unsealed and replayed frames | media:A-MED-09, S-11 | Low | FIXED HOL-SEC-109 |
+| P28 | Voice channel SDP and ICE over Olm skip the signal rate limit | media (parity note) | Low | FIXED HOL-SEC-110 |
+| P29 | A key request from anyone mints a fresh one-time key | dm:A-DM-01, S-21 | Low | FIXED HOL-SEC-111 |
+| P30 | A friend request from before a removal comes back | dm:A-DM-09, S-07 | Low | FIXED HOL-SEC-112 |
+| P31 | A sibling that missed a removal brings the friend back | identity:S14 | Low | FIXED HOL-SEC-113 |
+| P32 | A member removed while offline never learns it | HOL-SEC-097 residual | Low | FIXED HOL-SEC-114 |
+| P33 | A friend removal reaches only the device it happened on | HOL-SEC-113 residual | Medium | FIXED HOL-SEC-115 |
+| P34 | The Dart data-channel receiver trusts every stream's size and sender | HOL-SEC-102 residual, files:A-F8 | Medium | FIXED HOL-SEC-116 |
+| P35 | A planted or wrong vault shard blocks a download for good | files:A-V1, A-V6, A-V11 | Medium | FIXED HOL-SEC-117 |
+| P36 | Olm repeat memory lost at a restart; slow mode backdating; a removed device's removals until the phrase; legacy device-list marks lost at a box reboot | transport:A-T18, channel:A-CH01, identity:A-02, relay:A-02c | Low | ACCEPTED AR-19 (D7) |
+| P37 | Unsigned ring control and the other legacy paths stay open until the release-day switches turn off | relay:A-16, A-17 | Medium | Closes on 0.12 release day (`ACCEPT_UNSIGNED_RING_CONTROL` and the three other switches); both builds now pinned by `test_relay_live` |
+
+Found while rebuilding the matrix (session 32, 2026-10-03); evidence ids are the matrix rows.
+
+| ID | What an attacker can do | Evidence | Sev | Status |
+|---|---|---|---|---|
+| P38 | Any Olm peer attaches reactions to, or an old author edits, rows of a server we left | channel:A-CH05 | Low | FIXED HOL-SEC-118 |
+| P39 | A delete reaches the screen when the store fails to open; a refused reaction still shows | channel:A-CH04 (S12), A-CH05 | Info | FIXED HOL-SEC-119 |
+| P40 | Leaving a voice channel while watching a share keeps our forwarding offer (and every leave ran two teardowns) | session 31 follow-up b | Low | FIXED HOL-SEC-120 |
+| P41 | A member back from away answers a removed joiner's old parked ask | session 31 follow-up e, server_mls:A-01 | Low | OPEN HOL-SEC-121 (session 33, xhigh) |
+| P42 | Anyone in a room opens an unlimited stream for a file we pull | files:A-F7, transport:A-T20 | Low | FIXED HOL-SEC-122 |
+| P43 | A device its identity's roster no longer counts hosts, knocks, joins and speaks in meetings | server_mls:A-17..A-22 | Medium | FIXED HOL-SEC-123 |
+| P44 | A re-sealed commit or Welcome makes us send our sync state to its sealer | server_mls:A-10, A-09 | Low | FIXED HOL-SEC-124 |
+| P45 | The bare master id re-enters room presence through discovery | relay:B-12 | Low | FIXED HOL-SEC-125 |
+| P46 | The first vault manifest for a content id wins | files:A-V10 | Low | ACCEPTED AR-20 |
+| P47 | Anyone joining a `fwd:` room sees which devices use the forwarder and when; a D1-hidden socket sends 0x09 wakes into a locked room | relay:0.2, A-24 | Medium | OPEN (session 33, decided 2026-10-03) |

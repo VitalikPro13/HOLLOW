@@ -502,9 +502,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// on a stale generation must abandon its half-built service, not `_service!`.
   int _joinGen = 0;
 
-  /// In-flight teardown from the server-forced `onLocalLeft` path, which its
-  /// synchronous caller cannot await. A later `joinChannel` awaits this so new
-  /// PCs can't race the old mesh's native teardown (heap corruption on Linux).
+  /// The call teardown in flight, if any. A later `joinChannel` awaits this so
+  /// new PCs can't race the old mesh's native teardown (heap corruption on Linux).
   Future<void>? _teardownInFlight;
 
   /// Channel that was selected before joining the VC (restored on leave).
@@ -548,6 +547,25 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   VoiceChannelService? get service => _service;
+
+  /// Adopts a call's media without the native bring-up: the mesh, incoming
+  /// shares, forwarder ingest legs (by forwarder id), the camera self-view and
+  /// our own share's capture.
+  @visibleForTesting
+  void debugAdoptCall(
+    VoiceChannelService mesh, {
+    Map<String, ScreenShareService> incomingShares = const {},
+    Map<String, ScreenShareService> forwarderIngests = const {},
+    RTCVideoRenderer? cameraRenderer,
+    MediaStream? captureStream,
+  }) {
+    _service = mesh;
+    _incomingScreenShares.addAll(incomingShares);
+    forwarderIngests.forEach((forwarder, ingest) => _fwdBranches[forwarder] =
+        _FwdBranch(forwarder, isPeer: false)..ingest = ingest);
+    _localCameraRenderer = cameraRenderer;
+    _screenCaptureStream = captureStream;
+  }
 
   RTCVideoRenderer? getScreenShareRenderer(String peerId) =>
       _incomingScreenShares[peerId]?.remoteRenderer;
@@ -1180,52 +1198,85 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _leaving = false;
   }
 
-  /// Tear down all live call media. Idempotent; shared by `leaveChannel()` and
-  /// the server-forced leave path in `onLocalLeft()`.
-  Future<void> _teardownCall() async {
+  /// Tear down all live call media, shared by `leaveChannel()` and the
+  /// server-forced leave path in `onLocalLeft()`.
+  ///
+  /// One run at a time, every caller awaits it: Rust reports our own leave
+  /// while `leaveChannel` is still tearing down, and two runs racing through
+  /// the share maps can drop the mesh unclosed with its watchdogs still dialing.
+  Future<void> _teardownCall() {
+    final running = _teardownInFlight;
+    if (running != null) return running;
+    final done = Completer<void>();
+    _teardownInFlight = done.future;
+    unawaited(_runTeardown()
+        .catchError((Object e) => debugPrint('[HOLLOW-VC] call teardown error: $e'))
+        .whenComplete(() {
+      if (identical(_teardownInFlight, done.future)) _teardownInFlight = null;
+      done.complete();
+    }));
+    return done.future;
+  }
+
+  Future<void> _runTeardown() async {
+    // Read before the first await: the left event clears the state while this
+    // runs, and each watch still holds a forwarding offer to withdraw.
+    final watched = Set.of(state.watchingScreenShares);
     _resetSframeHeal();
     // Whatever join is mid-flight no longer owns this call.
     _joinGen++;
-    try {
-      if (_localCameraRenderer != null) {
-        _localCameraRenderer!.srcObject = null;
-        await _localCameraRenderer!.dispose();
-        _localCameraRenderer = null;
-      }
-
-      for (final renderer in _remoteCameraRenderers.values) {
-        renderer.srcObject = null;
-        await renderer.dispose();
-      }
-      _remoteCameraRenderers.clear();
-
-      _audioConnectedPeers.clear();
-      await _cleanupAllScreenShares();
-
-      // AFTER the capturer is gone; idempotent with stopScreenShare.
-      await _disarmVoiceRedirect();
-
-      if (_screenAudioRenderer != null) {
-        ShareAudioLevel.detach(_screenAudioRenderer!);
-        await _screenAudioRenderer!.stop();
-        _screenAudioRenderer = null;
-      }
-      ShareAudioLevel.setSendingShareAudio(false);
-      try {
-        ref.read(webRtcProvider.notifier).service.onScreenAudioReceived = null;
-      } catch (_) {}
-
-      if (_service != null) {
-        await _service!.closeAll();
-        _service = null;
-      }
-    } catch (e) {
-      debugPrint('[HOLLOW-VC] call teardown error: $e');
+    await _teardownPhase('camera', _disposeCameraRenderers);
+    _audioConnectedPeers.clear();
+    await _teardownPhase(
+        'screen shares', () => _cleanupAllScreenShares(watched));
+    // AFTER the capturer is gone; idempotent with stopScreenShare.
+    await _teardownPhase('voice redirect', _disarmVoiceRedirect);
+    await _teardownPhase('share audio', _stopShareAudioPlayback);
+    await _teardownPhase('mesh', () async {
+      final mesh = _service;
       _service = null;
-    } finally {
-      // A teardown that threw part-way must not leave a stale health flair.
-      ref.read(vcLinkHealthProvider.notifier).clear();
+      await mesh?.closeAll();
+    });
+    ref.read(vcLinkHealthProvider.notifier).clear();
+  }
+
+  /// A phase that throws must not skip the ones after it: each owns peer
+  /// connections, forwarder legs or watchdogs that would outlive the call.
+  Future<void> _teardownPhase(
+      String name, Future<void> Function() phase) async {
+    try {
+      await phase();
+    } catch (e) {
+      debugPrint('[HOLLOW-VC] call teardown ($name) failed: $e');
     }
+  }
+
+  Future<void> _disposeCameraRenderers() async {
+    final local = _localCameraRenderer;
+    _localCameraRenderer = null;
+    if (local != null) {
+      local.srcObject = null;
+      await local.dispose();
+    }
+    final remote = List.of(_remoteCameraRenderers.values);
+    _remoteCameraRenderers.clear();
+    for (final renderer in remote) {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    }
+  }
+
+  Future<void> _stopShareAudioPlayback() async {
+    final renderer = _screenAudioRenderer;
+    _screenAudioRenderer = null;
+    if (renderer != null) {
+      ShareAudioLevel.detach(renderer);
+      await renderer.stop();
+    }
+    ShareAudioLevel.setSendingShareAudio(false);
+    try {
+      ref.read(webRtcProvider.notifier).service.onScreenAudioReceived = null;
+    } catch (_) {}
   }
 
   /// Called after the local leave event arrives to update state.
@@ -1233,19 +1284,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// A non-null `_service` means Rust FORCED us out (lost visibility, demoted,
   /// kicked) and the call is still running, so the media teardown must run here.
   void onLocalLeft() {
+    final ownLeave = _leaving;
     _leaving = false;
     if (state.isInVoiceChannel) {
       SoundService.instance.play(HollowSound.leaveVoice, duringCall: true);
     }
     if (_service != null) {
-      // Server-forced leave: this callback is synchronous (a Rust event), so
-      // record the teardown in-flight for a racing joinChannel to await.
-      debugPrint('[HOLLOW-VC] Forced leave — tearing down live call');
-      final teardown = _teardownCall();
-      _teardownInFlight = teardown;
-      teardown.whenComplete(() {
-        if (identical(_teardownInFlight, teardown)) _teardownInFlight = null;
-      });
+      // Our own leave is already tearing down and this joins it.
+      if (!ownLeave) {
+        debugPrint('[HOLLOW-VC] Forced leave — tearing down live call');
+      }
+      unawaited(_teardownCall());
     }
     // So the next call doesn't inherit a stale speakerphone state.
     if (_isMobile) {
@@ -3055,7 +3104,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final svc = branch.ingest;
     branch.ingest = null;
     if (svc != null) {
-      await svc.close();
+      // A leg that fails to close must not keep the forwarder registered or
+      // stop the next branch's teardown.
+      try {
+        await svc.close();
+      } catch (e) {
+        debugPrint('[HOLLOW-VC] ingest leg to ${branch.forwarderId} '
+            'failed to close: $e');
+      }
       await _dropShareCryptors(branch.forwarderId);
     }
     final origin = _myShareOrigin();
@@ -3943,7 +3999,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  Future<void> _cleanupAllScreenShares() async {
+  /// [watched] = the shares we watched when the call ended.
+  Future<void> _cleanupAllScreenShares(Set<String> watched) async {
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
 
@@ -3985,7 +4042,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
               originPeer: origin, kind: 'screen', active: false)
           .catchError((_) {});
     }
-    for (final origin in state.watchingScreenShares) {
+    for (final origin in watched) {
       network_api
           .setForwarderExpectation(
               originPeer: origin, kind: 'screen', active: false)
@@ -4006,15 +4063,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       ..._outgoingScreenShares.keys,
       ..._incomingScreenShares.keys,
     };
-    for (final service in _outgoingScreenShares.values) {
-      await service.close();
-    }
+    // Taken out of the maps before any await: a watch or share ending while
+    // these close would otherwise mutate the map under the loop.
+    final shares = [
+      ..._outgoingScreenShares.values,
+      ..._incomingScreenShares.values,
+    ];
     _outgoingScreenShares.clear();
-
-    for (final service in _incomingScreenShares.values) {
-      await service.close();
-    }
     _incomingScreenShares.clear();
+    for (final service in shares) {
+      try {
+        await service.close();
+      } catch (e) {
+        debugPrint('[HOLLOW-VC] screen share close failed: $e');
+      }
+    }
     _incomingShareOrigins.clear();
     _shareSessionId = null;
     _shareOriginPeer = null;

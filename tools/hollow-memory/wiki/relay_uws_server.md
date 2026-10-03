@@ -68,7 +68,18 @@ Binary name: `hollow-relay`
   `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`.
 - **Release day**: four switches go off once 0.12 ships: `ACCEPT_AUTH_V1`,
   `ACCEPT_UNSIGNED_RING_CONTROL`, `ACCEPT_UNSIGNED_NICKNAME_CLAIMS`,
-  `ACCEPT_DEVICE_LIST_INBOX_PROOF`.
+  `ACCEPT_DEVICE_LIST_INBOX_PROOF`. Each is `HOLLOW_ACCEPT_<NAME>` (default 1,
+  overridable with `-D`): release day flips the four `#define ... 1` defaults to 0;
+  afterwards drop the `on` build from `test/run_live.sh`.
+- **Live handler tests (session 32)**: `test/run_live.sh` (called last by `run_tests.sh`)
+  builds the real relay twice, every switch 1 and every switch 0, listens on 127.0.0.1
+  only (`HOLLOW_RELAY_TEST_LOOPBACK`), self-signed cert, random port, and drives it with
+  `test/test_relay_live.cpp` (a TLS WebSocket client doing real auth v2): the switches,
+  guest refusals, the fetch slot rule, inbox audiences, D1 door rooms, 145 checks per
+  build. Negative checks never sleep (a round trip from each side first); each socket
+  connects from its own 127.0.x.y; no push token is ever registered (the sidecar on
+  127.0.0.1:3001 is production's). Needs the uWebSockets/uSockets submodules and the
+  `openssl` CLI, else it skips. ~25 s plain, ~70 s under `SANITIZE=1`.
 
 ## Door-proof server rooms (design D1, 2026-10-02, HOL-SEC-091)
 

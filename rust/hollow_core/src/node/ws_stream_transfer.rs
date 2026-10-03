@@ -604,7 +604,7 @@ mod tests {
         use super::super::file_transfer::DEFAULT_MAX_FILE_SIZE;
         let ceiling = |kind: &StreamKind, id: &str| {
             super::super::file_handler::stream_ceiling(
-                kind, id, "mallory", &HashMap::new(), &HashMap::new(), &HashMap::new(),
+                kind, id, "mallory", &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(),
             )
         };
         let temp = |id: &str| files_dir().join(format!(".ws_recv_{id}.tmp"));

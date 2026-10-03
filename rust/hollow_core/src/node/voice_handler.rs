@@ -59,27 +59,51 @@ pub(crate) fn data_channel_peer_allowed(
     db_path: &str,
     db_passphrase: &str,
 ) -> bool {
+    data_channel_peer_known(server_states, local_master, peer).unwrap_or_else(|| {
+        super::social::holds_accepted_friend(db_path, db_passphrase, &super::resolver::resolve(peer))
+    })
+}
+
+/// [`data_channel_peer_allowed`] for the event loop, which must not open the store
+/// itself: the friend row is read on the blocking pool.
+pub(crate) async fn data_channel_peer_allowed_off_loop(
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    if let Some(known) = data_channel_peer_known(server_states, local_master, peer) {
+        return known;
+    }
+    let (db, pass, master) = (db_path.to_string(), db_passphrase.to_string(), super::resolver::resolve(peer));
+    tokio::task::spawn_blocking(move || super::social::holds_accepted_friend(&db, &pass, &master))
+        .await
+        .unwrap_or(false)
+}
+
+/// The answer the in-memory state gives, `None` when only the friend row can tell.
+fn data_channel_peer_known(
+    server_states: &HashMap<String, ServerState>,
+    local_master: &str,
+    peer: &str,
+) -> Option<bool> {
     if super::resolver::same_identity(peer, local_master) {
-        return true;
+        return Some(true);
     }
     if super::blocklist::is_blocked(peer) {
-        return false;
+        return Some(false);
     }
-    if server_states.values().any(|s| !s.is_deleted() && s.is_member(peer) && s.is_member(local_master)) {
-        return true;
-    }
-    let master = super::resolver::resolve(peer);
-    crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|st| st.get_friend_status(&master).ok().flatten())
-        .as_deref()
-        == Some("accepted")
+    server_states
+        .values()
+        .any(|s| !s.is_deleted() && s.is_member(peer) && s.is_member(local_master))
+        .then_some(true)
 }
 
 // ── WebRtcSendSignal ─────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_webrtc_send_signal(
+pub(crate) async fn handle_webrtc_send_signal(
     peer_id: String,
     signal_type: String,
     payload: String,
@@ -92,7 +116,7 @@ pub(crate) fn handle_webrtc_send_signal(
     db_passphrase: &str,
 ) {
     if signal_type == "offer"
-        && !data_channel_peer_allowed(server_states, local_master, &peer_id, db_path, db_passphrase)
+        && !data_channel_peer_allowed_off_loop(server_states, local_master, &peer_id, db_path, db_passphrase).await
     {
         hollow_log!("[HOLLOW-WEBRTC] Not dialling {peer_id}: no friendship or shared server");
         return;
@@ -2366,6 +2390,11 @@ mod tests {
         assert!(allowed(sibling) && allowed(friend) && allowed(member));
         assert!(!allowed(stranger), "HOL-SEC-040: a stranger in one of our rooms got a data channel");
         assert!(!allowed(blocked));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        for p in [sibling, friend, member, stranger, blocked] {
+            let off_loop = rt.block_on(data_channel_peer_allowed_off_loop(&states, me, p, &db, &pass));
+            assert_eq!(off_loop, allowed(p), "the event loop's gate disagrees about {p}");
+        }
 
         let swarm = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"),
@@ -2373,7 +2402,7 @@ mod tests {
         .unwrap()
         .replace("\r\n", "\n");
         let rtc = swarm.find("        HavenMessage::RtcOffer { sdp, conn_id } => {").unwrap();
-        assert!(swarm[rtc..rtc + 1200].contains("data_channel_peer_allowed("), "an inbound offer skips the gate");
+        assert!(swarm[rtc..rtc + 1200].contains("data_channel_peer_allowed_off_loop("), "an inbound offer skips the gate");
         let exchange = swarm.find("HavenMessage::PeerExchange { server_id, peers } => {").unwrap();
         assert!(swarm[exchange..exchange + 1500].contains("is_member(p)"), "J6: a neighbour's list names non-members");
         assert_eq!(
@@ -2390,8 +2419,8 @@ mod tests {
         let send = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/voice_handler.rs"))
             .unwrap()
             .replace("\r\n", "\n");
-        let dial = send.find("pub(crate) fn handle_webrtc_send_signal(").unwrap();
-        assert!(send[dial..dial + 1200].contains("data_channel_peer_allowed("), "an outbound dial skips the gate");
+        let dial = send.find("pub(crate) async fn handle_webrtc_send_signal(").unwrap();
+        assert!(send[dial..dial + 1200].contains("data_channel_peer_allowed_off_loop("), "an outbound dial skips the gate");
         super::super::blocklist::clear_for_test();
         super::super::resolver::clear_all();
     }
@@ -2539,5 +2568,59 @@ mod tests {
         report(sibling).await;
         assert!(rx.try_recv().is_ok());
         super::super::resolver::clear_all();
+    }
+
+    /// A member outside the call, or anyone the relay hands a group frame for, can
+    /// neither negotiate a leg with us nor paint a participant's state: every group
+    /// VC signal counts only from a participant of that channel.
+    #[tokio::test]
+    async fn authz_a_vc_signal_counts_only_from_a_participant_of_that_call() {
+        let (sid, cid, me) = ("srv", "vc", "me-dev");
+        let participants = HashMap::from([(
+            format!("{sid}:{cid}"),
+            std::collections::HashSet::from(["inside-dev".to_string()]),
+        )]);
+        let (tx, mut rx) = mpsc::channel::<NetworkEvent>(64);
+        let mut heard = Vec::new();
+        for sender in ["outside-dev", "inside-dev"] {
+            let at = || (sender.to_string(), sid.to_string(), cid.to_string());
+            let p = &participants;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_sdp_offer(p, &tx, s, i, c, "v=0".into()).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_sdp_answer(p, &tx, s, i, c, "v=0".into()).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_reneg_offer(p, &tx, s, i, c, "v=0".into(), false).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_reneg_answer(p, &tx, s, i, c, "v=0".into()).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_ice(p, &tx, s, i, c, "candidate:1".into(), "0".into(), 0).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_screen_offer(p, &tx, s, i, c, "v=0".into(), None, me).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_screen_answer(p, &tx, s, i, c, "v=0".into(), None, me).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_screen_ice(p, &tx, s, i, c, "candidate:1".into(), "0".into(), 0, "sender".into(), None, me).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_screen_watch(p, &tx, s, i, c, true, 1280, 720, "direct".into(), false, false, false, false).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_leg_restart(p, &tx, s, i, c).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_audio_state(p, &tx, s, i, c, true, false).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_screen_state(p, &tx, s, i, c, true, None).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_camera_state(p, &tx, s, i, c, true).await;
+            let (s, i, c) = at();
+            handle_envelope_voice_channel_recording_state(p, &tx, s, i, c, true).await;
+            while let Ok(ev) = rx.try_recv() {
+                if let NetworkEvent::VoiceChannelSignal { peer_id, signal_type, .. } = ev {
+                    heard.push((peer_id, signal_type));
+                }
+            }
+        }
+        let outside: Vec<&String> = heard.iter().filter(|(p, _)| p != "inside-dev").map(|(_, t)| t).collect();
+        assert!(outside.is_empty(), "signals from outside the call reached the app: {outside:?}");
+        assert_eq!(heard.len(), 14, "every signal from the participant arrives: {heard:?}");
     }
 }

@@ -1,8 +1,9 @@
 #!/bin/bash
-# Builds and runs every relay unit test. SANITIZE=1 builds them with AddressSanitizer
-# and UBSan, which is how the kill list's use-after-free (HOL-SEC-070 follow-up) was
-# caught; run both before a relay deploy.
-#   bash run_tests.sh            (from relay-uws/test, needs g++, libsodium, OpenSSL)
+# Builds and runs every relay unit test, then the live tests (run_live.sh). SANITIZE=1
+# builds them with AddressSanitizer and UBSan, which is how the kill list's
+# use-after-free (HOL-SEC-070 follow-up) was caught; run both before a relay deploy.
+#   bash run_tests.sh            (from relay-uws/test, needs g++, libsodium, OpenSSL;
+#                                 the live tests also zlib and the uWebSockets submodules)
 #   SANITIZE=1 bash run_tests.sh
 cd "$(dirname "$0")" || exit 1
 out=$(mktemp -d)
@@ -49,5 +50,7 @@ run test_roster ../src/crypto.cpp $LIBS
 run test_snapshot_codec
 run test_turn_uris
 run test_verify_device_list ../src/device_list.cpp ../src/crypto.cpp $LIBS
+# The handlers themselves: the real relay on loopback, driven over TLS.
+bash ./run_live.sh "$out" || fail=1
 rm -rf "$out"
 exit $fail

@@ -2744,7 +2744,7 @@ async fn run_event_loop(
                             peer_id, signal_type, payload, conn_id,
                             &ws_cmd_tx, &ws_room_peers,
                             &server_states, &local_peer_str, &db_path, &db_passphrase,
-                        );
+                        ).await;
                     }
                     NodeCommand::WebRtcTransferComplete { transfer_id, temp_path, sender_peer_id, kind, shard_index, chunk_index } => {
                         if kind == "share_chunk" {
@@ -3153,7 +3153,7 @@ async fn run_event_loop(
                         vault_ops::handle_initiate_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
-                            &local_peer_str,
+                            &device_peer_id,
                             server_id, token,
                             &db_path, &db_passphrase,
                         ).await;
@@ -3162,7 +3162,7 @@ async fn run_event_loop(
                         vault_ops::handle_join_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
-                            &local_peer_str, &device_peer_id,
+                            &device_peer_id,
                             server_id, token,
                             &db_path, &db_passphrase,
                         ).await;
@@ -3236,6 +3236,24 @@ async fn run_event_loop(
                         let envelope = MessageEnvelope::Carried { msg, at_ms: super::frame_auth::now_ms() };
                         if let Ok(json) = serde_json::to_string(&envelope) {
                             super::olm_lane::carry_json(&ws_cmd_tx, &device, None, json, super::olm_lane::NoSession::Queue);
+                        }
+                    }
+
+                    #[cfg(test)]
+                    NodeCommand::TestEnvelopeJson { device, json } => {
+                        super::olm_lane::carry_json(&ws_cmd_tx, &device, None, json, super::olm_lane::NoSession::Queue);
+                    }
+
+                    #[cfg(test)]
+                    NodeCommand::TestEnvelope { olm_device, mls_server, envelope } => {
+                        if let Some(device) = olm_device {
+                            let json = serde_json::to_string(&*envelope).unwrap_or_default();
+                            Box::pin(send_encrypted_message(
+                                &mut olm, &crypto_store, &device, &json, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            ))
+                            .await;
+                        } else if let (Some(sid), Some(mls_mgr)) = (mls_server, mls.as_mut()) {
+                            let _ = send_mls_broadcast(mls_mgr, &ws_cmd_tx, &sid, &envelope, &crypto_store);
                         }
                     }
 
@@ -3383,16 +3401,20 @@ async fn run_event_loop(
                         }
                         lock_keeper.on_connected(&server_states, &local_peer_str, &ws_cmd_tx);
                         {
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                if let Ok(friends) = store.load_friends(None) {
-                                    let local_peer = local_peer_str.to_string();
-                                    for (friend_pid, _, _, _, _) in &friends {
-                                        let room = dm_room_code(&local_peer, friend_pid);
-                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                                            room_code: room,
-                                        });
-                                    }
-                                }
+                            let (path, pass) = (db_path.clone(), db_passphrase.clone());
+                            let friends = tokio::task::spawn_blocking(move || {
+                                crate::storage::MessageStore::open(&path, &pass)
+                                    .ok()
+                                    .and_then(|store| store.load_friends(None).ok())
+                                    .unwrap_or_default()
+                            })
+                            .await
+                            .unwrap_or_default();
+                            for (friend_pid, _, _, _, _) in &friends {
+                                let room = dm_room_code(&local_peer_str, friend_pid);
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                    room_code: room,
+                                });
                             }
                         }
                         for guest_sid in guest_rooms.rooms() {
@@ -3569,7 +3591,7 @@ async fn run_event_loop(
                             if let Some(pool) = recovery_pool_state.as_ref() {
                                 if room == pool.room_code() && peer_id != local_peer_str && peer_id != device_peer_id {
                                     hollow_log!("[RECOVERY-POOL] Peer {peer_id} joined — sending our inventory");
-                                    if let Some(our_inv) = pool.members.get(&local_peer_str) {
+                                    if let Some(our_inv) = pool.own_inventory() {
                                         let welcome = HavenMessage::RecoveryWelcome {
                                             manifest_ids: our_inv.manifest_ids.clone(),
                                             shard_inventory_json: serde_json::to_string(&our_inv.shards).unwrap_or_default(),
@@ -4011,7 +4033,7 @@ async fn run_event_loop(
 
                         if room.starts_with("recovery:") {
                             if let Some(pool) = recovery_pool_state.as_mut() {
-                                if room == pool.room_code() && peer_id != local_peer_str {
+                                if room == pool.room_code() && peer_id != pool.local_device {
                                     hollow_log!("[RECOVERY-POOL] Peer {peer_id} left pool");
                                     pool.remove_member(&peer_id);
                                     let _ = event_tx.send(NetworkEvent::RecoveryPoolMemberLeft {
@@ -4629,7 +4651,8 @@ async fn run_event_loop(
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
                             &mut pending_ws_transfers, &from, &data,
                             |kind, id| file_handler::stream_ceiling(
-                                kind, id, &from, &pending_file_streams, &requested_file_receipts, &pending_link_snapshots,
+                                kind, id, &from, &pending_file_streams, &requested_file_receipts,
+                                &pending_file_asks, &pending_public_file_requests, &pending_link_snapshots,
                             ),
                         ) {
                             // Auto-download gate (issue #41): the sender queues its push before our
@@ -4822,6 +4845,7 @@ async fn run_event_loop(
                         // proactively key-exchange with any peer we lack a confirmed session for,
                         // reusing the reconciliation sweep's freshness guard so a dropped frame heals.
                         hollow_log!("[HOLLOW-WS] Discovered {} peers in room {room}", peers.len());
+                        let peers: Vec<String> = peers.into_iter().filter(|p| bare_presence.admits(p)).collect();
                         let room_set = ws_room_peers.entry(room.clone()).or_default();
                         for pid in &peers {
                             // Exclude our own DEVICE id too (relay reports us by it,
@@ -5000,8 +5024,8 @@ async fn run_event_loop(
                                     match &msg {
                                         HavenMessage::DoorAsk { server_id } => {
                                             door_rooms.answer_ask(
-                                                &room, server_id, &from, &server_states, &ws_room_peers,
-                                                &local_peer_str, &device_peer_id, &ws_cmd_tx,
+                                                &room, server_id, &from, &olm, &server_states,
+                                                &ws_room_peers, &local_peer_str, &device_peer_id, &ws_cmd_tx,
                                             );
                                             continue;
                                         }
@@ -5033,9 +5057,9 @@ async fn run_event_loop(
                                                             manifest_ids: manifest_ids.clone(),
                                                             shards,
                                                         };
-                                                        pool.add_member(from.clone(), inventory);
+                                                        let fresh = pool.add_member(from.clone(), inventory);
 
-                                                        if let Some(our_inv) = pool.members.get(&local_peer_str) {
+                                                        if let Some(our_inv) = pool.own_inventory() {
                                                             let welcome = HavenMessage::RecoveryWelcome {
                                                                 manifest_ids: our_inv.manifest_ids.clone(),
                                                                 shard_inventory_json: serde_json::to_string(&our_inv.shards).unwrap_or_default(),
@@ -5049,10 +5073,12 @@ async fn run_event_loop(
                                                             }
                                                         }
 
-                                                        let _ = event_tx.send(NetworkEvent::RecoveryPoolMemberJoined {
-                                                            server_id: pool.server_id.clone(),
-                                                            peer_id: from.clone(),
-                                                        }).await;
+                                                        if fresh {
+                                                            let _ = event_tx.send(NetworkEvent::RecoveryPoolMemberJoined {
+                                                                server_id: pool.server_id.clone(),
+                                                                peer_id: from.clone(),
+                                                            }).await;
+                                                        }
 
                                                         let status = pool.compute_status();
                                                         let _ = event_tx.send(NetworkEvent::RecoveryPoolStatus {
@@ -5064,21 +5090,10 @@ async fn run_event_loop(
                                                             progress_pct: status.progress_pct,
                                                         }).await;
 
-                                                        // Coordinator election: if we're the lowest peer_id, compute and broadcast transfer plan.
-                                                        if pool.is_coordinator() && pool.members.len() >= 2 {
-                                                            let plan = pool.compute_transfer_plan();
-                                                            if !plan.is_empty() {
-                                                                hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
-                                                                let plan_json = serde_json::to_string(&plan).unwrap_or_default();
-                                                                let msg = HavenMessage::RecoveryTransferPlan { plan_json };
-                                                                if let Some(bytes) = pool.seal(&device_peer_id, &msg) {
-                                                                    let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
-                                                                        room_code: pool.room_code(),
-                                                                        data: bytes,
-                                                                    });
-                                                                }
-                                                            }
-                                                        }
+                                                        Box::pin(vault_ops::coordinate_recovery(
+                                                            pool, &mut pending_shard_streams, &mut pending_vault_downloads,
+                                                            &server_states, &ws_cmd_tx, &local_peer_str, &db_path, &db_passphrase,
+                                                        )).await;
                                                     }
                                                 }
                                                 HavenMessage::RecoveryWelcome { manifest_ids, shard_inventory_json } => {
@@ -5089,12 +5104,13 @@ async fn run_event_loop(
                                                         manifest_ids,
                                                         shards,
                                                     };
-                                                    pool.add_member(from.clone(), inventory);
-
-                                                    let _ = event_tx.send(NetworkEvent::RecoveryPoolMemberJoined {
-                                                        server_id: pool.server_id.clone(),
-                                                        peer_id: from.clone(),
-                                                    }).await;
+                                                    // A member welcomes us on our join and on our hello; the UI lists it once.
+                                                    if pool.add_member(from.clone(), inventory) {
+                                                        let _ = event_tx.send(NetworkEvent::RecoveryPoolMemberJoined {
+                                                            server_id: pool.server_id.clone(),
+                                                            peer_id: from.clone(),
+                                                        }).await;
+                                                    }
 
                                                     let status = pool.compute_status();
                                                     let _ = event_tx.send(NetworkEvent::RecoveryPoolStatus {
@@ -5106,20 +5122,10 @@ async fn run_event_loop(
                                                         progress_pct: status.progress_pct,
                                                     }).await;
 
-                                                    if pool.is_coordinator() && pool.members.len() >= 2 {
-                                                        let plan = pool.compute_transfer_plan();
-                                                        if !plan.is_empty() {
-                                                            hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
-                                                            let plan_json = serde_json::to_string(&plan).unwrap_or_default();
-                                                            let msg = HavenMessage::RecoveryTransferPlan { plan_json };
-                                                            if let Some(bytes) = pool.seal(&device_peer_id, &msg) {
-                                                                let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
-                                                                    room_code: pool.room_code(),
-                                                                    data: bytes,
-                                                                });
-                                                            }
-                                                        }
-                                                    }
+                                                    Box::pin(vault_ops::coordinate_recovery(
+                                                        pool, &mut pending_shard_streams, &mut pending_vault_downloads,
+                                                        &server_states, &ws_cmd_tx, &local_peer_str, &db_path, &db_passphrase,
+                                                    )).await;
                                                 }
                                                 HavenMessage::RecoveryShardReceived { content_id, shard_index } => {
                                                     hollow_log!("[RECOVERY-POOL] ShardReceived: {content_id}:{shard_index} from {from}");
@@ -5145,91 +5151,14 @@ async fn run_event_loop(
                                                 }
                                                 HavenMessage::RecoveryTransferPlan { plan_json } => {
                                                     hollow_log!("[RECOVERY-POOL] TransferPlan from {from}");
-                                                    // Only the elected coordinator plans, and only for pool members.
-                                                    let from_coordinator = pool.members.keys().min() == Some(&from);
-                                                    if !from_coordinator {
+                                                    // Only the elected coordinator plans.
+                                                    if pool.coordinator() != Some(from.as_str()) {
                                                         hollow_log!("[HOLLOW-SECURITY] Dropped a transfer plan from {from}: not the pool's coordinator");
-                                                    }
-                                                    if let Some(plan) = serde_json::from_str::<Vec<crate::node::recovery_pool::TransferAssignment>>(&plan_json)
-                                                        .ok()
-                                                        .filter(|_| from_coordinator)
-                                                    {
-                                                        hollow_log!("[RECOVERY-POOL] Processing {} transfer assignments", plan.len());
-
-                                                        let vault_dir_r = crate::identity::data_dir().unwrap_or_default().join("vault");
-
-                                                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir_r) {
-                                                            for assignment in &plan {
-                                                                // The id names our shard files and temps.
-                                                                if !crate::vault::content_store::is_content_id(&assignment.content_id) {
-                                                                    hollow_log!("[HOLLOW-SECURITY] Skipped a transfer assignment from {from}: not a content id");
-                                                                    continue;
-                                                                }
-                                                                if assignment.dest_peer == local_peer_str {
-                                                                    if let Some(meta) = pool.manifest_meta.get(&assignment.content_id) {
-                                                                        let key = format!("{}:{}", assignment.content_id, assignment.shard_index);
-                                                                        let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
-                                                                        if cs.has_shard(&sk).unwrap_or(false) {
-                                                                            continue;
-                                                                        }
-                                                                        pending_shard_streams.insert(key, PendingShardStream {
-                                                                            server_id: pool.server_id.clone(),
-                                                                            content_id: assignment.content_id.clone(),
-                                                                            shard_index: assignment.shard_index,
-                                                                            shard_key: sk,
-                                                                            k: meta.k,
-                                                                            m: meta.m,
-                                                                            total_size: meta.total_data_size,
-                                                                            tier: meta.storage_tier.clone(),
-                                                                            sender: None,
-                                                                            pledge: vault_ops::our_pledge(&server_states, &pool.server_id, &local_peer_str),
-                                                                            asked: false,
-                                                                        });
-                                                                        // Register for auto-reconstruction after shard arrives.
-                                                                        pending_vault_downloads.entry(assignment.content_id.clone())
-                                                                            .or_insert((pool.server_id.clone(), meta.k as usize, 0));
-                                                                    }
-                                                                }
-
-                                                                if assignment.source_peer == local_peer_str
-                                                                    && pool.members.contains_key(&assignment.dest_peer)
-                                                                {
-                                                                    let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
-                                                                    if let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) {
-                                                                        let temp_dir = std::env::temp_dir().join("hollow_recovery");
-                                                                        let _ = tokio::fs::create_dir_all(&temp_dir).await;
-                                                                        let temp_path = temp_dir.join(format!("{sk}.shard"));
-                                                                        if tokio::fs::write(&temp_path, &shard_bytes).await.is_ok() {
-                                                                            let total_size = shard_bytes.len() as u64;
-                                                                            hollow_log!("[RECOVERY-POOL] Sending shard {}:{} ({} bytes) to {}",
-                                                                                assignment.content_id, assignment.shard_index, total_size, assignment.dest_peer);
-                                                                            crate::node::ws_stream_transfer::ws_stream_send(
-                                                                                &ws_cmd_tx,
-                                                                                &pool.room_code(),
-                                                                                &assignment.dest_peer,
-                                                                                &crate::node::ws_stream_transfer::StreamKind::Shard { shard_index: assignment.shard_index },
-                                                                                &assignment.content_id,
-                                                                                &temp_path,
-                                                                                total_size,
-                                                                                0,
-                                                                            ).await;
-                                                                            let _ = tokio::fs::remove_file(&temp_path).await;
-
-                                                                            let received_msg = HavenMessage::RecoveryShardReceived {
-                                                                                content_id: assignment.content_id.clone(),
-                                                                                shard_index: assignment.shard_index,
-                                                                            };
-                                                                            if let Some(bytes) = pool.seal(&device_peer_id, &received_msg) {
-                                                                                let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
-                                                                                    room_code: pool.room_code(),
-                                                                                    data: bytes,
-                                                                                });
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
+                                                    } else if let Ok(plan) = serde_json::from_str::<Vec<crate::node::recovery_pool::TransferAssignment>>(&plan_json) {
+                                                        Box::pin(vault_ops::apply_recovery_plan(
+                                                            pool, &plan, &mut pending_shard_streams, &mut pending_vault_downloads,
+                                                            &server_states, &ws_cmd_tx, &local_peer_str, &db_path, &db_passphrase,
+                                                        )).await;
                                                     }
                                                 }
                                                 _ => {}
@@ -5673,13 +5602,15 @@ async fn run_event_loop(
                         match retried {
                             Some(Ok(crate::crypto::Verdict::Accept)) => {
                                 hollow_log!("[HOLLOW-MLS] Held Welcome for {group_key} now passes, joined");
-                                let sync_peer = sender.as_ref().map(|s| s.device.clone()).unwrap_or_default();
+                                let sync_peer = crate::node::crypto_handler::mls_sync_partner(
+                                    server_states.get(&server_id), sender.as_ref(), None,
+                                );
                                 after_welcome_joined(
                                     mls_mgr, &master_keypair, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                                     &crdt_store, &server_states, &mut mls_bootstrap_requested,
                                     &mut mls_welcome_grace, &mut awaiting_mls_after_parked_join,
                                     &mut relay_catchup_done, &db_path, &db_passphrase, &local_peer_str,
-                                    &sync_peer, &server_id, &channel_id, &group_key,
+                                    sync_peer, &server_id, &channel_id, &group_key,
                                     sender.as_ref().map(|s| s.master.as_str()),
                                 ).await;
                             }
@@ -7075,6 +7006,7 @@ async fn apply_remote_crdt_op_inner(
 /// Everything owed once a Welcome is installed, live or after being held: clear the
 /// requests it answers, finish a parked join or a meeting admission, emit the new
 /// SFrame key, and pull the ops and messages missed while the group was stale.
+/// `sync_peer` is a [`crypto_handler::mls_sync_partner`] with its master, or nobody to ask.
 #[allow(clippy::too_many_arguments)]
 async fn after_welcome_joined(
     mls_mgr: &mut MlsManager,
@@ -7092,7 +7024,7 @@ async fn after_welcome_joined(
     db_path: &str,
     db_passphrase: &str,
     local_peer_str: &str,
-    sync_peer: &str,
+    sync_peer: Option<(&str, String)>,
     server_id: &str,
     channel_id: &Option<String>,
     group_key: &str,
@@ -7178,6 +7110,7 @@ async fn after_welcome_joined(
         }).await;
     }
 
+    let Some((sync_peer, peer_master)) = sync_peer else { return };
     // After SERVER-GROUP recovery, also catch up on CRDT OPS missed at a
     // stale epoch. An op broadcast via MLS at an epoch we could not decrypt
     // was dropped with no plaintext fallback, so a channel created during
@@ -7209,7 +7142,7 @@ async fn after_welcome_joined(
                 Some(cid) => vec![cid.clone()],
                 None => state.channels.keys().cloned().collect(),
             };
-            for cid in &sync_cids {
+            for cid in sync_cids.iter().filter(|c| state.can_see_channel(&peer_master, c)) {
                 super::olm_lane::carry(
                     ws_cmd_tx, sync_peer, None,
                     &super::sync_handler::channel_sync_request(&store, server_id, cid, true),
@@ -8379,6 +8312,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-EDIT] Received edit for message {mid} from {peer_str}");
+                    if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "edit") {
+                        return;
+                    }
                     if sid.is_some() {
                         message_ops::handle_envelope_edit_message(
                             event_tx, bundle_keypair,
@@ -8397,6 +8333,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-LP] Received link preview for message {mid} from {peer_str}");
+                    if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "link preview") {
+                        return;
+                    }
                     message_ops::handle_envelope_link_preview_set(
                         event_tx,
                         sid.as_deref().and_then(|s| server_states.get(s)),
@@ -8407,6 +8346,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-DELETE] Received delete for message {mid} from {peer_str}");
+                    if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "delete") {
+                        return;
+                    }
                     if sid.is_some() {
                         message_ops::handle_envelope_delete_message(
                             event_tx, bundle_keypair, &super::resolver::resolve(peer_str),
@@ -8423,6 +8365,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-REACTION] Received reaction on {mid} from {peer_str}");
+                    if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "reaction") {
+                        return;
+                    }
                     // Reactions are signed by and attributed to the reactor's MASTER, so a
                     // friend's reactions from any of its devices count as one person's.
                     let reactor = super::resolver::resolve(peer_str);
@@ -8443,7 +8388,7 @@ async fn handle_incoming_request(
                                 message_ops::dm_reaction_target_ok(&store, &mid, peer_str, master_peer_str)
                                     && store.add_reaction(
                                         &mid, &emoji, &reactor, ts, sig.as_deref(), pk.as_deref(),
-                                    ).is_ok()
+                                    ) == Ok(true)
                             });
                         if stored {
                             // The DM thread is the OTHER party: the reactor for a friend's
@@ -8460,6 +8405,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-REACTION] Received remove reaction {emoji} on {mid} from {peer_str}");
+                    if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "reaction removal") {
+                        return;
+                    }
                     let reactor = super::resolver::resolve(peer_str);
                     if sid.is_some() {
                         message_ops::handle_envelope_remove_reaction(
@@ -8879,14 +8827,17 @@ async fn handle_incoming_request(
                             pending_shard_streams.entry(key.clone()).or_insert(PendingShardStream {
                                 server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
                                 shard_key: sk, k, m, total_size, tier,
-                                sender: Some(peer_str.to_string()),
+                                sender: peer_str.to_string(),
                                 pledge: vault_ops::our_pledge(server_states, &sid, local_peer_str),
                                 asked: false,
+                                recovery: false,
                             });
                             hollow_log!("[HOLLOW-VAULT] Registered pending shard stream: {key}");
                             return;
                         }
-                        None => match vault_ops::shard_bytes_refused(&content_store, &cid, si, &shard_bytes) {
+                        None => match vault_ops::shard_bytes_refused(
+                            &content_store, &cid, si, &shard_bytes, vault_ops::pull_waiting(vault_shard_asks, &cid),
+                        ) {
                             Some(reason) => Err(reason.to_string()),
                             None => {
                                 let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
@@ -8978,13 +8929,7 @@ async fn handle_incoming_request(
                         ws_cmd_tx, ws_room_peers,
                     ).await;
                     if let Some(shard_data) = shard {
-                        let shard_temp_dir = crate::node::file_transfer::files_dir();
-                        // The cid is whatever a member stored the shard under: it names a
-                        // file here, so only alphanumerics survive (a `\..\` walks out on Windows).
-                        let shard_safe_prefix: String =
-                            cid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
-                        let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
-                        let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
+                        let shard_temp_path = vault_ops::shard_send_temp(&crate::node::file_transfer::files_dir(), &cid, si);
                         if let Ok(()) = tokio::fs::write(&shard_temp_path, &shard_data).await {
                             let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
                             file_handler::stream_to_peer(
@@ -9024,18 +8969,20 @@ async fn handle_incoming_request(
                         return;
                     }
                     if shard_bytes.is_empty() {
-                        // Streamed shard response: the bytes follow on the stream lane.
+                        // Streamed shard response: the bytes follow on the stream lane. The
+                        // answer we asked for takes the slot from any other registration.
                         let key = format!("{cid}:{si}");
-                        pending_shard_streams.entry(key.clone()).or_insert(PendingShardStream {
+                        pending_shard_streams.insert(key.clone(), PendingShardStream {
                             server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
                             shard_key: String::new(), k: 0, m: 0, total_size: 0,
                             tier: "standard".to_string(),
-                            sender: Some(peer_str.to_string()),
+                            sender: peer_str.to_string(),
                             pledge: vault_ops::our_pledge(server_states, &sid, local_peer_str),
                             asked: true,
+                            recovery: false,
                         });
                         hollow_log!("[HOLLOW-VAULT] Registered pending shard stream for response: {key}");
-                    } else if let Some(reason) = vault_ops::shard_bytes_refused(&cs, &cid, si, &shard_bytes) {
+                    } else if let Some(reason) = vault_ops::shard_bytes_refused(&cs, &cid, si, &shard_bytes, false) {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED shard answer {si} of {cid} from {peer_str}: {reason}");
                         vault_ops::refute_holder(vault_shard_asks, &cid, peer_str);
                     } else {
@@ -9063,7 +9010,9 @@ async fn handle_incoming_request(
                     match vault_ops::shard_write_refused(
                         server_states, &cs, peer_str, &sid, &cid, si, local_peer_str, shard_bytes.len() as u64,
                     )
-                    .or_else(|| vault_ops::shard_bytes_refused(&cs, &cid, si, &shard_bytes))
+                    .or_else(|| vault_ops::shard_bytes_refused(
+                        &cs, &cid, si, &shard_bytes, vault_ops::pull_waiting(vault_shard_asks, &cid),
+                    ))
                     {
                         Some(reason) => hollow_log!("[HOLLOW-VAULT] Migrated shard {si} of {cid} from {peer_str} not taken: {reason}"),
                         None => {
@@ -9500,28 +9449,27 @@ async fn handle_incoming_request(
                     s
                 });
 
-                // SECURITY: every op in the batch passes `admit_remote_op`
-                // inside `merge_ops`: the author's signature, the clock bound,
-                // then the permission matrix using OUR role map and never the
-                // relayer's word. That covers the destructive `ServerDeleted`
-                // tombstone along with every other payload.
+                // SECURITY: every op in the batch passes `ingest_remote` inside
+                // `merge_ops_with`: the author's signature, the clock bound, then the
+                // permission matrix using OUR role map and never the relayer's word.
+                // That covers the destructive `ServerDeleted` tombstone along with
+                // every other payload.
                 //
-                // Persist every ADMITTED op into the crdt_ops table. op_log is
-                // NOT serialized in the state JSON, so without this a member
-                // that joined via sync serves near-empty op logs after a restart.
+                // Persist exactly what the fold admitted, and drop the rows a
+                // checkpoint in the batch overwrote: op_log is NOT in the state JSON,
+                // so the crdt_ops table is what a restart rebuilds it from.
 
                 // Capture membership BEFORE merge so we can detect a kick-while-offline
                 // (we were a member, the synced ops remove us → self-evict on reconnect).
                 let was_member_before = state.is_member(local_peer_str);
 
-                let op_store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
-                let merged = crdt_sync::merge_ops_with(state, &incoming_ops, |op| {
-                    if let Some(store) = op_store.as_ref() {
-                        if op.server_id == server_id {
-                            let _ = store.insert_crdt_op(op);
-                        }
-                    }
-                });
+                let mut admitted = Vec::new();
+                let merged = crdt_sync::merge_ops_with(state, &incoming_ops, |op| admitted.push(op.clone()));
+                if !admitted.is_empty()
+                    && let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase)
+                {
+                    store.persist_admitted_ops(&admitted, state.checkpoint_hlc.as_ref());
+                }
                 if let Ok(report) = &merged {
                     if report.rejected > 0 {
                         hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
@@ -11336,15 +11284,9 @@ async fn handle_incoming_request(
                 return;
             };
             let rules = super::mls_authority::GroupRules::Server { state, channel: kp_channel_id.as_deref() };
-            if !state.members.contains_key(&sender_leaf.master) || state.is_banned(&sender_leaf.master) {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from {peer_str} for {group_key}: {} is not a member", sender_leaf.master);
+            if let crate::crypto::Verdict::Hold(why) = rules.membership(&sender_leaf.master, "sender") {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from {peer_str} for {group_key}: {why}");
                 return;
-            }
-            if let Some(cid) = &kp_channel_id {
-                if !state.can_see_channel(&sender_leaf.master, cid) {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED subgroup MlsKeyPackage from {peer_str}: {} cannot see channel {cid}", sender_leaf.master);
-                    return;
-                }
             }
 
             // SIBLING-RE-ADDS-SIBLING fast path (keystone regen recovery): when WE
@@ -11502,11 +11444,11 @@ async fn handle_incoming_request(
                     join_pending: pending_server_joins.contains_key(&server_id),
                     answered: mls_mgr.key_request_answered(&group_key),
                 };
-                let mut welcome_sender: Option<String> = None;
+                let mut welcome_leaf: Option<crate::crypto::LeafIdentity> = None;
                 let judged = mls_mgr.join_from_welcome_judged(&group_key, &welcome_bytes, |facts| {
-                    welcome_sender = facts.sender.bound().map(|s| s.master.clone());
+                    welcome_leaf = facts.sender.bound().cloned();
                     let asked = super::mls_authority::asked_for_leaf(
-                        &group_key, &server_id, welcome_sender.as_deref(), &requests,
+                        &group_key, &server_id, welcome_leaf.as_ref().map(|s| s.master.as_str()), &requests,
                     );
                     super::mls_authority::judge_welcome(
                         server_states, &server_id, wl_channel_id.as_deref(), conf_nonce.as_deref(), asked, facts,
@@ -11531,12 +11473,15 @@ async fn handle_incoming_request(
 
                 match judged {
                     Ok(()) => {
+                        let sync_peer = crate::node::crypto_handler::mls_sync_partner(
+                            server_states.get(&server_id), welcome_leaf.as_ref(), Some(peer_str),
+                        );
                         after_welcome_joined(
                             mls_mgr, master_keypair, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
                             crdt_store_actor, server_states, mls_bootstrap_requested,
                             mls_welcome_grace, awaiting_mls_after_parked_join, relay_catchup_done,
-                            db_path, db_passphrase, local_peer_str, peer_str,
-                            &server_id, &wl_channel_id, &group_key, welcome_sender.as_deref(),
+                            db_path, db_passphrase, local_peer_str, sync_peer,
+                            &server_id, &wl_channel_id, &group_key, welcome_leaf.as_ref().map(|s| s.master.as_str()),
                         ).await;
                     }
                     Err(e) => {
@@ -12940,7 +12885,7 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-SECURITY] REJECTED PublicFileHeader for {file_id} from {peer_str}: we asked {asked}");
                 return;
             }
-            let fresh = *req_sid == sid && req_at.elapsed() <= std::time::Duration::from_secs(120);
+            let fresh = file_handler::guest_answer_fresh(req_sid, *req_at, &sid);
             pending_public_file_requests.remove(&file_id);
             if !fresh || !guest_rooms.contains(&sid) {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED PublicFileHeader for {file_id} from {peer_str} — stale or server mismatch");
@@ -13475,9 +13420,9 @@ async fn handle_incoming_request(
             }
             // Guarding the OFFER kills the connection at initiation; the other Rtc
             // signals are inert without one. Blocked and unknown peers get none.
-            if !voice_handler::data_channel_peer_allowed(
+            if !voice_handler::data_channel_peer_allowed_off_loop(
                 server_states, master_peer_str, peer_str, db_path, db_passphrase,
-            ) {
+            ).await {
                 hollow_log!("[HOLLOW-SECURITY] Dropped RtcOffer from {peer_str}: no friendship or shared server");
                 return;
             }
@@ -13821,7 +13766,7 @@ async fn handle_incoming_request(
             // ADMITTED peer can hold. That is what lets the PeerJoined re-broadcast
             // and the conference reply-on-join sync reach late joiners.
             let refusal = if super::conference::is_conference_sid(&server_id) {
-                if !mls.as_ref().is_some_and(|m| m.group_members(&server_id).iter().any(|c| c == peer_str)) {
+                if !mls.as_ref().is_some_and(|m| super::conference::seated(&m.group_leaves(&server_id), peer_str)) {
                     Some("not in the meeting group")
                 } else {
                     (channel_id != super::conference::CONF_CHANNEL).then_some("not the meeting channel")

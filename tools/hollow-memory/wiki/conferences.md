@@ -21,6 +21,15 @@ message to name the room's meeting. Keys: host = `ConferenceHostState.seal`
 `handle_conference_request_join`, cleared on leave, end, kick). A link without a key cannot
 knock (FFI `OLD_LINK`, Dart toast). The relay reads no name, avatar hash, KeyPackage or host.
 
+Meetings ask the ROSTER like every other attribution (design ID-1, HOL-SEC-123, session 32):
+one rule, `mls_authority::refused` (revoked, or a roster we hold does not count the device),
+in `verified_host` (deny, lobby info, end, kick), the knock (`seat_of`, then again at
+`admit_peer`), meeting chat and cards (`handle_inbound_chat`) and the meeting voice join
+(`conference::seated`). A device minted from the identity's master key alone speaks for no
+one wherever we hold its roster; in a stranger's meeting the certificate still decides
+(AR-15). Known gap: a device its roster drops mid-meeting keeps its MLS leaf (the batch tick
+skips `conf:` groups, which have no server state) until kicked or the meeting restarts.
+
 ## Rust core (`rust/hollow_core/src/node/conference.rs`)
 
 - Helpers: `conf_server_id(id)` → `"conf:{id}"`, `is_conference_sid`, `conf_id_from_sid`, `CONF_CHANNEL = "main"`, `derive_access_hash(conf_id, code)` = sha256("{conf_id}:{code}") hex (admission check, NOT key material).

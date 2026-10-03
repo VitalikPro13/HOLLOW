@@ -605,55 +605,15 @@ async fn ingest_inner(
     if master.is_empty() {
         return Ingested::default();
     }
-    let Ok(store) = MessageStore::open(db_path, db_passphrase) else {
-        return Ingested::default();
+    let folded = {
+        let (db, pass) = (db_path.to_string(), db_passphrase.to_string());
+        let (from, our_master, our_device) = (sender.to_string(), local_master.to_string(), local_device.to_string());
+        tokio::task::spawn_blocking(move || fold_in(&db, &pass, &incoming, &from, &our_master, &our_device))
+            .await
+            .ok()
+            .flatten()
     };
-    let stored = load(&store, &master);
-    let known = stored.is_some() || store.load_device_list(&master).ok().flatten().is_some();
-    if !known {
-        let alone = incoming.fold(|_| None, now_ms());
-        if !alone.is_member(sender) {
-            hollow_log!(
-                "[HOLLOW-SECURITY] Dropped a roster for {master}: its deliverer {sender} is not one of its members"
-            );
-            return Ingested::default();
-        }
-    }
-    let base = stored.clone().unwrap_or_else(|| Roster::new(&master));
-    let merged = base.merged(&incoming);
-    stamp_pending(&store, &merged);
-    // Members as last saved, not re-folded now: a pending join that matured since
-    // then is a member this ingest adds, and contacts are told.
-    let prev = stored
-        .as_ref()
-        .map(|r| RosterState {
-            members: store.device_links_for(&master).unwrap_or_default(),
-            ..fold(&store, r)
-        })
-        .unwrap_or_default();
-    let now = fold(&store, &merged);
-    let changed = stored.as_ref() != Some(&merged) || prev != now;
-
-    if changed {
-        if let Err(e) = save(&store, &merged, &now, local_master, local_device) {
-            hollow_log!("[HOLLOW-ROSTER] Failed to save the roster for {master}: {e}");
-            return Ingested::default();
-        }
-    } else if master == local_master {
-        super::resolver::note_roster(&master);
-        super::resolver::seed_self(local_master, &now.members.iter().cloned().collect::<Vec<_>>());
-    } else {
-        super::resolver::note_roster(&master);
-        super::resolver::update_many(&master, now.members.iter().map(String::as_str));
-    }
-
-    for dev in now.members.iter().map(String::as_str).chain(std::iter::once(sender)) {
-        if super::resolver::resolve(dev) == master
-            && let Ok(true) = store.migrate_friend_to_master(dev, &master)
-        {
-            hollow_log!("[HOLLOW-FRIENDS] Re-keyed friend {dev} -> master {master}");
-        }
-    }
+    let Some((prev, now, changed)) = folded else { return Ingested::default() };
 
     let newly_revoked: Vec<String> = prev
         .members
@@ -664,13 +624,11 @@ async fn ingest_inner(
     let added: Vec<String> = now.members.difference(&prev.members).cloned().collect();
 
     if master == local_master {
-        drop(store);
         own_changes(event_tx, local_device, &prev, &now, db_path, db_passphrase).await;
         if sender != local_device && now.is_member(sender) {
             super::crypto_handler::share_state_with_sibling(ws_cmd_tx, sender, db_path, db_passphrase);
         }
     } else {
-        drop(store);
         if !added.is_empty() {
             super::destroy::note_identity_reappeared(event_tx, db_path, db_passphrase, &master).await;
         }
@@ -702,6 +660,67 @@ async fn ingest_inner(
         added: if master == local_master { added } else { Vec::new() },
         asks_again,
     }
+}
+
+/// The store half of [`ingest`], on the blocking pool: merge, fold, save, re-key the
+/// friend row. `(members as last saved, the fold now, whether anything changed)`.
+fn fold_in(
+    db_path: &str,
+    db_passphrase: &str,
+    incoming: &Roster,
+    sender: &str,
+    local_master: &str,
+    local_device: &str,
+) -> Option<(RosterState, RosterState, bool)> {
+    let master = incoming.master.as_str();
+    let store = MessageStore::open(db_path, db_passphrase).ok()?;
+    let stored = load(&store, master);
+    let known = stored.is_some() || store.load_device_list(master).ok().flatten().is_some();
+    if !known {
+        let alone = incoming.fold(|_| None, now_ms());
+        if !alone.is_member(sender) {
+            hollow_log!(
+                "[HOLLOW-SECURITY] Dropped a roster for {master}: its deliverer {sender} is not one of its members"
+            );
+            return None;
+        }
+    }
+    let base = stored.clone().unwrap_or_else(|| Roster::new(master));
+    let merged = base.merged(incoming);
+    stamp_pending(&store, &merged);
+    // Members as last saved, not re-folded now: a pending join that matured since
+    // then is a member this ingest adds, and contacts are told.
+    let prev = stored
+        .as_ref()
+        .map(|r| RosterState {
+            members: store.device_links_for(master).unwrap_or_default(),
+            ..fold(&store, r)
+        })
+        .unwrap_or_default();
+    let now = fold(&store, &merged);
+    let changed = stored.as_ref() != Some(&merged) || prev != now;
+
+    if changed {
+        if let Err(e) = save(&store, &merged, &now, local_master, local_device) {
+            hollow_log!("[HOLLOW-ROSTER] Failed to save the roster for {master}: {e}");
+            return None;
+        }
+    } else if master == local_master {
+        super::resolver::note_roster(master);
+        super::resolver::seed_self(local_master, &now.members.iter().cloned().collect::<Vec<_>>());
+    } else {
+        super::resolver::note_roster(master);
+        super::resolver::update_many(master, now.members.iter().map(String::as_str));
+    }
+
+    for dev in now.members.iter().map(String::as_str).chain(std::iter::once(sender)) {
+        if super::resolver::resolve(dev) == master
+            && let Ok(true) = store.migrate_friend_to_master(dev, master)
+        {
+            hollow_log!("[HOLLOW-FRIENDS] Re-keyed friend {dev} -> master {master}");
+        }
+    }
+    Some((prev, now, changed))
 }
 
 /// What a change to our own roster means for this device: removed, back, or asked.
@@ -1124,8 +1143,8 @@ mod tests {
     }
 
     /// G1: the bare master refusal is only as good as the doors that ask it: relay
-    /// frames, stream chunks, room presence (both events and the loop's settle) and the
-    /// push fetch node.
+    /// frames, stream chunks, room presence (presence events, discovery and the loop's
+    /// settle) and the push fetch node.
     #[test]
     fn bare_master_gates_stay_wired() {
         let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
@@ -1141,6 +1160,7 @@ mod tests {
             ("WsEvent::BinaryDirect { room, from, data } => {", "ws_stream_receive(", "resolver::is_bare_master(&from)"),
             ("WsEvent::PeerJoined { room, peer_id } => {", "ws_room_peers.entry(", "bare_presence.admits(&peer_id)"),
             ("WsEvent::RoomMembers { room, peers } => {", "ws_room_peers.insert(", "bare_presence.admits(p)"),
+            ("WsEvent::DiscoveredPeers { room, peers } => {", "ws_room_peers.entry(", "bare_presence.admits(p)"),
             ("loop_stall.check(arm, name, t0);", "tokio::select! {", "settle_bare_presence(&mut bare_presence"),
             ("async fn settle_bare_presence(", "\n}\n", "bare_presence.settle(ws_room_peers)"),
         ] {
@@ -1178,6 +1198,28 @@ mod tests {
         me.ingest(&gone.peer_id(), &before).await;
         assert_eq!(carried_master(&before, &gone.peer_id()), None, "HOL-SEC-033: a removed device replaying an older roster");
         assert_eq!(carried_master(&after, &kept.peer_id()), Some(bob.peer_id()));
+    }
+
+    /// HOL-SEC-033. Every arm that carries a roster ingests it, enforces the removals it
+    /// brought, and attributes its sender only through `carried_master`.
+    #[test]
+    fn carried_roster_arms_stay_wired() {
+        let swarm = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/swarm.rs"))
+            .expect("read swarm.rs")
+            .replace("\r\n", "\n");
+        for arm in [
+            "        HavenMessage::ServerJoinRequest {",
+            "        HavenMessage::FriendRequest {",
+            "        HavenMessage::FriendAccept {",
+            "        HavenMessage::FriendReject {",
+        ] {
+            let start = swarm.find(arm).unwrap_or_else(|| panic!("missing {arm}"));
+            let rest = &swarm[start + arm.len()..];
+            let body = &rest[..rest.find("\n        HavenMessage::").unwrap_or(rest.len())];
+            for step in ["roster_book::ingest(", "enforce_device_revocations(", "roster_book::carried_master("] {
+                assert!(body.contains(step), "{}: the carried roster skips {step}", arm.trim());
+            }
+        }
     }
 
     /// HOL-SEC-034. Only a device we had never seen for an identity reported destroyed

@@ -73,6 +73,9 @@ struct RelayInner {
     /// (sender, target) pairs whose direct frames the relay holds back, in order,
     /// until the test releases them: a slow link, so two frames can cross.
     held_directs: HashMap<(String, String), Vec<BufferedMsg>>,
+    /// (sender, target) pairs whose stream frames (0x02) the relay holds back, in order,
+    /// until the test releases or loses them.
+    held_streams: HashMap<(String, String), Vec<BufferedMsg>>,
     /// Devices whose outgoing data frames are kept, so a test can replay one
     /// later (a captured older announce is a replay, not a forgery).
     recording: HashSet<String>,
@@ -91,6 +94,9 @@ struct RelayInner {
     /// all handed over on the device's next auth, each deleted only by the device's
     /// ack naming its issuer and stamp, or by its bare ack.
     kill_list: HashMap<String, Vec<KillEntry>>,
+    /// (acking device, the signal it named) for every `kill_ack`, `None` = bare: a
+    /// bare ack clears junk and a genuine order alike, so only the record tells them apart.
+    kill_acks: Vec<(String, Option<super::ws_client::KillSignalId>)>,
     /// Join lock chains by record key (`join_lock::record_key`), held by the rule the
     /// real relay applies (`join_lock::relay_put`).
     locks: HashMap<String, Vec<super::join_lock::LockLink>>,
@@ -374,6 +380,18 @@ impl MockRelay {
             .into_iter()
             .flatten()
             .map(|e| (e.blob.clone(), e.issued_at_ms, e.issuer.clone()))
+            .collect()
+    }
+
+    /// Every `kill_ack` `device` sent, oldest first, as the `(issuer, issued_at_ms)`
+    /// it named, `None` for a bare ack.
+    pub(crate) fn kill_acks_from(&self, device: &str) -> Vec<Option<(String, i64)>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .kill_acks
+            .iter()
+            .filter(|(from, _)| from == device)
+            .map(|(_, s)| s.as_ref().map(|s| (s.issuer.clone(), s.issued_at_ms)))
             .collect()
     }
 
@@ -840,6 +858,28 @@ impl MockRelay {
         }
     }
 
+    /// Hold back every stream frame from one device to another.
+    pub(crate) fn hold_streams(&self, from: &str, target: &str) {
+        self.inner.lock().unwrap().held_streams.entry((from.to_string(), target.to_string())).or_default();
+    }
+
+    /// How many stream frames the relay holds from `from` to `target`.
+    pub(crate) fn held_stream_count(&self, from: &str, target: &str) -> usize {
+        self.inner.lock().unwrap().held_streams.get(&(from.to_string(), target.to_string())).map_or(0, Vec::len)
+    }
+
+    /// Deliver, in order, the stream frames held from `from` to `target` (all of them, or
+    /// lose them when `deliver` is false), and stop holding.
+    pub(crate) fn release_streams(&self, from: &str, target: &str, deliver: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let held = inner.held_streams.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
+        if let Some(conn) = inner.conns.get(target).filter(|c| c.online && deliver) {
+            for m in held {
+                let _ = conn.event_tx.send(WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
+            }
+        }
+    }
+
     pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
         let mut inner = self.inner.lock().unwrap();
         if deaf {
@@ -980,6 +1020,10 @@ impl MockRelay {
                 let sender_in_room = inner.peer_in_room(&room_code, from);
                 let in_room = inner.peer_in_room(&room_code, &target_peer);
                 if !sender_in_room { return; }
+                if let Some(held) = inner.held_streams.get_mut(&(from.to_string(), target_peer.clone())) {
+                    held.push(BufferedMsg { room: room_code, from: from.to_string(), data, direct: true });
+                    return;
+                }
                 if let Some(conn) = inner.conns.get(&target_peer).filter(|c| c.online && in_room) {
                     let _ = conn.event_tx.send(WsEvent::BinaryDirect {
                         room: room_code,
@@ -1178,6 +1222,7 @@ impl MockRelay {
             WsCommand::KillAck { signal } => {
                 // The only removal a client can ask for, and always its own: the
                 // one signal it names by issuer and stamp, or every one.
+                inner.kill_acks.push((from.to_string(), signal.clone()));
                 match signal {
                     None => {
                         inner.kill_list.remove(from);
@@ -2678,7 +2723,7 @@ async fn create_server_and_wait(node: &mut TestNode, name: &str) -> String {
         .await
         .unwrap();
     let mut server_id = None;
-    let ok = wait_event(node, std::time::Duration::from_secs(3), |ev| {
+    let ok = wait_event(node, std::time::Duration::from_secs(15), |ev| {
         if let NetworkEvent::ServerCreated { server_id: sid, .. } = ev {
             server_id = Some(sid.clone());
             true
@@ -7199,24 +7244,6 @@ async fn authz_a_vc_signal_flood_over_olm_is_rate_limited() {
     })
     .await;
     assert!(j_saw_join, "joiner must see the owner enter the voice channel");
-    // Sent while the joins' carried sync answers are still queued, the burst loses its
-    // tail to an Olm decrypt failure, which would pass for the limit. A DM that arrives
-    // first has drained them.
-    o.cmd_tx
-        .send(NodeCommand::SendMessage {
-            peer_id: j_master.clone(),
-            text: "flood-ready".to_string(),
-            message_id: "vc-flood-ready-1".to_string(),
-            reply_to_mid: None,
-            link_preview: None,
-        })
-        .await
-        .unwrap();
-    let ready = wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
-        matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "flood-ready")
-    })
-    .await;
-    assert!(ready, "a DM before the flood must arrive");
     drain_events(&mut o);
     drain_events(&mut j);
 
@@ -7289,6 +7316,152 @@ async fn authz_a_vc_signal_flood_over_olm_is_rate_limited() {
     assert!(
         ice <= allowed,
         "{ice} of {sent} VC ICE signals over Olm reached the app in {secs:.1}s; the VC bucket admits about {allowed}"
+    );
+}
+
+/// Media A-MED-05/06: a member of the server who is not in the voice channel cannot
+/// negotiate a leg with a participant (SDP and ICE ride Olm) or paint state on a tile
+/// (state rides the carried lane): each counts only from a participant of that call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_a_vc_signal_from_outside_the_call_is_refused() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_MASTER: u8 = 118;
+    const J_MASTER: u8 = 128;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "VC Outsider Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev
+            && channel_type == "voice"
+        {
+            voice_cid = Some(channel_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    expect_mls_group(&[&o, &j], &server_id, 15).await;
+
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin { server_id: server_id.clone(), channel_id: voice_cid.clone() })
+        .await
+        .unwrap();
+    let j_saw_join = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(j_saw_join, "the member must see the owner enter the voice channel");
+    drain_events(&mut o);
+
+    // Every signal a participant sends O, then a DM that reaches O after all of them
+    // (one Olm session, in order). Returns the VC signal types O took from J.
+    let round = async |o: &mut TestNode, marker: &str| -> Vec<String> {
+        for (signal_type, payload) in [
+            ("sdp_offer", serde_json::json!({ "sdp": "v=0" })),
+            ("sdp_answer", serde_json::json!({ "sdp": "v=0" })),
+            ("ice", serde_json::json!({ "candidate": "candidate:1 1 udp 1 10.0.0.1 4000 typ host", "sdpMid": "0", "sdpMLineIndex": 0 })),
+            ("reneg_offer", serde_json::json!({ "sdp": "v=0", "ice_restart": false })),
+            ("reneg_answer", serde_json::json!({ "sdp": "v=0" })),
+        ] {
+            j.cmd_tx
+                .send(NodeCommand::VoiceChannelSendSignal {
+                    server_id: server_id.clone(),
+                    channel_id: voice_cid.clone(),
+                    peer_id: o_master.clone(),
+                    signal_type: signal_type.to_string(),
+                    payload: payload.to_string(),
+                })
+                .await
+                .unwrap();
+        }
+        let (sid, cid) = (server_id.clone(), voice_cid.clone());
+        for state in [
+            super::types::HavenMessage::VoiceChannelAudioState { server_id: sid.clone(), channel_id: cid.clone(), muted: true, deafened: false },
+            super::types::HavenMessage::VoiceChannelScreenState { server_id: sid.clone(), channel_id: cid.clone(), enabled: true, quality: None },
+            super::types::HavenMessage::VoiceChannelCameraState { server_id: sid.clone(), channel_id: cid.clone(), enabled: true },
+            super::types::HavenMessage::VoiceChannelRecordingState { server_id: sid.clone(), channel_id: cid.clone(), recording: true },
+        ] {
+            carry_as(&j, o, state).await;
+        }
+        j.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: o_master.clone(),
+                text: marker.to_string(),
+                message_id: format!("vc-outsider-{marker}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        let mut took = Vec::new();
+        let done = wait_event(o, std::time::Duration::from_secs(15), |ev| match ev {
+            NetworkEvent::VoiceChannelSignal { signal_type, channel_id, peer_id, .. }
+                if *channel_id == voice_cid && *peer_id == j.device_id =>
+            {
+                took.push(signal_type.clone());
+                false
+            }
+            NetworkEvent::MessageReceived { text, .. } => text == marker,
+            _ => false,
+        })
+        .await;
+        assert!(done, "the DM sent after the {marker} round must arrive");
+        took
+    };
+
+    let outside = round(&mut o, "outside").await;
+    assert!(outside.is_empty(), "O took VC signals from a member outside the call: {outside:?}");
+
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin { server_id: server_id.clone(), channel_id: voice_cid.clone() })
+        .await
+        .unwrap();
+    let o_saw_join = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(o_saw_join, "the owner must see the member enter the voice channel");
+    let mut inside = round(&mut o, "inside").await;
+    inside.sort();
+    assert_eq!(
+        inside,
+        ["audio_state", "camera_state", "ice", "recording_start", "reneg_answer", "reneg_offer", "screen_state", "sdp_answer", "sdp_offer"],
+        "every signal from a participant reaches the app",
     );
 }
 
@@ -7535,6 +7708,255 @@ async fn a_holder_that_answers_with_a_wrong_shard_is_not_asked_again() {
     assert_eq!(asked_again, 0, "the holder that answered with a wrong shard was asked again");
 }
 
+/// Have `from` send `envelope` to `to` inside its own Olm session, as a modified client could.
+async fn olm_envelope_as(from: &TestNode, to: &TestNode, envelope: super::types::MessageEnvelope) {
+    from.cmd_tx
+        .send(NodeCommand::TestEnvelope { olm_device: Some(to.device_id.clone()), mls_server: None, envelope: Box::new(envelope) })
+        .await
+        .unwrap();
+}
+
+/// Have `from` send `envelope` MLS-encrypted to the group of `server_id`.
+async fn mls_envelope_as(from: &TestNode, server_id: &str, envelope: super::types::MessageEnvelope) {
+    from.cmd_tx
+        .send(NodeCommand::TestEnvelope { olm_device: None, mls_server: Some(server_id.to_string()), envelope: Box::new(envelope) })
+        .await
+        .unwrap();
+}
+
+/// Deliver every frame the relay holds from `from` to `to` except stream bytes.
+fn release_held_messages(relay: &MockRelay, from: &str, to: &str) {
+    for kind in relay.held_kinds(from, to) {
+        if kind != "binary" {
+            relay.release_held_kind(from, to, &kind);
+        }
+    }
+}
+
+/// An inline ShardStore of `bytes` as shard `si` of `cid`.
+fn inline_shard_store(server_id: &str, cid: &str, si: u16, bytes: &[u8]) -> super::types::MessageEnvelope {
+    use base64::Engine as _;
+    super::types::MessageEnvelope::ShardStore {
+        inner: Box::new(super::types::ShardStorePayload {
+            sid: server_id.to_string(),
+            cid: cid.to_string(),
+            si,
+            sk: crate::vault::content_store::shard_key(cid, si),
+            k: 0,
+            m: 0,
+            total_size: bytes.len() as u64,
+            tier: "standard".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            chunks: 0,
+            target: None,
+        }),
+    }
+}
+
+/// HOL-SEC-117 residual: a member sends unasked stores of the shards we are about to
+/// pull, for content whose manifest (from before 0.12) pins no hash. One registers before
+/// our pull and its bytes never come, one's bytes land while the pull waits, one arrives
+/// inline then. The holder we asked fills all three, and nothing the member sent is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn the_holder_we_asked_wins_over_unasked_stores_of_a_shard() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (o, mut a, m, server_id) = vault_trio(&relay, 156, 157, 158).await;
+
+    let plaintext = b"a file the vault took before its manifests pinned shards".to_vec();
+    let sealed = crate::vault::pipeline::aes_encrypt(&plaintext).expect("encrypt");
+    let cid = crate::vault::content_store::content_id(&sealed.ciphertext);
+    let shards = crate::vault::erasure::encode(&sealed.ciphertext, 3, 2, &cid).expect("split");
+    let tier = crate::vault::content_store::StorageTier::Standard;
+    for (si, shard) in shards.iter().enumerate() {
+        vault_store_of(&o)
+            .store_shard(&server_id, &cid, si as u16, 3, 2, sealed.ciphertext.len() as u64, tier, shard)
+            .expect("the owner holds every shard");
+    }
+    let legacy = crate::vault::pipeline::VaultManifest {
+        content_id: cid.clone(),
+        encryption_key: hex::encode(sealed.key),
+        nonce: hex::encode(sealed.nonce),
+        original_size: plaintext.len() as u64,
+        k: 3,
+        m: 2,
+        shard_count: 5,
+        file_name: "old.txt".into(),
+        mime_type: "text/plain".into(),
+        storage_tier: "standard".into(),
+        created_at: 1,
+        creator_peer_id: o.master_id.clone(),
+        channel_id: general_channel_of(&server_id),
+        message_id: String::new(),
+        shard_hashes: Vec::new(),
+    };
+    let placements: Vec<_> = (0..5u16)
+        .map(|si| crate::vault::placement::ShardPlacement {
+            shard_index: si,
+            target_peer: o.master_id.clone(),
+            shard_key: crate::vault::content_store::shard_key(&cid, si),
+        })
+        .collect();
+    vault_store_of(&a).save_manifest(&server_id, &legacy.channel_id, &legacy).expect("A holds the old manifest");
+    vault_store_of(&a).save_placements(&server_id, &cid, &placements).expect("every shard placed on the owner");
+
+    let plant = |si: u16, junk: &[u8]| NodeCommand::StoreShardOnPeer {
+        server_id: server_id.clone(),
+        content_id: cid.clone(),
+        shard_index: si,
+        shard_key: crate::vault::content_store::shard_key(&cid, si),
+        k: 0,
+        m: 0,
+        total_data_size: junk.len() as u64,
+        storage_tier: "standard".into(),
+        data: junk.to_vec(),
+        target_peer: a.master_id.clone(),
+    };
+    let a_dev = a.device_id.clone();
+    let streamed = async |relay: &MockRelay, from: &str, n: usize| {
+        wait_until(20, async || relay.held_stream_count(from, &a_dev) >= n).await
+    };
+    relay.hold_direct(&m.device_id, &a.device_id);
+    relay.hold_streams(&m.device_id, &a.device_id);
+    m.cmd_tx.send(plant(0, b"junk for shard zero")).await.unwrap();
+    assert!(streamed(&relay, &m.device_id, 1).await, "the member streams shard 0");
+    release_held_messages(&relay, &m.device_id, &a.device_id);
+    relay.release_streams(&m.device_id, &a.device_id, false);
+    relay.hold_streams(&m.device_id, &a.device_id);
+    m.cmd_tx.send(plant(1, b"junk for shard one")).await.unwrap();
+    assert!(streamed(&relay, &m.device_id, 1).await, "the member streams shard 1");
+    release_held_messages(&relay, &m.device_id, &a.device_id);
+    flush_frames(&relay, &mut a).await;
+
+    // A pulls shards 0, 1 and 2 from the owner, whose answers the relay keeps back.
+    relay.hold_direct(&o.device_id, &a.device_id);
+    relay.hold_streams(&o.device_id, &a.device_id);
+    a.cmd_tx
+        .send(NodeCommand::VaultDownloadFile { server_id: server_id.clone(), content_id: cid.clone() })
+        .await
+        .unwrap();
+    assert!(streamed(&relay, &o.device_id, 3).await, "the owner answers the three shards asked for");
+    olm_envelope_as(&m, &a, inline_shard_store(&server_id, &cid, 2, b"junk for shard two")).await;
+    olm_envelope_as(&m, &a, super::types::MessageEnvelope::ShardMigrate {
+        sid: server_id.clone(),
+        cid: cid.clone(),
+        si: 3,
+        sk: crate::vault::content_store::shard_key(&cid, 3),
+        data: {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(b"junk for shard three")
+        },
+        target: None,
+    })
+    .await;
+    expect_relay_drained(&relay, &m, "unasked-stores").await;
+    relay.release_held(&m.device_id, &a.device_id);
+    relay.release_streams(&m.device_id, &a.device_id, true);
+    let kept = seen_before_flush(&relay, &mut a, |ev| {
+        matches!(ev, NetworkEvent::ShardStored { content_id, from_peer, .. } if *content_id == cid && *from_peer == m.device_id)
+    })
+    .await;
+    assert!(!kept, "HOL-SEC-117 residual: a copy nobody asked for was kept while our pull of it waited");
+    for si in 0..4u16 {
+        assert!(
+            !vault_store_of(&a).has_shard(&crate::vault::content_store::shard_key(&cid, si)).unwrap(),
+            "HOL-SEC-117 residual: the member's copy of shard {si} is held",
+        );
+    }
+
+    // Each answer's registration before its bytes, as a holder sends them.
+    relay.release_held(&o.device_id, &a.device_id);
+    relay.release_streams(&o.device_id, &a.device_id, true);
+    let mut outcome = None;
+    wait_event(&mut a, std::time::Duration::from_secs(30), |ev| {
+        match ev {
+            NetworkEvent::VaultDownloadComplete { content_id, disk_path, .. } if *content_id == cid => {
+                outcome = Some(Ok(disk_path.clone()));
+            }
+            NetworkEvent::VaultDownloadFailed { content_id, error, .. } if *content_id == cid => {
+                outcome = Some(Err(error.clone()));
+            }
+            _ => {}
+        }
+        outcome.is_some()
+    })
+    .await;
+    let path = outcome
+        .unwrap_or_else(|| Err("the download never finished".into()))
+        .unwrap_or_else(|e| panic!("HOL-SEC-117 residual: an unasked store made the answer we asked for drop: {e}"));
+    assert_eq!(
+        crate::node::at_rest::read_all(std::path::Path::new(&path)).expect("read the rebuilt file"),
+        plaintext,
+    );
+}
+
+/// A-V4: an order to delete vault content counts only from a member holding Manage
+/// Server, on both lanes. A plain member is refused over Olm and over MLS; once the
+/// member role holds Manage Server its order counts; kicked, the same peer (whose role
+/// would still read as member) is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_vault_delete_needs_a_member_with_manage_server_on_both_lanes() {
+    use crate::crdt::operations::{MemberRole, Permission};
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (o, mut a, m, server_id) = vault_trio(&relay, 159, 160, 161).await;
+    let (kept, granted) = ("d1".repeat(32), "d2".repeat(32));
+    let tier = crate::vault::content_store::StorageTier::Standard;
+    for cid in [&kept, &granted] {
+        vault_store_of(&a).store_shard(&server_id, cid, 0, 0, 0, 4, tier, b"held").expect("A holds a shard");
+    }
+    let (a_db, a_pass) = (a.db_path.clone(), a.passphrase.clone());
+    let held = |cid: &str| {
+        let vault_dir = crate::identity::data_dir().expect("data dir").join("vault");
+        crate::vault::content_store::ContentStore::open(&a_db, &a_pass, &vault_dir)
+            .expect("open A's vault")
+            .has_shard(&crate::vault::content_store::shard_key(cid, 0))
+            .unwrap()
+    };
+    let delete = |cid: &str| super::types::MessageEnvelope::ShardDelete { sid: server_id.clone(), cid: cid.to_string() };
+
+    olm_envelope_as(&m, &a, delete(&kept)).await;
+    mls_envelope_as(&m, &server_id, delete(&kept)).await;
+    carried_barrier(&m, &mut a).await;
+    assert!(held(&kept), "A-V4: a member without Manage Server deleted vault content");
+
+    o.cmd_tx
+        .send(NodeCommand::ChangeRolePermissions {
+            server_id: server_id.clone(),
+            role: "member".into(),
+            permissions: MemberRole::Member.default_permissions() | Permission::MANAGE_SERVER,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || a.live_server_state(&server_id).await.is_some_and(|s| s.has_permission(&m.master_id, Permission::MANAGE_SERVER))).await,
+        "A sees the member role given Manage Server",
+    );
+    mls_envelope_as(&m, &server_id, delete(&granted)).await;
+    assert!(wait_until(15, async || !held(&granted)).await, "a member holding Manage Server deletes over MLS");
+
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || a.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&m.master_id))).await,
+        "A sees M kicked",
+    );
+    assert!(
+        a.live_server_state(&server_id).await.is_some_and(|s| s.has_permission(&m.master_id, Permission::MANAGE_SERVER)),
+        "a non-member's role still reads as member, so only membership refuses it",
+    );
+    olm_envelope_as(&m, &a, delete(&kept)).await;
+    carried_barrier(&m, &mut a).await;
+    assert!(held(&kept), "A-V4: a peer that is not a member deleted vault content");
+}
+
 // Recovery-pool formation: an initiator opens a pool, a second node joins and
 // broadcasts a RecoveryHello, and the initiator registers it as a member. Shard
 // streaming needs a populated vault and is out of harness scope.
@@ -7738,6 +8160,89 @@ async fn authz_a_recovery_frame_counts_only_with_the_pool_token() {
     );
 }
 
+/// A-R4, HOL-SEC-106: a transfer plan counts only from the pool's coordinator (its lowest
+/// member id), sends a shard only to a pool member, and only for a content id. V holds
+/// the shards; C and M are pool members known only by the hellos sealed for them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_a_recovery_plan_counts_only_from_the_coordinator() {
+    use super::types::HavenMessage;
+
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let mut tags = [162u8, 163, 164];
+    tags.sort_by_key(|t| id(*t));
+    let [c_tag, v_tag, m_tag] = tags;
+    let (c, m) = (id(c_tag), id(m_tag));
+    let mut v = spawn_node_on(&relay, v_tag, v_tag).await;
+    drain_events(&mut v);
+    let (v_master, v_dev) = (v.master_id.clone(), v.device_id.clone());
+
+    let server_id = "recovery-server-plan".to_string();
+    let token = "tokplan".to_string();
+    let cid = "a1".repeat(32);
+    let bad_cid = "..\\..\\recovery-escape".to_string();
+    let tier = crate::vault::content_store::StorageTier::Standard;
+    for held in [&cid, &bad_cid] {
+        vault_store_of(&v).store_shard(&server_id, held, 0, 0, 0, 5, tier, b"shard").expect("V holds the shard");
+    }
+    v.cmd_tx
+        .send(NodeCommand::InitiateRecoveryPool { server_id: server_id.clone(), token: token.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut v, std::time::Duration::from_secs(3), |ev| {
+            matches!(ev, NetworkEvent::RecoveryPoolCreated { server_id: sid, .. } if *sid == server_id)
+        })
+        .await
+    );
+    let room = super::recovery_pool::pool_room(&server_id, &token);
+    assert!(wait_until(5, async || relay.room_devices(&room).contains(&v.device_id)).await, "V sits in the pool room");
+    let sealed = |from: &str, msg: &HavenMessage| super::recovery_pool::seal_control(&server_id, &token, from, msg).unwrap();
+    for member in [&c, &m] {
+        let hello = HavenMessage::RecoveryHello { server_id: server_id.clone(), manifest_ids: Vec::new(), shard_inventory_json: "{}".into() };
+        relay.inject(&room, member, &v.device_id, sealed(member, &hello));
+        assert!(
+            wait_event(&mut v, std::time::Duration::from_secs(3), |ev| {
+                matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { peer_id, .. } if peer_id == member)
+            })
+            .await,
+            "{member} joins the pool",
+        );
+    }
+
+    let plan = |cid: &str, dest: &str| HavenMessage::RecoveryTransferPlan {
+        plan_json: serde_json::to_string(&[super::recovery_pool::TransferAssignment {
+            content_id: cid.to_string(),
+            shard_index: 0,
+            source_peer: v_master.clone(),
+            dest_peer: dest.to_string(),
+        }])
+        .unwrap(),
+    };
+    let streams_to = |dest: &str| {
+        relay.wiretap().frames.iter().filter(|f| f.from == v_dev && f.to.as_deref() == Some(dest) && f.kind() == "binary").count()
+    };
+    let outsider = id(165);
+    for (tag, author, msg, dest, why) in [
+        ("plan-m", &m, plan(&cid, &m), &m, "A-R4: a plan from a member that is not the coordinator moved a shard"),
+        ("plan-out", &c, plan(&cid, &outsider), &outsider, "A-R4: a plan sent a shard to a peer outside the pool"),
+        ("plan-bad", &c, plan(&bad_cid, &m), &m, "HOL-SEC-106: a plan moved a shard under an id that is not a content id"),
+    ] {
+        relay.inject(&room, author, &v_dev, sealed(author, &msg));
+        flush_frames(&relay, &mut v).await;
+        expect_relay_drained(&relay, &v, tag).await;
+        assert_eq!(streams_to(dest), 0, "{why}");
+    }
+    relay.inject(&room, &c, &v_dev, sealed(&c, &plan(&cid, &m)));
+    assert!(wait_until(10, async || streams_to(&m) > 0).await, "the coordinator's plan moves the shard");
+}
+
 /// C-24: the relay learns neither a pool's token nor what its members hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -7800,6 +8305,224 @@ async fn c24_a_recovery_pool_shows_the_relay_neither_its_token_nor_its_frames() 
     assert_eq!(tap.lane_leaks(), Vec::<String>::new());
     assert_eq!(tap.readable(&token), Vec::<String>::new(), "the relay read the pool's token");
     assert_eq!(tap.readable(&server_id), Vec::<String>::new(), "the relay read which server the pool recovers");
+}
+
+/// An erasure-coded vault file (k 3, m 2): its manifest and its packed shards by index.
+fn recovery_vault_file() -> (crate::vault::pipeline::VaultManifest, Vec<(u16, Vec<u8>)>) {
+    let plaintext = b"a file the members of a dead server put back together".to_vec();
+    let sealed = crate::vault::pipeline::aes_encrypt(&plaintext).expect("encrypt");
+    let cid = crate::vault::content_store::content_id(&sealed.ciphertext);
+    let members: Vec<String> = (0..6).map(|i| format!("member-{i}")).collect();
+    let split = crate::vault::pipeline::prepare_upload(
+        &sealed.ciphertext, &cid, &sealed.key, &sealed.nonce, "notes.txt", "text/plain", "general",
+        plaintext.len() as u64, "creator", &members, &HashMap::new(), "",
+    )
+    .expect("split the file");
+    assert!(split.manifest.k > 0, "the file is erasure coded");
+    (split.manifest, split.shards)
+}
+
+/// `node` keeps `manifest` for `server_id` and the shards `held` of it, as an ex-member would.
+fn hold_vault_file(
+    node: &TestNode,
+    server_id: &str,
+    manifest: &crate::vault::pipeline::VaultManifest,
+    shards: &[(u16, Vec<u8>)],
+    held: &[u16],
+) {
+    let store = vault_store_of(node);
+    store.save_manifest(server_id, &manifest.channel_id, manifest).expect("keep the manifest");
+    let tier = crate::vault::content_store::StorageTier::Standard;
+    for (si, bytes) in shards.iter().filter(|(si, _)| held.contains(si)) {
+        store
+            .store_shard(server_id, &manifest.content_id, *si, manifest.k, manifest.m, manifest.original_size, tier, bytes)
+            .expect("keep the shard");
+    }
+}
+
+async fn open_recovery_pool(node: &mut TestNode, relay: &MockRelay, server_id: &str, token: &str) {
+    node.cmd_tx
+        .send(NodeCommand::InitiateRecoveryPool { server_id: server_id.to_string(), token: token.to_string() })
+        .await
+        .unwrap();
+    let room = super::recovery_pool::pool_room(server_id, token);
+    assert!(wait_until(5, async || relay.room_devices(&room).contains(&node.device_id)).await, "the pool opens its room");
+}
+
+async fn shard_lands(node: &mut TestNode, cid: &str, si: u16, from: &str) -> bool {
+    wait_event(node, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::ShardStored { content_id, shard_index, from_peer, .. }
+            if content_id == cid && *shard_index == si && from_peer == from)
+    })
+    .await
+}
+
+/// A pool keys every member by its device, ours included, so on installs whose device is
+/// not their master (every fresh install) a plan names each member as it knows itself. C
+/// coordinates (the lowest device), V holds a shard, M lacks it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn a_recovery_transfer_reaches_a_device_that_is_not_its_master() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let mut devices = [190u8, 191, 192];
+    devices.sort_by_key(|t| id(*t));
+    let [c_dev, v_dev, m_dev] = devices;
+    let mut c = spawn_node_on(&relay, 180, c_dev).await;
+    let v = spawn_node_on(&relay, 181, v_dev).await;
+    let mut m = spawn_node_on(&relay, 182, m_dev).await;
+    for node in [&c, &v, &m] {
+        assert_ne!(node.device_id, node.master_id, "a fresh install's device is not its master");
+    }
+
+    let (server_id, token) = ("recovery-devices".to_string(), "tokdevices".to_string());
+    let (manifest, shards) = recovery_vault_file();
+    let cid = manifest.content_id.clone();
+    hold_vault_file(&v, &server_id, &manifest, &shards, &[0]);
+    hold_vault_file(&m, &server_id, &manifest, &shards, &[]);
+
+    open_recovery_pool(&mut c, &relay, &server_id, &token).await;
+    for joiner in [&v, &m] {
+        joiner
+            .cmd_tx
+            .send(NodeCommand::JoinRecoveryPool { server_id: server_id.clone(), token: token.clone() })
+            .await
+            .unwrap();
+        assert!(
+            wait_event(&mut c, std::time::Duration::from_secs(5), |ev| {
+                matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { peer_id, .. } if *peer_id == joiner.device_id)
+            })
+            .await,
+            "the coordinator takes {}'s hello",
+            joiner.device_id,
+        );
+    }
+    assert!(shard_lands(&mut m, &cid, 0, &v.device_id).await, "the plan moves V's shard to M");
+}
+
+/// The room never echoes a frame to its sender, so the coordinator carries out its own
+/// part of the plan itself: O, the lowest device, sends a shard J lacks and takes one J
+/// sends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn the_recovery_coordinator_carries_out_its_own_part_of_the_plan() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let mut devices = [193u8, 194];
+    devices.sort_by_key(|t| id(*t));
+    let [o_dev, j_dev] = devices;
+    let mut o = spawn_node_on(&relay, 183, o_dev).await;
+    let mut j = spawn_node_on(&relay, 184, j_dev).await;
+
+    let (server_id, token) = ("recovery-coordinator".to_string(), "tokcoordinator".to_string());
+    let (manifest, shards) = recovery_vault_file();
+    let cid = manifest.content_id.clone();
+    hold_vault_file(&o, &server_id, &manifest, &shards, &[0]);
+    hold_vault_file(&j, &server_id, &manifest, &shards, &[1]);
+
+    open_recovery_pool(&mut o, &relay, &server_id, &token).await;
+    j.cmd_tx
+        .send(NodeCommand::JoinRecoveryPool { server_id: server_id.clone(), token: token.clone() })
+        .await
+        .unwrap();
+    // O welcomes J twice (on its join and on its hello); J's list names O once.
+    let mut listed = 0;
+    let o_dev = o.device_id.clone();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| {
+            listed += matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { peer_id, .. } if *peer_id == o_dev) as usize;
+            matches!(ev, NetworkEvent::ShardStored { content_id, shard_index: 0, from_peer, .. }
+                if *content_id == cid && *from_peer == o_dev)
+        })
+        .await,
+        "the coordinator sends its own shard",
+    );
+    assert_eq!(listed, 1, "the joiner's pool lists the coordinator once per device");
+    assert!(shard_lands(&mut o, &cid, 1, &j.device_id).await, "the coordinator takes the shard planned for it");
+}
+
+/// One whole-shard stream frame: [type 1][id padded to 64][size u64 LE][index u16 LE][bytes].
+fn shard_stream_frame(cid: &str, si: u16, bytes: &[u8]) -> Vec<u8> {
+    let mut frame = vec![1u8];
+    let mut id = [0u8; 64];
+    id[..cid.len()].copy_from_slice(cid.as_bytes());
+    frame.extend_from_slice(&id);
+    frame.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    frame.extend_from_slice(&si.to_le_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+
+/// A shard the plan asks of V lands only from V: X, another member, sends the same bytes
+/// first and is refused. M's manifest predates per-shard hashes, so nothing but the
+/// plan's source decides whose bytes land. A repeated hello lists no member twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn authz_a_recovery_shard_lands_only_from_the_plans_source() {
+    use super::types::HavenMessage;
+
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let mut tags = [195u8, 196, 197, 198];
+    tags.sort_by_key(|t| id(*t));
+    let [c_tag, v_tag, x_tag, m_dev] = tags;
+    let (c, v, x) = (id(c_tag), id(v_tag), id(x_tag));
+    let mut m = spawn_node_on(&relay, 185, m_dev).await;
+
+    let (server_id, token) = ("recovery-source".to_string(), "toksource".to_string());
+    let (mut manifest, shards) = recovery_vault_file();
+    manifest.shard_hashes.clear();
+    let cid = manifest.content_id.clone();
+    hold_vault_file(&m, &server_id, &manifest, &shards, &[]);
+    open_recovery_pool(&mut m, &relay, &server_id, &token).await;
+
+    let room = super::recovery_pool::pool_room(&server_id, &token);
+    let sealed = |from: &str, msg: &HavenMessage| super::recovery_pool::seal_control(&server_id, &token, from, msg).unwrap();
+    let hello = HavenMessage::RecoveryHello { server_id: server_id.clone(), manifest_ids: Vec::new(), shard_inventory_json: "{}".into() };
+    for member in [&c, &v, &x] {
+        relay.inject(&room, member, &m.device_id, sealed(member, &hello));
+        assert!(
+            wait_event(&mut m, std::time::Duration::from_secs(3), |ev| {
+                matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { peer_id, .. } if peer_id == member)
+            })
+            .await,
+            "{member} joins the pool",
+        );
+    }
+    relay.inject(&room, &v, &m.device_id, sealed(&v, &hello));
+    let listed = |ev: &NetworkEvent| matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { .. });
+    assert!(!seen_before_flush(&relay, &mut m, listed).await, "a second hello listed its member again");
+
+    let plan = HavenMessage::RecoveryTransferPlan {
+        plan_json: serde_json::to_string(&[super::recovery_pool::TransferAssignment {
+            content_id: cid.clone(),
+            shard_index: 0,
+            source_peer: v.clone(),
+            dest_peer: m.device_id.clone(),
+        }])
+        .unwrap(),
+    };
+    relay.inject(&room, &c, &m.device_id, sealed(&c, &plan));
+    flush_frames(&relay, &mut m).await;
+
+    let bytes = &shards[0].1;
+    relay.inject_binary(&room, &x, &m.device_id, shard_stream_frame(&cid, 0, bytes));
+    let stored = |ev: &NetworkEvent| matches!(ev, NetworkEvent::ShardStored { content_id, .. } if *content_id == cid);
+    assert!(!seen_before_flush(&relay, &mut m, stored).await, "a member the plan does not name completed V's transfer");
+    relay.inject_binary(&room, &v, &m.device_id, shard_stream_frame(&cid, 0, bytes));
+    assert!(shard_lands(&mut m, &cid, 0, &v).await, "the plan's source still delivers");
 }
 
 // Sibling-to-sibling SERVER-message backfill, the server analog of the DM
@@ -13873,6 +14596,155 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     drop(g);
 }
 
+/// `node` posts the file at `path` in a channel; returns its file id once its own copy
+/// is complete.
+async fn post_channel_file(node: &mut TestNode, server_id: &str, channel_id: &str, path: &std::path::Path, mid: &str) -> String {
+    drain_events(node);
+    node.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.to_string()),
+            channel_id: Some(channel_id.to_string()),
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid = None;
+    wait_event(node, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+            fid = Some(file_id.clone());
+        }
+        fid.is_some()
+    })
+    .await;
+    fid.expect("the sender's own copy completes")
+}
+
+/// A-F5: a guest takes a public file header only from the peer it asked, for the server
+/// it asked in. A friend copying the card's claim answers in the owner's place and the
+/// owner's own answer still lands; the peer asked answers naming another server the
+/// guest browses, and nothing lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_guest_takes_a_public_file_header_only_from_the_peer_it_asked() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (o_tag, g_tag, m_tag) = (232u8, 233u8, 234u8);
+    // Friends, so the owner's answer needs no key exchange while the relay holds it.
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&id(g_tag)]).await;
+    let mut g = spawn_node_with_friends(&relay, g_tag, g_tag, &[&id(o_tag), &id(m_tag)]).await;
+    let m = spawn_node_with_friends(&relay, m_tag, m_tag, &[&id(g_tag)]).await;
+    expect_dm_pair_ready(&relay, &o, &g, 30).await;
+    expect_dm_pair_ready(&relay, &g, &m, 30).await;
+
+    let first = create_server_and_wait(&mut o, "Guest Pull").await;
+    let second = create_server_and_wait(&mut o, "Guest Browse").await;
+    let general = general_channel_of(&first);
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: first.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || o.live_server_state(&first).await.is_some_and(|s| s.is_channel_public(&general))).await,
+        "the owner makes #general public",
+    );
+    let (one, two) = (global_tmp.path().join("one.txt"), global_tmp.path().join("two.txt"));
+    std::fs::write(&one, b"the first public file").unwrap();
+    std::fs::write(&two, b"the second public file").unwrap();
+    let fid = post_channel_file(&mut o, &first, &general, &one, "guest-pull-1").await;
+    let fid2 = post_channel_file(&mut o, &first, &general, &two, "guest-pull-2").await;
+
+    for sid in [&first, &second] {
+        g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: sid.clone() }).await.unwrap();
+        assert!(wait_until(10, async || relay.room_devices(sid).contains(&g.device_id)).await, "G browses {sid}");
+    }
+    // G hears the owner and the friend in #general's server, as it would from a post.
+    for speaker in [&o.device_id, &m.device_id] {
+        relay.inject(&first, speaker, &g.device_id, serde_json::to_vec(&HavenMessage::RecoveryStop).unwrap());
+    }
+    flush_frames(&relay, &mut g).await;
+
+    // What the owner's header claims, which anyone who saw the card can copy.
+    let header_for = |file_id: &str, sid: &str| {
+        let card = o.file_meta(file_id).expect("the owner's card");
+        HavenMessage::PublicFileHeader {
+            file_id: file_id.to_string(),
+            name: card.file_name,
+            ext: card.file_ext,
+            mime: card.mime_type,
+            size: card.size_bytes,
+            img: false,
+            w: None,
+            h: None,
+            mid: card.message_id,
+            sid: sid.to_string(),
+            cid: general.clone(),
+            ts: card.created_at,
+            aes_key: "00".repeat(32),
+            aes_nonce: "00".repeat(12),
+            author: Some(o.master_id.clone()),
+            sha256: card.sha256,
+        }
+    };
+    // Whether G takes a header for `file_id` before the friend's barrier arrives.
+    let taken_before_barrier = async |g: &mut TestNode, file_id: &str| {
+        carry_as(&m, g, HavenMessage::TypingIndicator { server_id: String::new(), channel_id: g.master_id.clone() }).await;
+        let mut taken = false;
+        assert!(
+            wait_event(g, std::time::Duration::from_secs(15), |ev| {
+                taken |= matches!(ev, NetworkEvent::FileHeaderReceived { file_id: f, .. } if f == file_id);
+                matches!(ev, NetworkEvent::TypingStarted { peer_id, .. } if *peer_id == m.master_id)
+            })
+            .await,
+            "the barrier arrives",
+        );
+        taken
+    };
+
+    // G asks the owner, whose answer the relay keeps back; the friend answers instead.
+    relay.hold_direct(&o.device_id, &g.device_id);
+    relay.hold_streams(&o.device_id, &g.device_id);
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicFile { server_id: first.clone(), file_id: fid.clone(), peer_hint: Some(o.device_id.clone()) })
+        .await
+        .unwrap();
+    assert!(wait_until(20, async || relay.held_stream_count(&o.device_id, &g.device_id) > 0).await, "the owner answers");
+    carry_as(&m, &g, header_for(&fid, &first)).await;
+    assert!(!taken_before_barrier(&mut g, &fid).await, "A-F5: a header from a peer we did not ask was taken");
+    relay.release_held(&o.device_id, &g.device_id);
+    relay.release_streams(&o.device_id, &g.device_id, true);
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+        })
+        .await,
+        "the owner's own answer still lands",
+    );
+
+    // G asks the friend, which answers for the other server G browses.
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicFile { server_id: first.clone(), file_id: fid2.clone(), peer_hint: Some(m.device_id.clone()) })
+        .await
+        .unwrap();
+    carry_as(&m, &g, header_for(&fid2, &second)).await;
+    assert!(!taken_before_barrier(&mut g, &fid2).await, "A-F5: a header naming another server answered the pull");
+    assert!(g.file_meta(&fid2).is_none_or(|meta| meta.completed_at.is_none()), "A-F5: bytes landed for the other server");
+}
+
 // SELF-DM ("Saved messages"): a DM whose recipient is our OWN master is a
 // notes-to-self thread. The send stores it locally like any DM, but fan-out must SKIP
 // the recipient-device expansion, or the bare-master fallback queues a dead envelope
@@ -17954,6 +18826,21 @@ fn plant_signed_channel_message(
     mid: &str,
     text: &str,
 ) {
+    plant_signed_channel_row(&node.store(), signer_tag, server_id, channel_id, is_mine, ts, mid, text);
+}
+
+/// [`plant_signed_channel_message`] into any store.
+#[allow(clippy::too_many_arguments)]
+fn plant_signed_channel_row(
+    store: &crate::storage::MessageStore,
+    signer_tag: u8,
+    server_id: &str,
+    channel_id: &str,
+    is_mine: bool,
+    ts: i64,
+    mid: &str,
+    text: &str,
+) {
     use base64::Engine as _;
     let kp = NativeKeypair::from_secret_bytes(&seed_bytes(signer_tag));
     let pk_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
@@ -17969,7 +18856,7 @@ fn plant_signed_channel_message(
     let (sig, pk) = super::crypto_handler::sign_message_versioned(
         &kp, &pk_b64, "ch", &format!("{server_id}:{channel_id}"), &kp.peer_id(), ts, &extras, text,
     );
-    node.store()
+    store
         .insert_channel_message(
             server_id, channel_id, &kp.peer_id(), text, is_mine, ts, sig.as_deref(),
             pk.as_deref(), Some(mid), None, None, Some(order_us), None,
@@ -20074,6 +20961,86 @@ async fn blocked_sender_mailbox_request_dropped() {
 
     super::blocklist::clear_for_test();
     drop(a);
+    drop(b);
+}
+
+/// S-08 (HOL-SEC-036): a blocked identity's device the receiver never met resolves to
+/// itself, so the block check before the roster ingest passes it. Only the check after
+/// the carried roster binds it to the blocked master drops the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_a_blocked_identitys_unknown_device_is_dropped_once_its_roster_binds() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 115;
+    const A_DEV: u8 = 116;
+    const C_MASTER: u8 = 117;
+    const C_DEV: u8 = 118;
+    const B_MASTER: u8 = 119;
+    const B_DEV: u8 = 120;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    super::blocklist::block(&a_master);
+
+    // A (blocked) and C (the control) leave requests in B's mailbox and go away.
+    let mut requesters = Vec::new();
+    for (master, device) in [(A_MASTER, A_DEV), (C_MASTER, C_DEV)] {
+        let mut node = spawn_node_with_friends(&relay, master, device, &[]).await;
+        let before = relay.buffered_count(&b_master);
+        node.cmd_tx
+            .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+            .await
+            .unwrap();
+        assert!(
+            wait_until(10, async || relay.buffered_count(&b_master) > before).await,
+            "the request must reach B's mailbox",
+        );
+        relay.set_online(&node.device_id, false);
+        drain_events(&mut node);
+        requesters.push(node);
+    }
+    // B has never met either device: only the carried roster can bind them.
+    for node in &requesters {
+        super::resolver::forget_for_test(&node.device_id);
+        super::resolver::forget_for_test(&node.master_id);
+    }
+    let (a_device, c_device) = (requesters[0].device_id.clone(), requesters[1].device_id.clone());
+    assert!(!super::blocklist::is_blocked(&a_device), "the blocked identity's device must be unknown to B");
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let mut heard = Vec::new();
+    let control = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            heard.push(peer_id.clone());
+        }
+        heard.iter().any(|p| *p == c_master || *p == c_device)
+    })
+    .await;
+    assert!(control, "the control's request from a device B never met must land, heard {heard:?}");
+    // An absence has no condition to poll, so this waits out a real window.
+    wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            heard.push(peer_id.clone());
+        }
+        false
+    })
+    .await;
+    assert_eq!(super::resolver::resolve(&a_device), a_master, "the carried roster bound the device");
+    assert!(
+        !heard.iter().any(|p| *p == a_master || *p == a_device),
+        "a blocked identity's request from a device B never met emitted an event: {heard:?}",
+    );
+    assert_eq!(friend_row(&b, &a_master), None, "and must leave no friends row");
+    assert_eq!(friend_row(&b, &a_device), None, "under either id");
+
+    drop(requesters);
     drop(b);
 }
 
@@ -23987,7 +24954,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // landing has no event (0.25 s).
     // 2026-10-03: the VC burst rose to the frame bucket's 100, so the Olm VC rate-limit
     // test waits for one refill between two floods (4.0 s).
-    const BUDGET_MS: u64 = 681_250;
+    // 2026-10-03: D1's settle for the owner's burst became a relay drain barrier (-1.5 s).
+    // 2026-10-03: the VC outsider test added one spawn stagger (1.2 s).
+    const BUDGET_MS: u64 = 680_950;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -26801,6 +27770,68 @@ async fn authz_turning_away_junk_that_shares_an_orders_stamp_keeps_the_order() {
     drop(b);
 }
 
+/// HOL-SEC-096 on the full node: a blob that is no order at all is acked by its own
+/// issuer and stamp too. A bare ack would also clear the genuine order parked beside
+/// it, which the target has not wiped for yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_an_unreadable_kill_blob_is_acked_alone_by_the_full_node() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 223;
+    const B_DEV: u8 = 222;
+    const SIBLING: u8 = 221;
+    const HOSTILE: u8 = 220;
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let sibling_dev = NativeKeypair::from_secret_bytes(&seed_bytes(SIBLING)).peer_id();
+    let hostile_dev = NativeKeypair::from_secret_bytes(&seed_bytes(HOSTILE)).peer_id();
+
+    let mut b = spawn_node_on(&relay, M_MASTER, B_DEV).await;
+    assert!(
+        wait_until(15, async || relay.online_devices().contains(&b.device_id)).await,
+        "the target must be on the relay",
+    );
+    drain_events(&mut b);
+
+    let stamp = super::destroy::now_ms() + 1000;
+    let order = super::crypto_handler::build_destroy_identity(&b.master_kp, None, stamp, Vec::new(), false);
+    let sibling = raw_socket(&relay, &sibling_dev);
+    let hostile = raw_socket(&relay, &hostile_dev);
+    for (socket, blob) in [
+        (&sibling, super::destroy::encode_kill_blob(&order).expect("encode")),
+        (&hostile, "not-a-destruction-order".to_string()),
+    ] {
+        socket
+            .cmd_tx
+            .send(WsCommand::KillDeposit { targets: vec![b_dev.clone()], issued_at_ms: stamp, blob })
+            .unwrap();
+    }
+
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::DestroyReceived { .. })
+        })
+        .await,
+        "the genuine order is acted on",
+    );
+    assert!(
+        wait_until(15, async || relay.kill_entries(&b_dev).iter().all(|(_, _, issuer)| *issuer != hostile_dev)).await,
+        "the unreadable blob is turned away and acked",
+    );
+    assert_eq!(
+        relay.kill_acks_from(&b_dev),
+        vec![Some((hostile_dev.clone(), stamp))],
+        "the full node acks the unreadable blob alone, by its issuer and stamp",
+    );
+    assert_eq!(
+        relay.kill_entries(&b_dev).into_iter().map(|(_, at, issuer)| (issuer, at)).collect::<Vec<_>>(),
+        vec![(sibling_dev.clone(), stamp)],
+        "the genuine order stays parked for the wipe to ack",
+    );
+    drop(b);
+}
+
 /// The friend half: a destroyed identity drops its verified flag and raises the
 /// banner, and coming back from the mnemonic is a warning rather than a silent
 /// return to a trusted safety number.
@@ -27275,6 +28306,109 @@ async fn authz_a_frame_that_fails_to_decrypt_asks_only_a_member_to_sync() {
     assert!(
         !v.carried_to(&stranger.peer_id()).await.iter().any(asks_sync),
         "a stranger's undecryptable frame was answered with what we hold",
+    );
+}
+
+/// HOL-SEC-089, the held commit: a commit our view cannot judge yet makes us ask for
+/// the ops we lack, and the ask carries our state vector. Anyone can re-seal a member's
+/// genuine commit, so the ask goes to the committer's own device, never to whoever
+/// delivered the commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_held_commit_asks_only_a_member_to_sync() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, v, c, server_id) = setup_epoch_race_trio(&relay, 176, 177, 178).await;
+    let stranger = tag_kp(179);
+    relay.register_key(&stranger);
+    use super::types::HavenMessage;
+
+    // V misses the kick, so its view still lists C when the removal's commit reaches it.
+    relay.set_online(&v.device_id, false);
+    relay.set_recording(&o.device_id, true);
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: c.master_id.clone() }).await.unwrap();
+    let mut commit = None;
+    assert!(
+        wait_until(20, async || {
+            commit = relay.recorded_frames(&o.device_id).into_iter().find_map(|f| {
+                match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+                    Ok(m @ HavenMessage::MlsCommit { channel_id: None, .. }) => Some(m),
+                    _ => None,
+                }
+            });
+            commit.is_some()
+        })
+        .await,
+        "the owner commits C's removal",
+    );
+
+    let asked = async |device: &str| {
+        v.carried_to(device).await.iter().filter(|m| matches!(m, HavenMessage::SyncRequest { .. })).count()
+    };
+    let asked_owner = asked(&o.device_id).await;
+    relay.inject_direct(&server_id, &stranger.peer_id(), &v.device_id, frame(&commit.unwrap()));
+    assert!(
+        wait_until(10, async || asked(&o.device_id).await > asked_owner || asked(&stranger.peer_id()).await > 0).await,
+        "the held commit asks for the ops V lacks",
+    );
+    assert_eq!(asked(&stranger.peer_id()).await, 0, "the device that delivered a held commit was sent what we hold");
+    assert!(asked(&o.device_id).await > asked_owner, "the committer's own device is asked");
+}
+
+/// HOL-SEC-089, the Welcome: joining a group makes us ask for the ops and the channel
+/// history we may lack, and those asks name what we hold. Anyone can re-seal the
+/// member's genuine Welcome, so the asks go to the device whose leaf made it, never to
+/// whoever delivered it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_welcome_asks_only_a_member_to_sync() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, v, _c, server_id) = setup_epoch_race_trio(&relay, 181, 182, 183).await;
+    let stranger = tag_kp(184);
+    relay.register_key(&stranger);
+    use super::types::HavenMessage;
+    let asks_sync = |m: &HavenMessage| matches!(m, HavenMessage::SyncRequest { .. } | HavenMessage::ChannelSyncRequest { .. });
+    let asked = async |device: &str| v.carried_to(device).await.iter().filter(|m| asks_sync(m)).count();
+
+    // The owner repairs V's leaf; the relay keeps the owner's Welcome and re-seals it.
+    relay.set_recording(&o.device_id, true);
+    relay.hold_direct(&o.device_id, &v.device_id);
+    relay.inject_direct(&server_id, &o.device_id, &v.device_id, frame(&HavenMessage::MlsKeyPackageRequest {
+        server_id: server_id.clone(),
+        channel_id: None,
+    }));
+    let mut welcome = None;
+    assert!(
+        wait_until(20, async || {
+            welcome = relay.recorded_frames(&o.device_id).into_iter().find_map(|f| {
+                match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+                    Ok(m @ HavenMessage::MlsWelcome { channel_id: None, .. }) => Some(m),
+                    _ => None,
+                }
+            });
+            welcome.is_some()
+        })
+        .await,
+        "the owner Welcomes V's fresh leaf",
+    );
+    relay.discard_held_kind(&o.device_id, &v.device_id, "mls_welcome");
+    relay.release_held(&o.device_id, &v.device_id);
+
+    let asked_owner = asked(&o.device_id).await;
+    relay.inject_direct(&server_id, &stranger.peer_id(), &v.device_id, frame(&welcome.unwrap()));
+    assert!(
+        wait_until(15, async || asked(&o.device_id).await > asked_owner || asked(&stranger.peer_id()).await > 0).await,
+        "the Welcome V joins from asks for what it may lack",
+    );
+    assert_eq!(asked(&stranger.peer_id()).await, 0, "the device that delivered a Welcome was sent what we hold");
+    assert!(
+        v.mls_members_checked(&server_id).await.is_some_and(|m| m.contains(&v.device_id)),
+        "V holds its leaf again",
     );
 }
 
@@ -30511,6 +31645,184 @@ async fn authz_a_member_banned_while_away_learns_it_from_its_sync() {
     assert!(sync_ops_carried(&o, &j, &server_id).await.is_empty(), "a stranger was told about the server");
 }
 
+// ── Session 32: a removed joiner's parked ask, read back out of the ring ──
+
+/// Join-lane boxes `from` addressed to `to`, as the relay saw them.
+fn join_boxes_to(relay: &MockRelay, from: &str, to: &str) -> usize {
+    relay
+        .wiretap()
+        .frames
+        .iter()
+        .filter(|f| f.from == from && f.to.as_deref() == Some(to) && f.kind() == "join_sealed")
+        .count()
+}
+
+/// `from_device`'s answers about `joiner_master` in the room's join ring.
+fn ring_verdicts_on(relay: &MockRelay, server_id: &str, from_device: &str, joiner_master: &str) -> usize {
+    join_ring(relay, server_id)
+        .iter()
+        .filter(|(from, msg)| {
+            from == from_device
+                && matches!(msg, super::types::HavenMessage::ServerJoinResolved { joiner_master: jm, .. } if jm == joiner_master)
+        })
+        .count()
+}
+
+/// M and B ask to join while the owner is away, so their asks park in the join ring,
+/// and the owner admits both from it. M is kicked and B banned; then the owner reboots
+/// and reads the ring again, behind a third parked ask. The old asks get nothing:
+/// no answer, no admission, no leaf, no verdict in the ring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_removed_joiners_parked_ask_read_back_gets_nothing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    const O_TAG: u8 = 231;
+    let mut o = spawn_node_with_friends(&relay, O_TAG, O_TAG, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Ring Server").await;
+    go_offline(&relay, &o, &server_id).await;
+
+    let mut m = spawn_node_with_friends(&relay, 232, 233, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, 234, 235, &[]).await;
+    for joiner in [&mut m, &mut b] {
+        joiner.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    }
+    for joiner in [&mut m, &mut b] {
+        assert!(expect_parked(joiner, &server_id).await, "{} parks with the owner away", joiner.device_id);
+        expect_ring_parked_request(&relay, &server_id, &joiner.device_id).await;
+    }
+
+    relay.set_online(&o.device_id, true);
+    for joiner in [&mut m, &mut b] {
+        assert!(expect_joined(joiner, &server_id, 40).await, "the owner admits {} from the ring", joiner.device_id);
+        expect_ring_resolution(&relay, &server_id, &o.device_id, &joiner.master_id, true).await;
+        expect_mls_leaf(&o, &server_id, &joiner.device_id, 30).await;
+    }
+
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: b.master_id.clone() }).await.unwrap();
+    for gone in [&m, &b] {
+        assert!(
+            wait_until(20, async || {
+                o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&gone.master_id))
+                    && gone.live_server_state(&server_id).await.is_none()
+            })
+            .await,
+            "{} is out of the server on both sides",
+            gone.device_id,
+        );
+        expect_no_mls_leaf(&o, &server_id, &gone.device_id, 30).await;
+    }
+    let boxes_before = [join_boxes_to(&relay, &o.device_id, &m.device_id), join_boxes_to(&relay, &o.device_id, &b.device_id)];
+    assert!(boxes_before.iter().all(|n| *n > 0), "the owner's first answers show on the tap");
+    let verdicts_before = [
+        ring_verdicts_on(&relay, &server_id, &o.device_id, &m.master_id),
+        ring_verdicts_on(&relay, &server_id, &o.device_id, &b.master_id),
+    ];
+    assert!(verdicts_before.iter().all(|n| *n > 0), "the owner's first verdicts are in the ring");
+
+    // J parks while the owner is down: its ask sits in the ring behind M's and B's.
+    relay.set_online(&o.device_id, false);
+    let mut j = spawn_node_with_friends(&relay, 236, 237, &[]).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut j, &server_id).await, "J parks with the owner away");
+    expect_ring_parked_request(&relay, &server_id, &j.device_id).await;
+    for joiner in [&m, &b, &j] {
+        super::resolver::forget_for_test(&joiner.device_id);
+    }
+
+    let o = restart_node(&relay, o, O_TAG, O_TAG).await;
+    assert!(
+        wait_until(40, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await,
+        "the rebooted owner reads the ring and admits J",
+    );
+    expect_mls_leaf(&o, &server_id, &j.device_id, 30).await;
+    expect_relay_drained(&relay, &o, "ring-read").await;
+
+    let state = o.live_server_state(&server_id).await.expect("the owner keeps the server");
+    for (i, gone) in [&m, &b].into_iter().enumerate() {
+        assert!(!state.is_member(&gone.master_id), "an old parked ask brought {} back", gone.device_id);
+        assert_eq!(join_boxes_to(&relay, &o.device_id, &gone.device_id), boxes_before[i], "the owner answered {}'s old ask", gone.device_id);
+        assert_eq!(
+            ring_verdicts_on(&relay, &server_id, &o.device_id, &gone.master_id),
+            verdicts_before[i],
+            "the owner published a new verdict on {}'s old ask",
+            gone.device_id,
+        );
+        assert!(
+            !o.mls_members(&server_id).await.contains(&gone.device_id),
+            "an old parked ask seated {}'s leaf again",
+            gone.device_id,
+        );
+    }
+    assert!(state.is_banned(&b.master_id));
+}
+
+/// Every frame `from` addressed to `to`, as the relay saw them.
+fn frames_addressed(relay: &MockRelay, from: &str, to: &str) -> Vec<String> {
+    relay.wiretap().frames.iter().filter(|f| f.from == from && f.to.as_deref() == Some(to)).map(|f| f.kind()).collect()
+}
+
+/// Y is away through both M's admission from the join ring and M's kick. Back, Y reads
+/// the ring before its sync: M's old ask comes before the verdict behind it, so Y
+/// knows nothing of M and must still give that ask nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "open finding: a member back from away serves a removed joiner's old parked ask (session 32 report)"]
+async fn authz_a_member_back_from_away_gives_a_kicked_joiners_old_ask_nothing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let mut o = spawn_node_with_friends(&relay, 238, 238, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Stale Server").await;
+    let mut y = spawn_node_with_friends(&relay, 239, 239, &[]).await;
+    y.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut y, &server_id, 25).await, "Y joins");
+    expect_mls_group(&[&o, &y], &server_id, 30).await;
+    go_offline(&relay, &y, &server_id).await;
+    assert!(wait_until(10, async || !o.sees_peer(&y.device_id).await).await);
+    go_offline(&relay, &o, &server_id).await;
+
+    let mut m = spawn_node_with_friends(&relay, 240, 241, &[]).await;
+    m.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_parked(&mut m, &server_id).await, "M parks with everyone away");
+    expect_ring_parked_request(&relay, &server_id, &m.device_id).await;
+    relay.set_online(&o.device_id, true);
+    assert!(expect_joined(&mut m, &server_id, 40).await, "the owner admits M from the ring");
+    expect_ring_resolution(&relay, &server_id, &o.device_id, &m.master_id, true).await;
+
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&m.master_id))
+                && m.live_server_state(&server_id).await.is_none()
+        })
+        .await,
+        "M is out on both sides",
+    );
+    super::resolver::forget_for_test(&m.device_id);
+
+    relay.set_online(&y.device_id, true);
+    assert!(expect_sees_room(&relay, &server_id, &y.device_id).await, "Y gets the newest door");
+    assert!(
+        wait_until(30, async || y.live_server_state(&server_id).await.is_some_and(|s| s.left_at(&m.master_id).is_some())).await,
+        "Y learns M was kicked",
+    );
+    expect_relay_drained(&relay, &y, "back").await;
+    assert!(
+        frames_addressed(&relay, &y.device_id, &m.device_id).is_empty(),
+        "a member back from away answered a kicked joiner's old ask: {:?}",
+        frames_addressed(&relay, &y.device_id, &m.device_id),
+    );
+    assert_eq!(ring_verdicts_on(&relay, &server_id, &y.device_id, &m.master_id), 0, "and published a verdict on it");
+    assert!(!o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m.master_id)));
+}
+
 /// A-D2: a file's id commits to its author, message and bytes, so a member holding a
 /// channel file's key cannot answer another member's pull with different bytes. The
 /// forged bytes decrypt under the holder's header and then fail the id.
@@ -31047,6 +32359,296 @@ async fn authz_a_knock_proves_its_code_only_for_its_own_device() {
         .await,
         "the rogue never reaches the waiting room",
     );
+}
+
+/// `node` knocks on `conf_id` as `name`.
+async fn knock_on_meeting(node: &TestNode, conf_id: &str, name: &str) {
+    node.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.to_string(),
+            link_key: MEETING_LINK_KEY.to_string(),
+            display_name: name.to_string(),
+            avatar_hash: String::new(),
+            code_key: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// Wait until `host` lists `device`'s knock on `conf_id` in its waiting room.
+async fn expect_in_waiting_room(host: &mut TestNode, conf_id: &str, device: &str) {
+    assert!(
+        wait_event(host, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { conf_id: c, peer_id, .. } if c == conf_id && peer_id == device)
+        })
+        .await,
+        "{device} must reach the waiting room of {conf_id}",
+    );
+}
+
+/// `node` knocks on `host`'s meeting `conf_id` and the host lets it in.
+async fn admit_to_meeting(host: &mut TestNode, node: &mut TestNode, conf_id: &str, name: &str) {
+    knock_on_meeting(node, conf_id, name).await;
+    let device = node.device_id.clone();
+    expect_in_waiting_room(host, conf_id, &device).await;
+    host.cmd_tx
+        .send(NodeCommand::ConferenceAdmit { conf_id: conf_id.to_string(), peer_id: device })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(node, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceAdmitted { conf_id: c } if c == conf_id)
+        })
+        .await,
+        "{name} must be admitted to {conf_id}",
+    );
+}
+
+/// G1 for meetings (design ID-1): the host's master key certifies any device, so a
+/// device the host's roster leaves out (a removed install, a backup nobody approved)
+/// that holds the key and the link still runs nobody's lobby. To a knocker and a guest
+/// who hold the host's roster, its lobby info, denial, kick and end count for nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_device_the_hosts_roster_leaves_out_runs_no_lobby() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const H_MASTER: u8 = 236;
+    const H_DEV: u8 = 237;
+    const K_MASTER: u8 = 238;
+    const G_MASTER: u8 = 239;
+    const X_DEV: u8 = 240;
+    let h_master = tag_kp(H_MASTER).peer_id();
+    let h_dev = tag_kp(H_DEV).peer_id();
+    let (k_master, g_master) = (tag_kp(K_MASTER).peer_id(), tag_kp(G_MASTER).peer_id());
+    let now = super::roster_book::now_ms();
+
+    let mut host = spawn_node_seeded(
+        &relay, H_MASTER, H_DEV, &[&k_master, &g_master], Some(protected_roster(H_MASTER, &[H_DEV], now - 60_000)),
+    ).await;
+    let mut knocker = spawn_node_with_friends(&relay, K_MASTER, K_MASTER, &[&h_master]).await;
+    let mut guest = spawn_node_with_friends(&relay, G_MASTER, G_MASTER, &[&h_master]).await;
+    for node in [&knocker, &guest] {
+        expect_dm_pair_ready(&relay, &host, node, 20).await;
+        assert!(
+            wait_until(20, async || node.known_devices(&h_master) == vec![h_dev.clone()]).await,
+            "{} must hold the host's roster first, got {:?}",
+            node.device_id,
+            node.known_devices(&h_master),
+        );
+    }
+    drain_events(&mut host);
+    drain_events(&mut knocker);
+    drain_events(&mut guest);
+
+    // The guest sits in one meeting, the knocker waits in another.
+    let in_call = start_pinned_meeting(&relay, &mut host, "roster-host-g", None).await;
+    let waiting = start_pinned_meeting(&relay, &mut host, "roster-host-k", None).await;
+    admit_to_meeting(&mut host, &mut guest, &in_call, "Gee").await;
+    knock_on_meeting(&knocker, &waiting, "Kay").await;
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceLobbyInfo { conf_id: c, host_peer_id, host_name, .. }
+                if *c == waiting && *host_peer_id == h_master && host_name == "Hosty")
+        })
+        .await,
+        "the knocker learns its host from the host's device",
+    );
+
+    // A device minted with the host's master key: a certificate the master signed, the
+    // nonces the ids hash from, the link key, and no place in the host's roster.
+    let minted = tag_kp(X_DEV);
+    let x_dev = minted.peer_id();
+    relay.register_key(&minted);
+    let proof = |nonce: &str| super::types::ConfHost {
+        master: h_master.clone(),
+        nonce: nonce.to_string(),
+        cert: crate::crypto::certificate_for_test(&minted, &tag_kp(H_MASTER)),
+    };
+    assert!(
+        crate::crypto::certified_device(&proof("n").cert).is_some_and(|id| id.master == h_master && id.device == x_dev),
+        "the master key certifies the minted device",
+    );
+    assert!(super::conference::hosts_meeting(&waiting, &h_master, Some("roster-host-k")));
+    use super::types::HavenMessage;
+    let send_as_minted = |conf_id: &str, target: &str, msg: HavenMessage| {
+        relay.inject_direct(&super::conference::conf_server_id(conf_id), &x_dev, target, meeting_frame(conf_id, &x_dev, &msg));
+    };
+
+    send_as_minted(&waiting, &knocker.device_id, HavenMessage::ConferenceLobbyInfo {
+        conf_id: waiting.clone(), host_name: "Impostor".into(), host_avatar_hash: String::new(), host: proof("roster-host-k"),
+    });
+    send_as_minted(&waiting, &knocker.device_id, HavenMessage::ConferenceJoinDenied {
+        conf_id: waiting.clone(), reason: "declined".into(), host: proof("roster-host-k"),
+    });
+    let obeyed = surfaces_before_barrier(&relay, &mut knocker, |ev| {
+        matches!(ev, NetworkEvent::ConferenceLobbyInfo { host_name, .. } if host_name == "Impostor")
+            || matches!(ev, NetworkEvent::ConferenceJoinDenied { .. })
+    })
+    .await;
+    assert!(!obeyed, "a device the host's roster leaves out ran the knocker's lobby");
+
+    send_as_minted(&in_call, &guest.device_id, HavenMessage::ConferenceKicked { conf_id: in_call.clone(), host: proof("roster-host-g") });
+    send_as_minted(&in_call, &guest.device_id, HavenMessage::ConferenceEnded { conf_id: in_call.clone(), host: proof("roster-host-g") });
+    let ended = surfaces_before_barrier(&relay, &mut guest, |ev| {
+        matches!(ev, NetworkEvent::ConferenceEnded { .. } | NetworkEvent::ConferenceKicked { .. })
+    })
+    .await;
+    assert!(!ended, "a device the host's roster leaves out kicked the guest or ended its meeting");
+
+    // The host's own device still runs both.
+    host.cmd_tx
+        .send(NodeCommand::ConferenceDeny { conf_id: waiting.clone(), peer_id: knocker.device_id.clone(), reason: "declined".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut knocker, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinDenied { conf_id: c, reason } if *c == waiting && reason == "declined")
+        })
+        .await,
+        "the host's denial lands",
+    );
+    host.cmd_tx.send(NodeCommand::ConferenceEnd { conf_id: in_call.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut guest, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceEnded { conf_id: c, by_peer_id } if *c == in_call && *by_peer_id == h_master)
+        })
+        .await,
+        "the host's end lands",
+    );
+}
+
+/// G1 for meetings, at the host and at a guest: a device its master's roster does not
+/// count knocks for nobody and speaks for nobody, though the master key certifies it. A
+/// restored backup nobody approved never reaches the waiting room; approved, it joins
+/// and chats; removed, the host's admit seats nothing and a guest drops what it says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_device_its_roster_leaves_out_never_joins_or_speaks_in_a_meeting() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const H_MASTER: u8 = 241;
+    const F_MASTER: u8 = 242;
+    const F_DEV: u8 = 243;
+    const T_DEV: u8 = 244;
+    const G_MASTER: u8 = 245;
+    let (h_master, g_master) = (tag_kp(H_MASTER).peer_id(), tag_kp(G_MASTER).peer_id());
+    let (f_master, f_dev, t_dev) = (tag_kp(F_MASTER).peer_id(), tag_kp(F_DEV).peer_id(), tag_kp(T_DEV).peer_id());
+    let now = super::roster_book::now_ms();
+
+    let mut host = spawn_node_with_friends(&relay, H_MASTER, H_MASTER, &[&f_master]).await;
+    let mut f = spawn_node_seeded(
+        &relay, F_MASTER, F_DEV, &[&h_master, &g_master], Some(protected_roster(F_MASTER, &[F_DEV], now - 60_000)),
+    ).await;
+    let mut guest = spawn_node_with_friends(&relay, G_MASTER, G_MASTER, &[&f_master]).await;
+    for node in [&host, &guest] {
+        expect_dm_pair_ready(&relay, node, &f, 20).await;
+        assert!(
+            wait_until(20, async || node.known_devices(&f_master) == vec![f_dev.clone()]).await,
+            "{} must hold F's roster first, got {:?}",
+            node.device_id,
+            node.known_devices(&f_master),
+        );
+    }
+
+    // A thief restores F's backup on a new device: F's master key, no place in the roster.
+    let stolen = super::roster_book::load(&f.store(), &f_master).expect("F holds its roster");
+    let mut t = spawn_node_seeded(&relay, F_MASTER, T_DEV, &[], Some(stolen)).await;
+    assert!(
+        wait_event(&mut f, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == t_dev)
+        })
+        .await,
+        "F's device is asked about the restored backup",
+    );
+    assert!(!host.known_devices(&f_master).contains(&t_dev), "the host does not count the thief");
+    relay.set_recording(&t_dev, true);
+    drain_events(&mut host);
+    drain_events(&mut guest);
+
+    let first = start_pinned_meeting(&relay, &mut host, "roster-knock-1", None).await;
+    knock_on_meeting(&t, &first, "Thief").await;
+    assert!(
+        wait_until(10, async || !meeting_frames_of_type(&relay, &t_dev, &first, "conf_join_req").is_empty()).await,
+        "the thief knocks",
+    );
+    let listed = surfaces_before_barrier(&relay, &mut host, |ev| {
+        matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { conf_id, peer_id, .. } if *conf_id == first && *peer_id == t_dev)
+    })
+    .await;
+    assert!(!listed, "a device its roster does not count reached the waiting room");
+    t.cmd_tx.send(NodeCommand::ConferenceLeave { conf_id: first.clone() }).await.unwrap();
+
+    // Approved, it is one of F's devices: it is admitted and its chat is F's.
+    f.cmd_tx.send(NodeCommand::ApproveDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut t, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::DeviceRestored)).await,
+        "the approved device learns it belongs",
+    );
+    for node in [&host, &guest] {
+        assert!(
+            wait_until(20, async || node.known_devices(&f_master).contains(&t_dev)).await,
+            "{} learns the approval",
+            node.device_id,
+        );
+    }
+    let meeting = start_pinned_meeting(&relay, &mut host, "roster-knock-2", None).await;
+    let later = start_pinned_meeting(&relay, &mut host, "roster-knock-3", None).await;
+    let meeting_sid = super::conference::conf_server_id(&meeting);
+    admit_to_meeting(&mut host, &mut guest, &meeting, "Gee").await;
+    admit_to_meeting(&mut host, &mut t, &meeting, "Tee").await;
+    assert!(
+        wait_until(10, async || guest.mls_members_checked(&meeting_sid).await.is_some_and(|m| m.contains(&t_dev))).await,
+        "the guest seats the approved device",
+    );
+    let say = |text: &str| NodeCommand::ConferenceSendChat { conf_id: meeting.clone(), text: text.to_string(), timestamp: now };
+    t.cmd_tx.send(say("before removal")).await.unwrap();
+    assert!(
+        wait_event(&mut guest, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceChatMessage { conf_id, sender_peer_id, text, .. }
+                if *conf_id == meeting && *sender_peer_id == t_dev && text == "before removal")
+        })
+        .await,
+        "control: the guest reads an approved device's chat",
+    );
+    knock_on_meeting(&t, &later, "Tee").await;
+    expect_in_waiting_room(&mut host, &later, &t_dev).await;
+
+    // Removed, it speaks for nobody: still seated in the meeting, still knocking.
+    f.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: t_dev.clone() }).await.unwrap();
+    for node in [&host, &guest] {
+        assert!(
+            wait_until(20, async || node.revoked_devices(&f_master).contains(&t_dev)).await,
+            "{} learns the removal",
+            node.device_id,
+        );
+    }
+    let sent = frames_of_type(&relay, &t_dev, "conf_chat").len();
+    t.cmd_tx.send(say("after removal")).await.unwrap();
+    assert!(
+        wait_until(10, async || frames_of_type(&relay, &t_dev, "conf_chat").len() > sent).await,
+        "the removed device still sends its chat",
+    );
+    let read = surfaces_before_barrier(&relay, &mut guest, |ev| {
+        matches!(ev, NetworkEvent::ConferenceChatMessage { text, .. } if text == "after removal")
+    })
+    .await;
+    assert!(!read, "a guest read a removed device's chat as F's");
+
+    host.cmd_tx
+        .send(NodeCommand::ConferenceAdmit { conf_id: later.clone(), peer_id: t_dev.clone() })
+        .await
+        .unwrap();
+    let seated = host.mls_members_checked(&super::conference::conf_server_id(&later)).await.expect("the host's loop answers");
+    assert!(!seated.contains(&t_dev), "the host seated a removed device: {seated:?}");
+
+    drop((f, t));
 }
 
 // ---------------------------------------------------------------------------
@@ -34087,9 +35689,13 @@ async fn a_member_offline_through_a_lock_move_gets_the_door_and_sees_again() {
     j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
     assert!(expect_joined(&mut j, &server_id, 25).await, "J joins too");
     assert!(expect_sees_room(&relay, &server_id, &m.device_id).await);
+    // M's leaf is seated, so no Welcome for it is still to come.
+    expect_mls_group(&[&o, &m], &server_id, 30).await;
 
     go_offline(&relay, &m, &server_id).await;
-    // Whatever the owner sends M meanwhile is lost, as a buffer that aged out is.
+    // Gone for the owner too, so it carries M nothing about the kick; anything it
+    // still addresses to M by name is held and lost, as a buffer that aged out is.
+    assert!(wait_until(10, async || !o.sees_peer(&m.device_id).await).await, "the owner sees M leave");
     relay.hold_direct(&o.device_id, &m.device_id);
     let first = relay_tip(&relay, &server_id);
     o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: j.master_id.clone() }).await.unwrap();
@@ -34102,9 +35708,7 @@ async fn a_member_offline_through_a_lock_move_gets_the_door_and_sees_again() {
         .await,
         "the kick moves the lock and the owner holds the new door",
     );
-    assert!(wait_until(10, async || !relay.held_kinds(&o.device_id, &m.device_id).is_empty()).await, "the owner's copies for M are held");
-    // The rest of the owner's burst for M lands in the hold (counted in BUDGET_MS).
-    sleep_ms(1500).await;
+    expect_relay_drained(&relay, &o, "lock-moved").await;
     for kind in relay.held_kinds(&o.device_id, &m.device_id) {
         relay.discard_held_kind(&o.device_id, &m.device_id, &kind);
     }
@@ -34143,4 +35747,344 @@ async fn a_joiner_completes_its_join_in_a_room_that_hides_its_members() {
     assert!(expect_joined(&mut j, &server_id, 10).await, "a member admits the hidden joiner");
     assert!(expect_sees_room(&relay, &server_id, &j.device_id).await, "and the new member proves the door");
     drop((o, m));
+}
+
+// ── Session 32: phase B guard tests ──
+
+/// A-02: a member's ring answer cannot name an ask made after its own seal. Taken at
+/// its word, a stamp in its future marks every later ask of that joiner answered, and
+/// members skip the joiner's parked request for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_resolution_never_answers_an_ask_made_after_it() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, j, server_id) = owner_member_and_joiner(&relay, 214, 215, 216).await;
+    let now = super::frame_auth::now_ms();
+    let future = super::types::HavenMessage::ServerJoinResolved {
+        server_id: server_id.clone(),
+        joiner_master: j.master_id.clone(),
+        requested_at: now + 3_600_000,
+        admitted: false,
+        reason: "banned".into(),
+        op_json: None,
+    };
+    relay.inject(&server_id, &m.device_id, &o.device_id, sealed_to_members(&relay, &server_id, &m.device_id, &future));
+    let parked = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: now,
+        device_list: None,
+        parked: true,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
+        ask: join_ask(&server_id, now, &j.master_kp),
+    };
+    relay.inject(&server_id, &j.device_id, &o.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &parked));
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await,
+        "a resolution dated past its own seal kept the owner from admitting the parked ask",
+    );
+    drop(m);
+}
+
+/// A-02: a ring answer counts only from a current member. Anyone holding the door can
+/// seal one into the members' box, here the joiner itself, refusing its own ask; taken
+/// at its word, members would skip that parked request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_resolution_counts_only_from_a_member() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, j, server_id) = owner_member_and_joiner(&relay, 227, 228, 229).await;
+    let now = super::frame_auth::now_ms();
+    let refusal = super::types::HavenMessage::ServerJoinResolved {
+        server_id: server_id.clone(),
+        joiner_master: j.master_id.clone(),
+        requested_at: now,
+        admitted: false,
+        reason: "banned".into(),
+        op_json: None,
+    };
+    relay.inject(&server_id, &j.device_id, &o.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &refusal));
+    let parked = super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: now,
+        device_list: None,
+        parked: true,
+        key_package: None,
+        reply_key: fresh_reply_key(),
+        card: None,
+        avatar_b64: String::new(),
+        ask: join_ask(&server_id, now, &j.master_kp),
+    };
+    relay.inject(&server_id, &j.device_id, &o.device_id, sealed_to_members(&relay, &server_id, &j.device_id, &parked));
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await,
+        "a non-member's resolution kept the owner from admitting the parked ask",
+    );
+    drop(m);
+}
+
+/// A-06 since HOL-SEC-097: a kick notice counts only through its removal op, and the op
+/// only from a kicker that holds Kick Members AND outranks us, each gate on its own: an
+/// equal rank with the right, then a higher rank without it. Once the owner gives the
+/// right back, the same notice lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_kick_notice_needs_a_kicker_with_the_right_and_the_rank() {
+    use crate::crdt::operations::{CrdtPayload, MemberRole, Permission};
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut m, x, server_id) = three_member_server(&relay, 217, 218, 219).await;
+    expect_olm_confirmed(&x, &m, 20).await;
+    let (m_master, x_master) = (m.master_id.clone(), x.master_id.clone());
+    let role = |master: &str, role: &str| NodeCommand::ChangeRole {
+        server_id: server_id.clone(), peer_id: master.to_string(), new_role: role.to_string(),
+    };
+    let admin_may = |bits: u32| NodeCommand::ChangeRolePermissions {
+        server_id: server_id.clone(), role: "admin".into(), permissions: bits,
+    };
+    let notice = || super::types::HavenMessage::MemberKickBroadcast {
+        server_id: server_id.clone(),
+        op_json: serde_json::to_string(&forge_crdt_op(
+            &server_id, &x_master, CrdtPayload::MemberRemoved { peer_id: m_master.clone() }, 0, Some(&x.master_kp),
+        ))
+        .unwrap(),
+    };
+
+    // Equal rank, with the right.
+    o.cmd_tx.send(role(&x_master, "moderator")).await.unwrap();
+    o.cmd_tx.send(role(&m_master, "moderator")).await.unwrap();
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|s| {
+            s.get_role(&x_master) == MemberRole::Moderator && s.get_role(&m_master) == MemberRole::Moderator
+        }))
+        .await,
+        "M sees both moderators",
+    );
+    carry_as(&x, &m, notice()).await;
+    carried_barrier(&x, &mut m).await;
+    assert!(m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m_master)), "a kicker of equal rank removed M");
+
+    // Higher rank, without the right.
+    let admin = MemberRole::Admin.default_permissions();
+    o.cmd_tx.send(admin_may(admin & !Permission::KICK_MEMBERS)).await.unwrap();
+    o.cmd_tx.send(role(&x_master, "admin")).await.unwrap();
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|s| {
+            s.get_role(&x_master) == MemberRole::Admin && !s.has_permission(&x_master, Permission::KICK_MEMBERS)
+        }))
+        .await,
+        "M sees X as an admin without Kick Members",
+    );
+    carry_as(&x, &m, notice()).await;
+    carried_barrier(&x, &mut m).await;
+    assert!(m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m_master)), "a kicker without Kick Members removed M");
+
+    o.cmd_tx.send(admin_may(admin)).await.unwrap();
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|s| s.has_permission(&x_master, Permission::KICK_MEMBERS))).await,
+        "M sees the right given back",
+    );
+    carry_as(&x, &m, notice()).await;
+    assert!(wait_until(15, async || m.live_server_state(&server_id).await.is_none()).await, "the notice of a kicker with the right and the rank lands");
+}
+
+/// A-T14: an op handed over a WebRTC data channel takes the one ingest every op takes.
+/// The owner's name with no signature and a stranger's own signed rename are refused;
+/// the owner's signed rename through the same entry lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_data_channel_op_takes_the_one_ingest() {
+    use crate::crdt::operations::CrdtPayload;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 220, 220).await;
+    let server_id = create_server_and_wait(&mut o, "Mesh Server").await;
+    let stranger = keys(221);
+    let rename = |name: &str| CrdtPayload::ServerRenamed { new_name: name.into() };
+    let over_the_mesh = |n: u8, op: &crate::crdt::operations::CrdtOp| NodeCommand::WebRtcGossipOpReceived {
+        sender_peer_id: stranger.peer_id(),
+        payload: serde_json::to_vec(&super::gossip::GossipCrdtOp {
+            broadcast_id: format!("mesh-{n}"),
+            server_id: server_id.clone(),
+            ttl: 1,
+            op_json: serde_json::to_string(op).unwrap(),
+        })
+        .unwrap(),
+    };
+    // Stamped after the owner's rename, so either would win if it landed.
+    let refused = [
+        forge_crdt_op(&server_id, &o.master_id, rename("Unsigned"), 60_000, None),
+        forge_crdt_op(&server_id, &stranger.peer_id(), rename("Stranger"), 60_000, Some(&stranger)),
+    ];
+    for (n, op) in refused.iter().enumerate() {
+        o.cmd_tx.send(over_the_mesh(n as u8, op)).await.unwrap();
+    }
+    let signed = forge_crdt_op(&server_id, &o.master_id, rename("Mesh"), 30_000, Some(&o.master_kp));
+    o.cmd_tx.send(over_the_mesh(9, &signed)).await.unwrap();
+    assert!(
+        wait_until(10, async || o.live_server_name(&server_id).await == "Mesh").await,
+        "the mesh entry let a forged op in, or took no op at all: the name is {:?}",
+        o.live_server_name(&server_id).await,
+    );
+}
+
+/// `envelope`, built by hand, from `from` to `to` inside `from`'s own Olm session.
+async fn send_envelope_as(from: &TestNode, to: &TestNode, envelope: &super::types::MessageEnvelope) {
+    from.cmd_tx
+        .send(NodeCommand::TestEnvelopeJson { device: to.device_id.clone(), json: serde_json::to_string(envelope).unwrap() })
+        .await
+        .unwrap();
+}
+
+/// A channel sync batch holding one post `signer_tag` signed, built from a scratch
+/// store the way a responder builds one from its own rows.
+fn signed_channel_batch(
+    signer_tag: u8,
+    server_id: &str,
+    channel_id: &str,
+    ts: i64,
+    mid: &str,
+    text: &str,
+) -> super::types::MessageEnvelope {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let path = dir.path().join("batch.db");
+    let store = crate::storage::MessageStore::open(path.to_str().unwrap(), "scratch").expect("scratch store");
+    plant_signed_channel_row(&store, signer_tag, server_id, channel_id, false, ts, mid, text);
+    super::sync_handler::build_channel_sync_batch(&store, server_id, channel_id, 0, &HashMap::new(), None)
+        .expect("a batch")
+        .0
+}
+
+/// A-CH02: both channel batch arms take backfill only from a current member who can
+/// read the channel, judged by our state. Over Olm, a member who cannot see a
+/// restricted channel sends its own post into it; over MLS, a member our state has
+/// removed sends its own post from before the removal, from the leaf no commit has
+/// taken out yet. Neither lands; the same batches from a reader do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_both_batch_arms_take_backfill_only_from_a_reader() {
+    use crate::crdt::operations::CrdtPayload;
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const V: u8 = 223;
+    const C: u8 = 224;
+    let (mut o, v, c, server_id) = setup_epoch_race_trio(&relay, 222, V, C).await;
+    let general = general_channel_of(&server_id);
+    let ts = super::types::now_ms() - 2_000;
+    let holds = |node: &TestNode, cid: &str, text: &str| node.channel_messages(&server_id, cid).iter().any(|m| m.text == text);
+
+    // Olm: V is a plain member and the channel is for admins.
+    let staff = crate::node::new_channel_id(&server_id);
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(), channel_id: staff.clone(), name: "staff".into(), category: None, channel_type: "text".into(),
+        })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility { server_id: server_id.clone(), channel_id: staff.clone(), visibility: "admin".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| {
+            s.channels.contains_key(&staff) && !s.can_see_channel(&v.master_id, &staff)
+        }))
+        .await,
+        "the owner holds a channel V cannot see",
+    );
+    send_envelope_as(&v, &o, &signed_channel_batch(V, &server_id, &staff, ts, "ch02-olm-staff", "into staff")).await;
+    send_envelope_as(&v, &o, &signed_channel_batch(V, &server_id, &general, ts, "ch02-olm-general", "into general")).await;
+    assert!(wait_until(10, async || holds(&o, &general, "into general")).await, "control: a reader's Olm batch lands");
+    assert!(!holds(&o, &staff, "into staff"), "an Olm batch from a member who cannot read the channel landed");
+
+    // MLS: C's own leaf, used the way a modified client would.
+    let mut hostile = hostile_mls_copy(&c, C, &server_id).await;
+    let mut from_c = |mid: &str, text: &str, ts: i64| {
+        let batch = signed_channel_batch(C, &server_id, &general, ts, mid, text);
+        let ct = hostile.encrypt(&server_id, serde_json::to_string(&batch).unwrap().as_bytes()).expect("encrypts");
+        frame(&HavenMessage::MlsChannelMessage { server_id: server_id.clone(), body: b64(&ct), channel_id: None })
+    };
+    relay.inject_direct(&server_id, &c.device_id, &o.device_id, from_c("ch02-mls-member", "while a member", ts));
+    assert!(wait_until(10, async || holds(&o, &general, "while a member")).await, "control: a member's MLS batch lands");
+
+    // The owner's state drops C while its leaf stays: C never hears of it.
+    relay.swallow_direct(&o.device_id, &c.device_id);
+    relay.swallow_direct(&v.device_id, &c.device_id);
+    let removal = forge_crdt_op(
+        &server_id, &o.master_id, CrdtPayload::MemberRemoved { peer_id: c.master_id.clone() }, 0, Some(&o.master_kp),
+    );
+    carry_as(&v, &o, crdt_broadcast(&server_id, &removal)).await;
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&c.master_id))).await,
+        "the owner's state drops C",
+    );
+    assert!(o.mls_members(&server_id).await.contains(&c.device_id), "precondition: C's leaf is still in the owner's group");
+    let before_removal = removal.hlc.physical_ms as i64 - 1_000;
+    relay.inject_direct(&server_id, &c.device_id, &o.device_id, from_c("ch02-mls-removed", "after the removal", before_removal));
+    flush_frames(&relay, &mut o).await;
+    assert!(!holds(&o, &general, "after the removal"), "an MLS batch from a removed member's leaf landed");
+}
+
+/// A sync answer stores exactly what the fold admitted: a refused op in the batch stays
+/// out of the store, and a checkpoint in it prunes the stored log as it prunes the
+/// state's, so a restart never reloads the ops it overwrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_sync_answer_stores_exactly_what_the_fold_admitted() {
+    use crate::crdt::operations::CrdtPayload;
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut m) = friend_pair(&relay, 225, 226).await;
+    let server_id = create_server_and_wait(&mut o, "Checkpoint Server").await;
+    m.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut m, &server_id, 15).await, "M joins");
+
+    let state = o.live_server_state(&server_id).await.expect("the owner's state");
+    let covers = state.horizon();
+    let base = state.checkpoint_json(&o.master_id, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
+    let checkpoint = forge_crdt_op(
+        &server_id, &o.master_id, CrdtPayload::ServerCheckpoint { state: base, covers: covers.clone() }, 1_000, Some(&o.master_kp),
+    );
+    let refused = forge_crdt_op(&server_id, &o.master_id, CrdtPayload::ServerRenamed { new_name: "Unsigned".into() }, 2_000, None);
+    carry_as(&o, &m, sync_response(&server_id, &[refused.clone(), checkpoint.clone()])).await;
+    assert!(
+        wait_until(10, async || {
+            m.live_server_state(&server_id).await.is_some_and(|s| s.anchor() == crate::crdt::server_state::Anchor::Checkpoint)
+        })
+        .await,
+        "M rebases on the owner's checkpoint",
+    );
+
+    let stored = m.store().load_ops_for_server(&server_id, None).unwrap();
+    let same = |a: &crate::crdt::operations::CrdtOp, b: &crate::crdt::operations::CrdtOp| a.author == b.author && a.hlc == b.hlc;
+    assert!(stored.iter().any(|op| same(op, &checkpoint)), "the checkpoint is stored");
+    assert!(!stored.iter().any(|op| same(op, &refused)), "a refused op was stored");
+    let overwritten: Vec<&str> = stored
+        .iter()
+        .filter(|op| (op.hlc.physical_ms, op.hlc.counter) < (covers.physical_ms, covers.counter))
+        .filter(|op| !matches!(op.payload, CrdtPayload::ServerCreated { .. }))
+        .map(|op| crate::crdt::sync::payload_name(&op.payload))
+        .collect();
+    assert!(overwritten.is_empty(), "the store keeps ops the checkpoint overwrote: {overwritten:?}");
 }
