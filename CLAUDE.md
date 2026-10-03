@@ -42,7 +42,7 @@ pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 **Releases: load the `release` skill FIRST** (incl. the go-live gate; `reference_release_pipeline`). **Certum signing:** CNG binding self-heals; output `installer\Output\` (`reference_certum_signing_procedure`). **Linux release = BOTH artifacts uploaded + `scripts/publish_flatpak_repo.sh` (VM, own GPG-signed OSTree repo, NEVER Flathub) BEFORE the LAST step `scripts\sign_manifest.ps1`** (key OUTSIDE repo, `project_update_integrity`, `project_linux_auto_update`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Area Rule Books (READ the matching one BEFORE working in that area)
-This file keeps the rules that break things silently ANYWHERE (security, crypto, multi-device, data integrity). Area traps live in wiki rule books, `tools/hollow-memory/wiki/`. **Workflow, every task: first name the areas it touches, read those books whole (plus `memory_search` for the feature), then do the whole job.** This file alone is NOT the full rule set. A new area-only rule goes into its book, never here:
+This file keeps the rules that break things silently ANYWHERE (security, crypto, multi-device, data integrity). Area traps live in wiki rule books, `tools/hollow-memory/wiki/`. **Workflow, every task: first name the areas it touches, read those books whole (plus the search workflow below for the feature), then do the whole job.** This file alone is NOT the full rule set. A new area-only rule goes into its book, never here:
 - `rules_media_calls.md`: calls, voice channels, meetings, WebRTC, audio, screen share, forked flutter_webrtc/libwebrtc, ffmpeg.
 - `rules_ui_flutter.md` (+ the `hollow-ui` skill): any widget, dialog, menu, list, shell, theme, scale, provider-driven UI.
 - `rules_platforms.md`: Windows/Linux/macOS runners, flatpak, updater, restart, single instance, Android build, Skia.
@@ -160,8 +160,10 @@ All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
 - **CRITICAL: fire-and-forget FFI needs `.catchError((_) {})`:** a sync try/catch catches NOTHING (rejections hit the zone handler). State-REGISTERING calls need a retry helper; subscribes ALWAYS via `subscribeChannelTopics()`. `feedback_ffi_fire_and_forget_catcherror`.
 - **Widget tests:** `pumpHollowMobile()` mocks FFI. **VERIFY UI BY DRIVING THE APP on THROWAWAY fleet peers:** `scripts/fleet.ps1` (NEVER `ui_probe.ps1`'s default = Vitalik's REAL identity; a missed step goes `-Live`); also drives the mini's iOS Simulators + Linux laptop. `feedback_probe_throwaway_identities_only`, wiki `fleet_probe`.
 
-## Semantic Memory Search (hollow-memory MCP)
-- `memory_search(query)` = memory+wiki+plan/whitepaper; ALWAYS search before designing or re-investigating; `memory_reindex()` after modifying indexed files.
+## Search tools = THE dev workflow (hollow-memory MCP + LSP)
+- Every task and every subagent brief, in order: `memory_search` (what we know) -> `code_search` (where it lives) -> LSP for exact references/callers -> Grep as the completeness floor -> READ the code -> harness/fleet prove it. Tools point where to look, never count as proof. `feedback_semantic_search_first`.
+- `memory_search(query)` = memory+wiki+reports+plan/whitepaper/CLAUDE.md, meaning + keywords; ALWAYS before designing or re-investigating. No reindex step: both indexes refresh changed files per search (code files once git tracks them).
+- `code_search(query)` LOCATES code by what it does, never proves completeness: "every call site/arm" sweeps = Grep as the floor PLUS LSP `findReferences`/`incomingCalls` (Rust + Dart; catches aliased calls, but misses code that does not resolve mid-edit). `reference_code_search_tooling`.
 
 ## Rules
 - Never commit secrets, keys or credentials.

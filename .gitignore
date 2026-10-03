@@ -177,6 +177,7 @@ packages/flutter_webrtc/third_party/**
 # Hollow Memory (semantic search tool)
 tools/hollow-memory/models/
 tools/hollow-memory/*.db
+tools/hollow-memory/*.db-*
 
 tools/hollow-memory/wiki/web_public_viewer.md
 

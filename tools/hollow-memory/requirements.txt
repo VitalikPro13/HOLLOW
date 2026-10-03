@@ -1,2 +1,6 @@
-mcp>=1.27.0
+# torch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.8
+sentence-transformers>=5.1
+mcp>=1.27,<2
 sqlite-vec>=0.1.9
+numpy

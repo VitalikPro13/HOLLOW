@@ -1,10 +1,12 @@
 {
   "mcpServers": {
     "hollow-memory": {
-      "command": "C:/Users/Jabun/AppData/Local/Microsoft/WindowsApps/PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0/python.exe",
+      "command": "D:/dev/venvs/hollow-embed/Scripts/python.exe",
       "args": ["-u", "C:/Users/Jabun/Documents/Coding/HOLLOW/tools/hollow-memory/server.py"],
       "env": {
-        "PYTHONUNBUFFERED": "1"
+        "PYTHONUNBUFFERED": "1",
+        "HF_HOME": "D:/dev/hf-cache",
+        "HF_HUB_OFFLINE": "1"
       }
     }
   }

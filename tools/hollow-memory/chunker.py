@@ -1,223 +1,165 @@
 import hashlib
 import re
+import subprocess
 from pathlib import Path
 
-from config import MEMORY_DIR, HOLLOW_PLAN_PATH, WHITEPAPER_PATH, CLAUDE_MD_PATH, WIKI_DIR
+from config import (
+    CLAUDE_MD_PATH, CODE_EXTENSIONS, CODE_ROOTS, CODE_SKIP_NAMES, CODE_SKIP_PREFIXES, HOLLOW_PLAN_PATH,
+    MAX_CHUNK_CHARS, MEMORY_DIR, PROJECT_ROOT, REPORTS_DIR, REPORTS_SKIP, WHITEPAPER_PATH, WIKI_DIR,
+)
 
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def _parse_yaml_frontmatter(content: str) -> tuple[dict, str]:
-    """Extract YAML frontmatter and body from a markdown file."""
-    meta = {}
-    body = content
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].strip().splitlines():
-                if ":" in line:
-                    key, val = line.split(":", 1)
-                    meta[key.strip()] = val.strip()
-            body = parts[2].strip()
-    return meta, body
+def list_doc_files() -> list[tuple[Path, str, str]]:
+    """(path, source label, kind) for every doc the index covers."""
+    files = []
+    if MEMORY_DIR.exists():
+        files += [(f, f"memory/{f.name}", "memory") for f in sorted(MEMORY_DIR.glob("*.md")) if f.name != "MEMORY.md"]
+    for path, kind in [(HOLLOW_PLAN_PATH, "plan"), (WHITEPAPER_PATH, "whitepaper"), (CLAUDE_MD_PATH, "claude-md")]:
+        if path.exists():
+            files.append((path, path.name, kind))
+    if WIKI_DIR.exists():
+        files += [(f, f"wiki/{f.name}", "wiki") for f in sorted(WIKI_DIR.glob("*.md"))]
+    if REPORTS_DIR.exists():
+        files += [(f, f.relative_to(PROJECT_ROOT).as_posix(), "report")
+                  for f in sorted(REPORTS_DIR.rglob("*.md")) if f.name not in REPORTS_SKIP]
+    return files
 
 
-def _split_by_headings(content: str, level: str = "## ") -> list[tuple[str, str]]:
-    """Split markdown by heading level. Returns [(heading, section_text), ...]."""
-    sections = []
-    current_heading = ""
-    current_lines = []
+def list_code_files() -> list[tuple[Path, str, str]]:
+    # Inheriting the MCP stdin pipe deadlocks on Windows while the transport thread blocks reading it.
+    out = subprocess.run(["git", "ls-files", *CODE_ROOTS], cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL,
+                         capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
+    return [(PROJECT_ROOT / rel, rel, "code") for rel in out
+            if rel.endswith(CODE_EXTENSIONS) and not rel.startswith(CODE_SKIP_PREFIXES)
+            and rel.rsplit("/", 1)[-1] not in CODE_SKIP_NAMES]
 
-    for line in content.splitlines():
-        if line.startswith(level) and not line.startswith(level + "#"):
-            if current_lines:
-                sections.append((current_heading, "\n".join(current_lines).strip()))
-            current_heading = line.lstrip("#").strip()
-            current_lines = [line]
+
+def _sections(lines, level):
+    """Split numbered lines at one heading level: [(heading, [(lineno, text), ...])]."""
+    out, head, buf = [], "", []
+    for ln in lines:
+        if ln[1].startswith(level) and not ln[1].startswith(level + "#"):
+            if buf:
+                out.append((head, buf))
+            head, buf = ln[1].lstrip("#").strip(), [ln]
         else:
-            current_lines.append(line)
-
-    if current_lines:
-        sections.append((current_heading, "\n".join(current_lines).strip()))
-
-    return sections
+            buf.append(ln)
+    if buf:
+        out.append((head, buf))
+    return out
 
 
-def chunk_memory_files() -> list[dict]:
-    """Read all memory markdown files and return as chunks."""
+def _size(lines):
+    return sum(len(t) + 1 for _, t in lines)
+
+
+def _windows(lines, limit=MAX_CHUNK_CHARS):
+    """Cut at blank lines once a piece passes the limit, hard cut at 1.5x."""
+    pieces, cur, size = [], [], 0
+    for ln in lines:
+        if cur and size + len(ln[1]) > limit and (not ln[1].strip() or size > limit * 1.5):
+            pieces.append(cur)
+            cur, size = [], 0
+        cur.append(ln)
+        size += len(ln[1]) + 1
+    if cur:
+        pieces.append(cur)
+    return pieces
+
+
+def _chunk(source, kind, heading, lines, prefix):
+    body = "\n".join(t for _, t in lines).strip()
+    content = f"{prefix}\n\n{body}"
+    return {"source": source, "kind": kind, "heading": heading, "start_line": lines[0][0],
+            "end_line": lines[-1][0], "content": content, "content_hash": _hash(content)}
+
+
+def _markdown_chunks(text, source, kind, title):
+    """## sections, then ### when a section is too big, then paragraph windows."""
     chunks = []
-    if not MEMORY_DIR.exists():
-        return chunks
-
-    for f in sorted(MEMORY_DIR.glob("*.md")):
-        if f.name == "MEMORY.md":
-            continue  # Skip the index file — it's just pointers
-
-        content = f.read_text(encoding="utf-8", errors="replace")
-        meta, body = _parse_yaml_frontmatter(content)
-
-        name = meta.get("name", f.stem)
-        description = meta.get("description", "")
-        mem_type = meta.get("type", "unknown")
-
-        # Prepend name+description for better embedding quality
-        embed_text = f"{name}: {description}\n\n{body}" if description else f"{name}\n\n{body}"
-
-        chunks.append({
-            "source": f"memory/{f.name}",
-            "heading": name,
-            "chunk_type": f"memory-{mem_type}",
-            "name": name,
-            "description": description,
-            "content": embed_text,
-            "content_hash": _hash(embed_text),
-        })
-
-    return chunks
-
-
-def chunk_plan() -> list[dict]:
-    """Split HOLLOW_PLAN.md into chunks by sections and phases."""
-    if not HOLLOW_PLAN_PATH.exists():
-        return []
-
-    content = HOLLOW_PLAN_PATH.read_text(encoding="utf-8", errors="replace")
-    chunks = []
-
-    sections = _split_by_headings(content, "## ")
-
-    for heading, section_text in sections:
-        if not heading:
-            continue
-
-        # Section 13 (Development Phases) is massive — sub-chunk by ### Phase
-        if "phase" in heading.lower() and "milestone" in heading.lower():
-            phase_sections = _split_by_headings(section_text, "### ")
-            for phase_heading, phase_text in phase_sections:
-                if not phase_heading:
-                    continue
-                # Further sub-chunk if a phase section is too large (>4000 chars)
-                if len(phase_text) > 4000:
-                    sub_sections = _split_by_headings(phase_text, "#### ")
-                    for sub_heading, sub_text in sub_sections:
-                        if not sub_heading or len(sub_text.strip()) < 50:
-                            continue
-                        full_heading = f"{phase_heading} > {sub_heading}"
-                        chunks.append({
-                            "source": "HOLLOW_PLAN.md",
-                            "heading": full_heading,
-                            "chunk_type": "plan-phase",
-                            "name": full_heading,
-                            "description": f"Phase sub-section from HOLLOW_PLAN.md",
-                            "content": f"{full_heading}\n\n{sub_text}",
-                            "content_hash": _hash(sub_text),
-                        })
-                else:
-                    chunks.append({
-                        "source": "HOLLOW_PLAN.md",
-                        "heading": phase_heading,
-                        "chunk_type": "plan-phase",
-                        "name": phase_heading,
-                        "description": f"Development phase from HOLLOW_PLAN.md",
-                        "content": f"{phase_heading}\n\n{phase_text}",
-                        "content_hash": _hash(phase_text),
-                    })
+    lines = list(enumerate(text.splitlines(), 1))
+    for h2, body2 in _sections(lines, "## "):
+        if _size(body2) <= MAX_CHUNK_CHARS:
+            parts = [(h2, body2)]
         else:
-            chunks.append({
-                "source": "HOLLOW_PLAN.md",
-                "heading": heading,
-                "chunk_type": "plan-section",
-                "name": heading,
-                "description": f"Architecture section from HOLLOW_PLAN.md",
-                "content": f"{heading}\n\n{section_text}",
-                "content_hash": _hash(section_text),
-            })
-
-    return chunks
-
-
-def chunk_whitepaper() -> list[dict]:
-    """Split WHITEPAPER.md by ## headings."""
-    if not WHITEPAPER_PATH.exists():
-        return []
-
-    content = WHITEPAPER_PATH.read_text(encoding="utf-8", errors="replace")
-    chunks = []
-
-    sections = _split_by_headings(content, "## ")
-    for heading, section_text in sections:
-        if not heading or len(section_text.strip()) < 50:
-            continue
-        chunks.append({
-            "source": "WHITEPAPER.md",
-            "heading": heading,
-            "chunk_type": "whitepaper",
-            "name": heading,
-            "description": f"Whitepaper section",
-            "content": f"{heading}\n\n{section_text}",
-            "content_hash": _hash(section_text),
-        })
-
-    return chunks
-
-
-def chunk_claude_md() -> list[dict]:
-    """CLAUDE.md as a single chunk."""
-    if not CLAUDE_MD_PATH.exists():
-        return []
-
-    content = CLAUDE_MD_PATH.read_text(encoding="utf-8", errors="replace")
-    return [{
-        "source": "CLAUDE.md",
-        "heading": "Project Instructions",
-        "chunk_type": "claude-md",
-        "name": "CLAUDE.md — Project Instructions",
-        "description": "Coding conventions, build commands, architecture notes",
-        "content": content,
-        "content_hash": _hash(content),
-    }]
-
-
-def chunk_wiki_files() -> list[dict]:
-    """Split wiki markdown files by ## headings into searchable chunks."""
-    chunks = []
-    if not WIKI_DIR.exists():
-        return chunks
-
-    for f in sorted(WIKI_DIR.glob("*.md")):
-        content = f.read_text(encoding="utf-8", errors="replace")
-
-        title = f.stem.replace("_", " ").title()
-        first_line = content.split("\n", 1)[0]
-        if first_line.startswith("# "):
-            title = first_line.lstrip("# ").strip()
-
-        sections = _split_by_headings(content, "## ")
-        for heading, section_text in sections:
-            if not heading or len(section_text.strip()) < 50:
+            parts = [((f"{h2} > {h3}" if h2 and h3 else h3 or h2), b3) for h3, b3 in _sections(body2, "### ")]
+        for head, body in parts:
+            if len("".join(t for _, t in body).strip()) < 50:
                 continue
-            embed_text = f"{title} > {heading}\n\n{section_text}"
-            chunks.append({
-                "source": f"wiki/{f.name}",
-                "heading": heading,
-                "chunk_type": "wiki",
-                "name": f"{title} > {heading}",
-                "description": f"Wiki: {title}",
-                "content": embed_text,
-                "content_hash": _hash(embed_text),
-            })
-
+            label = head or title
+            pieces = [body] if _size(body) <= MAX_CHUNK_CHARS else _windows(body)
+            for i, piece in enumerate(pieces):
+                heading = label + (f" ({i + 1})" if len(pieces) > 1 else "")
+                chunks.append(_chunk(source, kind, heading, piece, f"{title} > {heading}"))
     return chunks
 
 
-def get_all_chunks() -> list[dict]:
-    """Get all chunks from all sources."""
-    chunks = []
-    chunks.extend(chunk_memory_files())
-    chunks.extend(chunk_plan())
-    chunks.extend(chunk_whitepaper())
-    chunks.extend(chunk_claude_md())
-    chunks.extend(chunk_wiki_files())
-    return chunks
+def _memory_chunks(text, source):
+    meta, body_start = {}, 0
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == "---":
+                body_start = i + 1
+                break
+            if ":" in line:
+                key, val = line.split(":", 1)
+                meta[key.strip()] = val.strip()
+    name = meta.get("name", Path(source).stem)
+    kind = f"memory-{meta.get('type', 'unknown')}"
+    prefix = f"{name}: {meta['description']}" if meta.get("description") else name
+    numbered = [(i + 1, t) for i, t in enumerate(lines)][body_start:]
+    if not numbered:
+        return []
+    pieces = [numbered] if _size(numbered) <= MAX_CHUNK_CHARS else _windows(numbered)
+    return [_chunk(source, kind, name + (f" ({i + 1})" if len(pieces) > 1 else ""), p, prefix)
+            for i, p in enumerate(pieces)]
+
+
+def chunk_doc(path: Path, source: str, kind: str) -> list[dict]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if kind == "memory":
+        return _memory_chunks(text, source)
+    first = text.split("\n", 1)[0]
+    title = first.lstrip("# ").strip() if first.startswith("# ") else path.stem.replace("_", " ")
+    return _markdown_chunks(text, source, kind, title)
+
+
+_CODE_BOUNDARY = re.compile(
+    r"^\s{0,4}(pub(\([a-z]+\))?\s+)?(async\s+)?(unsafe\s+)?(fn|impl|struct|enum|trait|mod|const|static|type)\b"
+    r"|^\s{0,2}(class|mixin|extension|enum|typedef|abstract class|final class|sealed class)\b"
+    r"|^\s{0,2}[A-Za-z_<>?, ]+\s+[a-zA-Z_]\w*\s*(<[^>]*>)?\(.*\)\s*(async\s*)?(\{|=>)"
+    r"|^\s{0,2}(static|inline|bool|void|int|std::|uint\d+_t|struct|class|namespace|template)\b.*[({]\s*$")
+_ATTACHED = ("///", "#[", "@")
+
+
+def chunk_code(path: Path, source: str, kind: str = "code", min_lines=25, max_lines=90) -> list[dict]:
+    """Windows of 25-90 lines, cut where a top-level item starts, keeping its doc comment attached."""
+    lines = list(enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1))
+    chunks, start = [], 0
+    for i in range(len(lines)):
+        size = i - start
+        prev = lines[i - 1][1].lstrip() if i else ""
+        boundary = (size >= min_lines and _CODE_BOUNDARY.match(lines[i][1])
+                    and (not prev or prev.startswith(("//", "#[", "@"))))
+        if boundary or size >= max_lines:
+            cut = i
+            if boundary:
+                while cut > start and lines[cut - 1][1].lstrip().startswith(_ATTACHED):
+                    cut -= 1
+            if cut > start:
+                chunks.append(_chunk(source, kind, f"{source}:{lines[start][0]}", lines[start:cut], f"// {source}"))
+                start = cut
+    if start < len(lines):
+        chunks.append(_chunk(source, kind, f"{source}:{lines[start][0]}", lines[start:], f"// {source}"))
+    return [c for c in chunks if c["content"].strip()]
+
+
+CORPORA = {
+    "docs": (list_doc_files, chunk_doc),
+    "code": (list_code_files, chunk_code),
+}

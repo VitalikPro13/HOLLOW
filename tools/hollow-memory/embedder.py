@@ -1,88 +1,63 @@
 import sys
+import threading
+import time
+
 import numpy as np
-from pathlib import Path
 
-from config import ONNX_MODEL_PATH, TOKENIZER_PATH, MODELS_DIR, HF_MODEL_ID, EMBEDDING_DIM
+from config import IDLE_UNLOAD_SECS, MAX_SEQ_TOKENS, MODEL_ID
 
-_session = None
-_tokenizer = None
-
-
-def ensure_model():
-    """Download model files if not present. Returns True if ready."""
-    if ONNX_MODEL_PATH.exists() and TOKENIZER_PATH.exists():
-        return True
-
-    print("Downloading embedding model (first-time setup, ~45 MB)...", file=sys.stderr)
-    from huggingface_hub import hf_hub_download
-
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not ONNX_MODEL_PATH.exists():
-        hf_hub_download(
-            repo_id=HF_MODEL_ID,
-            filename="onnx/model_O4.onnx",
-            local_dir=str(MODELS_DIR),
-            local_dir_use_symlinks=False,
-        )
-
-    if not TOKENIZER_PATH.exists():
-        hf_hub_download(
-            repo_id=HF_MODEL_ID,
-            filename="tokenizer.json",
-            local_dir=str(MODELS_DIR),
-            local_dir_use_symlinks=False,
-        )
-
-    print("Model downloaded successfully.", file=sys.stderr)
-    return True
+_model = None
+_device = None
+_last_used = 0.0
+_lock = threading.RLock()
 
 
-def _get_tokenizer():
-    global _tokenizer
-    if _tokenizer is None:
-        from tokenizers import Tokenizer
-        _tokenizer = Tokenizer.from_file(str(TOKENIZER_PATH))
-        _tokenizer.enable_truncation(max_length=128)
-        _tokenizer.enable_padding(length=128)
-    return _tokenizer
+def _load():
+    global _model, _device
+    import torch
+    from sentence_transformers import SentenceTransformer
+
+    _device = "cuda" if torch.cuda.is_available() else "cpu"
+    kwargs = {"model_kwargs": {"torch_dtype": torch.float16}} if _device == "cuda" else {}
+    t = time.time()
+    _model = SentenceTransformer(MODEL_ID, device=_device, processor_kwargs={"padding_side": "left"}, **kwargs)
+    _model.max_seq_length = MAX_SEQ_TOKENS
+    print(f"hollow-memory: {MODEL_ID} on {_device} in {time.time() - t:.1f}s", file=sys.stderr)
 
 
-def _get_session():
-    global _session
-    if _session is None:
-        import onnxruntime as ort
-        _session = ort.InferenceSession(
-            str(ONNX_MODEL_PATH),
-            providers=["CPUExecutionProvider"],
-        )
-    return _session
+def _unload_when_idle():
+    global _model
+    while True:
+        time.sleep(60)
+        with _lock:
+            if _model is not None and time.time() - _last_used > IDLE_UNLOAD_SECS:
+                _model = None
+                if _device == "cuda":
+                    import torch
+                    torch.cuda.empty_cache()
 
 
-def embed(texts: list[str]) -> np.ndarray:
-    """Embed a list of texts into 384-dim normalized vectors."""
-    ensure_model()
-    tokenizer = _get_tokenizer()
-    session = _get_session()
+threading.Thread(target=_unload_when_idle, daemon=True).start()
 
-    encodings = tokenizer.encode_batch(texts)
-    input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
-    attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
-    token_type_ids = np.array([e.type_ids for e in encodings], dtype=np.int64)
 
-    outputs = session.run(None, {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "token_type_ids": token_type_ids,
-    })
-
-    # Mean pooling with attention mask
-    token_embeddings = outputs[0]  # [batch, seq_len, 384]
-    mask_expanded = attention_mask[:, :, np.newaxis].astype(np.float32)
-    sum_embeddings = np.sum(token_embeddings * mask_expanded, axis=1)
-    sum_mask = np.sum(mask_expanded, axis=1).clip(min=1e-9)
-    embeddings = sum_embeddings / sum_mask
-
-    # L2 normalize
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-9)
-    return (embeddings / norms).astype(np.float32)
+def embed(texts: list[str], prompt: str = "") -> np.ndarray:
+    """Normalized float32 vectors; queries pass their instruction prompt, documents none."""
+    global _last_used
+    with _lock:
+        if _model is None:
+            _load()
+        _last_used = time.time()
+        batch = 8
+        while True:
+            try:
+                vecs = _model.encode([prompt + t for t in texts], batch_size=batch, normalize_embeddings=True,
+                                     convert_to_numpy=True, show_progress_bar=False)
+                break
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower() or batch == 1:
+                    raise
+                import torch
+                torch.cuda.empty_cache()
+                batch //= 2
+        _last_used = time.time()
+        return vecs.astype(np.float32)

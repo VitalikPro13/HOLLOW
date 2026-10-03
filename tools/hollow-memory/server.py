@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-# Ensure the tool directory is on the path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from mcp.server.fastmcp import FastMCP
@@ -9,110 +8,121 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("hollow-memory")
 
 
-@mcp.tool()
-def memory_search(query: str, limit: int = 5) -> str:
-    """Semantic search across project memory files, HOLLOW_PLAN.md, WHITEPAPER.md, and CLAUDE.md.
+def _refresh(corpus: str, budget: int | None):
+    from chunker import CORPORA
+    from embedder import embed
+    from store import refresh
 
-    Use this to find relevant memories, architectural decisions, coding conventions,
-    or phase details by meaning — not just keywords.
+    list_files, chunk_file = CORPORA[corpus]
+    return refresh(corpus, list_files, chunk_file, embed, budget)
+
+
+def _search(corpus: str, query: str, limit: int, prompt: str):
+    from config import SEARCH_REFRESH_BUDGET
+    from embedder import embed
+    from store import looks_like_identifier, search
+
+    status = _refresh(corpus, SEARCH_REFRESH_BUDGET)
+    # Keyword ranking helps docs everywhere but drags plain-English code queries down (85% -> 67% top-5).
+    lex = 1.0 if corpus == "docs" or looks_like_identifier(query) else 0.0
+    results = search(corpus, embed([query], prompt)[0], query, limit, lex)
+    note = ""
+    if status["files_pending"]:
+        note = f"\n_Index catching up: {status['files_pending']} changed files not yet re-embedded; search again or run memory_reindex()._"
+    return results, note
+
+
+@mcp.tool()
+def memory_search(query: str, limit: int = 6) -> str:
+    """Search Hollow's knowledge by meaning and keywords: memory files, wiki, reports/ (plans, audits, findings,
+    shipped designs), HOLLOW_PLAN.md, WHITEPAPER.md and CLAUDE.md.
+
+    The index refreshes changed files on every call. Each result names `source:line` so you can Read that spot.
 
     Args:
-        query: Natural language search query (e.g. "WebRTC reconnection issues" or "relay scaling decisions")
-        limit: Maximum number of results to return (default 5)
+        query: A question or topic ("why a 50k member server keeps MLS") or an identifier ("HOL-SEC-079").
+        limit: Number of results (default 6).
     """
-    from store import search, get_stats
-    from embedder import embed
+    from config import DOC_QUERY_PROMPT
 
-    stats = get_stats()
-    if stats["total_chunks"] == 0:
-        return "Index is empty. Run memory_reindex() first to build the search index."
-
-    query_vec = embed([query])[0]
-    results = search(query_vec, limit=limit)
-
+    results, note = _search("docs", query, limit, DOC_QUERY_PROMPT)
     if not results:
-        return "No results found."
-
-    lines = [f"**Found {len(results)} results for:** \"{query}\"\n"]
+        return "No results found." + note
+    lines = [f"**{len(results)} results for:** \"{query}\"\n"]
     for i, r in enumerate(results, 1):
-        score = max(0.0, 1.0 - r["distance"])
-        lines.append(f"### {i}. {r['name']} (relevance: {score:.2f})")
-        lines.append(f"Source: `{r['source']}` | Type: {r['chunk_type']}")
-        snippet = r["content"][:400].replace("\n", " ").strip()
-        if len(r["content"]) > 400:
-            snippet += "..."
-        lines.append(f"> {snippet}")
-        lines.append("")
+        body = r["content"].split("\n\n", 1)[-1]
+        snippet = " ".join(body[:500].split()) + ("..." if len(body) > 500 else "")
+        lines.append(f"### {i}. {r['heading']}")
+        lines.append(f"`{r['source']}:{r['start_line']}` | {r['kind']}")
+        lines.append(f"> {snippet}\n")
+    return "\n".join(lines) + note
 
-    return "\n".join(lines)
+
+@mcp.tool()
+def code_search(query: str, limit: int = 8) -> str:
+    """Find code in rust/hollow_core, lib/ and relay-uws/src by what it does, when you do not know the symbol name.
+
+    A starting point only: it never proves completeness. For every call site or every arm of a rule, use Grep or
+    LSP findReferences. Each result is `path:start-end` plus its first lines.
+
+    Args:
+        query: What the code does ("refuse a file header from someone other than the owner").
+        limit: Number of results (default 8).
+    """
+    from config import CODE_QUERY_PROMPT
+
+    results, note = _search("code", query, limit, CODE_QUERY_PROMPT)
+    if not results:
+        return "No results found." + note
+    lines = [f"**{len(results)} results for:** \"{query}\"\n"]
+    for i, r in enumerate(results, 1):
+        body = [l for l in r["content"].split("\n")[1:] if l.strip()][:8]
+        lines.append(f"### {i}. `{r['source']}:{r['start_line']}-{r['end_line']}`")
+        lines.append("```\n" + "\n".join(l[:160] for l in body) + "\n```")
+    return "\n".join(lines) + note
 
 
 @mcp.tool()
 def memory_reindex(force: bool = False) -> str:
-    """Rebuild the semantic search index from source files.
-
-    Incrementally updates by default (only re-embeds changed files).
-    Use force=True for a full rebuild.
+    """Bring the docs and code indexes fully up to date (searches already refresh changed files in small batches).
 
     Args:
-        force: If True, drop all data and rebuild from scratch
+        force: Drop everything and re-embed from scratch (minutes on the GPU).
     """
-    from chunker import get_all_chunks
-    from embedder import embed
-    from store import upsert_chunks, rebuild
-
-    chunks = get_all_chunks()
-    if not chunks:
-        return "No chunks found. Check that source files exist."
-
-    texts = [c["content"] for c in chunks]
-    embeddings = embed(texts)
+    from store import clear_all
 
     if force:
-        rebuild(chunks, embeddings)
-        return f"Full rebuild complete. Indexed {len(chunks)} chunks."
-    else:
-        result = upsert_chunks(chunks, embeddings)
-        return (
-            f"Reindex complete. "
-            f"Inserted: {result['inserted']}, "
-            f"Removed: {result['removed']}, "
-            f"Unchanged: {result['unchanged']}. "
-            f"Total: {len(chunks)} chunks."
-        )
+        clear_all()
+    parts = []
+    for corpus in ("docs", "code"):
+        s = _refresh(corpus, None)
+        parts.append(f"{corpus}: {s['files_updated']} files updated, {s['files_removed']} removed, "
+                     f"{s['chunks_embedded']} chunks embedded")
+    return "Reindex complete. " + "; ".join(parts)
 
 
 @mcp.tool()
 def memory_stats() -> str:
-    """Show statistics about the current search index."""
+    """Show what the search indexes hold."""
     from store import get_stats
 
-    stats = get_stats()
-
-    lines = [
-        f"**Hollow Memory Index**",
-        f"Total chunks: {stats['total_chunks']}",
-        f"Last indexed: {stats['last_indexed'] or 'never'}",
-        f"Database: {stats['db_path']}",
-        "",
-        "**By type:**",
-    ]
-    for chunk_type, count in sorted(stats["by_type"].items()):
-        lines.append(f"  - {chunk_type}: {count}")
-
+    s = get_stats()
+    lines = ["**Hollow Memory Index**", f"Database: {s['db_path']}", f"Files: {s['files']}"]
+    lines += [f"{k}: {v}" for k, v in sorted(s["meta"].items())]
+    lines += ["", "**Chunks by kind:**"] + [f"  - {k}: {v}" for k, v in s["by_kind"].items()]
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    # Eager initialization — load DB and model before MCP handshake
-    # so tool calls don't block the stdio event loop
+    import chunker  # noqa: F401
+    from embedder import embed
     from store import init_db
-    from embedder import ensure_model, _get_tokenizer, _get_session
 
     init_db()
-    ensure_model()
-    _get_tokenizer()
-    _get_session()
-
-    print("hollow-memory: ready (94 chunks indexed)", file=sys.stderr)
-    mcp.run()
+    if "--reindex" in sys.argv:
+        print(memory_reindex(force="--force" in sys.argv))
+    else:
+        # On Windows a DLL load deadlocks once the stdio thread blocks reading stdin, so every heavy import and
+        # the first CUDA kernels load before serving; a later reload after an idle unload loads no new DLLs.
+        embed(["warm up"])
+        mcp.run()
