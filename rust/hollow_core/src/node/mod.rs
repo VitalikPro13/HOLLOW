@@ -25,6 +25,7 @@ pub(crate) mod gossip;
 pub(crate) mod gossip_relay;
 pub(crate) mod guest_view;
 pub(crate) mod image_convert;
+pub(crate) mod join_hold;
 pub(crate) mod join_lane;
 pub(crate) mod join_lock;
 pub(crate) mod lock_keeper;

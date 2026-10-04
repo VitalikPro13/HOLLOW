@@ -1744,6 +1744,33 @@ pub(crate) fn is_vc_signal(envelope: &MessageEnvelope) -> bool {
     )
 }
 
+/// Senders whose VC bucket stops refilling, so a test can count its tokens exactly.
+#[cfg(test)]
+static PAUSED_VC_REFILLS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// TEST-ONLY: stop or restart the refill of `sender`'s VC bucket on every node.
+#[cfg(test)]
+pub(crate) fn pause_vc_refill(sender: &str, paused: bool) {
+    let mut senders = PAUSED_VC_REFILLS.lock().unwrap_or_else(|e| e.into_inner());
+    senders.retain(|s| s != sender);
+    if paused {
+        senders.push(sender.to_string());
+    }
+}
+
+/// Whether `sender`'s VC bucket is held at its level; never, outside tests.
+fn vc_refill_paused(sender: &str) -> bool {
+    #[cfg(test)]
+    {
+        PAUSED_VC_REFILLS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|s| s == sender)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = sender;
+        false
+    }
+}
+
 /// Rate-limit gate for VC signaling envelopes (token bucket per peer).
 /// Returns `true` if the call is allowed, `false` if rate-limited.
 pub(crate) fn vc_rate_check(
@@ -1761,7 +1788,7 @@ pub(crate) fn vc_rate_check(
         .or_insert((VC_SIGNAL_RATE_BURST, std::time::Instant::now()));
     let (tokens, last_refill) = entry;
     let elapsed = last_refill.elapsed().as_secs_f64();
-    let refill = (elapsed * VC_SIGNAL_RATE_REFILL as f64) as u32;
+    let refill = if vc_refill_paused(sender_peer_id) { 0 } else { (elapsed * VC_SIGNAL_RATE_REFILL as f64) as u32 };
     if refill > 0 {
         *tokens = (*tokens + refill).min(VC_SIGNAL_RATE_BURST);
         *last_refill = std::time::Instant::now();
@@ -1806,12 +1833,15 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     // Self-echo guard: match BOTH our id forms (an echo carries our DEVICE id;
     // the master compare alone would admit it as a remote participant).
     if sender_peer_id == local_peer_str || sender_peer_id == device_peer_id { return; }
-    // Conferences are virtual servers with no CRDT state: this envelope arrived
-    // MLS-DECRYPTED under the `conf:{id}` group, so the sender provably holds it,
-    // and that IS the membership check. The plaintext path keeps its strict CRDT
-    // guard and conferences never ride it. Channel is always the synthetic "main".
+    // Conferences are virtual servers with no CRDT state, so the group is the
+    // membership: a seat in it now, since a past epoch still decrypts for a device
+    // a commit already took out. Channel is always the synthetic "main".
     let refusal = if super::conference::is_conference_sid(&sid) {
-        (cid != super::conference::CONF_CHANNEL).then_some("not the meeting channel")
+        if !super::conference::seated(&mls.group_leaves(&sid), &sender_peer_id) {
+            Some("no seat in the meeting group")
+        } else {
+            (cid != super::conference::CONF_CHANNEL).then_some("not the meeting channel")
+        }
     } else {
         voice_join_refusal(server_states.get(&sid), &sender_peer_id, &cid)
     };

@@ -593,6 +593,13 @@ impl MessageStore {
                 pickle  TEXT NOT NULL
             )")?;
 
+        // Per sending device, the newest seal time of a frame our sessions decrypted.
+        ddl(conn, "olm_read_marks table",
+            "CREATE TABLE IF NOT EXISTS olm_read_marks (
+                peer_id   TEXT PRIMARY KEY,
+                sealed_ms INTEGER NOT NULL
+            )")?;
+
         ddl(conn, "channel_messages table",
             "CREATE TABLE IF NOT EXISTS channel_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1735,6 +1742,31 @@ impl MessageStore {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
         collect_rows(rows, "olm_sessions")
+    }
+
+    /// Raise a sending device's read mark to `sealed_ms`. It never moves back: two
+    /// processes share this table (the node and the push fetch).
+    pub fn save_olm_read_mark(&self, peer_id: &str, sealed_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO olm_read_marks (peer_id, sealed_ms) VALUES (?1, ?2)
+                 ON CONFLICT(peer_id) DO UPDATE SET sealed_ms = MAX(sealed_ms, excluded.sealed_ms)",
+                params![peer_id, sealed_ms],
+            )
+            .map_err(|e| format!("Failed to save olm read mark: {e}"))?;
+        Ok(())
+    }
+
+    /// Every sending device's read mark, (peer_id, sealed_ms).
+    pub fn load_olm_read_marks(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT peer_id, sealed_ms FROM olm_read_marks")
+            .map_err(|e| format!("Failed to prepare olm_read_marks query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to query olm_read_marks: {e}"))?;
+        collect_rows(rows, "olm_read_marks")
     }
 
     /// Load recent messages for a peer, oldest-first, excluding hidden ones.

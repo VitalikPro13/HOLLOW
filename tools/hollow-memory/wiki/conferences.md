@@ -27,8 +27,17 @@ in `verified_host` (deny, lobby info, end, kick), the knock (`seat_of`, then aga
 `admit_peer`), meeting chat and cards (`handle_inbound_chat`) and the meeting voice join
 (`conference::seated`). A device minted from the identity's master key alone speaks for no
 one wherever we hold its roster; in a stranger's meeting the certificate still decides
-(AR-15). Known gap: a device its roster drops mid-meeting keeps its MLS leaf (the batch tick
-skips `conf:` groups, which have no server state) until kicked or the meeting restarts.
+(AR-15). A device its roster drops mid-meeting loses its seat (session 33): the HOST runs
+`unseat_refused`, one commit per meeting taking out every refused or unbound leaf, at the
+event loop's head once the resolver moves (`SeatWatch`) and on every MLS batch tick (phase 2
+skips `conf:` groups, which have no server state). Device-scoped, so a sibling stays; only
+the host commits. Harness `authz_the_host_unseats_a_device_its_roster_drops_mid_meeting`.
+Any meeting commit that removes leaves (unseat, kick) also ends their CALL: the host and
+each participant merging it run `drop_leafless_from_call` (the `VoiceChannelLeft` a room
+departure emits, so Dart closes the peer; an old SFrame key stays in the 16-key ring and
+would keep its media playing), and the MLS voice join asks `seated` like the plaintext one,
+since a past epoch still decrypts. Harness
+`authz_a_device_out_of_the_meeting_group_loses_its_call_for_good`.
 
 ## Rust core (`rust/hollow_core/src/node/conference.rs`)
 
@@ -39,15 +48,15 @@ skips `conf:` groups, which have no server state) until kicked or the meeting re
 - **Re-knock:** `reknock_if_pending` fires from the PeerJoined + RoomMembers(non-empty) arms — re-sends the request with a FRESH KeyPackage (2s throttle) so knocking on a not-yet-started meeting resolves when the host appears. Cleared on Welcome/denied/ended/leave.
 - **Host gate** (`handle_inbound_join_request`): blocklist FIRST → access-hash compare (mismatch → `ConferenceJoinDenied{wrong_code}`) → `ConferenceLobbyInfo` direct (lobby banner) → auto-admit if waiting room off, else stash pending + emit `ConferenceJoinRequestReceived`.
 - **Admit** (`admit_peer`): `add_member` → merge → persist → `MlsWelcome{server_id: conf sid, channel_id: None}` DIRECT (`send_message_to_peer_in_room`, never first-match lookup) → `broadcast_mls_commit` with epoch guard → local `MlsEpochChanged` (SFrame rotation). The MlsWelcome arm in swarm.rs emits `ConferenceAdmitted` for conf sids and clears the pending knock.
-- **Kick** (`handle_conference_kick`): `remove_identity_leaves` → merge/persist → commit broadcast → `ConferenceKicked` courtesy signal direct. Receiver-side Dart validates by_peer_id is the known host before teardown.
+- **Kick** (`handle_conference_kick`): `remove_identity_leaves` → merge/persist → commit broadcast → `ConferenceKicked` courtesy signal direct → `drop_leafless_from_call` (the kicked device's call ends here even if it never leaves the room). Receiver-side Dart validates by_peer_id is the known host before teardown.
 - **Chat**: `ConferenceChat{conf_id, body}` = MLS application message of `{text, ts}`; RAM-ONLY both ends (never persisted, never rings). Attribution = the authenticated MLS **leaf credential** from `decrypt` (device id; Dart collapses via identityOf), NOT the WS frame sender. Send stamps ride `chat_clock::next_send_stamp_us` via the FFI.
 - **Roster hygiene:** `handle_conf_room_peer_gone` (PeerLeft + RoomMembers-vanished arms) — room presence is a prereq for call presence: drops the peer from `voice_channel_participants["conf:x:main"]` and emits `VoiceChannelLeft` (live tile removal for kicked/crashed/left members whose VoiceChannelLeave raced the host's room-leave). `clear_conf_voice_state` wipes `conf:{id}:*` keys on start/end/leave (restart reuses the same key). Disconnected clears host pending lists.
 
 ## Conference-aware branches OUTSIDE conference.rs (only these)
 
-1. `voice_handler::handle_envelope_voice_channel_join` — conf branch: membership = MLS decrypt success; channel must be `"main"`; PLUS **reply-on-join sync**: if we're already a participant, reply DIRECT with our own plaintext `VoiceChannelJoin` (a freshly-admitted member has no way to learn the pre-existing roster).
+1. `voice_handler::handle_envelope_voice_channel_join` — conf branch: membership = a seat in the group now (`conference::seated`; decrypting is not enough, a past epoch still decrypts for a removed leaf); channel must be `"main"`; PLUS **reply-on-join sync**: if we're already a participant, reply DIRECT with our own plaintext `VoiceChannelJoin` (a freshly-admitted member has no way to learn the pre-existing roster).
 2. swarm.rs plaintext `HavenMessage::VoiceChannelJoin` guard — conf branch: sender must be in the conf group's `group_members` leaf set (only admitted peers pass; keeps phantom-participant spoofing out).
-3. swarm.rs `MlsWelcome` arm — emits `ConferenceAdmitted` + clears pending knock for conf sids.
+3. swarm.rs `MlsWelcome` arm — emits `ConferenceAdmitted` + clears pending knock for conf sids. The `MlsCommit` arm runs `conference::drop_leafless_from_call` for conf sids after the merge.
 4. `message_ops::handle_envelope_channel_message` + `fetch.rs` — DROP ChannelMessage envelopes with conf sids (a modified client must never persist into a conference; live-only invariant).
 
 ## Persistence & FFI

@@ -75,7 +75,8 @@ Binary name: `hollow-relay`
   builds the real relay twice, every switch 1 and every switch 0, listens on 127.0.0.1
   only (`HOLLOW_RELAY_TEST_LOOPBACK`), self-signed cert, random port, and drives it with
   `test/test_relay_live.cpp` (a TLS WebSocket client doing real auth v2): the switches,
-  guest refusals, the fetch slot rule, inbox audiences, D1 door rooms, 145 checks per
+  guest refusals, the fetch slot rule, inbox audiences, D1 door rooms, forwarder rooms,
+  hidden sockets' channel copies, the catch-up end mark, 192 checks per
   build. Negative checks never sleep (a round trip from each side first); each socket
   connects from its own 127.0.x.y; no push token is ever registered (the sidecar on
   127.0.0.1:3001 is production's). Needs the uWebSockets/uSockets submodules and the
@@ -92,13 +93,23 @@ Binary name: `hollow-relay`
   `test_door_room.cpp` (pinned vector shared with Rust).
 - **`Audience`** (`audience()`): `sees` = inbox owners / locked-room provers / everyone;
   `reachable` (directs) = inbox owners / everyone. Every fan-out, discover, check_peers,
-  0x09 in-room test and topic catch-up uses it.
+  0x09 in-room test and topic catch-up uses it. `shares(pid, other)` = `sees(pid)` and the
+  forwarder pairing below: every roster, presence, co-member and broadcast fan-out asks it.
+- **0x09 from a hidden socket** (HOL-SEC-127, session 33): `handle_binary_channel_direct`
+  takes a channel copy or push only from a socket that `sees` the room.
 - **0x0A** = public broadcast, delivered as 0x05; a prover's reaches hidden sockets too.
 - **Lock move** (`relock_room` from `handle_lock_put`): who saw keeps it for
   `door_room::GRACE_MS` (60 s); a stored proof that opens the new door (a lock put back)
   proves at once. `sweep_door_grace` (5 s timer) ends graces: peer_left to provers,
   `members [self] proved:false` to the demoted socket.
 - No new state in the snapshot: proofs die with the socket, the key with the process.
+- **Forwarder rooms** (HOL-SEC-126, session 33, `fwd_room.h`): `fwd:{X}` pairs every member
+  with X (the forwarder the name says, compared with the socket's authenticated id) and
+  nobody else: X sees and reaches everyone, the others only X (roster, presence,
+  check_peers, discover, broadcasts, topics, JSON and binary directs, deposits, 0x09). A
+  `fwd:` room keeps no ring. The VPS forwarder's room holds viewers of every server, so
+  before this anyone joining it saw who watched forwarded shares and when. Unit test
+  `test_fwd_room.cpp`; MockRelay mirrors it (`RelayInner::paired/shares`).
 - Live probe: `~/relay-next/door_probe.py [url] [domain]` (24 checks; mind the 10 new
   connections per minute per address when chaining probes).
 
@@ -1205,7 +1216,7 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 Generalizes the push buffer into user-facing offline delivery. **Availability, never authority**: the relay retains the SAME E2EE Ed25519-signed ciphertext it routes; receivers verify + dedup-by-mid + CRDT-merge exactly as if a peer served it; peer sync stays the correctness floor. RAM-only by design (restart = clean slate; nothing seizable persists).
 
 - **DM tier**: `set_offline_buffer {enabled, retention_secs}` (see offline_buffer bullet above). Dart default ON at 3d (`offlineInboxProvider`/`offlineInboxRetentionProvider`, re-applied from `_bootstrap`; ws_client re-registers on reconnect). Delete-on-replay unchanged.
-- **Channel rings**: `topic_buffers: room+'\0'+topic -> TopicBuffer{frames(0x08 form + sender), bytes, retention, last_registered}`. Registered additively via `set_topic_buffer {room, channels[], retention_secs}` (member must be in room); idle-expire 7d. **`clear:true` is non-destructive since 2026-08** (issue #46): it sets `accepting=false` and drops `retention_secs` to `OFFLINE_RETENTION_MIN_SECS`, so retained frames age out on the normal sweep instead of being erased on demand, and a drained non-accepting ring is reaped immediately. It used to erase every buffer for the room outright — and since the relay authorizes `clear` by room membership alone (it cannot tell an owner from a member, by design), any single member could destroy the shared catch-up state everyone else depended on. Convention said "Owner/Admin toggle site only"; nothing enforced it. Re-registering re-arms `accepting`. Inbound `0x07` frames tee into registered rings (caps 200 msgs / 1MB per channel). `topic_catchup {room, channel, max_age_secs}` replays to the requester, skipping their own frames (MLS can't decrypt own ciphertext) and frames older than `max_age_secs` (client watermark + 30min lookback via `catchup_watermark_age_secs` — stops SecretReuse noise from cross-session re-replay). Deletion = retention expiry, NEVER delivery ("everyone got it" is unknowable without learning membership).
+- **Channel rings**: `topic_buffers: room+'\0'+topic -> TopicBuffer{frames(0x08 form + sender), bytes, retention, last_registered}`. Registered additively via `set_topic_buffer {room, channels[], retention_secs}` (member must be in room); idle-expire 7d. **`clear:true` is non-destructive since 2026-08** (issue #46): it sets `accepting=false` and drops `retention_secs` to `OFFLINE_RETENTION_MIN_SECS`, so retained frames age out on the normal sweep instead of being erased on demand, and a drained non-accepting ring is reaped immediately. It used to erase every buffer for the room outright — and since the relay authorizes `clear` by room membership alone (it cannot tell an owner from a member, by design), any single member could destroy the shared catch-up state everyone else depended on. Convention said "Owner/Admin toggle site only"; nothing enforced it. Re-registering re-arms `accepting`. Inbound `0x07` frames tee into registered rings (caps 200 msgs / 1MB per channel). `topic_catchup {room, channel, max_age_secs}` replays to the requester, skipping their own frames (MLS can't decrypt own ciphertext) and frames older than `max_age_secs` (client watermark + 30min lookback via `catchup_watermark_age_secs` — stops SecretReuse noise from cross-session re-replay). With `end: true` (only a member's `~join` read sends it) the replay is followed by `{type: topic_catchup_done, room, channel}`, an empty or missing ring included, so a member just back judges parked asks only after the verdicts behind them (HOL-SEC-121, session 33); a request without `end` never sees that frame, so 0.11 clients are unaffected. Deletion = retention expiry, NEVER delivery ("everyone got it" is unknowable without learning membership).
 - **Client wiring** (swarm.rs): CRDT setting `relay_catchup_secs` (Owner/Admin `ServerSettingChanged`; ABSENT = default ON 259200s, explicit "0" = off). Per-channel `relay_catchup_done` gate (cleared on Disconnected); catch-up fires on RoomMembers sweep AND on `SubscribeChannels` (channel open). `register_relay_catchup` re-registers on toggle, connect, channel open, channel create.
 - **MLS late-delivery windows** (mls_manager.rs `hollow_join_config`): `out_of_order_tolerance=512`, `maximum_forward_distance=2000`, `max_past_epochs=3`, applied at create/join AND upgraded onto loaded groups via `set_configuration` — OpenMLS defaults (5, 1000, 0) made replayed ring frames permanently undecryptable after newer traffic or an epoch bump.
 - **Iron rule**: anything that must reach OFFLINE channel members rides `0x07` topic frames — 0x03 room broadcasts and targeted direct sends are invisible to the rings (channel FileHeaders + file companion messages were both moved to `send_mls_broadcast_topic`).

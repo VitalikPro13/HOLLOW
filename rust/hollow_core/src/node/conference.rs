@@ -753,12 +753,16 @@ pub(crate) fn handle_conference_deny(
 /// (Host) kick a CURRENT member: MLS remove commit (cryptographic cutoff —
 /// the next SFrame rotation locks them out of media too), room-broadcast the
 /// commit, then the courtesy teardown signal so their UI leaves cleanly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_conference_kick(
     conference_host: &mut HashMap<String, ConferenceHostState>,
     mls: &mut Option<MlsManager>,
     crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    voice_channel_participants: &mut HashMap<String, HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    device_peer_id: &str,
     conf_id: &str,
     peer_id: &str,
 ) {
@@ -792,7 +796,131 @@ pub(crate) async fn handle_conference_kick(
             channel_id: None,
         }).await;
     }
+    drop_leafless_from_call(mls_mgr, voice_channel_participants, voice_channel_gossip_mode, event_tx, &sid, device_peer_id).await;
     hollow_log!("[HOLLOW-CONF] Kicked {peer_id} from conference {conf_id}");
+}
+
+/// Devices in a meeting's call that hold no leaf in its group any more leave the call as
+/// if they had left the room, so Dart closes their peer: their old SFrame key stays in
+/// every key ring. With no group left (we were evicted), that is everyone but us.
+pub(crate) async fn drop_leafless_from_call(
+    mls_mgr: &MlsManager,
+    voice_channel_participants: &mut HashMap<String, HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sid: &str,
+    device_peer_id: &str,
+) {
+    Box::pin(drop_leafless_from_call_inner(
+        mls_mgr, voice_channel_participants, voice_channel_gossip_mode, event_tx, sid, device_peer_id,
+    ))
+    .await
+}
+
+async fn drop_leafless_from_call_inner(
+    mls_mgr: &MlsManager,
+    voice_channel_participants: &mut HashMap<String, HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sid: &str,
+    device_peer_id: &str,
+) {
+    let leaves = mls_mgr.group_members(sid);
+    let gone: Vec<String> = voice_channel_participants
+        .get(&format!("{sid}:{CONF_CHANNEL}"))
+        .map(|call| call.iter().filter(|d| d.as_str() != device_peer_id && !leaves.contains(d)).cloned().collect())
+        .unwrap_or_default();
+    for device in gone {
+        hollow_log!("[HOLLOW-CONF] {device} holds no leaf in {sid} any more: out of its call");
+        handle_conf_room_peer_gone(voice_channel_participants, voice_channel_gossip_mode, event_tx, sid, &device).await;
+    }
+}
+
+/// Notices each move of the resolver, after which the seats of the meetings we host
+/// are judged again.
+#[derive(Default)]
+pub(crate) struct SeatWatch(u64);
+
+impl SeatWatch {
+    /// True once for each move of the resolver since the last call.
+    pub(crate) fn moved(&mut self) -> bool {
+        let now = super::resolver::epoch();
+        std::mem::replace(&mut self.0, now) != now
+    }
+}
+
+/// (Host) take every leaf that holds no seat out of each meeting we host, in one commit
+/// per meeting: a device its master's roster stopped counting must not read the next
+/// epoch. Idempotent, so the event loop's head and the batch tick both run it; boxed, as
+/// the loop head's future sits at the edge of the worker stack.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn unseat_refused(
+    conference_host: &HashMap<String, ConferenceHostState>,
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    voice_channel_participants: &mut HashMap<String, HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    device_peer_id: &str,
+) {
+    Box::pin(unseat_refused_inner(
+        conference_host, mls_mgr, crypto_store, ws_cmd_tx, event_tx,
+        voice_channel_participants, voice_channel_gossip_mode, device_peer_id,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn unseat_refused_inner(
+    conference_host: &HashMap<String, ConferenceHostState>,
+    mls_mgr: &mut MlsManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    voice_channel_participants: &mut HashMap<String, HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    device_peer_id: &str,
+) {
+    for sid in mls_mgr.group_ids() {
+        let Some(conf_id) = conf_id_from_sid(&sid) else { continue };
+        // Participants accept the host's commits only.
+        if !conference_host.contains_key(conf_id) {
+            continue;
+        }
+        let gone: Vec<String> = mls_mgr
+            .group_leaves(&sid)
+            .into_iter()
+            .filter(|leaf| leaf.id() != device_peer_id && leaf.bound().is_none_or(refused))
+            .map(|leaf| leaf.id().to_string())
+            .collect();
+        if gone.is_empty() {
+            continue;
+        }
+        let done = match mls_mgr.commit_membership(&sid, &gone, &[]) {
+            Ok(done) => done,
+            Err(e) => {
+                hollow_log!("[HOLLOW-CONF] Could not unseat {gone:?} from {conf_id}: {e}");
+                continue;
+            }
+        };
+        if let Err(e) = mls_mgr.merge_pending_commit(&sid) {
+            hollow_log!("[HOLLOW-CONF] Unseat merge failed for {conf_id}: {e}");
+            continue;
+        }
+        persist_mls_state(mls_mgr, crypto_store);
+        let epoch = mls_mgr.epoch(&sid).ok();
+        broadcast_mls_commit(mls_mgr, ws_cmd_tx, &sid, None,
+            base64::engine::general_purpose::STANDARD.encode(&done.commit), epoch);
+        if let Ok(sframe_key) = mls_mgr.export_secret(&sid, "sframe", b"", 32) {
+            let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
+                server_id: sid.clone(), epoch: epoch.unwrap_or(0), sframe_key,
+                channel_id: None,
+            }).await;
+        }
+        drop_leafless_from_call(mls_mgr, voice_channel_participants, voice_channel_gossip_mode, event_tx, &sid, device_peer_id).await;
+        hollow_log!("[HOLLOW-SECURITY] Unseated {:?} from conference {conf_id}: their masters' rosters no longer count them", done.removed);
+    }
 }
 
 // ── Chat and cards (RAM-only, MLS application messages) ──────────────
@@ -1125,6 +1253,41 @@ mod tests {
         resolver::mark_revoked(&["dev-a".to_string()]);
         assert!(!seated(&leaves, "dev-a"), "a removed device");
         resolver::clear_for_test();
+    }
+
+    #[test]
+    fn a_seat_watch_fires_once_per_move_of_the_resolver() {
+        use crate::node::resolver;
+        let _g = resolver::test_lock();
+        let mut watch = SeatWatch::default();
+        watch.moved();
+        assert!(!watch.moved(), "nothing moved since the last look");
+        resolver::update("seat-watch-device", "seat-watch-master");
+        assert!(watch.moved(), "a roster change moves the resolver");
+        assert!(!watch.moved(), "one sweep per move");
+        resolver::clear_for_test();
+    }
+
+    /// HOL-SEC-123: the meetings we host are swept at the event loop's head once the
+    /// resolver moved (where a roster change lands), and again on every MLS batch tick.
+    #[test]
+    fn meeting_seats_follow_the_roster_stay_wired() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node").join("swarm.rs");
+        let swarm = std::fs::read_to_string(path).expect("read swarm.rs").replace("\r\n", "\n");
+        let between = |from: &str, to: &str| -> String {
+            let start = swarm.find(from).unwrap_or_else(|| panic!("missing {from}"));
+            let end = swarm[start..].find(to).unwrap_or_else(|| panic!("missing {to} after {from}"));
+            swarm[start..start + end].to_string()
+        };
+        let head = between("loop_stall.check(arm, name, t0);", "tokio::select! {");
+        assert!(
+            head.contains("if seat_watch.moved()") && head.contains("conference::unseat_refused("),
+            "the loop head no longer sweeps hosted meetings when the resolver moves",
+        );
+        assert!(
+            between("_ = mls_batch_timer.tick() => {", "// Phase 3:").contains("conference::unseat_refused("),
+            "the MLS batch tick no longer sweeps hosted meetings",
+        );
     }
 
     /// S-26: the knock proves the code for its own device and meeting, so a proof

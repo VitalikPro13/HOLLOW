@@ -693,6 +693,86 @@ static void test_rings() {
           !got(*late, bin(frame(0x08, {server, forged, a->id.peer}, "ring-forged"))));
 }
 
+// Every frame up to and including the first that matches `pred`, in arrival order.
+static std::vector<Frame> through(Peer& p, const Pred& pred, int timeout_ms = WAIT_MS) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        for (size_t i = 0; i < p.ws.inbox.size(); i++) {
+            if (pred(p.ws.inbox[i])) {
+                std::vector<Frame> out(p.ws.inbox.begin(), p.ws.inbox.begin() + static_cast<long>(i) + 1);
+                p.ws.inbox.erase(p.ws.inbox.begin(), p.ws.inbox.begin() + static_cast<long>(i) + 1);
+                return out;
+            }
+        }
+        if (left_ms(deadline) <= 0 || !p.ws.pump(left_ms(deadline))) return {};
+    }
+}
+
+static void test_catchup_end_mark() {
+    printf("catch-up end mark (HOL-SEC-121)\n");
+    // A legacy (32-hex) server: its ring opens in either build.
+    Ident owner, change;
+    Door door;
+    const std::string server = random_hex(16);
+    auto a = login(Ident());
+    a->send({{"type", "lock_put"}, {"server", server}, {"owner", owner.peer},
+             {"links", base_link(server, door, change, owner, "", false)}});
+    auto put = next_json(*a, typed("lock_chain"));
+    check("the relay takes the server's lock", put && put->value("put", false));
+    join(*a, server);
+    const std::string topic = owner.peer + ".~join";
+    a->send(ring_control(server, owner.peer, {topic}, change));
+    a->send_bin(frame(0x07, {server, topic}, "mark-one"));
+    a->send_bin(frame(0x07, {server, topic}, "mark-two"));
+    auto late = login(Ident());
+    join(*late, server);
+    settle({a.get(), late.get()});
+    late->ws.inbox.clear();
+
+    const auto with_end = [](json j) {
+        j["end"] = true;
+        return j;
+    };
+    const auto marked = [&](const std::string& channel) {
+        return json_where([server, channel](const json& j) {
+            return j.value("type", "") == "topic_catchup_done" && j.value("room", "") == server &&
+                   j.value("channel", "") == channel;
+        });
+    };
+    late->send(with_end(catchup(server, topic)));
+    const auto upto = through(*late, marked(topic));
+    const auto has = [&](const std::string& payload) {
+        const std::string want = frame(0x08, {server, topic, a->id.peer}, payload);
+        for (size_t i = 0; i + 1 < upto.size(); i++) {
+            if (!upto[i].text && upto[i].data == want) return true;
+        }
+        return false;
+    };
+    check("a catch-up that asks for its end gets the mark", !upto.empty());
+    check("behind every frame of the replay", has("mark-one") && has("mark-two"));
+
+    late->send(catchup(server, topic));
+    settle({late.get()});
+    check("a catch-up that does not ask gets the replay and no mark",
+          got(*late, bin(frame(0x08, {server, topic, a->id.peer}, "mark-two"))) && !got(*late, typed("topic_catchup_done")));
+
+    const std::string empty = owner.peer + ".none";
+    late->send(with_end(catchup(server, empty)));
+    check("a ring the relay never kept is marked too", next(*late, marked(empty)).has_value());
+
+    json odd = catchup(server, topic);
+    odd["end"] = "yes";
+    late->send(odd);
+    settle({late.get()});
+    check("an end that is not true asks for nothing", !got(*late, typed("topic_catchup_done")));
+
+    auto outsider = login(Ident());
+    outsider->send(with_end(catchup(server, topic)));
+    settle({outsider.get()});
+    check("a socket outside the room is told nothing",
+          !got(*outsider, typed("topic_catchup_done")) && !got(*outsider, bin(frame(0x08, {server, topic, a->id.peer}, "mark-one"))));
+}
+
 static void test_inbox_proof() {
     printf("inbox proof (ACCEPT_DEVICE_LIST_INBOX_PROOF %s)\n", g_legacy ? "on" : "off");
     Ident master, d1, d2;
@@ -792,6 +872,134 @@ static void test_inbox_audience() {
     check("and only the other owner to an owner", discover(*o1, room) == std::set<std::string>{d2.peer});
     check("check_peers tells the non-owner of no owner", online(*n, {d1.peer, d2.peer}).empty());
     check("nor an owner of the non-owner", online(*o1, {n->id.peer, d2.peer}) == std::set<std::string>{d2.peer});
+}
+
+// A forwarder's room `fwd:{X}` serves viewers from every server: X sees and reaches all
+// of them, each of them only X (HOL-SEC-126).
+static void test_forwarder_rooms() {
+    printf("forwarder rooms: a member meets only the forwarder\n");
+    auto x = login(Ident());
+    const std::string room = "fwd:" + x->id.peer;
+    const std::string fwd = x->id.peer;
+    auto mx = join(*x, room);
+    check("the forwarder sees itself", mx && peers_of(*mx) == std::set<std::string>{fwd});
+    auto a = login(Ident());
+    auto ma = join(*a, room);
+    check("a viewer sees the forwarder", ma && peers_of(*ma) == std::set<std::string>{fwd, a->id.peer});
+    check("the forwarder is told of it", next(*x, about("peer_joined", room, a->id.peer)).has_value());
+    auto s = login(Ident());
+    auto ms = join(*s, room);
+    check("a stranger sees the forwarder and not the viewer",
+          ms && peers_of(*ms) == std::set<std::string>{fwd, s->id.peer});
+    check("the forwarder is told of the stranger", next(*x, about("peer_joined", room, s->id.peer)).has_value());
+    settle({s.get(), a.get()});
+    check("the viewer is not", !got(*a, about("peer_joined", room, s->id.peer)));
+    check("discovery names only the forwarder to a member", discover(*s, room) == std::set<std::string>{fwd});
+    check("and every member to the forwarder", discover(*x, room) == std::set<std::string>{a->id.peer, s->id.peer});
+    check("check_peers tells a member of no other member", online(*s, {a->id.peer, fwd}) == std::set<std::string>{fwd});
+    check("and the forwarder of every member",
+          online(*x, {a->id.peer, s->id.peer}) == std::set<std::string>{a->id.peer, s->id.peer});
+
+    s->send_bin(frame(0x03, {room}, "s-bcast"));
+    s->send({{"type", "msg"}, {"room", room}, {"data", "s-msg"}});
+    s->send_bin(frame(0x07, {room, "t"}, "s-topic"));
+    s->send_bin(frame(0x0A, {room}, "s-public"));
+    check("a member's broadcast reaches the forwarder", next(*x, bin(frame(0x05, {room, s->id.peer}, "s-bcast"))).has_value());
+    check("its message too", next(*x, json_where([](const json& j) { return j.value("data", "") == "s-msg"; })).has_value());
+    check("its topic frame too", next(*x, bin(frame(0x08, {room, "t", s->id.peer}, "s-topic"))).has_value());
+    check("its public frame too", next(*x, bin(frame(0x05, {room, s->id.peer}, "s-public"))).has_value());
+    settle({s.get(), a.get()});
+    check("no other member hears its broadcast", !got(*a, bin(frame(0x05, {room, s->id.peer}, "s-bcast"))));
+    check("message", !got(*a, json_where([](const json& j) { return j.value("data", "") == "s-msg"; })));
+    check("topic frame", !got(*a, bin(frame(0x08, {room, "t", s->id.peer}, "s-topic"))));
+    check("or public frame", !got(*a, bin(frame(0x05, {room, s->id.peer}, "s-public"))));
+    x->send_bin(frame(0x03, {room}, "x-bcast"));
+    check("the forwarder's broadcast reaches every member",
+          next(*a, bin(frame(0x05, {room, fwd}, "x-bcast"))).has_value() &&
+              next(*s, bin(frame(0x05, {room, fwd}, "x-bcast"))).has_value());
+
+    s->send_bin(frame(0x04, {room, a->id.peer}, "s-direct"));
+    s->send_bin(frame(0x08, {room, a->id.peer}, "s-image"));
+    s->send_bin(frame(0x02, {room, a->id.peer}, "s-raw"));
+    s->send({{"type", "direct"}, {"room", room}, {"target", a->id.peer}, {"data", "s-json"}});
+    s->send_bin(frame(0x04, {room, fwd}, "s-to-x"));
+    x->send_bin(frame(0x04, {room, s->id.peer}, "x-to-s"));
+    check("a member's direct reaches the forwarder", next(*x, bin(frame(0x06, {room, s->id.peer}, "s-to-x"))).has_value());
+    check("the forwarder's reaches a member", next(*s, bin(frame(0x06, {room, fwd}, "x-to-s"))).has_value());
+    settle({s.get(), a.get()});
+    check("a member's direct reaches no other member (0x04)", !got(*a, bin(frame(0x06, {room, s->id.peer}, "s-direct"))));
+    check("(0x08)", !got(*a, bin(frame(0x06, {room, s->id.peer}, "s-image"))));
+    check("(0x02)", !got(*a, bin(frame(0x02, {room, s->id.peer}, "s-raw"))));
+    check("(JSON)", !got(*a, json_where([](const json& j) { return j.value("data", "") == "s-json"; })));
+
+    // Deposits for a member not in the room, and for one in a room nobody is in yet.
+    Ident later, y;
+    const std::string empty = "fwd:" + y.peer;
+    s->send_bin(frame(0x04, {room, later.peer}, "s-deposit"));
+    s->send({{"type", "direct"}, {"room", room}, {"target", later.peer}, {"data", "s-json-deposit"}});
+    s->send_bin(channel_frame(room, later.peer, "c", "s-chan"));
+    s->send_bin(frame(0x04, {empty, later.peer}, "s-empty-deposit"));
+    s->send_bin(frame(0x04, {empty, y.peer}, "s-to-absent-forwarder"));
+    x->send_bin(frame(0x04, {room, later.peer}, "x-deposit"));
+    settle({s.get(), x.get()});
+    auto l = login(later);
+    join(*l, room);
+    check("the forwarder's deposit waits for an absent member", next(*l, bin(frame(0x06, {room, fwd}, "x-deposit"))).has_value());
+    join(*l, empty);
+    auto yy = login(y);
+    join(*yy, empty);
+    check("a deposit for an absent forwarder waits for it",
+          next(*yy, bin(frame(0x06, {empty, s->id.peer}, "s-to-absent-forwarder"))).has_value());
+    settle({l.get()});
+    check("another member's waits for nobody (0x04)", !got(*l, bin(frame(0x06, {room, s->id.peer}, "s-deposit"))));
+    check("(JSON)", !got(*l, bin(frame(0x06, {room, s->id.peer}, "s-json-deposit"))));
+    check("(0x09)", !got(*l, bin(frame(0x06, {room, s->id.peer}, "s-chan"))));
+    check("(a room nobody was in)", !got(*l, bin(frame(0x06, {empty, s->id.peer}, "s-empty-deposit"))));
+
+    s->send(unsigned_ring_control(room, {"fc"}));
+    s->send_bin(frame(0x07, {room, "fc"}, "s-ring"));
+    settle({s.get(), l.get()});
+    l->ws.inbox.clear();  // a live copy is the fan-out's to refuse, not the ring's
+    l->send(catchup(room, "fc"));
+    settle({l.get()});
+    check("a forwarder's room keeps no ring", !got(*l, bin(frame(0x08, {room, "fc", s->id.peer}, "s-ring"))));
+
+    a->send({{"type", "leave"}, {"room", room}});
+    check("a member's leave is told to the forwarder", next(*x, about("peer_left", room, a->id.peer)).has_value());
+    settle({a.get(), s.get()});
+    check("and to no other member", !got(*s, about("peer_left", room, a->id.peer)));
+    x->send({{"type", "leave"}, {"room", room}});
+    check("the forwarder's leave is told to every member", next(*s, about("peer_left", room, fwd)).has_value() &&
+                                                                next(*l, about("peer_left", room, fwd)).has_value());
+}
+
+// In a locked server room a channel copy (0x09) and its wake come only from a socket
+// that sees the room (HOL-SEC-127).
+static void test_hidden_channel_copies() {
+    printf("door rooms (D1): a hidden socket leaves no channel copy\n");
+    Ident owner, change, target;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string room = genesis_server_id(owner.peer, nonce);
+    auto p = login(Ident());
+    p->send({{"type", "lock_put"}, {"server", room}, {"owner", ""},
+             {"links", base_link(room, door, change, owner, nonce, true)}});
+    auto put = next_json(*p, typed("lock_chain"));
+    check("the relay takes the server's first lock", put && put->value("put", false));
+    auto mp = join(*p, room, {{"door_proof", door_proof(*p, room, door)}});
+    check("a member proves the door", mp && mp->value("proved", false));
+    auto h = login(Ident());
+    auto mh = join(*h, room);
+    check("a socket without a proof is hidden", mh && !mh->value("proved", true));
+    h->send_bin(channel_frame(room, target.peer, "hc", "hidden-chan"));
+    p->send_bin(channel_frame(room, target.peer, "hc", "prover-chan"));
+    settle({h.get(), p.get()});
+    auto t = login(target);
+    join(*t, room);
+    check("a prover's channel copy waits for its target",
+          next(*t, bin(frame(0x06, {room, p->id.peer}, "prover-chan"))).has_value());
+    settle({t.get()});
+    check("a hidden socket's is never kept", !got(*t, bin(frame(0x06, {room, h->id.peer}, "hidden-chan"))));
 }
 
 static void test_guests() {
@@ -1171,8 +1379,11 @@ int main(int argc, char** argv) {
     test_auth();
     test_nicknames();
     test_rings();
+    test_catchup_end_mark();
     test_inbox_proof();
     test_inbox_audience();
+    test_forwarder_rooms();
+    test_hidden_channel_copies();
     test_guests();
     test_fetch();
     test_door_rooms();

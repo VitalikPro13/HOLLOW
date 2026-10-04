@@ -4,6 +4,7 @@
 #include "ring_auth.h"
 #include "crypto.h"
 #include "device_list.h"
+#include "fwd_room.h"
 #include "kill_order.h"
 #include "roster_crypto.h"
 #include "validate.h"
@@ -132,23 +133,31 @@ static const LockLink* room_lock(const RelayState& state, const std::string& roo
 // Who in one room sees it (the roster, presence, broadcasts and rings) and whom a
 // direct may reach. An inbox shows its owners only, to each other and to nobody
 // else; a door-locked server room shows its provers only, but a direct still reaches
-// anyone in it, because a member chooses whom to address.
+// anyone in it, because a member chooses whom to address. A forwarder's room pairs
+// each member with the forwarder alone (fwd_room.h).
 struct Audience {
     const WsRoom& room;
     bool inbox = false;
     bool locked = false;
     int64_t now_ms = 0;
+    std::string_view name;
 
     bool sees(const std::string& peer) const {
         if (inbox) return room.owners.count(peer) != 0;
         return !locked || room.doors.sees(peer, now_ms);
     }
 
+    // Whether `pid` sees the room and may know of `other` there: list it, be told it
+    // came or went, hear its broadcasts.
+    bool shares(const std::string& pid, const std::string& other) const {
+        return sees(pid) && fwd_room::paired(name, pid, other);
+    }
+
     bool reachable(const std::string& peer) const { return !inbox || room.owners.count(peer) != 0; }
 };
 
 static Audience audience(const RelayState& state, const WsRoom& room, const std::string& name) {
-    return Audience{room, is_inbox_room(name), room_lock(state, name) != nullptr, steady_ms()};
+    return Audience{room, is_inbox_room(name), room_lock(state, name) != nullptr, steady_ms(), name};
 }
 
 // "Is `x` in one of the same rooms as `caller`" is the only relationship the
@@ -174,7 +183,7 @@ static std::unordered_set<std::string> collect_room_co_members(
         if (!aud.sees(caller)) continue;
         for (const auto& [pid, sock] : rit->second.peers) {
             (void)sock;
-            if (!aud.sees(pid)) continue;
+            if (!aud.shares(pid, caller)) continue;
             if (budget == 0) return members;
             budget--;
             members.insert(pid);
@@ -674,7 +683,7 @@ static void announce_door_change(const WsRoom& room, const Audience& aud, const 
                                  const std::string& peer, const char* type) {
     std::string frame = json{{"type", type}, {"room", room_name}, {"peer_id", peer}}.dump();
     for (const auto& [pid, sock] : room.peers) {
-        if (pid != peer && !sock->getUserData()->is_guest && aud.sees(pid)) {
+        if (pid != peer && !sock->getUserData()->is_guest && aud.shares(pid, peer)) {
             send_to_peer(sock, frame, uWS::OpCode::TEXT);
         }
     }
@@ -774,7 +783,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     if (visible) {
         for (auto& [pid, peer_ws] : ws_room.peers) {
             auto* pd = peer_ws->getUserData();
-            if (pid != data->peer_id && !pd->is_guest && !pd->is_fetch && aud.sees(pid)) {
+            if (pid != data->peer_id && !pd->is_guest && !pd->is_fetch && aud.shares(pid, data->peer_id)) {
                 existing_peers.push_back(pid);
             }
         }
@@ -1756,18 +1765,25 @@ static void handle_topic_catchup(SSLWebSocket* ws, PerSocketData* data,
     key.push_back('\0');
     key += channel;
     auto it = state.topic_buffers.find(key);
-    if (it == state.topic_buffers.end()) return;
-    // Age filter: the client passes its channel watermark age (+lookback) so
-    // frames it already holds aren't re-replayed every session. 0 = all.
-    int64_t max_age = j.value("max_age_secs", (int64_t)0);
-    auto now = std::chrono::steady_clock::now();
-    for (const auto& f : it->second.frames) {
-        if (f.sender == data->peer_id) continue;  // never echo own frames
-        if (max_age > 0) {
-            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - f.at).count();
-            if (age > max_age) continue;
+    if (it != state.topic_buffers.end()) {
+        // Age filter: the client passes its channel watermark age (+lookback) so
+        // frames it already holds aren't re-replayed every session. 0 = all.
+        int64_t max_age = j.value("max_age_secs", (int64_t)0);
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& f : it->second.frames) {
+            if (f.sender == data->peer_id) continue;  // never echo own frames
+            if (max_age > 0) {
+                auto age = std::chrono::duration_cast<std::chrono::seconds>(now - f.at).count();
+                if (age > max_age) continue;
+            }
+            send_to_peer(ws, f.frame, uWS::OpCode::BINARY);
         }
-        send_to_peer(ws, f.frame, uWS::OpCode::BINARY);
+    }
+    // Asked for, the end of the replay is marked behind its last frame, an empty or
+    // missing ring included; a client that never asks never sees this frame type.
+    auto end = j.find("end");
+    if (end != j.end() && end->is_boolean() && end->get<bool>()) {
+        send_json(ws, {{"type", "topic_catchup_done"}, {"room", room}, {"channel", channel}});
     }
 }
 
@@ -1866,11 +1882,15 @@ static void handle_binary_channel_direct(PerSocketData* data,
     // peer id and not whatever the sender felt like typing (RELAY-1). Dropped
     // in silence: a well-formed client never sends one of these.
     if (!is_peer_id_shape(target_str)) return;
+    if (!fwd_room::paired(room_str, data->peer_id, target_str)) return;
 
-    // Sender must actually be in the server room it claims to post to.
+    // Sender must actually be in the server room it claims to post to, and see it: a
+    // socket a locked room hides may be anyone holding the server id.
     auto rit = state.ws_rooms.find(room_str);
     if (rit == state.ws_rooms.end()) return;
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
+    const Audience aud = audience(state, rit->second, room_str);
+    if (!aud.sees(data->peer_id)) return;
 
     // Buffer whenever the target is NOT in the server room — a member who IS
     // in the room already got the topic broadcast. Mirrors the 0x04 DM fix for
@@ -1878,8 +1898,7 @@ static void handle_binary_channel_direct(PerSocketData* data,
     // "connected" per peer_sockets does NOT mean the member received the room
     // broadcast, and the old full-return here silently dropped the copy.
     // A member hidden by a locked room missed the broadcast too.
-    bool in_room = rit->second.peers.find(target_str) != rit->second.peers.end() &&
-                   audience(state, rit->second, room_str).sees(target_str);
+    bool in_room = rit->second.peers.find(target_str) != rit->second.peers.end() && aud.sees(target_str);
     bool fully_offline = state.peer_sockets.find(target_str) == state.peer_sockets.end();
     if (in_room) return;
 
@@ -1920,7 +1939,7 @@ static void handle_msg(PerSocketData* data, const std::string& room,
     std::string broadcast_str = broadcast.dump();
     const Audience aud = audience(state, rit->second, room);
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id && aud.sees(pid)) {
+        if (pid != data->peer_id && aud.shares(pid, data->peer_id)) {
             send_to_peer(peer_ws, broadcast_str, uWS::OpCode::TEXT);
         }
     }
@@ -1934,6 +1953,7 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     if (data->is_guest) return;
     // The target becomes an offline_buffer KEY on the miss path below.
     if (!is_peer_id_shape(target)) return;
+    if (!fwd_room::paired(room, data->peer_id, target)) return;
 
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
@@ -2019,6 +2039,7 @@ static void handle_binary_direct(PerSocketData* data,
     // Nothing is stored on this path, but the id is still attacker-supplied and
     // names who the frame is forwarded to — hold it to the same shape.
     if (!is_peer_id_shape(target_str)) return;
+    if (!fwd_room::paired(room_str, data->peer_id, target_str)) return;
     auto tit = rit->second.peers.find(target_str);
     if (tit == rit->second.peers.end()) return;
     if (!audience(state, rit->second, room_str).reachable(target_str)) return;
@@ -2072,7 +2093,7 @@ static void handle_binary_msg(PerSocketData* data,
     const Audience aud = audience(state, rit->second, room_str);
     const bool public_frame = to_all && aud.locked && aud.sees(data->peer_id);
     for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id && (public_frame || aud.sees(pid))) {
+        if (pid != data->peer_id && (public_frame || aud.shares(pid, data->peer_id))) {
             send_to_peer(peer_ws, forwarded, uWS::OpCode::BINARY);
         }
     }
@@ -2110,6 +2131,8 @@ static void handle_binary_direct_msg(PerSocketData* data,
     // this, that key space was "anything an authenticated peer cares to type" —
     // the RELAY-1 memory-growth primitive. Silent drop, no reply, no log.
     if (!is_peer_id_shape(target_str)) return;
+    // In a forwarder's room, live or deposited, only the forwarder and one member.
+    if (!fwd_room::paired(room_str, data->peer_id, target_str)) return;
 
     auto rit = state.ws_rooms.find(room_str);
     if (rit == state.ws_rooms.end()) {
@@ -2254,14 +2277,15 @@ static void handle_binary_topic_msg(PerSocketData* data,
 
     // Tee into the channel's ring buffer when registered (server owner opted
     // into relay catch-up). Ciphertext only; per-channel caps + retention +
-    // the global budget bound RAM. One stored copy serves every late joiner.
+    // the global budget bound RAM. One stored copy serves every late joiner, so
+    // a forwarder's room, whose members never meet, keeps none.
     {
         std::string key = room_str;
         key.push_back('\0');
         key += topic_str;
         auto tit = state.topic_buffers.find(key);
         if (tit != state.topic_buffers.end() && tit->second.accepting &&
-            forwarded.size() <= MAX_RING_FRAME_BYTES) {
+            forwarded.size() <= MAX_RING_FRAME_BYTES && !fwd_room::forwarder_of(room_str)) {
             auto& tb = tit->second;
             const uint64_t share = socket_share(state, data);
             uint64_t seq = state.buffer_index.stamp(key, true, share, forwarded.size());
@@ -2286,7 +2310,7 @@ static void handle_binary_topic_msg(PerSocketData* data,
     const Audience aud = audience(state, rit->second, room_str);
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid == data->peer_id) continue;
-        if (!aud.sees(pid)) continue;
+        if (!aud.shares(pid, data->peer_id)) continue;
 
         auto* peer_data = peer_ws->getUserData();
         auto sit = peer_data->subscriptions.find(room_str);
@@ -2753,7 +2777,8 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                 const bool sees = aud.sees(data->peer_id);
                 for (const auto& [pid, sock] : rit->second.peers) {
                     const auto* pd = sock->getUserData();
-                    if (sees && pid != data->peer_id && !pd->is_guest && !pd->is_fetch && aud.sees(pid)) {
+                    if (sees && pid != data->peer_id && !pd->is_guest && !pd->is_fetch &&
+                        aud.shares(pid, data->peer_id)) {
                         peers.push_back(pid);
                     }
                 }

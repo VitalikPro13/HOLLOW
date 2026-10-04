@@ -7,6 +7,7 @@ pub(crate) enum CryptoStoreCmd {
     SaveAccount(String),
     SaveSession { peer_id: String, pickle: String },
     DeleteSession { peer_id: String },
+    SaveReadMark { peer_id: String, sealed_ms: i64 },
     SaveMlsIdentity { signer: Vec<u8>, credential: Vec<u8>, storage: Vec<u8> },
 }
 
@@ -51,6 +52,11 @@ impl CryptoStore {
                             hollow_log!("CryptoStore: failed to delete session for {peer_id}: {e}");
                         }
                     }
+                    CryptoStoreCmd::SaveReadMark { peer_id, sealed_ms } => {
+                        if let Err(e) = store.save_olm_read_mark(&peer_id, sealed_ms) {
+                            hollow_log!("CryptoStore: failed to save read mark for {peer_id}: {e}");
+                        }
+                    }
                     CryptoStoreCmd::SaveMlsIdentity { signer, credential, storage } => {
                         if let Err(e) = store.save_mls_identity(&signer, &credential, &storage) {
                             hollow_log!("CryptoStore: failed to save MLS identity: {e}");
@@ -79,6 +85,11 @@ impl CryptoStore {
     /// Fire-and-forget: delete a persisted Olm session.
     pub fn delete_session(&self, peer_id: String) {
         let _ = self.cmd_tx.send(CryptoStoreCmd::DeleteSession { peer_id });
+    }
+
+    /// Fire-and-forget: raise a sending device's read mark.
+    pub fn save_read_mark(&self, peer_id: String, sealed_ms: i64) {
+        let _ = self.cmd_tx.send(CryptoStoreCmd::SaveReadMark { peer_id, sealed_ms });
     }
 
     /// Fire-and-forget: persist MLS identity (signer, credential, storage).

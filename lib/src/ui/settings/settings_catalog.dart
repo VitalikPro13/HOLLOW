@@ -88,7 +88,7 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Appear invisible', SettingsCategory.profile, 'offline hidden presence'),
   SettingsSearchEntry('Twitch', SettingsCategory.profile, 'connection stream verified'),
   SettingsSearchEntry('Your art', SettingsCategory.profile, 'shop pack wear hollowpack'),
-  SettingsSearchEntry('Support marks', SettingsCategory.profile, 'mark redeem code receipt'),
+  SettingsSearchEntry('Supporter badges', SettingsCategory.profile, 'badge mark redeem code receipt'),
   SettingsSearchEntry('Password', SettingsCategory.security, 'app lock password encrypt'),
   SettingsSearchEntry('Lock after', SettingsCategory.security, 'idle lock now timeout'),
   SettingsSearchEntry('Duress code', SettingsCategory.security, 'wipe panic'),

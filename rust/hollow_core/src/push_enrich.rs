@@ -124,11 +124,8 @@ fn fetch_and_decrypt(
 
     let mut olm = {
         let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
-        match store.load_olm_account()? {
-            Some(account_json) => {
-                let sessions = store.load_all_olm_sessions()?;
-                OlmManager::from_pickles(&account_json, sessions)?
-            }
+        match OlmManager::load(&store)? {
+            Some(olm) => olm,
             None => return Ok("[]".to_string()),
         }
     };

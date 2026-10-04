@@ -2396,6 +2396,16 @@ pub(crate) fn persist_olm_session(olm: &OlmManager, crypto_store: &CryptoStore, 
     }
 }
 
+/// Persist the session that decrypted a frame from `peer_id` sealed at `sealed_ms`,
+/// then the read mark, in that order through one queue: a crash between can leave the
+/// mark behind its session, where a replay only re-keys as before, never ahead of it.
+pub(crate) fn persist_olm_read(olm: &mut OlmManager, crypto_store: &CryptoStore, peer_id: &str, sealed_ms: i64) {
+    persist_olm_session(olm, crypto_store, peer_id);
+    if olm.note_read(peer_id, sealed_ms) {
+        crypto_store.save_read_mark(peer_id.to_string(), sealed_ms);
+    }
+}
+
 /// Send a HavenMessage to a specific peer via the WS relay.
 /// Silently drops the message if the peer is not reachable.
 pub(crate) fn send_message_to_peer(
@@ -2615,6 +2625,7 @@ pub(crate) async fn handle_mls_commit_frame(
                         server_id: server_id.to_string(),
                         state_vector_json: sv,
                         mls_epoch: None,
+                        nonce: None,
                     },
                     super::olm_lane::NoSession::Queue,
                 );

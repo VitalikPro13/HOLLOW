@@ -444,7 +444,7 @@ use super::crypto_handler::{
     verify_key_exchange, key_exchange_device_unauthorized,
     KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
     check_backfill_signature, BackfillSig, PkCache,
-    persist_mls_state, persist_crypto_state, persist_olm_session,
+    persist_mls_state, persist_crypto_state, persist_olm_read,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
     send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer, send_raw_to_identity,
@@ -804,6 +804,7 @@ async fn run_event_loop(
 
     // -- Conference host state (active meetings we host; node/conference.rs) --
     let mut conference_host: HashMap<String, super::conference::ConferenceHostState> = HashMap::new();
+    let mut seat_watch = super::conference::SeatWatch::default();
 
     // -- WS stream transfer reassembly state --
     let mut pending_ws_transfers: HashMap<String, super::ws_stream_transfer::WsTransferState> = HashMap::new();
@@ -1053,6 +1054,8 @@ async fn run_event_loop(
     // member returning days later from re-serving a join somebody else handled. NOT
     // sync-gating state, so it deliberately survives `WsEvent::Disconnected`.
     let mut join_resolutions: HashMap<String, i64> = HashMap::new();
+    let mut join_hold = super::join_hold::JoinHold::default();
+    join_hold.went_away(&server_states);
     // Servers whose PARKED join completed but whose MLS leaf has not formed yet.
     // Between the two the UI says "waiting for a member to finish setup"; the
     // Welcome clears it.
@@ -1337,9 +1340,85 @@ async fn run_event_loop(
         if bare_presence.stale() {
             Box::pin(settle_bare_presence(&mut bare_presence, &mut ws_room_peers, &mut synced_peers, &event_tx, &ws_cmd_tx)).await;
         }
+        // A device its roster just stopped counting loses its seat in our meetings now.
+        if seat_watch.moved()
+            && let Some(mls_mgr) = mls.as_mut()
+        {
+            super::conference::unseat_refused(
+                &conference_host, mls_mgr, &crypto_store, &ws_cmd_tx, &event_tx,
+                &mut voice_channel_participants, &mut voice_channel_gossip_mode, &device_peer_id,
+            ).await;
+        }
         // A door that just reached our state proves itself to the relay before
         // anything else goes out.
         door_rooms.sync(&server_states, &local_peer_str, &ws_cmd_tx);
+        // Join asks held until we knew what we missed, judged like any other ask.
+        if join_hold.holds_any() {
+            let started = std::time::Instant::now();
+            let due = {
+                let visible = |sid: &str| super::join_hold::visible_members(sid, &server_states, &ws_room_peers);
+                join_hold.due(&visible)
+            };
+            for ask in due {
+                #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
+                #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                let fwd_bridge: FwdBridge = std::marker::PhantomData;
+                Box::pin(handle_incoming_request(
+                    &mut olm, &crypto_store, &crdt_store, &event_tx,
+                    &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                    &mut server_states, &bundle_keypair,
+                    &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
+                    &mut pending_server_joins,
+                    &mut join_request_seen,
+                    &mut join_resolutions,
+                    &mut awaiting_mls_after_parked_join,
+                    &crdt_store,
+                    &mut pending_sync_requests, &mut mls,
+                    &mut mls_bootstrap_requested,
+                    &mut mls_welcome_grace,
+                    &mut relay_catchup_done,
+                    &mut pending_file_streams,
+                    &mut pending_shard_streams, &mut early_file_streams,
+                    &mut pending_link_snapshots,
+                    &mut vault_shard_asks,
+                    &mut link,
+                    &mut decrypt_fail_cooldown,
+                    &mut pending_mls_key_packages, &mut pending_mls_removals,
+                    &mut mls_epoch_hint_cooldown,
+                    &ws_cmd_tx, &ws_room_peers,
+                    &webrtc_peers, &mut pending_webrtc_sends,
+                    &mut channel_sync_sent,
+                    &mut slow_mode_clock,
+                    &mut gossip_overlays,
+                    &mut voice_channel_participants,
+                    &mut voice_channel_gossip_mode,
+                    &mut call_book,
+                    &mut conference_host,
+                    &mut vc_signal_rate_tokens,
+                    &mut mls_dirty,
+                    &guest_rooms,
+                    &subscribed_channels,
+                    &db_path, &db_passphrase,
+                    &local_peer_str, &ask.from, is_invisible,
+                    &mut pending_friend_accepts, &mut pending_friend_requests,
+                    &mut pending_friend_removals,
+                    &mut reject_resent,
+                    &mut pending_asset_asks,
+                    &mut pending_file_asks,
+                    &pending_ws_transfers,
+                    &mut pending_public_file_requests,
+                    &mut requested_file_receipts,
+                    &mut declined_file_ids,
+                    &mut peer_auto_dl,
+                    fwd_bridge,
+                    ask.msg,
+                    ask.frame_ts,
+                    &mut None,
+                )).await;
+            }
+            loop_stall.check("join_hold", "release", started);
+        }
         tokio::select! {
             Some((carry, done)) = carry_rx.recv(), if super::olm_lane::carry_lane_open(&device_peer_id) => {
                 if let super::ws_client::WsCommand::Carry { device, room, json, no_session, ticket } = carry {
@@ -2471,6 +2550,7 @@ async fn run_event_loop(
                                     room_code: server_id.clone(),
                                     channel_id: super::ring_auth::ring_topic(&server_id, owner.as_deref(), &cid),
                                     max_age_secs,
+                                    end: false,
                                 });
                             }
                         }
@@ -2979,6 +3059,7 @@ async fn run_event_loop(
                         super::conference::handle_conference_kick(
                             &mut conference_host, &mut mls, &crypto_store,
                             &ws_cmd_tx, &event_tx,
+                            &mut voice_channel_participants, &mut voice_channel_gossip_mode, &device_peer_id,
                             &conf_id, &peer_id,
                         ).await;
                     }
@@ -3000,9 +3081,11 @@ async fn run_event_loop(
                     }
 
                     // -- Server join: coordinator window elapsed, ask everyone --
-                    NodeCommand::RetryPendingJoin { server_id } => {
+                    NodeCommand::RetryPendingJoin { server_id, opened_at } => {
+                        let hidden = door_rooms.is_hidden(&server_id);
                         sync_handler::handle_retry_pending_join(
-                            &pending_server_joins, &ws_cmd_tx, &ws_room_peers, &device_peer_id, server_id,
+                            &mut pending_server_joins, &ws_cmd_tx, &ws_room_peers, &cmd_tx,
+                            &device_peer_id, server_id, opened_at, hidden,
                         );
                     }
 
@@ -3044,13 +3127,13 @@ async fn run_event_loop(
                     }
 
                     // -- Server join timeout --
-                    NodeCommand::CheckPendingJoinTimeout { server_id, only_if_empty } => {
+                    NodeCommand::CheckPendingJoinTimeout { server_id, only_if_empty, opened_at } => {
                         // A room that hides its members from us is not known to be empty.
                         if !(only_if_empty && door_rooms.is_hidden(&server_id)) {
                             sync_handler::handle_check_pending_join_timeout(
                                 &mut pending_server_joins, &event_tx, &ws_cmd_tx,
                                 &ws_room_peers, &local_peer_str, &device_peer_id,
-                                server_id, only_if_empty,
+                                server_id, only_if_empty, opened_at,
                                 &crdt_store,
                             ).await;
                         }
@@ -3296,6 +3379,10 @@ async fn run_event_loop(
                         snap.room_peers = peers.into_iter().collect();
                         snap.carried = carry_log.clone();
                         snap.olm_one_time_keys = olm.stored_one_time_key_count();
+                        snap.pending_asks = pending_server_joins
+                            .iter()
+                            .map(|(sid, p)| (sid.clone(), (p.opened_at, p.parked)))
+                            .collect();
                         let _ = reply.send(snap);
                     }
                 }
@@ -3493,6 +3580,7 @@ async fn run_event_loop(
                         // peers re-advertise on rejoin (issue #41 pre-negotiation).
                         peer_auto_dl.clear();
                         relay_catchup_done.clear();
+                        join_hold.went_away(&server_states);
                         // A new socket means a fresh mailbox replay burst, so the
                         // decline re-send is re-armed with it (see `reject_resent`).
                         reject_resent.clear();
@@ -3853,6 +3941,7 @@ async fn run_event_loop(
                                                         // Epoch hint: lets the responder detect
                                                         // us (or itself) stale on first contact.
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
+                                                        nonce: Some(join_hold.ask()),
                                                     },
                                                     super::olm_lane::NoSession::Queue,
                                                 );
@@ -3973,6 +4062,9 @@ async fn run_event_loop(
                             }
                     }
                     WsEvent::DoorStatus { room, proved } => {
+                        if !proved && server_states.contains_key(&room) {
+                            join_hold.hidden(&room);
+                        }
                         // A hidden member asks the members for the newest door; reading the
                         // relay's chain now lets us judge the grant that answers it.
                         if door_rooms.on_status(&room, proved, &server_states, &local_peer_str, &ws_cmd_tx)
@@ -3982,7 +4074,7 @@ async fn run_event_loop(
                         }
                         // A joiner sees nobody in a locked room: its request goes to the room.
                         if !proved
-                            && let Some(pending) = pending_server_joins.get(&room).filter(|p| !p.asked)
+                            && let Some(pending) = pending_server_joins.get_mut(&room).filter(|p| !p.asked)
                             && super::join_lane::send_request_to_room(&ws_cmd_tx, &room, &device_peer_id, pending)
                         {
                             hollow_log!("[HOLLOW-CRDT] Sent our join request for {room} to the whole room");
@@ -4245,6 +4337,10 @@ async fn run_event_loop(
                         // which is why this cannot ride the block above. No `max_age`: a join has
                         // no watermark and an old request is exactly the one we want.
                         {
+                            let member = server_states.contains_key(&room);
+                            if member {
+                                join_hold.joined(&room, hidden);
+                            }
                             let ring_wanted = server_states
                                 .get(&room)
                                 .is_some_and(|s| s.relay_catchup_secs() > 0)
@@ -4259,10 +4355,16 @@ async fn run_event_loop(
                                     .get(&room)
                                     .and_then(|s| s.anchor_owner())
                                     .or_else(|| pending_server_joins.get(&room).and_then(|p| p.owner_pin.clone()));
+                                let topic = super::ring_auth::ring_topic(&room, owner.as_deref(), super::types::JOIN_TOPIC);
+                                // A member judges the parked asks of the replay only after its end.
+                                if member {
+                                    join_hold.ring_asked(&room, &topic);
+                                }
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
                                     room_code: room.clone(),
-                                    channel_id: super::ring_auth::ring_topic(&room, owner.as_deref(), super::types::JOIN_TOPIC),
+                                    channel_id: topic,
                                     max_age_secs: 0,
+                                    end: member,
                                 });
                             }
                         }
@@ -4413,6 +4515,7 @@ async fn run_event_loop(
                                                         // Epoch hint: lets the responder detect
                                                         // us (or itself) stale on first contact.
                                                         mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
+                                                        nonce: Some(join_hold.ask()),
                                                     },
                                                     super::olm_lane::NoSession::Queue,
                                                 );
@@ -4696,6 +4799,9 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &blob, signal,
                             &master_peer_str, &device_peer_id, &db_path, &db_passphrase,
                         ).await;
+                    }
+                    WsEvent::TopicCatchupDone { room, channel } => {
+                        join_hold.ring_ended(&room, &channel);
                     }
                     WsEvent::LockChain { server, links, put } => {
                         // A server we are in: keep the relay's chain where ours is.
@@ -5237,6 +5343,9 @@ async fn run_event_loop(
                                             hollow_log!("[HOLLOW-SECURITY] Dropped a stale or repeated live join frame from {from} in {room}");
                                             continue;
                                         }
+                                        // A member just back judges an ask only once it knows what it missed.
+                                        let visible = |sid: &str| super::join_hold::visible_members(sid, &server_states, &ws_room_peers);
+                                        let Some(inner) = join_hold.hold(&from, frame_ts, inner, &visible) else { continue };
                                         inner
                                     } else if let HavenMessage::MeetingSealed { nonce, ct } = &msg {
                                         // The meeting lane: sealed under the meeting link's key, in that
@@ -5264,6 +5373,7 @@ async fn run_event_loop(
                                         let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
                                         #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                                         let fwd_bridge: FwdBridge = std::marker::PhantomData;
+                                        let synced = join_hold.sync_mark(&msg, &from, &server_states);
                                         handle_incoming_request(
                                             &mut olm, &crypto_store, &crdt_store, &event_tx,
                                             &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
@@ -5316,6 +5426,7 @@ async fn run_event_loop(
                                             frame_ts,
                                         &mut next,
                                         ).await;
+                                        join_hold.synced(synced);
                                     }
                                     sync_handler::note_completed_join(&mut recent_joins, &pending_server_joins, &server_states, &local_peer_str, &room, joining);
                             } else {
@@ -5553,6 +5664,13 @@ async fn run_event_loop(
                             }
                         }
                     }
+
+                    // Phase 2b: meetings have no server state, so phase 2 skips them; the
+                    // host takes out a seat the loop head could not.
+                    super::conference::unseat_refused(
+                        &conference_host, mls_mgr, &crypto_store, &ws_cmd_tx, &event_tx,
+                        &mut voice_channel_participants, &mut voice_channel_gossip_mode, &device_peer_id,
+                    ).await;
 
                     // Phase 3: commits and Welcomes held because our view was behind get
                     // judged again, now that the ops they waited for may have landed.
@@ -7126,6 +7244,7 @@ async fn after_welcome_joined(
                         state_vector_json: sv,
                         // Freshly Welcomed — current by construction.
                         mls_epoch: mls_mgr.epoch(server_id).ok(),
+                        nonce: None,
                     },
                     super::olm_lane::NoSession::Queue,
                 );
@@ -7490,6 +7609,11 @@ async fn handle_incoming_request(
                         opened.plaintext
                     }
                     Err(e) => {
+                        // The same replay rule as an ordinary frame below.
+                        if olm.read_past(peer_str, frame_ts_ms) {
+                            hollow_log!("[HOLLOW-SECURITY] Dropped a PreKey from {peer_str} sealed before a frame we already read ({e}), no re-key");
+                            return;
+                        }
                         // ALWAYS log the drop (the re-key below is throttled): a burst of
                         // failures must never go dark on the receive side.
                         hollow_log!("[HOLLOW-CRYPTO] Inbound PreKey from {peer_str} undecryptable: {e} — dropped");
@@ -7547,6 +7671,13 @@ async fn handle_incoming_request(
                         opened.plaintext
                     }
                     Err(e) => {
+                        // Sealed no later than a frame we already read from this device: a
+                        // replay, or a chain since let go, so it says nothing about the
+                        // session we hold, and re-keying on it is what a replaying relay wants.
+                        if olm.read_past(peer_str, frame_ts_ms) {
+                            hollow_log!("[HOLLOW-SECURITY] Dropped an Olm frame from {peer_str} sealed before one we already read ({e}), no re-key");
+                            return;
+                        }
                         let now = std::time::Instant::now();
                         // ALWAYS log a decrypt failure. Gating this behind the 5s teardown
                         // cooldown left a burst of undecryptable frames after a glare-desynced
@@ -7604,8 +7735,8 @@ async fn handle_incoming_request(
             };
 
             olm.note_decrypted(peer_str, &ciphertext);
-            // Persist only session ratchet after decrypt (account unchanged).
-            persist_olm_session(olm, crypto_store, &peer_str);
+            // The ratchet and the read mark moved; the account is unchanged.
+            persist_olm_read(olm, crypto_store, peer_str, frame_ts_ms);
 
             let text = String::from_utf8_lossy(&plaintext).to_string();
 
@@ -9320,7 +9451,7 @@ async fn handle_incoming_request(
 
         // -- CRDT sync message handlers --
 
-        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch } => {
+        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce } => {
             hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
 
             // The op log is the whole server (names, roles, bans, restricted channels), so
@@ -9331,7 +9462,8 @@ async fn handle_incoming_request(
             if let Some(state) = server_states.get(&server_id)
                 && let Ok(their_vector) = serde_json::from_str::<StateVector>(&state_vector_json)
             {
-                let delta = if state.is_member(peer_str) {
+                let member = state.is_member(peer_str);
+                let delta = if member {
                     crdt_sync::compute_delta(&state.op_log, &their_vector)
                 } else if state.is_deleted() {
                     let mut delta = crdt_sync::compute_delta(&state.op_log, &their_vector);
@@ -9342,13 +9474,15 @@ async fn handle_incoming_request(
                         .map(|master| crdt_sync::removal_notice(state, &master, &their_vector))
                         .unwrap_or_default()
                 };
-                if !delta.is_empty()
+                // A member hears back even when nothing is missing: that answer is how a
+                // member just back knows it has caught up (`join_hold`).
+                if (member || !delta.is_empty())
                     && let Ok(ops_json) = serde_json::to_string(&delta)
                 {
                     hollow_log!("[HOLLOW-CRDT] Sending {} delta ops to {peer_str}", delta.len());
                     super::olm_lane::carry(
                         ws_cmd_tx, peer_str, None,
-                        &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json },
+                        &HavenMessage::SyncResponse { server_id: server_id.clone(), ops_json, nonce },
                         super::olm_lane::NoSession::Queue,
                     );
                 }
@@ -9421,7 +9555,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::SyncResponse { server_id, ops_json } => {
+        HavenMessage::SyncResponse { server_id, ops_json, .. } => {
             hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
             
 
@@ -10230,6 +10364,7 @@ async fn handle_incoming_request(
                     answer.reply(ws_cmd_tx, &HavenMessage::SyncResponse {
                         server_id: server_id.clone(),
                         ops_json,
+                        nonce: None,
                     });
                 }
 
@@ -11227,6 +11362,7 @@ async fn handle_incoming_request(
                                                 // A decrypt failure often IS epoch skew —
                                                 // let the responder catch us up.
                                                 mls_epoch: mls_mgr.epoch(&server_id).ok(),
+                                                nonce: None,
                                             },
                                             super::olm_lane::NoSession::Queue,
                                         );
@@ -11508,6 +11644,11 @@ async fn handle_incoming_request(
                         None => server_id.clone(),
                     };
                     mls_welcome_grace.insert(group_key, std::time::Instant::now());
+                }
+                if super::conference::is_conference_sid(&server_id) {
+                    super::conference::drop_leafless_from_call(
+                        mls_mgr, voice_channel_participants, voice_channel_gossip_mode, event_tx, &server_id, device_peer_id,
+                    ).await;
                 }
             }
         }

@@ -37,6 +37,7 @@ run test_auth_frame
 run test_derive_peer_id ../src/crypto.cpp $LIBS
 run test_door_room ../src/crypto.cpp $LIBS
 run test_fair_share
+run test_fwd_room
 run test_join_lock ../src/crypto.cpp $LIBS
 run test_kill_list
 run test_kill_order ../src/crypto.cpp $LIBS

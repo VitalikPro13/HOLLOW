@@ -53,6 +53,21 @@ pub(crate) fn kill_ack_frame(signal: Option<&KillSignalId>) -> serde_json::Value
     }
 }
 
+/// The `topic_catchup` frame. `end` rides only when asked: a relay from before the
+/// marker ignores it, and a request without it is byte for byte the old one.
+pub(crate) fn topic_catchup_frame(room: &str, channel: &str, max_age_secs: i64, end: bool) -> serde_json::Value {
+    let mut msg = serde_json::json!({
+        "type": "topic_catchup",
+        "room": room,
+        "channel": channel,
+        "max_age_secs": max_age_secs,
+    });
+    if end {
+        msg["end"] = serde_json::Value::Bool(true);
+    }
+    msg
+}
+
 /// Commands sent from the swarm to the WebSocket client.
 #[derive(Debug, Clone)]
 pub enum WsCommand {
@@ -156,8 +171,9 @@ pub enum WsCommand {
     /// normal topic messages and ride the standard verify/dedup/merge path.
     /// `max_age_secs` > 0 replays only frames younger than that (the client
     /// passes its watermark age plus lookback, because MLS cannot decrypt
-    /// consumed generations). 0 = everything still in retention.
-    TopicCatchup { room_code: String, channel_id: String, max_age_secs: i64 },
+    /// consumed generations). 0 = everything still in retention. `end` asks the
+    /// relay to mark the end of the replay ([`WsEvent::TopicCatchupDone`]).
+    TopicCatchup { room_code: String, channel_id: String, max_age_secs: i64, end: bool },
     /// Park a destruction order for devices that are NOT connected. `blob` is
     /// opaque to the relay (base64 of the signed payload), capped at 2 KB, at most
     /// 16 targets per deposit. The relay hands it over on the target's next auth
@@ -203,6 +219,9 @@ pub enum WsEvent {
     /// `RoomMembers` it came with.
     DoorStatus { room: String, proved: bool },
     RoomMembers { room: String, peers: Vec<String> },
+    /// The relay replayed all it holds of a ring we asked for with `end`, every
+    /// frame of it ahead of this event.
+    TopicCatchupDone { room: String, channel: String },
     /// Encrypted message from another peer, routed through a room.
     Message { room: String, from: String, data: Vec<u8> },
     /// Direct message from a specific peer (shard transfers, etc.)
@@ -262,6 +281,7 @@ impl WsEvent {
             Self::LeftRoom { .. } => "LeftRoom",
             Self::DoorStatus { .. } => "DoorStatus",
             Self::RoomMembers { .. } => "RoomMembers",
+            Self::TopicCatchupDone { .. } => "TopicCatchupDone",
             Self::Message { .. } => "Message",
             Self::DirectMessage { .. } => "DirectMessage",
             Self::BinaryDirect { .. } => "BinaryDirect",
@@ -335,6 +355,7 @@ enum ServerMsg {
     PeerLeft { room: String, peer_id: String },
     /// `proved` only in a door-locked server room.
     Members { room: String, peers: Vec<String>, #[serde(default)] proved: Option<bool> },
+    TopicCatchupDone { room: String, channel: String },
     // `active_rooms` is always empty now: the relay's room-activity probe was
     // removed (it let anyone holding two peer_ids ask whether their deterministic
     // DM room was live). Defaulted so a relay dropping the field deserializes.
@@ -1271,13 +1292,8 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::TopicCatchup { room_code, channel_id, max_age_secs } => {
-            let msg = serde_json::json!({
-                "type": "topic_catchup",
-                "room": room_code,
-                "channel": channel_id,
-                "max_age_secs": max_age_secs,
-            });
+        WsCommand::TopicCatchup { room_code, channel_id, max_age_secs, end } => {
+            let msg = topic_catchup_frame(room_code, channel_id, *max_age_secs, *end);
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] TopicCatchup send failed: {e}");
                 return false;
@@ -1530,6 +1546,7 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             let _ = event_tx.send(WsEvent::DoorStatus { room: room.clone(), proved: proved.unwrap_or(true) });
             WsEvent::RoomMembers { room, peers }
         }
+        ServerMsg::TopicCatchupDone { room, channel } => WsEvent::TopicCatchupDone { room, channel },
         ServerMsg::PeerStatus { online, active_rooms } => {
             hollow_log!("[HOLLOW-WS] PeerStatus: {} online, {} active rooms", online.len(), active_rooms.len());
             WsEvent::PeerStatus { online, active_rooms }
@@ -1861,6 +1878,30 @@ mod tests {
         }
         let locked = r#"{"type":"members","room":"s","peers":["me"],"proved":false}"#;
         assert!(matches!(serde_json::from_str(locked).unwrap(), ServerMsg::Members { proved: Some(false), .. }));
+    }
+
+    /// HOL-SEC-121: a catch-up asks for the relay's end mark only when told to, and the
+    /// mark reaches the swarm as its own event.
+    #[tokio::test]
+    async fn a_catchup_asks_for_its_end_mark_only_when_told() {
+        let plain = topic_catchup_frame("srv", "~join", 0, false);
+        assert_eq!(plain, serde_json::json!({ "type": "topic_catchup", "room": "srv", "channel": "~join", "max_age_secs": 0 }));
+        assert_eq!(topic_catchup_frame("srv", "~join", 0, true)["end"], serde_json::json!(true));
+
+        let state = WsClientState {
+            joined_rooms: Arc::new(RwLock::new(HashSet::new())),
+            last_join_attempt: Arc::new(RwLock::new(None)),
+            subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            offline_optin: Arc::new(RwLock::new(None)),
+            inbox_rosters: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            doors: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            relay_host: String::new(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mark = r#"{"type":"topic_catchup_done","room":"srv","channel":"~join"}"#;
+        handle_server_message(&tx, serde_json::from_str(mark).unwrap(), &state).await;
+        let Ok(WsEvent::TopicCatchupDone { room, channel }) = rx.try_recv() else { panic!("no end mark") };
+        assert_eq!((room.as_str(), channel.as_str()), ("srv", "~join"));
     }
 
     #[test]

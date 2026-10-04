@@ -1490,11 +1490,8 @@ pub fn start_node() -> Result<String, String> {
         // Seed the Lamport chat clock from the highest stored stamp so a restart cannot
         // mint stamps below messages we already hold.
         crate::chat_clock::observe(store.max_chat_stamp_us());
-        match store.load_olm_account()? {
-            Some(account_json) => {
-                let sessions = store.load_all_olm_sessions()?;
-                OlmManager::from_pickles(&account_json, sessions)?
-            }
+        match OlmManager::load(&store)? {
+            Some(olm) => olm,
             None => {
                 let mgr = OlmManager::new();
                 let pickle = mgr.account_pickle_json()?;
@@ -2720,11 +2717,8 @@ pub fn start_fetch_node(
 
     let mut olm = {
         let store = MessageStore::open(&db_path, &passphrase)?;
-        match store.load_olm_account()? {
-            Some(account_json) => {
-                let sessions = store.load_all_olm_sessions()?;
-                OlmManager::from_pickles(&account_json, sessions)?
-            }
+        match OlmManager::load(&store)? {
+            Some(olm) => olm,
             None => {
                 hollow_log!("[HOLLOW-FETCH] No Olm account — cannot decrypt, returning empty");
                 return Ok(vec![]);

@@ -846,6 +846,11 @@ pub(crate) struct PendingJoin {
     pub(crate) avatar_b64: String,
     /// Our signed ask for the current `requested_at` ([`PendingJoin::ask_again`]).
     pub(crate) ask: Option<crate::crdt::operations::JoinAsk>,
+    /// The `requested_at` the user's ask opened with, which `ask_again` keeps: the
+    /// join's timers name it, so a timer armed for an earlier ask never acts on this one.
+    pub(crate) opened_at: i64,
+    /// When a copy of this ask first went out: the coordinator window counts from it.
+    pub(crate) first_sent_at: Option<std::time::Instant>,
 }
 
 impl PendingJoin {
@@ -1247,11 +1252,13 @@ pub(crate) enum NodeCommand {
     /// `only_if_empty` marks the SHORT window (`JOIN_EMPTY_ROOM_WINDOW`): it parks
     /// only when the relay has already told us the server room holds nobody else.
     /// The long window sends `false` and is the authority for every other case.
-    CheckPendingJoinTimeout { server_id: String, only_if_empty: bool },
+    /// `opened_at` names the ask that armed it ([`PendingJoin::opened_at`]).
+    CheckPendingJoinTimeout { server_id: String, only_if_empty: bool, opened_at: i64 },
     /// Internal: a pending join went unanswered past the coordinator's window, so
     /// re-send it and let EVERY online member serve it. The safety net for a
     /// members' election that named a coordinator already gone (presence skew).
-    RetryPendingJoin { server_id: String },
+    /// `opened_at` names the ask that armed it ([`PendingJoin::opened_at`]).
+    RetryPendingJoin { server_id: String, opened_at: i64 },
     /// User action: drop a persisted pending or rejected join row. Also leaves the
     /// server room, so a late admission's buffered answer never replays. Nothing is
     /// sent to the relay; the ring copy ages out.
@@ -1545,6 +1552,8 @@ pub(crate) struct DebugSnapshotReply {
     pub carried: Vec<(String, String)>,
     /// One-time keys our Olm account holds a private half for.
     pub olm_one_time_keys: usize,
+    /// server_id -> the pending join's (`opened_at`, parked).
+    pub pending_asks: std::collections::HashMap<String, (i64, bool)>,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1623,12 +1632,18 @@ pub(crate) enum HavenMessage {
         /// the authority itself when it is AHEAD of us. Absent = old client.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mls_epoch: Option<u64>,
+        /// Echoed by the answer: tells it from an answer to an older ask the relay kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<u64>,
     },
 
     #[serde(rename = "sync_response")]
     SyncResponse {
         server_id: String,
         ops_json: String,
+        /// The `nonce` of the ask this answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<u64>,
     },
 
     /// Full server state snapshot, sent alongside the op log when serving a join.
@@ -5125,7 +5140,7 @@ mod epoch_catchup_wire_tests {
     fn sync_request_without_epoch_parses_to_none() {
         let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
         match serde_json::from_str::<HavenMessage>(json) {
-            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch }) => {
+            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None }) => {
                 assert_eq!(server_id, "srv1");
                 assert_eq!(state_vector_json, "{}");
                 assert!(mls_epoch.is_none());
@@ -5142,6 +5157,7 @@ mod epoch_catchup_wire_tests {
             server_id: "s".into(),
             state_vector_json: "{}".into(),
             mls_epoch: None,
+            nonce: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"sync_request","server_id":"s","state_vector_json":"{}"}"#);
@@ -5153,6 +5169,7 @@ mod epoch_catchup_wire_tests {
             server_id: "s".into(),
             state_vector_json: "{}".into(),
             mls_epoch: Some(6),
+            nonce: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""mls_epoch":6"#), "epoch missing from wire: {json}");

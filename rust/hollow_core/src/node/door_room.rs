@@ -273,7 +273,7 @@ impl DoorRooms {
             ws_cmd_tx,
             asker,
             Some(room),
-            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json },
+            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None },
             super::olm_lane::NoSession::Drop,
         );
         true

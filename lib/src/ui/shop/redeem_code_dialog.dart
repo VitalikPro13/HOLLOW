@@ -158,7 +158,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
     final host = ref.context;
     if (!host.mounted) return;
     if (imported != null) {
-      HollowToast.show(host, 'Support mark saved for ${outcome.title}',
+      HollowToast.show(host, 'Supporter badge saved for ${outcome.title}',
           type: HollowToastType.success);
       if (outcome.warning.isNotEmpty) {
         HollowToast.show(host, outcome.warning, type: HollowToastType.info);
@@ -169,19 +169,19 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
         context: host,
         builder: (dialogContext) {
           return HollowDialog(
-            title: 'Support mark saved',
+            title: 'Supporter badge saved',
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 HollowDialogText(
-                  'Your support mark for ${outcome.title} by '
+                  'Your supporter badge for ${outcome.title} by '
                   '${outcome.artistName} is on your profile.',
                 ),
                 const SizedBox(height: HollowSpacing.md),
                 const HollowDialogText(
                   "The art didn't download with it. Import the .hollowpack "
-                  'from your Ko-fi download to wear the art. The mark lights '
+                  'from your Ko-fi download to wear the art. The badge lights '
                   'up as soon as you do.',
                 ),
               ],
@@ -219,7 +219,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       if (_step == _Step.entering && _codeProblem == null) ...[
         const SizedBox(height: HollowSpacing.md),
         const HollowDialogText(
-          'Redeeming adds a support mark to your profile. The shop signs it '
+          'Redeeming adds a supporter badge to your profile. The shop signs it '
           'without learning who you are, then Hollow puts the art in your '
           'library.',
         ),
@@ -245,7 +245,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
           )
         else
           const HollowDialogText(
-            'Once redeemed, the mark lives in your profile and its backup. '
+            'Once redeemed, the badge lives in your profile and its backup. '
             "The code is spent, so it can't be used again.",
           ),
       ],

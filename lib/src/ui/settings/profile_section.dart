@@ -338,7 +338,7 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
       final id = _userId!;
       return 'Connected (ID: ${id.length > 12 ? '${id.substring(0, 12)}...' : id})';
     }
-    return 'A verified mark on your name, and entry to Twitch-verified servers';
+    return 'A verified badge on your name, and entry to Twitch-verified servers';
   }
 
   @override

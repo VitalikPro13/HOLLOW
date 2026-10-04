@@ -15,7 +15,7 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use crate::hollow_log;
 use crate::node::crypto_handler::{
     check_backfill_signature, persist_crypto_state, persist_mls_state,
-    persist_olm_session, PkCache,
+    persist_olm_read, PkCache,
 };
 use crate::node::types::{
     ChannelMessagePayload, DirectMessagePayload, FileHeaderPayload, HavenMessage, LinkPreviewRef,
@@ -379,7 +379,7 @@ fn handle_binary_frame(
             if let Some(dm) = try_decrypt_dm(
                 &from, &payload, sealed_at, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
             ) {
-                persist_olm_session(olm, crypto_store, &from);
+                persist_olm_read(olm, crypto_store, &from, sealed_at);
                 messages.push(dm);
             }
         }
@@ -1758,6 +1758,60 @@ mod tests {
             "HOL-SEC-035: a key change first seen by the push path raised no notice",
         );
         assert_eq!(store.get_olm_key_pin(&b).unwrap(), Some(bob_olm.identity_key_base64()));
+        crate::node::resolver::clear_all();
+    }
+
+    /// AR-19. The push fetch spends message keys of the sessions the app loads next, so
+    /// it moves the read mark too: else the app takes the relay's next copy of that
+    /// frame for news and re-keys.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn a_push_fetched_dm_moves_the_olm_read_mark() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let (alice, bob) = (kp(177), kp(178));
+        let (a, b) = (alice.peer_id(), bob.peer_id());
+        let mut alice_olm = OlmManager::new();
+        let otk = alice_olm.generate_one_time_key();
+        let mut bob_olm = OlmManager::new();
+        crate::node::crypto_handler::bind_olm_identity(&mut bob_olm, &bob);
+        bob_olm.create_outbound_session(&a, &alice_olm.identity_key_base64(), &otk).unwrap();
+        let extras = SignedExtras { mid: Some("mark"), order_us: Some(1_000_000), ..SignedExtras::default() };
+        let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "dm", &a, &b, 1_000, &extras, "hi");
+        let envelope = serde_json::to_string(&MessageEnvelope::DirectMessage {
+            inner: Box::new(DirectMessagePayload {
+                text: "hi".into(), ts: 1_000, sig, pk, mid: Some("mark".into()), reply_to: None,
+                file_id: None, link_preview: None, convo: None, order_us: Some(1_000_000), album: None,
+            }),
+        })
+        .unwrap();
+        let (message_type, ciphertext) = bob_olm.encrypt(&a, envelope.as_bytes()).unwrap();
+        let body = serde_json::to_vec(
+            &crate::node::crypto_handler::encrypted_frame(&bob_olm, message_type, &ciphertext),
+        )
+        .unwrap();
+        let room = "a-dm-room";
+        let sealed_ms = crate::node::frame_auth::now_ms() - 60_000;
+        let mut data = vec![0x06];
+        data.extend_from_slice(format!("{room}\0{b}\0").as_bytes());
+        data.extend_from_slice(&crate::node::frame_auth::seal_at(&bob, room, &a, sealed_ms, [7; 16], &body));
+
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let mut messages = Vec::new();
+        handle_binary_frame(&data, None, &mut alice_olm, &mut None, &mut false, &crypto_store, &path, &pass, &a, &a, &mut messages);
+        assert_eq!(messages.len(), 1, "the DM must open");
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let mut marks = Vec::new();
+        for _ in 0..100 {
+            marks = store.load_olm_read_marks().unwrap();
+            if !marks.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(marks, vec![(b.clone(), sealed_ms)], "the push fetch left the read mark behind");
         crate::node::resolver::clear_all();
     }
 

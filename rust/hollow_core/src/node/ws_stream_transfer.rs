@@ -80,6 +80,9 @@ const TYPE_CONTINUATION: u8 = 0xFF;
 const MAX_RECV_STREAMS_PER_SENDER: usize = 16;
 const MAX_RECV_STREAMS: usize = 128;
 
+/// Numbers each receive temp file of this process.
+static RECV_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// How long a stream sits idle before another peer may open its id afresh (the
 /// next holder after one that stalled). Until then the id is its opener's alone.
 const STREAM_TAKEOVER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -436,8 +439,9 @@ pub fn ws_stream_receive(
             return None;
         }
 
-        // Create temp file for reassembly.
-        let temp_path = files_dir().join(format!(".ws_recv_{id}.tmp"));
+        // A file per stream, not per id: two receivers on one data dir (the harness's
+        // nodes) may take the same id at once.
+        let temp_path = files_dir().join(format!(".ws_recv_{id}.{}.tmp", RECV_TEMP_SEQ.fetch_add(1, Ordering::Relaxed)));
         let mut temp_file = match std::fs::File::create(&temp_path) {
             Ok(f) => f,
             Err(e) => {
@@ -519,7 +523,7 @@ fn pad_id(id: &str) -> [u8; 64] {
 
 /// Parse an ID from a 64-byte padded buffer (trailing zeroes stripped).
 ///
-/// The id becomes part of a temp file name (`.ws_recv_{id}.tmp`), so this is the
+/// The id becomes part of a temp file name (`.ws_recv_{id}.{n}.tmp`), so this is the
 /// gate: only the characters our own ids use pass (hex, `:` for the share-chunk
 /// and shard suffix, `_` for link snapshots, `-`). A `..` or a separator would
 /// walk out of the files directory on Windows, where `..` is collapsed lexically
@@ -566,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_parse_id_rejects_path_characters() {
-        // The id names `.ws_recv_{id}.tmp`; none of these may ever reach a path.
+        // The id names `.ws_recv_{id}.{n}.tmp`; none of these may ever reach a path.
         for id in ["/../../escaped", "../x", r"..\x", r"C:\x", "a/b", "a b", "a.b", ""] {
             assert_eq!(parse_id(&pad_id(id)), None, "{id}");
         }
@@ -607,13 +611,17 @@ mod tests {
                 kind, id, "mallory", &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(),
             )
         };
-        let temp = |id: &str| files_dir().join(format!(".ws_recv_{id}.tmp"));
+        let temps_of = |id: &str| {
+            let prefix = format!(".ws_recv_{id}.");
+            std::fs::read_dir(files_dir())
+                .map(|dir| dir.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)).count())
+                .unwrap_or(0)
+        };
         let mut pending = HashMap::new();
 
         let huge = "f7_unasked_huge";
-        let _ = std::fs::remove_file(temp(huge));
         ws_stream_receive(&mut pending, "mallory", &first_frame(huge, DEFAULT_MAX_FILE_SIZE + 17, &[1u8; 8]), ceiling);
-        let (opened, left) = (pending.contains_key(huge), temp(huge).exists());
+        let (opened, left) = (pending.contains_key(huge), temps_of(huge) > 0);
         abandon(&mut pending, huge);
         assert!(!opened && !left, "A-F7: a stream declaring past the send limit was opened");
 
@@ -761,5 +769,22 @@ mod tests {
         let contents = std::fs::read(&req.temp_path).unwrap();
         assert_eq!(contents, file_data);
         let _ = std::fs::remove_file(&req.temp_path);
+    }
+
+    /// Two receivers on one data dir, as the harness's nodes are, take a stream of the
+    /// same id at once: each reassembles its own bytes.
+    #[test]
+    fn two_streams_of_one_id_never_share_a_temp_file() {
+        let id = "two_streams_one_id";
+        let (ours, theirs) = (vec![0xA1u8; 1000], vec![0xB2u8; 1000]);
+        let (mut here, mut there) = (HashMap::new(), HashMap::new());
+        assert!(ws_stream_receive(&mut here, "holder_one", &first_frame(id, 1000, &ours[..500]), open).is_none());
+        assert!(ws_stream_receive(&mut there, "holder_two", &first_frame(id, 1000, &theirs[..500]), open).is_none());
+        let done_here = ws_stream_receive(&mut here, "holder_one", &continuation(id, &ours[500..]), open).expect("ours completes");
+        let done_there = ws_stream_receive(&mut there, "holder_two", &continuation(id, &theirs[500..]), open).expect("theirs completes");
+        let (got_here, got_there) = (std::fs::read(&done_here.temp_path).unwrap(), std::fs::read(&done_there.temp_path).unwrap());
+        let _ = std::fs::remove_file(&done_here.temp_path);
+        let _ = std::fs::remove_file(&done_there.temp_path);
+        assert!(got_here == ours && got_there == theirs, "one stream's bytes were written over by the other's");
     }
 }

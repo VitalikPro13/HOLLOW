@@ -359,7 +359,7 @@ Found while rebuilding the matrix (session 32, 2026-10-03); evidence ids are the
 | P38 | Any Olm peer attaches reactions to, or an old author edits, rows of a server we left | channel:A-CH05 | Low | FIXED HOL-SEC-118 |
 | P39 | A delete reaches the screen when the store fails to open; a refused reaction still shows | channel:A-CH04 (S12), A-CH05 | Info | FIXED HOL-SEC-119 |
 | P40 | Leaving a voice channel while watching a share keeps our forwarding offer (and every leave ran two teardowns) | session 31 follow-up b | Low | FIXED HOL-SEC-120 |
-| P41 | A member back from away answers a removed joiner's old parked ask | session 31 follow-up e, server_mls:A-01 | Low | OPEN HOL-SEC-121 (session 33, xhigh) |
+| P41 | A member back from away answers a removed joiner's old parked ask | session 31 follow-up e, server_mls:A-01 | Low | FIXED HOL-SEC-121 (session 33) |
 | P42 | Anyone in a room opens an unlimited stream for a file we pull | files:A-F7, transport:A-T20 | Low | FIXED HOL-SEC-122 |
 | P43 | A device its identity's roster no longer counts hosts, knocks, joins and speaks in meetings | server_mls:A-17..A-22 | Medium | FIXED HOL-SEC-123 |
 | P44 | A re-sealed commit or Welcome makes us send our sync state to its sealer | server_mls:A-10, A-09 | Low | FIXED HOL-SEC-124 |

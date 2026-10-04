@@ -417,7 +417,7 @@ class _KeptCodesRow extends ConsumerWidget {
     return SettingsExpandRow(
       title: codes.length == 1 ? '1 code waiting' : '${codes.length} codes waiting',
       subtitle:
-          'From a receipt link. Redeeming lights the mark and fetches the art.',
+          'From a receipt link. Redeeming adds the badge and fetches the art.',
       children: [
         for (final kept in codes)
           _KeptCodeRow(key: ValueKey(kept.code), code: kept.code),
@@ -604,24 +604,24 @@ class _SupportMarksSectionState extends ConsumerState<SupportMarksSection> {
         ref.watch(shop.supportMarksHiddenProvider).valueOrNull ?? false;
 
     return SettingsSection(
-        title: 'Support marks',
-        subtitle: 'Each mark proves you bought the art, without the shop '
+        title: 'Supporter badges',
+        subtitle: 'Each badge proves you bought the art, without the shop '
             'knowing it was you.',
         children: [
           // Greyed while hidden, because nothing it says is on screen then.
           // Still usable, so the choice is ready when the marks come back.
           SettingsRow(
-            title: 'Show the mark next to my name',
+            title: 'Show the badge next to my name',
             subtitle: 'In chats and member lists',
             enabled: !hidden,
             trailing: HollowToggle(
               value: badge,
               onChanged: _saving ? null : _setBadge,
-              semanticLabel: 'Show the mark next to my name',
+              semanticLabel: 'Show the badge next to my name',
             ),
           ),
           SettingsSwitchRow(
-            title: 'Hide my support marks',
+            title: 'Hide my supporter badges',
             subtitle: 'Nobody sees them until you switch this off',
             value: hidden,
             onChanged: _saving ? null : _setHidden,
@@ -629,7 +629,7 @@ class _SupportMarksSectionState extends ConsumerState<SupportMarksSection> {
           if (creds.isEmpty)
             const HollowEmptyState(
               dense: true,
-              title: 'No marks yet',
+              title: 'No badges yet',
               description: 'Redeem a code on the Shop tab to earn one.',
             )
           else
@@ -677,8 +677,8 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
     final marks = ref.read(shop.supportMarksFfiProvider);
     final confirmed = await showHollowConfirm(
       context: context,
-      title: 'Remove this mark?',
-      message: 'The mark for $label leaves your profile on every device and '
+      title: 'Remove this badge?',
+      message: 'The badge for $label leaves your profile on every device and '
           'cannot be brought back. The code you redeemed is spent. The files '
           'stay in your library, and Owned on the Shop tab goes away.',
       confirmLabel: 'Remove',
@@ -688,7 +688,7 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
     if (!confirmed || !mounted) return;
     ref.invalidate(shop.ownSupportCredsProvider);
     ref.invalidate(shop.ownCredentialItemsProvider);
-    HollowToast.show(context, 'Mark removed', type: HollowToastType.success);
+    HollowToast.show(context, 'Badge removed', type: HollowToastType.success);
     final me = ref.read(identityProvider).peerId;
     if (me != null && me.isNotEmpty) {
       // The mark is already gone; a failed re-read only delays the card.

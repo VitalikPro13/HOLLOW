@@ -899,6 +899,7 @@ pub(crate) async fn request_channel_catchups(
             room_code: room.to_string(),
             channel_id: super::ring_auth::ring_topic(room, owner.as_deref(), &cid),
             max_age_secs,
+            end: false,
         });
     }
 }
@@ -1532,6 +1533,7 @@ pub(crate) async fn handle_join_server(
         card,
         avatar_b64,
         ask: Some(crate::crdt::operations::JoinAsk::sign(&server_id, requested_at, master_keypair)),
+        opened_at: requested_at,
         ..Default::default()
     };
     // Persist BEFORE anything can go wrong: a crash inside the 15s live window
@@ -1548,7 +1550,7 @@ pub(crate) async fn handle_join_server(
     if pending.lock.is_some() {
         if let Some(room_peers) = ws_room_peers.get(&server_id) {
             for peer in room_peers.iter() {
-                if super::join_lane::send_request(ws_cmd_tx, &server_id, device_peer_id, &pending, peer) {
+                if super::join_lane::send_request(ws_cmd_tx, &server_id, device_peer_id, &mut pending, peer) {
                     hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
                 }
             }
@@ -1562,16 +1564,9 @@ pub(crate) async fn handle_join_server(
 
     // Members serve a join through their elected coordinator, and that election
     // reads each member's OWN presence view, so a coordinator whose socket has just
-    // died can be elected by everyone and answer for nobody. The 4s re-send is
-    // served by every member, degrading to the old fan-out instead of a failure.
-    let retry_cmd_tx = cmd_tx.clone();
-    let retry_sid = server_id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        let _ = retry_cmd_tx.send(NodeCommand::RetryPendingJoin {
-            server_id: retry_sid,
-        }).await;
-    });
+    // died can be elected by everyone and answer for nobody. The re-send a window
+    // later is served by every member, degrading to the old fan-out instead of a failure.
+    arm_join_retry(cmd_tx, &server_id, requested_at, JOIN_RETRY_WINDOW);
 
     // Both windows. The short one parks only when the relay has told us the room is
     // empty; the long one is the authority for everything else. Either is a no-op
@@ -1587,6 +1582,7 @@ pub(crate) async fn handle_join_server(
             let _ = timeout_cmd_tx.send(NodeCommand::CheckPendingJoinTimeout {
                 server_id: timeout_sid,
                 only_if_empty,
+                opened_at: requested_at,
             }).await;
         });
     }
@@ -1594,6 +1590,20 @@ pub(crate) async fn handle_join_server(
 
 /// Largest avatar a live join request carries; a bigger one arrives once we are in.
 const JOIN_AVATAR_MAX_BYTES: usize = 256 * 1024;
+
+/// How long members get to serve an ask before it goes out again, counted from the
+/// first copy that went out.
+const JOIN_RETRY_WINDOW: Duration = Duration::from_secs(4);
+
+/// Look at the ask opened at `opened_at` again after `after` ([`handle_retry_pending_join`]).
+fn arm_join_retry(cmd_tx: &mpsc::Sender<NodeCommand>, server_id: &str, opened_at: i64, after: Duration) {
+    let cmd_tx = cmd_tx.clone();
+    let server_id = server_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        let _ = cmd_tx.send(NodeCommand::RetryPendingJoin { server_id, opened_at }).await;
+    });
+}
 
 /// Between two asks for the lock of a server we are joining, unless an answer waits.
 const JOIN_LOCK_ASK_GAP: Duration = Duration::from_secs(1);
@@ -1872,27 +1882,44 @@ pub(crate) fn recent_join_answer(
 
 // ── 8b. RetryPendingJoin ──────────────────────────────────────────────
 
-/// Re-send a still-pending `ServerJoinRequest` to every peer in the server room.
-/// Members gate the FIRST request to their elected coordinator; a repeat inside
-/// their retry window is served by all of them, so this is what rescues a join
-/// whose elected coordinator turned out to be gone.
+/// Re-send a still-pending `ServerJoinRequest` to every peer in the server room, a
+/// window after its first copy went out. Members gate the FIRST request to their
+/// elected coordinator; a repeat inside their retry window is served by all of them,
+/// so this is what rescues a join whose elected coordinator turned out to be gone.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_retry_pending_join(
-    pending_server_joins: &HashMap<String, PendingJoin>,
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    cmd_tx: &mpsc::Sender<NodeCommand>,
     our_device: &str,
     server_id: String,
+    opened_at: i64,
+    hidden: bool,
 ) {
-    let Some(pending) = pending_server_joins.get(&server_id) else { return };
-    if pending.asked {
+    let Some(pending) = pending_server_joins.get_mut(&server_id) else { return };
+    if pending.opened_at != opened_at || pending.asked {
         return;
     }
-    let Some(room_peers) = ws_room_peers.get(&server_id) else { return };
+    let waited = pending.first_sent_at.map_or(Duration::ZERO, |t| t.elapsed());
+    if waited < JOIN_RETRY_WINDOW {
+        // A parked join has no timer: a member coming back serves it.
+        if !pending.parked {
+            arm_join_retry(cmd_tx, &server_id, opened_at, JOIN_RETRY_WINDOW - waited);
+        }
+        return;
+    }
+    let room_peers = ws_room_peers.get(&server_id);
     hollow_log!(
-        "[HOLLOW-CRDT] Join for {server_id} still pending after the coordinator window — re-asking {} peer(s)",
-        room_peers.len()
+        "[HOLLOW-CRDT] Join for {server_id} still pending after the coordinator window — re-asking {} peer(s){}",
+        room_peers.map_or(0, |p| p.len()),
+        if hidden { " and the room that hides them" } else { "" },
     );
-    for peer in room_peers.iter() {
+    // A locked room shows a joiner none of its members, so the room is asked instead.
+    if hidden {
+        super::join_lane::send_request_to_room(ws_cmd_tx, &server_id, our_device, pending);
+    }
+    for peer in room_peers.into_iter().flatten() {
         super::join_lane::send_request(ws_cmd_tx, &server_id, our_device, pending, peer);
     }
 }
@@ -3278,11 +3305,16 @@ pub(crate) async fn handle_check_pending_join_timeout(
     local_device_id: &str,
     server_id: String,
     only_if_empty: bool,
+    opened_at: i64,
     crdt_store: &CrdtStore,
 ) {
     // Already gone = the join completed or was discarded; already parked = a
     // stale timer from an earlier attempt. Both are no-ops.
     let Some(pending) = pending_server_joins.get_mut(&server_id) else { return };
+    // A window armed for an earlier ask to this server is not this ask's to end.
+    if pending.opened_at != opened_at {
+        return;
+    }
     // A member is asking the user something: it is here, and the answer asks again.
     if pending.parked || pending.asked {
         return;

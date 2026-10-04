@@ -130,13 +130,13 @@ void main() {
       (tester) async {
     final ffi = await _pump(tester, creds: [_cred]);
 
-    expect(find.text('Support marks'), findsOneWidget);
-    expect(find.text('Hide my support marks'), findsOneWidget);
-    expect(find.text('Show the mark next to my name'), findsOneWidget);
-    expect(_toggle('Hide my support marks'), findsOneWidget);
-    expect(_toggle('Show the mark next to my name'), findsOneWidget);
+    expect(find.text('Supporter badges'), findsOneWidget);
+    expect(find.text('Hide my supporter badges'), findsOneWidget);
+    expect(find.text('Show the badge next to my name'), findsOneWidget);
+    expect(_toggle('Hide my supporter badges'), findsOneWidget);
+    expect(_toggle('Show the badge next to my name'), findsOneWidget);
 
-    await tester.tap(_toggle('Hide my support marks'), warnIfMissed: false);
+    await tester.tap(_toggle('Hide my supporter badges'), warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(ffi.hidden, isTrue);
@@ -164,9 +164,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('Remove this mark?'), findsOneWidget);
+    expect(find.text('Remove this badge?'), findsOneWidget);
     expect(
-      find.textContaining('The mark for Gilded frame by Nadia leaves your '
+      find.textContaining('The badge for Gilded frame by Nadia leaves your '
           'profile on every device'),
       findsOneWidget,
     );
@@ -185,7 +185,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(ffi.removed, [_item]);
-    expect(find.text('Mark removed'), findsOneWidget);
+    expect(find.text('Badge removed'), findsOneWidget);
     await _drainToast(tester);
   });
 
@@ -201,13 +201,13 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(ffi.removed, isEmpty);
-    expect(find.text('Remove this mark?'), findsNothing);
+    expect(find.text('Remove this badge?'), findsNothing);
   });
 
   testWidgets('no marks says how to earn one', (tester) async {
     await _pump(tester);
 
-    expect(find.text('No marks yet'), findsOneWidget);
+    expect(find.text('No badges yet'), findsOneWidget);
     expect(
       find.text('Redeem a code on the Shop tab to earn one.'),
       findsOneWidget,

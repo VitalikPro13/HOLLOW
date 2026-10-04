@@ -123,7 +123,7 @@ pub(crate) fn request_frame(server_id: &str, our_device: &str, pending: &Pending
 
 /// Send our join request to one member device in the server's room. `false` when it
 /// cannot be sealed yet: no verified lock, or no invite key.
-pub(crate) fn send_request(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &str, pending: &PendingJoin, target: &str) -> bool {
+pub(crate) fn send_request(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &str, pending: &mut PendingJoin, target: &str) -> bool {
     let Some(data) = request_frame(server_id, our_device, pending, false) else {
         hollow_log!("[HOLLOW-CRDT] No verified join lock for {server_id} yet: the request cannot be sealed, not sent");
         return false;
@@ -133,14 +133,20 @@ pub(crate) fn send_request(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &st
         target_peer: target.to_string(),
         data,
     });
-    true
+    went_out(pending)
 }
 
 /// Send our join request to every member who sees the server's room: a joiner the
 /// relay hides there sees none of them. `false` when it cannot be sealed yet.
-pub(crate) fn send_request_to_room(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &str, pending: &PendingJoin) -> bool {
+pub(crate) fn send_request_to_room(ws_cmd_tx: &WsCmdTx, server_id: &str, our_device: &str, pending: &mut PendingJoin) -> bool {
     let Some(data) = request_frame(server_id, our_device, pending, false) else { return false };
     let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: server_id.to_string(), data });
+    went_out(pending)
+}
+
+/// A copy of the ask went out: the first one starts its coordinator window.
+fn went_out(pending: &mut PendingJoin) -> bool {
+    pending.first_sent_at.get_or_insert_with(std::time::Instant::now);
     true
 }
 
@@ -261,7 +267,7 @@ mod tests {
     }
 
     fn sync(server_id: &str) -> HavenMessage {
-        HavenMessage::SyncResponse { server_id: server_id.into(), ops_json: "[]".into() }
+        HavenMessage::SyncResponse { server_id: server_id.into(), ops_json: "[]".into(), nonce: None }
     }
 
     fn resolved(server_id: &str) -> HavenMessage {

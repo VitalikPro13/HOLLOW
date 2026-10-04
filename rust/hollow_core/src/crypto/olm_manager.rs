@@ -5,7 +5,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use vodozemac::olm::{
-    Account, AccountPickle, InboundCreationResult, OlmMessage, Session, SessionConfig,
+    Account, AccountPickle, DecryptionError, InboundCreationResult, OlmMessage, Session, SessionConfig,
+    SessionCreationError,
 };
 use vodozemac::Curve25519PublicKey;
 
@@ -33,6 +34,9 @@ pub(crate) struct OlmManager {
     /// Who holds each key [`Self::key_for_requester`] handed out, oldest first. Saved
     /// with the account: a restart that forgot it would orphan every key in it.
     key_slots: VecDeque<KeySlot>,
+    /// Per sending device, the newest seal time of a frame we decrypted from it. Saved,
+    /// unlike [`Self::decrypted`], so a restart still knows a replay for one.
+    read_marks: HashMap<String, i64>,
 }
 
 /// A requesting device and the one-time key it was handed.
@@ -75,6 +79,34 @@ pub(crate) struct Opened {
     pub switched: bool,
 }
 
+/// Why a message did not decrypt.
+#[derive(Debug)]
+pub(crate) enum OlmFail {
+    /// Behind our ratchet: a session we hold spent its message key, or the one-time
+    /// key its PreKey names is gone.
+    Stale(String),
+    /// No session we hold reads it. A replay ends here too once the session has let
+    /// the frame's chain go, so this never says the frame is new.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for OlmFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OlmFail::Stale(e) => write!(f, "stale, {e}"),
+            OlmFail::Unreadable(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+fn spent(e: &DecryptionError) -> bool {
+    matches!(e, DecryptionError::MissingMessageKey(_))
+}
+
+fn fail(stale: bool, why: String) -> OlmFail {
+    if stale { OlmFail::Stale(why) } else { OlmFail::Unreadable(why) }
+}
+
 fn ciphertext_digest(ciphertext: &[u8]) -> [u8; 16] {
     use sha2::{Digest, Sha256};
     let full = Sha256::digest(ciphertext);
@@ -95,7 +127,22 @@ impl OlmManager {
             identity_proof: None,
             decrypted: HashMap::new(),
             key_slots: VecDeque::new(),
+            read_marks: HashMap::new(),
         }
+    }
+
+    /// The saved account with its sessions and read marks, `None` before the first
+    /// account. A mark that fails to load only costs a replay its quiet drop.
+    pub fn load(store: &crate::storage::MessageStore) -> Result<Option<Self>, String> {
+        let Some(account_json) = store.load_olm_account()? else {
+            return Ok(None);
+        };
+        let mut olm = Self::from_pickles(&account_json, store.load_all_olm_sessions()?)?;
+        match store.load_olm_read_marks() {
+            Ok(marks) => olm.read_marks = marks.into_iter().collect(),
+            Err(e) => hollow_log!("[HOLLOW-CRYPTO] Olm read marks not loaded: {e}"),
+        }
+        Ok(Some(olm))
     }
 
     /// Restore from previously pickled account + sessions.
@@ -132,6 +179,7 @@ impl OlmManager {
             identity_proof: None,
             decrypted: HashMap::new(),
             key_slots: stored.key_slots,
+            read_marks: HashMap::new(),
         })
     }
 
@@ -148,6 +196,29 @@ impl OlmManager {
             seen.pop_front();
         }
         seen.push_back(ciphertext_digest(ciphertext));
+    }
+
+    /// Whether we already decrypted a frame from `peer` sealed at or after `sealed_ms`.
+    /// Such a frame failing says nothing about the session we hold now: it is a replay,
+    /// or rode a chain or session since let go.
+    pub(crate) fn read_past(&self, peer: &str, sealed_ms: i64) -> bool {
+        self.read_marks.get(peer).is_some_and(|&mark| sealed_ms <= mark)
+    }
+
+    /// Note that a frame from `peer` sealed at `sealed_ms` decrypted; true when that
+    /// moved its mark, which then needs saving.
+    pub(crate) fn note_read(&mut self, peer: &str, sealed_ms: i64) -> bool {
+        match self.read_marks.get_mut(peer) {
+            Some(mark) if *mark >= sealed_ms => false,
+            Some(mark) => {
+                *mark = sealed_ms;
+                true
+            }
+            None => {
+                self.read_marks.insert(peer.to_string(), sealed_ms);
+                true
+            }
+        }
     }
 
     /// Our Curve25519 identity key as unpadded base64.
@@ -261,19 +332,19 @@ impl OlmManager {
         their_identity_key_b64: &str,
         pre_key_message_bytes: &[u8],
         local_device: &str,
-    ) -> Result<Opened, String> {
+    ) -> Result<Opened, OlmFail> {
         let message = match OlmMessage::from_parts(0, pre_key_message_bytes)
-            .map_err(|e| format!("Failed to decode PreKeyMessage: {e}"))?
+            .map_err(|e| OlmFail::Unreadable(format!("Failed to decode PreKeyMessage: {e}")))?
         {
             OlmMessage::PreKey(m) => m,
-            OlmMessage::Normal(_) => return Err("Expected PreKeyMessage but got Normal".to_string()),
+            OlmMessage::Normal(_) => return Err(OlmFail::Unreadable("Expected PreKeyMessage but got Normal".to_string())),
         };
         let session_id = message.session_id();
 
         if let Some(session) = self.sessions.get_mut(peer_id).filter(|s| s.session_id() == session_id) {
             let plaintext = session
                 .decrypt(&OlmMessage::PreKey(message))
-                .map_err(|e| format!("PreKey decrypt on its session failed: {e}"))?;
+                .map_err(|e| fail(spent(&e), format!("PreKey decrypt on its session failed: {e}")))?;
             self.touch(peer_id);
             return Ok(Opened { plaintext, created: false, switched: false });
         }
@@ -286,7 +357,7 @@ impl OlmManager {
             let kept = self.retired.get_mut(peer_id).expect("position came from this entry");
             let plaintext = kept[i]
                 .decrypt(&OlmMessage::PreKey(message))
-                .map_err(|e| format!("PreKey decrypt on its retired session failed: {e}"))?;
+                .map_err(|e| fail(spent(&e), format!("PreKey decrypt on its retired session failed: {e}")))?;
             // With nothing to encrypt on, the session the peer is writing on is the one.
             let switched = !self.sessions.contains_key(peer_id);
             if switched {
@@ -299,11 +370,14 @@ impl OlmManager {
         }
 
         let their_identity_key = Curve25519PublicKey::from_base64(their_identity_key_b64)
-            .map_err(|e| format!("Invalid identity key: {e}"))?;
+            .map_err(|e| OlmFail::Unreadable(format!("Invalid identity key: {e}")))?;
         let InboundCreationResult { session, plaintext } = self
             .account
             .create_inbound_session(their_identity_key, &message)
-            .map_err(|e| format!("Failed to create inbound session: {e}"))?;
+            .map_err(|e| {
+                let stale = matches!(e, SessionCreationError::MissingOneTimeKey(_));
+                fail(stale, format!("Failed to create inbound session: {e}"))
+            })?;
         self.release_key_slots(peer_id, &message.one_time_key().to_base64());
 
         if self.has_unconfirmed_session(peer_id) && local_device < peer_id {
@@ -335,25 +409,33 @@ impl OlmManager {
         peer_id: &str,
         message_type: usize,
         ciphertext_bytes: &[u8],
-    ) -> Result<Opened, String> {
+    ) -> Result<Opened, OlmFail> {
         let olm_msg = OlmMessage::from_parts(message_type, ciphertext_bytes)
-            .map_err(|e| format!("Failed to decode OlmMessage: {e}"))?;
+            .map_err(|e| OlmFail::Unreadable(format!("Failed to decode OlmMessage: {e}")))?;
+        let mut stale = false;
         let failure = match self.sessions.get_mut(peer_id).map(|s| s.decrypt(&olm_msg)) {
             Some(Ok(plaintext)) => {
                 self.touch(peer_id);
                 return Ok(Opened { plaintext, created: false, switched: false });
             }
-            Some(Err(e)) => format!("Decryption failed: {e}"),
+            Some(Err(e)) => {
+                stale = spent(&e);
+                format!("Decryption failed: {e}")
+            }
             None => format!("No session for peer {peer_id}"),
         };
         // A failed decrypt leaves a vodozemac session untouched, so trying each is safe.
         let found = self.retired.get_mut(peer_id).and_then(|kept| {
-            kept.iter_mut()
-                .enumerate()
-                .find_map(|(i, s)| s.decrypt(&olm_msg).ok().map(|plaintext| (i, plaintext)))
+            kept.iter_mut().enumerate().find_map(|(i, s)| match s.decrypt(&olm_msg) {
+                Ok(plaintext) => Some((i, plaintext)),
+                Err(e) => {
+                    stale |= spent(&e);
+                    None
+                }
+            })
         });
         let Some((i, plaintext)) = found else {
-            return Err(failure);
+            return Err(fail(stale, failure));
         };
         let session = self
             .retired
@@ -869,6 +951,105 @@ mod tests {
         assert_eq!(alice.retired.get(BOB).map(VecDeque::len), Some(RETIRED_KEPT));
     }
 
+    // AR-19: which frames a session already read decides whether a failure is news.
+    // The error tells a spent key from the rest, but cannot alone spot a replay.
+
+    #[test]
+    fn a_spent_message_key_is_stale_on_our_session_or_a_retired_one() {
+        let (mut alice, mut bob) = established_pair();
+        let once = bob.encrypt(ALICE, b"once").unwrap();
+        open(&mut alice, BOB, &bob, once.clone(), ALICE);
+        let again = alice.decrypt(BOB, once.0, &once.1);
+        assert!(matches!(again, Err(OlmFail::Stale(_))), "on the session that read it: {again:?}");
+        alice.retire_session(BOB);
+        let again = alice.decrypt(BOB, once.0, &once.1);
+        assert!(matches!(again, Err(OlmFail::Stale(_))), "on a retired session: {again:?}");
+    }
+
+    #[test]
+    fn a_replayed_prekey_is_stale_with_or_without_its_session() {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let otk = bob.generate_one_time_key();
+        alice.create_outbound_session(BOB, &bob.identity_key_base64(), &otk).unwrap();
+        let hello = alice.encrypt(BOB, b"hello").unwrap();
+        let alice_key = alice.identity_key_base64();
+        bob.open_prekey(ALICE, &alice_key, &hello.1, BOB).unwrap();
+
+        let again = bob.open_prekey(ALICE, &alice_key, &hello.1, BOB);
+        assert!(matches!(again, Err(OlmFail::Stale(_))), "its session spent the key: {again:?}");
+        bob.retire_session(ALICE);
+        let again = bob.open_prekey(ALICE, &alice_key, &hello.1, BOB);
+        assert!(matches!(again, Err(OlmFail::Stale(_))), "its retired session spent the key: {again:?}");
+        bob.remove_session(ALICE);
+        let again = bob.open_prekey(ALICE, &alice_key, &hello.1, BOB);
+        assert!(matches!(again, Err(OlmFail::Stale(_))), "its one-time key is gone: {again:?}");
+    }
+
+    #[test]
+    fn a_replay_from_a_chain_the_session_let_go_is_unreadable_not_stale() {
+        // Why the seal time decides and not the error: a relay holding a frame long
+        // enough no longer gets a spent key back for it.
+        let (mut alice, mut bob) = established_pair();
+        let first = bob.encrypt(ALICE, b"first").unwrap();
+        open(&mut alice, BOB, &bob, first.clone(), ALICE);
+        for i in 0..6 {
+            let a = alice.encrypt(BOB, format!("a{i}").as_bytes()).unwrap();
+            open(&mut bob, ALICE, &alice, a, BOB);
+            let b = bob.encrypt(ALICE, format!("b{i}").as_bytes()).unwrap();
+            open(&mut alice, BOB, &bob, b, ALICE);
+        }
+        let again = alice.decrypt(BOB, first.0, &first.1);
+        assert!(matches!(again, Err(OlmFail::Unreadable(_))), "{again:?}");
+        assert!(matches!(alice.decrypt(ALICE, first.0, &first.1), Err(OlmFail::Unreadable(_))), "no session at all");
+    }
+
+    #[test]
+    fn a_read_mark_covers_what_was_sealed_up_to_it_and_never_moves_back() {
+        let mut olm = OlmManager::new();
+        assert!(!olm.read_past(BOB, 0), "nothing read yet");
+        assert!(olm.note_read(BOB, 1_000));
+        assert!(!olm.note_read(BOB, 900), "an older frame leaves the mark");
+        assert!(!olm.note_read(BOB, 1_000), "the same frame again moves nothing");
+        assert!(olm.read_past(BOB, 1_000), "the newest frame read is covered");
+        assert!(olm.read_past(BOB, 900));
+        assert!(!olm.read_past(BOB, 1_001), "a newer frame is news");
+        assert!(!olm.read_past(ALICE, 900), "one device's mark covers no other");
+    }
+
+    #[test]
+    fn read_marks_survive_a_restart_and_never_move_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("olm.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        assert!(OlmManager::load(&store).unwrap().is_none(), "no account yet");
+        store.save_olm_account(&OlmManager::new().account_pickle_json().unwrap()).unwrap();
+        store.save_olm_read_mark(BOB, 2_000).unwrap();
+        store.save_olm_read_mark(BOB, 1_000).unwrap();
+        let olm = OlmManager::load(&store).unwrap().expect("the account");
+        assert!(olm.read_past(BOB, 2_000), "a restart forgot the mark, or a later, older write moved it back");
+        assert!(!olm.read_past(BOB, 2_001));
+    }
+
+    #[test]
+    fn every_process_that_reads_olm_frames_boots_with_its_read_marks() {
+        let fn_body = |file: &str, start: &str| {
+            let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file))
+                .unwrap()
+                .replace("\r\n", "\n");
+            let at = text.find(start).unwrap_or_else(|| panic!("{start} not in {file}"));
+            text[at..].split("\n}\n").next().unwrap().to_string()
+        };
+        for (file, start) in [
+            ("src/api/network.rs", "pub fn start_node("),
+            ("src/api/network.rs", "pub fn start_fetch_node("),
+            ("src/push_enrich.rs", "fn fetch_and_decrypt("),
+        ] {
+            assert!(fn_body(file, start).contains("OlmManager::load("), "{start} boots Olm without its read marks");
+        }
+    }
+
     // Section 2 item 9a (A-DM-01): a KeyRequest from a device we never met mints a
     // key, so minting is bounded per requester and in total.
 
@@ -877,7 +1058,7 @@ mod tests {
         let mut alice = OlmManager::new();
         alice.create_outbound_session(BOB, &bob.identity_key_base64(), bob_key)?;
         let hello = alice.encrypt(BOB, b"hello").unwrap();
-        bob.open_prekey(ALICE, &alice.identity_key_base64(), &hello.1, BOB)
+        bob.open_prekey(ALICE, &alice.identity_key_base64(), &hello.1, BOB).map_err(|e| e.to_string())
     }
 
     #[test]
