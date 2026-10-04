@@ -284,34 +284,14 @@ pub(crate) fn safe_file_name(raw: &str) -> String {
     }
 
     // 4. Neutralize control chars and everything Windows forbids in a component,
-    //    plus the bidi override characters: they are category Cf, so `is_control()`
-    //    misses them, and `evil\u{202E}txt.exe` renders as `evil exe.txt`.
+    //    plus the bidi override characters.
     let mut cleaned: String = name
         .chars()
-        .map(|c| {
-            if c.is_control()
-                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-                || matches!(c,
-                    '\u{202A}'..='\u{202E}'   // LRE/RLE/PDF/LRO/RLO
-                    | '\u{2066}'..='\u{2069}' // LRI/RLI/FSI/PDI
-                    | '\u{200E}' | '\u{200F}' // LRM/RLM
-                )
-            {
-                '_'
-            } else {
-                c
-            }
-        })
+        .map(|c| if unsafe_name_char(c) { '_' } else { c })
         .collect();
 
-    // 5. Reserved device names, with or without an extension (`CON.txt` counts).
-    const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
-    if RESERVED.contains(&stem.as_str()) {
+    // 5. Reserved device names.
+    if reserved_device_name(&cleaned) {
         cleaned.insert(0, '_');
     }
 
@@ -330,6 +310,41 @@ pub(crate) fn safe_file_name(raw: &str) -> String {
         return FALLBACK_DOWNLOAD_NAME.to_string();
     }
     cleaned.to_string()
+}
+
+/// Control characters, everything Windows forbids in a component (`:` included, which
+/// kills drive-relative names and NTFS alternate data streams), and the bidi overrides:
+/// they are category Cf, so `is_control()` misses them, and `evil\u{202E}txt.exe`
+/// renders as `evil exe.txt`.
+fn unsafe_name_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        || matches!(c,
+            '\u{202A}'..='\u{202E}'   // LRE/RLE/PDF/LRO/RLO
+            | '\u{2066}'..='\u{2069}' // LRI/RLI/FSI/PDI
+            | '\u{200E}' | '\u{200F}' // LRM/RLM
+        )
+}
+
+/// A Windows device name, with or without an extension (`CON.txt` counts).
+fn reserved_device_name(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    RESERVED.contains(&stem.as_str())
+}
+
+/// Whether `name`, read from a file someone else made, already is one inert path
+/// component: what [`safe_file_name`] leaves as it is, at any length a filesystem takes.
+pub(crate) fn is_inert_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.ends_with(['.', ' '])
+        && !name.chars().any(unsafe_name_char)
+        && !reserved_device_name(name)
 }
 
 fn partial_path(root_hash_hex: &str) -> Result<PathBuf, String> {
@@ -543,6 +558,36 @@ pub fn build_manifest_from_file(
             .map(|d| d.as_secs()).unwrap_or(0),
         note: None,
     })
+}
+
+/// Folder-name prefix of a cleaned copy made for a chat send. The copy belongs
+/// to its share, which deletes it with itself.
+const SEND_COPY_PREFIX: &str = "send_";
+
+/// What a chat send too big to go directly is shared from: a photo or video
+/// is copied into `shares/` without its location and camera details
+/// (C-FILES-03), in a folder of its own so the copy keeps the name the
+/// receiver sees; any other file is shared from where it lies.
+pub(crate) fn cleaned_send_source(source_path: &str) -> Result<String, String> {
+    let path = Path::new(source_path);
+    let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+    if !crate::node::media_strip::strips_on_send(&ext) {
+        return Ok(source_path.to_string());
+    }
+    let data = crate::node::media_strip::read_for_send(path)?;
+    let name = path.file_name().ok_or("The file has no name")?;
+    let mut tag = [0u8; 8];
+    getrandom::fill(&mut tag).map_err(|e| format!("Failed to name the copy: {e}"))?;
+    let dest = shares_dir()?.join(format!("{SEND_COPY_PREFIX}{}", hex::encode(tag))).join(name);
+    crate::node::at_rest::write_all(&dest, &data)?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// True for a cleaned copy [`cleaned_send_source`] made.
+fn is_send_copy(path: &Path) -> bool {
+    let (Some(dir), Ok(shares)) = (path.parent(), shares_dir()) else { return false };
+    dir.parent() == Some(shares.as_path())
+        && dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with(SEND_COPY_PREFIX))
 }
 
 // ── Command handlers (called from swarm.rs) ──────────────────────────────
@@ -930,12 +975,21 @@ pub async fn handle_command_share_remove(
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: room });
     registry.remove(&root_hash);
     if let Some(store) = open_message_store(bundle_keypair) {
-        if delete_file && let Ok(Some(s)) = store.load_share(&root_hash) {
-            if let Some(p) = s.disk_path {
-                let _ = crate::node::at_rest::remove(Path::new(&p));
-            }
-            if let Ok(p) = partial_path(&root_hash) {
-                let _ = crate::node::at_rest::remove(&p);
+        if let Ok(Some(s)) = store.load_share(&root_hash) {
+            let disk = s.disk_path.as_deref().map(Path::new);
+            // A cleaned copy is the share's own, never the user's file.
+            if let Some(copy) = disk.filter(|p| is_send_copy(p)) {
+                let _ = crate::node::at_rest::remove(copy);
+                if let Some(dir) = copy.parent() {
+                    let _ = std::fs::remove_dir(dir);
+                }
+            } else if delete_file {
+                if let Some(p) = disk {
+                    let _ = crate::node::at_rest::remove(p);
+                }
+                if let Ok(p) = partial_path(&root_hash) {
+                    let _ = crate::node::at_rest::remove(&p);
+                }
             }
         }
         let _ = store.delete_share(&root_hash);
@@ -1609,6 +1663,12 @@ pub async fn handle_envelope_share_have(
     state.peer_have.insert(sender_peer_id.to_string(), bitmap);
 }
 
+/// Whether `peer` opened a sealed Have in the room of a share we hold, so it holds
+/// that share's link key.
+pub(crate) fn holds_a_link_we_serve(registry: &ShareRegistry, peer: &str) -> bool {
+    registry.values().any(|state| state.peer_have.contains_key(peer))
+}
+
 // ── Share data-channel liveness (NodeCommand handlers) ───────────────
 //
 // Hollow Share runs its OWN peer connection per peer from the STUN-only Share ICE
@@ -1843,9 +1903,7 @@ async fn finalize_completed_download(
 fn unique_final_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     let safe_name = safe_file_name(file_name);
     if safe_name != file_name {
-        hollow_log!(
-            "[HOLLOW-SECURITY] Share file name sanitized: {file_name:?} -> {safe_name:?}"
-        );
+        hollow_log!("[HOLLOW-SECURITY] Share file name sanitized ({} chars)", file_name.len());
     }
 
     let mut final_p = dir.join(&safe_name);
@@ -2349,6 +2407,25 @@ mod tests {
         }
     }
 
+    /// An inert name is exactly one `safe_file_name` keeps: every hostile shape fails it,
+    /// and everything the sanitizer makes passes it.
+    #[test]
+    fn inert_names_are_the_ones_safe_file_name_keeps() {
+        for raw in [
+            "", ".", "..", "...", "../poc.txt", r"..\poc.txt", "a/b", r"a\b", "/etc/passwd",
+            r"C:\x\evil.exe", "C:evil.exe", "a.txt:evil", "evil.exe.", "evil.exe ", "CON",
+            "con.txt", "LPT9", "x\u{0}y", "tab\there", "evil\u{202E}txt.exe", "a\u{2066}b",
+        ] {
+            assert!(!is_inert_file_name(raw), "{raw:?} passed as inert");
+            assert!(is_inert_file_name(&safe_file_name(raw)), "{raw:?} sanitized to a name that is not inert");
+        }
+        for name in ["ab12.png", ".bashrc", "Отчёт за июль.pdf", "vacation 🏖️ (final).png", "CONTACT.txt", "COM10.txt"] {
+            assert!(is_inert_file_name(name), "{name:?} is a fine name");
+        }
+        assert!(is_inert_file_name(&"a".repeat(255)));
+        assert!(!is_inert_file_name(&"a".repeat(256)), "a name no filesystem takes");
+    }
+
     #[test]
     fn unique_final_path_stays_inside_dir() {
         let dir = std::env::temp_dir().join("hollow-share-traversal-test");
@@ -2442,5 +2519,48 @@ mod tests {
         let bm2 = ChunkBitmap::from_bytes(vec![0xFE, 0xFF], 10);
         assert_eq!(bm2.count_set(), 9);
         assert!(!bm2.is_complete());
+    }
+
+    /// C-FILES-03: a chat video too big to send directly is shared from a
+    /// cleaned copy, never from the user's file, and one that cannot be
+    /// cleaned is refused before any share exists.
+    #[test]
+    fn a_large_video_send_is_shared_from_a_cleaned_copy() {
+        use crate::node::media_strip::fixtures::{mp4_with_location, LOCATION};
+        let _g = crate::node::resolver::test_lock();
+        let root = crate::test_tmp::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", root.path()) };
+        crate::node::at_rest::reset_for_test();
+        crate::node::at_rest::init(&root.path().join("messages.db").to_string_lossy(), &"5c".repeat(32))
+            .expect("init ring");
+
+        let picked = root.path().join("holiday.mp4");
+        let original = mp4_with_location();
+        std::fs::write(&picked, &original).unwrap();
+
+        let shared = cleaned_send_source(picked.to_str().unwrap()).expect("a valid video is shared");
+        let shared = Path::new(&shared);
+        assert_ne!(shared, picked.as_path(), "never the user's own file");
+        assert!(is_send_copy(shared), "the copy lives in its own folder under shares/");
+        assert_eq!(shared.file_name(), picked.file_name(), "the receiver sees the name that was picked");
+        assert!(crate::node::at_rest::is_encrypted(shared), "the copy is protected at rest");
+        let served = crate::node::at_rest::read_all(shared).unwrap();
+        assert_eq!(served.len(), original.len());
+        assert!(!served.windows(LOCATION.len()).any(|w| w == LOCATION), "the share serves no location");
+        assert_eq!(std::fs::read(&picked).unwrap(), original, "the user's file is untouched");
+
+        let broken = root.path().join("broken.mov");
+        std::fs::write(&broken, b"not a movie").unwrap();
+        assert_eq!(
+            cleaned_send_source(broken.to_str().unwrap()),
+            Err(crate::node::media_strip::REFUSED.to_string()),
+        );
+
+        let doc = root.path().join("notes.pdf");
+        std::fs::write(&doc, b"%PDF").unwrap();
+        assert_eq!(cleaned_send_source(doc.to_str().unwrap()).unwrap(), doc.to_str().unwrap(), "a file is shared as it lies");
+
+        crate::node::at_rest::reset_for_test();
+        unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
     }
 }

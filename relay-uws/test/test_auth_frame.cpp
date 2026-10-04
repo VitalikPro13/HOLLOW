@@ -66,6 +66,10 @@ int main() {
     check("an empty frame is refused", !accepted(""));
     check("a frame past the size cap is refused",
           !accepted(R"({"type":"auth","peer_id":")" + std::string(MAX_AUTH_FRAME_BYTES, 'a') + R"("})"));
+    const std::string deep = std::string(6000, '[') + std::string(6000, ']');
+    check("a frame nested past the depth cap is refused",
+          !accepted(R"({"type":"auth","peer_id":"p","x":)" + deep + "}") &&
+              !is_auth_hello(R"({"type":"auth_hello","x":)" + deep + "}"));
 
     printf("auth v2\n");
     check("a hello is recognised", is_auth_hello(R"({"type":"auth_hello"})"));

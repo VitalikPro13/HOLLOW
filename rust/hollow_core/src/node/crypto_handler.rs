@@ -252,6 +252,30 @@ impl SignedExtras<'_> {
     fn album(&self) -> Option<&str> {
         self.album.filter(|a| !a.is_empty())
     }
+
+    /// Whether every slot that sits before `text` in the payload has its shape. A
+    /// colon in any of them would let a holder move text across a field boundary
+    /// and keep the author's signature valid, so neither side signs or accepts one.
+    pub(crate) fn well_formed(&self) -> bool {
+        let id_ok = |v: Option<&str>| v.is_none_or(|s| s.is_empty() || is_signed_id_shape(s));
+        id_ok(self.mid)
+            && id_ok(self.reply_to)
+            && id_ok(self.file_id)
+            && self.lp_digest.is_none_or(|d| d.is_empty() || is_lp_digest_shape(d))
+            && self.album().is_none_or(is_album_id_shape)
+    }
+}
+
+/// True for a message or file id as a signed payload carries it: 1 to 64 of
+/// `[A-Za-z0-9_-]`. Message ids and older file ids are 32 hex, committed file ids 64.
+pub(crate) fn is_signed_id_shape(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// True for a [`link_preview_digest`]: 64 lowercase hex.
+fn is_lp_digest_shape(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// True for a hyphenated UUID (8-4-4-4-12 hex digits, either case). The album
@@ -270,9 +294,10 @@ pub(crate) fn is_album_id_shape(s: &str) -> bool {
 ///   hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}
 /// v3 when the message belongs to an album:
 ///   hollow-msg3:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{album}:{text}
-/// Every field before `text` is colon-free, so `text` stays LAST and the layout
-/// is unambiguous. The two prefixes differ, so stripping or adding an album
-/// can never keep a signature valid.
+/// Every field before `text` is colon-free ([`SignedExtras::well_formed`], held by
+/// signer and verifier alike), so `text` stays LAST and the layout is unambiguous.
+/// The two prefixes differ, so stripping or adding an album can never keep a
+/// signature valid.
 pub(crate) fn message_signing_payload_v2(
     msg_type: &str,
     context: &str,
@@ -308,6 +333,10 @@ pub(crate) fn sign_message_versioned(
     extras: &SignedExtras,
     text: &str,
 ) -> (Option<String>, Option<String>) {
+    if !extras.well_formed() {
+        hollow_log!("[HOLLOW-SECURITY] Refused to sign a {msg_type} message with a malformed id or preview digest");
+        return (None, None);
+    }
     let payload = message_signing_payload_v2(msg_type, context, sender, ts, extras, text);
     sign_message(keypair, pub_key_b64, &payload)
 }
@@ -316,10 +345,10 @@ pub(crate) fn sign_message_versioned(
 /// received extras carry an album, v2 otherwise, never both.
 ///
 /// There is deliberately no v1 fallback: it would be a downgrade oracle, since
-/// the attacker rather than the sender picks which payload is checked. A
-/// malformed album fails, and so do a body over [`MAX_MESSAGE_BYTES`] and a stamp
-/// past [`message_ts_fits`], which makes this the one place every signed receive
-/// path enforces both.
+/// the attacker rather than the sender picks which payload is checked. Malformed
+/// extras fail ([`SignedExtras::well_formed`]), and so do a body over
+/// [`MAX_MESSAGE_BYTES`] and a stamp past [`message_ts_fits`], which makes this the
+/// one place every signed receive path enforces all three.
 /// Reuses `pk_cache` across a batch; a missing signature returns false.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_message_signature_v2(
@@ -333,7 +362,8 @@ pub(crate) fn verify_message_signature_v2(
     text: &str,
     pk_cache: &mut PkCache,
 ) -> bool {
-    if extras.album().is_some_and(|a| !is_album_id_shape(a)) {
+    if !extras.well_formed() {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a {msg_type} message with a malformed id or preview digest");
         return false;
     }
     if !message_body_fits(text) {
@@ -633,7 +663,7 @@ pub(crate) fn verify_key_exchange(
 
     // Fresh? Blocks replaying a captured bundle after a key rotation.
     match ts {
-        Some(t) if (key_exchange_now() - t).abs() <= KEY_EXCHANGE_SKEW_SECS => {}
+        Some(t) if key_exchange_now().abs_diff(t) <= KEY_EXCHANGE_SKEW_SECS as u64 => {}
         _ => return KeyExchangeAuth::Invalid,
     }
 
@@ -839,7 +869,7 @@ pub(crate) fn verify_carried_bundle(
 
     // 4. Freshness — the CARRIED rule, not the live one.
     let now = key_exchange_now();
-    if now - b.ts > MAX_CARRIED_BUNDLE_AGE_SECS {
+    if now.saturating_sub(b.ts) > MAX_CARRIED_BUNDLE_AGE_SECS {
         return false;
     }
     if b.ts - now > KEY_EXCHANGE_SKEW_SECS {
@@ -1030,6 +1060,11 @@ pub(crate) fn verify_destroy_identity(order: &DestroyIdentity) -> bool {
     use base64::engine::general_purpose::STANDARD as B64;
     use crate::identity::native_identity::NativeKeypair;
 
+    // Targets join with ',' in the payload, so only a peer id may stand in one: else
+    // ["A","B"] re-signs as ["A,B"], an order that names nobody, and [] as [""].
+    if !order.targets.iter().all(|t| crate::crypto::safety_number::pubkey_from_peer_id(t).is_some()) {
+        return false;
+    }
     let Ok(pk_bytes) = B64.decode(&order.master_pubkey_b64) else {
         return false;
     };
@@ -1354,13 +1389,28 @@ pub(crate) fn persist_mls_state(mls: &MlsManager, crypto_store: &crate::crypto::
 /// Welcome built from it then fails forever with `NoMatchingKeyPackage`, and a
 /// parked join makes that window days long by design.
 ///
-/// The ONLY call site of `generate_key_package` in `node/`, guarded by a source
-/// scan in `key_package_mints_persist_mls_state`.
+/// With [`mint_group_key_package`], the ONLY call sites of `generate_key_package*`
+/// in `node/`, guarded by a source scan in `key_package_mints_persist_mls_state`.
+/// The package names no group, so it is for a meeting's knock alone.
 pub(crate) fn mint_key_package(
     mls: &MlsManager,
     crypto_store: &crate::crypto::CryptoStore,
 ) -> Result<Vec<u8>, String> {
     let kp_bytes = mls.generate_key_package()?;
+    persist_mls_state(mls, crypto_store);
+    Ok(kp_bytes)
+}
+
+/// [`mint_key_package`] for a server group or subgroup: the package names
+/// `group_key` and its mint time, without which no receiver counts it as a repair of
+/// our leaf. `parked` keeps it past the usual expiry, for a join Welcomed days later.
+pub(crate) fn mint_group_key_package(
+    mls: &MlsManager,
+    crypto_store: &crate::crypto::CryptoStore,
+    group_key: &str,
+    parked: bool,
+) -> Result<Vec<u8>, String> {
+    let kp_bytes = mls.generate_key_package_for(group_key, parked)?;
     persist_mls_state(mls, crypto_store);
     Ok(kp_bytes)
 }
@@ -1466,9 +1516,10 @@ pub(crate) fn leafless_member_devices_where(
     local_peer: &str,
     member_allowed: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    // Computed ONCE, not per device: `group_members` walks every leaf.
+    // Computed ONCE, not per device: `group_members` walks every leaf. A group that
+    // still seats someone we removed carries no send at all (`seats_only_members`).
     let (holds_group, leaves) = match mls.as_ref() {
-        Some(m) if m.has_group(group_key) => {
+        Some(m) if m.has_group(group_key) && unseated_leaves_in(m, group_key, state).is_empty() => {
             let set: std::collections::HashSet<String> =
                 m.group_members(group_key).into_iter().collect();
             (true, set)
@@ -1776,7 +1827,7 @@ pub(crate) fn request_subgroup_bootstrap(
         Some(c) if c != local_peer => c,
         _ => return, // we're the coordinator (reconciler handles it) or nobody online
     };
-    let kp_bytes = match mint_key_package(mls, crypto_store) {
+    let kp_bytes = match mint_group_key_package(mls, crypto_store, &crate::crypto::subgroup_id(server_id, channel_id), false) {
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] subgroup KP gen failed: {e}"); return; }
     };
@@ -1813,7 +1864,7 @@ pub(crate) fn request_server_group_bootstrap(
     let Some(owner) = owner else { return false };
     if super::resolver::same_identity(owner, local_peer) { return false; }
     if !peer_is_reachable(ws_room_peers, owner) { return false; }
-    let kp_bytes = match mint_key_package(mls, crypto_store) {
+    let kp_bytes = match mint_group_key_package(mls, crypto_store, server_id, false) {
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
     };
@@ -1859,7 +1910,7 @@ pub(crate) fn request_server_leaf(
     if targets.is_empty() {
         return false;
     }
-    let kp_bytes = match mint_key_package(mls, crypto_store) {
+    let kp_bytes = match mint_group_key_package(mls, crypto_store, server_id, false) {
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
     };
@@ -1913,35 +1964,7 @@ pub(crate) fn reconcile_subgroups_for_server(
 
     for cid in channels {
         let group_key = crate::crypto::subgroup_id(server_id, &cid);
-        // Prefer the OWNER as the single subgroup coordinator when online: it ALWAYS
-        // qualifies and is agreed from the CRDT, whereas the leaf-holder heuristic
-        // below disagrees across nodes, so two masters could fork the group under one
-        // id. Owner offline: the lowest online master who qualifies AND holds a leaf.
-        let coord = {
-            let owner = server.members.keys().find(|m| {
-                server.roles.get(*m)
-                    .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                    .unwrap_or(false)
-            });
-            let owner_online = owner.is_some_and(|o| {
-                o.as_str() == local_peer || peer_is_reachable(ws_room_peers, o)
-            });
-            if owner_online {
-                owner.cloned()
-            } else {
-                let leaf_masters: std::collections::HashSet<String> = mls.group_members(&group_key)
-                    .iter().map(|l| super::resolver::resolve(l)).collect();
-                let mut holders: Vec<String> = server.members.keys()
-                    .filter(|mm| server.can_see_channel(mm, &cid))
-                    .filter(|mm| mm.as_str() == local_peer || peer_is_reachable(ws_room_peers, mm))
-                    .filter(|mm| leaf_masters.contains(*mm))
-                    .cloned()
-                    .collect();
-                holders.sort();
-                holders.into_iter().next()
-                    .or_else(|| elect_subgroup_coordinator(server, &cid, local_peer, ws_room_peers))
-            }
-        };
+        let coord = subgroup_committer(mls, server, &cid, local_peer, ws_room_peers);
         if coord.as_deref() != Some(local_peer) { continue; }
 
         // The coordinator must hold the group to commit. Create it lazily (we are
@@ -1987,6 +2010,82 @@ pub(crate) fn reconcile_subgroups_for_server(
             let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data);
             if sent > 0 {
                 hollow_log!("[HOLLOW-MLS] reconcile: requested KeyPackage from {member} for {group_key} ({sent} device(s))");
+            }
+        }
+    }
+}
+
+/// Who commits for a restricted channel's subgroup. The OWNER when online: it ALWAYS
+/// qualifies and is agreed from the CRDT, whereas the leaf-holder heuristic disagrees
+/// across nodes, so two masters could fork the group under one id. Owner offline: the
+/// lowest online master who qualifies AND holds a leaf.
+fn subgroup_committer(
+    mls: &MlsManager,
+    server: &crate::crdt::server_state::ServerState,
+    cid: &str,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    let owner = server.members.keys().find(|m| {
+        server.roles.get(*m)
+            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+            .unwrap_or(false)
+    });
+    if owner.is_some_and(|o| o.as_str() == local_peer || peer_is_reachable(ws_room_peers, o)) {
+        return owner.cloned();
+    }
+    let leaf_masters: std::collections::HashSet<String> = mls.group_members(&crate::crypto::subgroup_id(&server.server_id, cid))
+        .iter().map(|l| super::resolver::resolve(l)).collect();
+    let mut holders: Vec<String> = server.members.keys()
+        .filter(|mm| server.can_see_channel(mm, cid))
+        .filter(|mm| mm.as_str() == local_peer || peer_is_reachable(ws_room_peers, mm))
+        .filter(|mm| leaf_masters.contains(*mm))
+        .cloned()
+        .collect();
+    holders.sort();
+    holders.into_iter().next()
+        .or_else(|| elect_subgroup_coordinator(server, cid, local_peer, ws_room_peers))
+}
+
+/// Every group we hold that still seats someone our view removed, which no send
+/// reaches until the removal is in: its committer queues the removal, anyone else asks
+/// for the commit it may have missed (a relay can withhold the one broadcast).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sweep_unseated_leaves(
+    mls: &MlsManager,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
+    local_peer: &str,
+) {
+    for group_key in mls.group_ids() {
+        let (server_id, channel) = crate::crypto::split_group_key(&group_key);
+        let Some(state) = server_states.get(&server_id) else { continue };
+        if super::conference::is_conference_sid(&server_id) || !mls.is_active(&group_key) {
+            continue;
+        }
+        let unseated = unseated_leaves_in(mls, &group_key, state);
+        if unseated.is_empty() {
+            continue;
+        }
+        let committer = match &channel {
+            Some(cid) => subgroup_committer(mls, state, cid, local_peer, ws_room_peers),
+            None => {
+                let seated: Vec<String> = mls.group_members(&group_key).into_iter().filter(|l| !unseated.contains(l)).collect();
+                elect_server_coordinator(state, &seated, local_peer, ws_room_peers)
+            }
+        };
+        if committer.as_deref() != Some(local_peer) {
+            send_epoch_probe(mls, ws_cmd_tx, ws_room_peers, state, &server_id, channel.as_deref(), local_peer, epoch_hint_cooldown);
+            continue;
+        }
+        let queue = pending_mls_removals.entry(group_key.clone()).or_default();
+        for leaf in unseated {
+            if !queue.contains(&leaf) {
+                hollow_log!("[HOLLOW-MLS] Queuing {leaf} for removal from {group_key}: our view no longer seats it");
+                queue.push(leaf);
             }
         }
     }
@@ -2075,6 +2174,43 @@ pub(crate) fn send_room_for_peer(
     ws_room_for_peer(ws_room_peers, peer_str).or_else(|| super::door_room::heard_room(peer_str))
 }
 
+/// Leaves of `group_key` that `state` no longer seats ([`super::mls_authority::unseated`]),
+/// which a member that missed their removal commit still holds. Legacy unbound leaves
+/// are left to the repair sweep.
+pub(crate) fn unseated_leaves_in(
+    mls: &MlsManager,
+    group_key: &str,
+    state: &crate::crdt::server_state::ServerState,
+) -> Vec<String> {
+    let (_, channel) = crate::crypto::split_group_key(group_key);
+    let rules = super::mls_authority::GroupRules::Server { state, channel: channel.as_deref() };
+    mls.other_bound_leaves(group_key)
+        .iter()
+        .filter(|leaf| super::mls_authority::unseated(leaf, &rules))
+        .map(|leaf| leaf.device.clone())
+        .collect()
+}
+
+/// A send under `group_key` may reach only members `seats` counts: a relay can
+/// withhold the one removal commit from us while the carried op still tells us. On
+/// `Err` the caller's Olm path reaches the current members instead. A meeting has
+/// no CRDT and passes `None`.
+fn seats_only_members(
+    mls: &MlsManager,
+    server_id: &str,
+    group_key: &str,
+    seats: Option<&crate::crdt::server_state::ServerState>,
+) -> Result<(), String> {
+    if super::conference::is_conference_sid(server_id) {
+        return Ok(());
+    }
+    let state = seats.ok_or_else(|| format!("no view of who {server_id} seats"))?;
+    match unseated_leaves_in(mls, group_key, state).first() {
+        Some(leaf) => Err(format!("{group_key} still seats {leaf}, whom our view no longer counts")),
+        None => Ok(()),
+    }
+}
+
 /// MLS-encrypt an envelope and broadcast to the server room via WS relay: one
 /// encrypt, one send, the relay fans out. `Err(reason)` lets the caller fall back.
 pub(crate) fn send_mls_broadcast(
@@ -2083,8 +2219,9 @@ pub(crate) fn send_mls_broadcast(
     server_id: &str,
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
+    seats: Option<&crate::crdt::server_state::ServerState>,
 ) -> Result<(), String> {
-    send_mls_broadcast_in(mls, ws_cmd_tx, server_id, None, envelope, crypto_store)
+    send_mls_broadcast_in(mls, ws_cmd_tx, server_id, None, envelope, crypto_store, seats)
 }
 
 /// [`send_mls_broadcast`] under `channel`'s subgroup when `Some`: still one frame to
@@ -2096,11 +2233,13 @@ pub(crate) fn send_mls_broadcast_in(
     channel: Option<&str>,
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
+    seats: Option<&crate::crdt::server_state::ServerState>,
 ) -> Result<(), String> {
     let group_key = match channel {
         Some(cid) => crate::crypto::subgroup_id(server_id, cid),
         None => server_id.to_string(),
     };
+    seats_only_members(mls, server_id, &group_key, seats)?;
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
@@ -2170,12 +2309,14 @@ pub(crate) fn send_mls_broadcast_topic(
     use_subgroup: bool,
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
+    seats: Option<&crate::crdt::server_state::ServerState>,
 ) -> Result<Vec<u8>, String> {
     let group_key = if use_subgroup {
         crate::crypto::subgroup_id(server_id, channel)
     } else {
         server_id.to_string()
     };
+    seats_only_members(mls, server_id, &group_key, seats)?;
     let channel_id = if use_subgroup { Some(channel.to_string()) } else { None };
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
@@ -2517,9 +2658,10 @@ pub(crate) enum CommitApplyOutcome {
     /// merged-then-evicted with no recovery owed (a kick or a ban).
     Applied,
     /// Processed and merged, and the commit removed OUR OWN leaf while we are
-    /// still a member: a repair whose Welcome is on its way. The group is dropped
-    /// and the throttle stamped, and the caller holds the Welcome grace.
-    Evicted,
+    /// still a member: a repair. The group is dropped and the caller arms the
+    /// Welcome grace, already elapsed unless `welcome_due` (the commit re-added us
+    /// with a KeyPackage we hold, so its Welcome can be opened).
+    Evicted { welcome_due: bool },
     /// Skipped: we're already at/past the frame's epoch.
     Skipped,
     /// We don't hold this group — nothing to do.
@@ -2538,6 +2680,13 @@ pub(crate) enum CommitApplyOutcome {
 /// back, and asking then mints a KeyPackage the next tick turns into another
 /// repair. Two batch intervals plus slack.
 pub(crate) const MLS_WELCOME_GRACE: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// When the Welcome grace after an eviction starts: now, or already over when no
+/// Welcome we could open is coming.
+pub(crate) fn welcome_grace_start(welcome_due: bool) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    if welcome_due { now } else { now.checked_sub(MLS_WELCOME_GRACE).unwrap_or(now) }
+}
 
 /// Apply one MlsCommit frame. Shared by the `MlsCommit` broadcast arm and the
 /// `MlsCommitCatchup` replay loop so both get identical validation and recovery
@@ -2673,6 +2822,7 @@ pub(crate) async fn after_commit_merged(
     // dead group and let the Welcome re-key us.
     if !mls_mgr.is_active(group_key) {
         hollow_log!("[HOLLOW-MLS] Commit EVICTED us from {group_key} — dropping inactive group");
+        let welcome_due = mls_mgr.take_eviction_welcome(group_key);
         mls_mgr.remove_group(group_key);
         persist_mls_state(mls_mgr, crypto_store);
         let still_member = server_states.get(server_id).is_some_and(|s| {
@@ -2683,6 +2833,12 @@ pub(crate) async fn after_commit_merged(
             // entitled to one; the dropped group is the whole response.
             return CommitApplyOutcome::Applied;
         }
+        if !welcome_due {
+            // Re-added with a KeyPackage we no longer hold (or not re-added): no
+            // Welcome we can open is coming, so the next tick asks at once.
+            hollow_log!("[HOLLOW-MLS] Commit evicted us from {group_key} with no Welcome we can open; asking again");
+            return CommitApplyOutcome::Evicted { welcome_due };
+        }
         // A repair. Its Welcome is on its way, so asking for a leaf here answers a
         // question already being answered and restarts the loop. Stamp the throttle
         // WITHOUT sending, which alone silences the opportunistic sends.
@@ -2691,7 +2847,7 @@ pub(crate) async fn after_commit_merged(
             "[HOLLOW-MLS] Commit evicted us from {group_key}; holding {}s for a Welcome before re-bootstrapping",
             MLS_WELCOME_GRACE.as_secs(),
         );
-        return CommitApplyOutcome::Evicted;
+        return CommitApplyOutcome::Evicted { welcome_due };
     }
 
     // Emit epoch change for SFrame key rotation. For a subgroup
@@ -2768,7 +2924,7 @@ pub(crate) async fn rebind_unbound_leaves(
             authority
         };
         let Some(target) = target else { continue };
-        let Ok(kp_bytes) = mint_key_package(mls_mgr, crypto_store) else { continue };
+        let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, &group_key, false) else { continue };
         let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
             server_id: server_id.clone(),
             key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
@@ -3306,6 +3462,21 @@ mod tests {
         );
     }
 
+    /// C-OLM-04: the stamp is the sender's to choose and is read before the
+    /// signature, so the extremes are refused instead of overflowing the clock check.
+    #[test]
+    fn a_key_exchange_stamped_at_the_i64_extremes_is_refused() {
+        let (sender_id, recipient_id) = (kp(1).peer_id(), kp(2).peer_id());
+        let now = key_exchange_now();
+        for ts in [i64::MIN, i64::MAX, now - i64::MAX, now.wrapping_sub(i64::MIN)] {
+            assert_eq!(
+                verify_key_exchange(&sender_id, &recipient_id, Some(&recipient_id), Some(ts), Some("x"), Some("y"), "p"),
+                KeyExchangeAuth::Invalid,
+                "stamp {ts}",
+            );
+        }
+    }
+
     /// A pre-rollout client sends no signature at all. Distinguished from
     /// Invalid so phase 1 can tolerate it while phase 2 refuses it.
     #[test]
@@ -3773,11 +3944,121 @@ mod tests {
         let mut cache = PkCache::new();
         for bad in ["a:b", "short", "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f-extra"] {
             let extras = album_extras(Some(bad));
-            let (sig, pk) = sign_message_versioned(&a, &a_pk, "dm", "rcpt", &a_id, 3, &extras, "x");
+            let payload = message_signing_payload_v2("dm", "rcpt", &a_id, 3, &extras, "x");
+            let (sig, pk) = sign_message(&a, &a_pk, &payload);
             assert!(!verify_message_signature_v2(
                 &a_id, sig.as_deref(), pk.as_deref(), "dm", "rcpt", 3, &extras, "x", &mut cache,
             ), "malformed album {bad:?} must reject");
         }
+    }
+
+    const MID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// C-OLM-01: the payload joins its slots with `:` and keeps `text` last, so a
+    /// holder moving a colon-led chunk of the text into an earlier slot keeps the
+    /// author's exact bytes; only the slot shapes refuse it.
+    #[test]
+    fn a_text_chunk_moved_into_another_slot_never_verifies() {
+        let a = kp(26);
+        let (a_id, a_pk) = (a.peer_id(), pk_b64(&a));
+        let mut cache = PkCache::new();
+        let text = "Do not click this: https://x.example";
+        let tail = " https://x.example";
+        let digest = link_preview_digest(&lp("Real Title"));
+        for preview in [None, Some(digest.as_str())] {
+            let genuine = SignedExtras {
+                mid: Some(MID), order_us: Some(1_000_000), lp_digest: preview, ..Default::default()
+            };
+            let (sig, pk) = sign_message_versioned(&a, &a_pk, "ch", "srv:chan", &a_id, 1_000, &genuine, text);
+            let mut check = |extras: &SignedExtras, text: &str| verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 1_000, extras, text, &mut cache,
+            );
+            assert!(check(&genuine, text), "the author's own item verifies");
+
+            let moved = format!("{}:Do not click this", preview.unwrap_or(""));
+            let resplit = SignedExtras { lp_digest: Some(&moved), ..genuine };
+            assert_eq!(
+                message_signing_payload_v2("ch", "srv:chan", &a_id, 1_000, &resplit, tail),
+                message_signing_payload_v2("ch", "srv:chan", &a_id, 1_000, &genuine, text),
+                "the re-split carries the author's exact bytes",
+            );
+            assert!(!check(&resplit, tail), "a chunk moved into the preview slot must not verify");
+
+            // The same bytes read with a colon as the reply, the order stamp in the
+            // file slot and the first chunk as the preview digest.
+            if preview.is_none() {
+                let shifted = SignedExtras {
+                    reply_to: Some(":"), file_id: Some("1000000"), order_us: None,
+                    lp_digest: Some("Do not click this"), ..genuine
+                };
+                assert_eq!(
+                    message_signing_payload_v2("ch", "srv:chan", &a_id, 1_000, &shifted, tail),
+                    message_signing_payload_v2("ch", "srv:chan", &a_id, 1_000, &genuine, text),
+                );
+                assert!(!check(&shifted, tail), "a chunk spread over the id slots must not verify");
+            }
+        }
+    }
+
+    /// Every slot before `text` refuses a colon and anything but its shape, even under
+    /// a signature over those exact bytes; real ids still verify.
+    #[test]
+    fn malformed_signed_slots_are_rejected_even_when_signed() {
+        let a = kp(27);
+        let (a_id, a_pk) = (a.peer_id(), pk_b64(&a));
+        let mut cache = PkCache::new();
+        let (long, upper) = ("a".repeat(65), "A".repeat(64));
+        let base = SignedExtras { mid: Some(MID), order_us: Some(5), ..Default::default() };
+        for bad in malformed_slot_cases(&base, &long, &upper) {
+            let payload = message_signing_payload_v2("dm", "rcpt", &a_id, 3, &bad, "x");
+            let (sig, pk) = sign_message(&a, &a_pk, &payload);
+            assert!(!verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "dm", "rcpt", 3, &bad, "x", &mut cache,
+            ), "{bad:?} must reject");
+        }
+
+        let committed = "c".repeat(64);
+        let digest = link_preview_digest(&lp("Real Title"));
+        for good in [
+            SignedExtras { reply_to: Some(MID), file_id: Some(&committed), lp_digest: Some(&digest), ..base },
+            SignedExtras { mid: Some("file-msg_1"), reply_to: Some(""), file_id: Some(MID), lp_digest: Some(""), ..base },
+        ] {
+            let (sig, pk) = sign_message_versioned(&a, &a_pk, "dm", "rcpt", &a_id, 3, &good, "x");
+            assert!(verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "dm", "rcpt", 3, &good, "x", &mut cache,
+            ), "{good:?} must verify");
+        }
+    }
+
+    fn malformed_slot_cases<'a>(base: &SignedExtras<'a>, long: &'a str, upper: &'a str) -> Vec<SignedExtras<'a>> {
+        vec![
+            SignedExtras { mid: Some("a:b"), ..*base },
+            SignedExtras { mid: Some(long), ..*base },
+            SignedExtras { mid: Some("has space"), ..*base },
+            SignedExtras { reply_to: Some(":"), ..*base },
+            SignedExtras { file_id: Some("f:1"), ..*base },
+            SignedExtras { lp_digest: Some(":a"), ..*base },
+            SignedExtras { lp_digest: Some(upper), ..*base },
+            SignedExtras { lp_digest: Some("abc"), ..*base },
+        ]
+    }
+
+    /// The signer refuses what no receiver would accept, so a malformed id never
+    /// leaves this device under our signature.
+    #[test]
+    fn the_signer_refuses_malformed_signed_slots() {
+        let a = kp(28);
+        let (a_id, a_pk) = (a.peer_id(), pk_b64(&a));
+        let (long, upper) = ("a".repeat(65), "A".repeat(64));
+        let base = SignedExtras { mid: Some(MID), order_us: Some(5), ..Default::default() };
+        for bad in malformed_slot_cases(&base, &long, &upper) {
+            assert_eq!(
+                sign_message_versioned(&a, &a_pk, "dm", "rcpt", &a_id, 3, &bad, "x"),
+                (None, None),
+                "the signer must refuse {bad:?}",
+            );
+        }
+        assert!(sign_message_versioned(&a, &a_pk, "dm", "rcpt", &a_id, 3, &base, "x").0.is_some());
     }
 
     /// Old peers parse album-bearing payloads (unknown fields are ignored) and
@@ -4609,7 +4890,7 @@ mod tests {
         let our_master = kp(0x53).peer_id();
 
         let list = crate::identity::roster::Roster::legacy_for_test(&sender_master, &[&sender_device]);
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("carried.db").to_str().unwrap().to_string();
         let pass = "cd".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -4703,6 +4984,9 @@ mod tests {
             !verify_carried_bundle(&our_master, &list, &sign_at(now + KEY_EXCHANGE_SKEW_SECS + 60), &db, &pass),
             "a bundle from the future is a REJECT",
         );
+        for ts in [i64::MIN, i64::MAX] {
+            assert!(!verify_carried_bundle(&our_master, &list, &sign_at(ts), &db, &pass), "C-OLM-04: stamp {ts}");
+        }
 
         // 5. Judged against the roster we hold for the sender: once we know its real
         //    recovery key, a carried roster under a forged one admits nobody.
@@ -4725,8 +5009,17 @@ mod tests {
         assert!(verify_carried_bundle(&our_master, &real, &good, &db, &pass), "the real roster still admits its device");
     }
 
-    /// Every KeyPackage mint in `node/` goes through [`mint_key_package`], so every
-    /// mint persists the private half it just created.
+    /// An eviction whose Welcome we cannot open asks for a leaf at the next tick
+    /// instead of waiting out the grace.
+    #[test]
+    fn an_eviction_with_no_welcome_to_open_skips_the_grace() {
+        assert!(welcome_grace_start(true).elapsed() < MLS_WELCOME_GRACE);
+        assert!(welcome_grace_start(false).elapsed() >= MLS_WELCOME_GRACE);
+    }
+
+    /// Every KeyPackage mint in `node/` goes through [`mint_key_package`] or
+    /// [`mint_group_key_package`], so every mint persists the private half it just
+    /// created.
     ///
     /// A SOURCE scan rather than a type-system guard, because `generate_key_package`
     /// must stay reachable for the crypto module's own tests and because a new call
@@ -4735,7 +5028,7 @@ mod tests {
     #[test]
     fn key_package_mints_persist_mls_state() {
         // Built from pieces so this test's own source text is not a hit.
-        let needle = concat!("generate_key", "_package(");
+        let needle = concat!("generate_key", "_package");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("node");
@@ -4777,12 +5070,13 @@ mod tests {
         );
         assert_eq!(
             hits.len(),
-            1,
-            "every KeyPackage mint in node/ must go through crypto_handler::mint_key_package,              which persists the freshly written private half before the public half can              reach anybody. Found: {hits:#?}",
+            2,
+            "every KeyPackage mint in node/ must go through crypto_handler::mint_key_package or              mint_group_key_package, which persist the freshly written private half before the              public half can reach anybody. Found: {hits:#?}",
         );
         assert!(
-            hits[0].starts_with("crypto_handler.rs::mint_key_package "),
-            "the one permitted call is the one inside the wrapper, got {hits:#?}",
+            hits[0].starts_with("crypto_handler.rs::mint_key_package ")
+                && hits[1].starts_with("crypto_handler.rs::mint_group_key_package "),
+            "the only permitted calls are the ones inside the wrappers, got {hits:#?}",
         );
     }
 

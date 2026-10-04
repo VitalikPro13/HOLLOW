@@ -6,7 +6,8 @@
 //! Routing link fetches through N receivers would turn Hollow into an
 //! IP-harvesting amplifier.
 
-use std::sync::{Mutex, OnceLock};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use scraper::{Html, Selector};
 
@@ -62,30 +63,139 @@ pub fn set_embed_proxy_base(base: Option<String>) {
 const USER_AGENT: &str =
     "Mozilla/5.0 (compatible; HollowBot/1.0; +https://anonlisten.com/bot)";
 
+/// Redirect hops a fetch follows, each judged like the first request.
+const MAX_REDIRECTS: usize = 3;
+
+/// Whether a fetch may connect to an address.
+type AddrPolicy = fn(IpAddr) -> bool;
+
+/// The client every fetch in this module goes through, with the address rule it
+/// was built with, so the first hop is judged by the same rule as the resolver
+/// and every redirect.
+#[derive(Clone)]
+struct Http {
+    client: reqwest::Client,
+    allow: AddrPolicy,
+}
+
 /// One shared HTTP client: a fresh `reqwest::Client` per keystroke-triggered
 /// fetch throws away the pool and re-does the TLS config.
-static HTTP_CLIENT: OnceLock<Mutex<Option<reqwest::Client>>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<Mutex<Option<Http>>> = OnceLock::new();
 
 /// The client to fetch with. `reqwest::Client` is an `Arc` internally, so
 /// cloning the cached one is cheap and every caller shares the same pool.
-fn http_client() -> Result<reqwest::Client, String> {
+fn http_client() -> Result<Http, String> {
     let cell = HTTP_CLIENT.get_or_init(|| Mutex::new(None));
     let mut guard = cell
         .lock()
         .map_err(|e| format!("HTTP client lock poisoned: {e}"))?;
-    if let Some(client) = guard.as_ref() {
-        return Ok(client.clone());
+    if let Some(http) = guard.as_ref() {
+        return Ok(http.clone());
     }
+    let http = build_http(is_public_ip)?;
+    *guard = Some(http.clone());
+    Ok(http)
+}
 
+/// SECURITY (C-FILES-01): a pasted URL, or a public page that redirects, must not
+/// make this machine fetch its own loopback, LAN or cloud metadata and paint the
+/// answer into a card. Names resolve through [`PublicResolver`], which hands the
+/// connector only the addresses it checked (no second lookup to rebind), and IP
+/// literals are judged on the first request and on every redirect hop.
+fn build_http(allow: AddrPolicy) -> Result<Http, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(3))
+        // A proxy would resolve the target itself, past the address rule.
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicResolver { allow }))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() > MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if let Err(e) = url_allowed(attempt.url(), allow) {
+                attempt.error(e)
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    Ok(Http { client, allow })
+}
 
-    *guard = Some(client.clone());
-    Ok(client)
+/// Refuses a non-http(s) URL and an IP-literal host the policy refuses. A name is
+/// left to [`PublicResolver`], which judges what it resolves to.
+fn url_allowed(url: &reqwest::Url, allow: AddrPolicy) -> Result<(), String> {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(format!("Unsupported URL scheme: {}", url.scheme()));
+    }
+    let host = url.host_str().filter(|h| !h.is_empty()).ok_or("URL has no host")?;
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        Ok(ip) if !allow(ip) => Err(format!("{host} is not a public address")),
+        _ => Ok(()),
+    }
+}
+
+/// Resolves a name and refuses it when ANY address it resolves to is one the
+/// policy refuses.
+struct PublicResolver {
+    allow: AddrPolicy,
+}
+
+impl reqwest::dns::Resolve for PublicResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow = self.allow;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            if addrs.is_empty() || addrs.iter().any(|a| !allow(a.ip())) {
+                return Err(format!("{host} does not resolve to public addresses only").into());
+            }
+            let addrs: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// Whether a preview fetch may connect to `ip`: globally routable unicast only.
+/// Loopback, private (RFC 1918, CGNAT, ULA), link-local (cloud metadata),
+/// unspecified, multicast and reserved space are refused, and an IPv6 address
+/// that carries an IPv4 one (mapped, compatible, NAT64) is judged by that IPv4.
+pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_v4(v4),
+        IpAddr::V6(v6) => is_public_v6(v6),
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 224)
+}
+
+fn is_public_v6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_v4(v4);
+    }
+    let s = ip.segments();
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        let [_, _, _, _, _, _, hi, lo] = s;
+        return is_public_v4(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo)));
+    }
+    !(s[..6] == [0; 6]
+        || (s[0] & 0xfe00) == 0xfc00
+        || (s[0] & 0xffc0) == 0xfe80
+        || (s[0] & 0xffc0) == 0xfec0
+        || (s[0] & 0xff00) == 0xff00)
 }
 
 /// Fetch OG metadata for `url` and build a `LinkPreviewRef`.
@@ -95,6 +205,10 @@ fn http_client() -> Result<reqwest::Client, String> {
 /// OpenGraph scrape. Returns `Err` on any failure, so the caller can drop the
 /// preview silently rather than block the message send.
 pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
+    fetch_link_preview_with(&http_client()?, url).await
+}
+
+async fn fetch_link_preview_with(client: &Http, url: &str) -> Result<LinkPreviewRef, String> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| format!("Invalid URL: {e}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
@@ -102,10 +216,8 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
     }
     let domain = parsed.host_str().unwrap_or("").to_string();
 
-    let client = http_client()?;
-
     if let Some(kind) = social::classify(&parsed) {
-        match social::fetch(&client, &parsed, kind, &domain).await {
+        match social::fetch(client, &parsed, kind, &domain).await {
             Ok(preview) => return Ok(preview),
             Err(e) => {
                 hollow_log!("[HOLLOW-LP] Social adapter for {domain} failed ({e}); falling back to OpenGraph");
@@ -113,7 +225,7 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
         }
     }
 
-    let html_bytes = fetch_bounded(&client, url, MAX_HTML_BYTES).await?;
+    let html_bytes = fetch_bounded(client, url, MAX_HTML_BYTES).await?;
     let html_str = String::from_utf8_lossy(&html_bytes).into_owned();
 
     let parsed_meta = parse_og_metadata(&html_str);
@@ -130,7 +242,7 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
     let mut thumb_h = None;
     if let Some(img_src) = parsed_meta.image_url.as_deref() {
         if let Ok(img_url) = parsed.join(img_src) {
-            if let Ok(bytes) = fetch_bounded(&client, img_url.as_str(), MAX_IMAGE_BYTES).await {
+            if let Ok(bytes) = fetch_bounded(client, img_url.as_str(), MAX_IMAGE_BYTES).await {
                 if let Ok((webp_bytes, w, h)) =
                     image_convert::convert_to_webp_preview(&bytes, thumb_dim)
                 {
@@ -244,7 +356,7 @@ fn wants_large_card(meta: &ParsedMeta, thumb_w: Option<u32>, thumb_h: Option<u32
 /// that travelled with the message.
 mod social {
     use super::{
-        fetch_bounded, truncate_chars, MAX_DESC_CHARS, MAX_IMAGE_BYTES,
+        fetch_bounded, truncate_chars, Http, MAX_DESC_CHARS, MAX_IMAGE_BYTES,
         MAX_TITLE_CHARS, THUMB_MAX_DIM_LARGE,
     };
     use crate::node::image_convert;
@@ -288,7 +400,7 @@ mod social {
     }
 
     pub(super) async fn fetch(
-        client: &reqwest::Client,
+        client: &Http,
         url: &reqwest::Url,
         kind: Kind,
         domain: &str,
@@ -321,7 +433,7 @@ mod social {
     /// not fatal, a text-only large card still beats no card.
     async fn build(
         n: Normalized,
-        client: &reqwest::Client,
+        client: &Http,
         url: &str,
         domain: &str,
     ) -> LinkPreviewRef {
@@ -361,7 +473,7 @@ mod social {
 
     /// GET a JSON document with the same caps the HTML path uses.
     async fn get_json(
-        client: &reqwest::Client,
+        client: &Http,
         url: &str,
     ) -> Result<serde_json::Value, String> {
         let bytes = fetch_bounded(client, url, MAX_JSON_BYTES).await?;
@@ -380,7 +492,7 @@ mod social {
     /// Parsed through `Value` rather than a mirrored struct, so an upstream field
     /// rename degrades one field instead of failing the whole card.
     async fn via_fxembed(
-        client: &reqwest::Client,
+        client: &Http,
         url: &reqwest::Url,
     ) -> Result<Normalized, String> {
         let id = status_id(url).ok_or("No status id in URL")?;
@@ -460,7 +572,7 @@ mod social {
     /// TikTok's public, key-free oEmbed endpoint. No direct mp4 is exposed,
     /// so the card is large but has no play affordance.
     async fn via_tiktok_oembed(
-        client: &reqwest::Client,
+        client: &Http,
         url: &reqwest::Url,
     ) -> Result<Normalized, String> {
         let mut endpoint = reqwest::Url::parse("https://www.tiktok.com/oembed")
@@ -483,7 +595,7 @@ mod social {
     /// Optional override: hand the whole lookup to a configured service that
     /// speaks the same normalized shape. Off by default.
     async fn via_proxy(
-        client: &reqwest::Client,
+        client: &Http,
         base: &str,
         url: &reqwest::Url,
     ) -> Result<Normalized, String> {
@@ -623,12 +735,15 @@ mod social {
 
 /// Fetch a URL, streaming the body and aborting if it exceeds `max_bytes`.
 async fn fetch_bounded(
-    client: &reqwest::Client,
+    http: &Http,
     url: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
-    let resp = client
-        .get(url)
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    url_allowed(&parsed, http.allow)?;
+    let resp = http
+        .client
+        .get(parsed)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -959,5 +1074,133 @@ mod tests {
             m.image_url.as_deref(),
             Some("https://i.ytimg.com/vi/qszGzNoopTc/maxresdefault.jpg")
         );
+    }
+
+    mod address_guard {
+        use super::super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        type Respond = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+        /// A tiny HTTP server on `ip`: answers each request with `respond(path)`
+        /// and counts the connections it accepted.
+        async fn serve(ip: &str, respond: Respond) -> (u16, Arc<AtomicUsize>) {
+            let listener = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let seen = hits.clone();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = listener.accept().await {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let _ = s.write_all(respond(&path).as_bytes()).await;
+                }
+            });
+            (port, hits)
+        }
+
+        fn page(title: &str) -> String {
+            let body = format!("<html><head><title>{title}</title></head></html>");
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }
+
+        fn redirect(to: &str) -> String {
+            format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        }
+
+        /// 127.0.0.2 stands in for a public host, so a redirect can start from an
+        /// address the guard lets through.
+        fn test_policy(ip: IpAddr) -> bool {
+            ip == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)) || is_public_ip(ip)
+        }
+
+        fn ip(s: &str) -> IpAddr {
+            s.parse().unwrap()
+        }
+
+        #[test]
+        fn only_globally_routable_addresses_are_public() {
+            for refused in [
+                "0.0.0.0", "0.1.2.3", "10.0.0.1", "100.64.0.1", "100.100.100.200", "100.127.255.255",
+                "127.0.0.1", "127.255.0.9", "169.254.169.254", "172.16.0.1", "172.31.255.255",
+                "192.168.1.1", "192.0.0.192", "198.18.0.1", "224.0.0.1", "240.0.0.1",
+                "255.255.255.255", "::", "::1", "::127.0.0.1", "::ffff:127.0.0.1", "::ffff:10.1.2.3",
+                "::ffff:169.254.169.254", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "fc00::1",
+                "fd00:ec2::254", "fe80::1", "febf::1", "fec0::1", "ff02::1",
+            ] {
+                assert!(!is_public_ip(ip(refused)), "{refused} counted as public");
+            }
+            for allowed in [
+                "1.1.1.1", "8.8.8.8", "100.63.255.255", "100.128.0.1", "172.15.0.1", "172.32.0.1",
+                "192.169.0.1", "192.0.1.1", "198.20.0.1", "223.255.255.254", "2606:4700::1111",
+                "2001:4860:4860::8888", "::ffff:8.8.8.8", "64:ff9b::808:808",
+            ] {
+                assert!(is_public_ip(ip(allowed)), "{allowed} counted as private");
+            }
+        }
+
+        #[test]
+        fn redirect_and_literal_urls_are_judged_by_scheme_and_address() {
+            let u = |s: &str| reqwest::Url::parse(s).unwrap();
+            assert!(url_allowed(&u("https://example.com/"), is_public_ip).is_ok());
+            assert!(url_allowed(&u("https://8.8.8.8/"), is_public_ip).is_ok());
+            for refused in [
+                "http://127.0.0.1/", "http://2130706433/", "http://0x7f.1/", "http://[::1]/",
+                "http://[::ffff:7f00:1]/", "http://169.254.169.254/latest/meta-data/",
+                "http://192.168.0.1/admin", "file:///C:/Windows/win.ini", "ftp://example.com/",
+            ] {
+                assert!(url_allowed(&u(refused), is_public_ip).is_err(), "{refused} allowed");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_loopback_url_is_never_fetched() {
+            let (port, hits) = serve("127.0.0.1", Arc::new(|_: &str| page("router admin"))).await;
+            let r = fetch_link_preview(&format!("http://127.0.0.1:{port}/")).await;
+            assert!(r.is_err(), "loopback fetched: {:?}", r.map(|p| p.title));
+            assert_eq!(hits.load(Ordering::SeqCst), 0, "loopback listener was contacted");
+        }
+
+        #[tokio::test]
+        async fn a_name_that_resolves_to_loopback_is_never_fetched() {
+            let (port, hits) = serve("127.0.0.1", Arc::new(|_: &str| page("router admin"))).await;
+            let r = fetch_link_preview(&format!("http://localhost:{port}/")).await;
+            assert!(r.is_err(), "localhost fetched: {:?}", r.map(|p| p.title));
+            assert_eq!(hits.load(Ordering::SeqCst), 0, "loopback listener was contacted");
+        }
+
+        #[tokio::test]
+        async fn a_redirect_into_loopback_is_never_followed() {
+            let http = build_http(test_policy).unwrap();
+            let (target, target_hits) = serve("127.0.0.1", Arc::new(|_: &str| page("router admin"))).await;
+            let (public, _) = serve(
+                "127.0.0.2",
+                Arc::new(move |path: &str| match path {
+                    "/literal" => redirect(&format!("http://127.0.0.1:{target}/")),
+                    "/name" => redirect(&format!("http://localhost:{target}/")),
+                    "/mapped" => redirect(&format!("http://[::ffff:127.0.0.1]:{target}/")),
+                    "/hop" => redirect("/page"),
+                    _ => page("public page"),
+                }),
+            )
+            .await;
+
+            // The control: the stand-in public host is fetchable, redirects included.
+            let ok = fetch_link_preview_with(&http, &format!("http://127.0.0.2:{public}/hop")).await;
+            assert_eq!(ok.map(|p| p.title).as_deref(), Ok("public page"));
+
+            for path in ["/literal", "/name", "/mapped"] {
+                let r = fetch_link_preview_with(&http, &format!("http://127.0.0.2:{public}{path}")).await;
+                assert!(r.is_err(), "{path} followed: {:?}", r.map(|p| p.title));
+            }
+            assert_eq!(target_hits.load(Ordering::SeqCst), 0, "a redirect reached loopback");
+        }
     }
 }

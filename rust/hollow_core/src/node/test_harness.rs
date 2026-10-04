@@ -116,6 +116,9 @@ struct RelayInner {
     /// Door-locked rooms (`relay-uws/src/door_room.h`): who sees each, `None` for
     /// holding the newest door, `Some` until a lock move's grace ends.
     provers: HashMap<String, HashMap<String, Option<std::time::Instant>>>,
+    /// (room, device) pairs a door-locked room keeps showing whatever door they prove:
+    /// a room whose lock the relay does not hold (a legacy server, an evicted record).
+    kept_in_view: HashSet<(String, String)>,
     door_sweeper: bool,
     /// Everything the relay can read while a test has the tap on (claim C-24).
     tap: Option<Wiretap>,
@@ -439,6 +442,12 @@ impl MockRelay {
             inner.relock(server, before.is_some());
         }
         took
+    }
+
+    /// Keep `device` seeing `room` through every lock move, as a relay that does not
+    /// hold the room's lock does: the door never hides it.
+    pub(crate) fn keep_in_view(&self, device: &str, room: &str) {
+        self.inner.lock().unwrap().kept_in_view.insert((room.to_string(), device.to_string()));
     }
 
     /// What a member's socket proves on joining `room`: the newest door the relay holds,
@@ -936,6 +945,22 @@ impl MockRelay {
         let held = inner.held_streams.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
         if let Some(conn) = inner.conns.get(target).filter(|c| c.online && deliver) {
             for m in held {
+                let _ = conn.event_tx.send(WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
+            }
+        }
+    }
+
+    /// Deliver the stream frames held from each of `froms` to `target` one frame from
+    /// each in turn, so their streams are open at once, and stop holding.
+    pub(crate) fn release_streams_interleaved(&self, froms: &[&str], target: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let mut queues: Vec<std::collections::VecDeque<BufferedMsg>> = froms
+            .iter()
+            .map(|from| inner.held_streams.remove(&(from.to_string(), target.to_string())).unwrap_or_default().into())
+            .collect();
+        let Some(conn) = inner.conns.get(target).filter(|c| c.online) else { return };
+        while queues.iter().any(|q| !q.is_empty()) {
+            for m in queues.iter_mut().filter_map(|q| q.pop_front()) {
                 let _ = conn.event_tx.send(WsEvent::BinaryDirect { room: m.room, from: m.from, data: m.data });
             }
         }
@@ -1453,6 +1478,9 @@ impl RelayInner {
     }
 
     fn sees_door(&self, room: &str, peer: &str) -> bool {
+        if self.kept_in_view.contains(&(room.to_string(), peer.to_string())) {
+            return true;
+        }
         match self.provers.get(room).and_then(|p| p.get(peer)) {
             Some(None) => true,
             Some(Some(until)) => std::time::Instant::now() < *until,
@@ -1522,7 +1550,7 @@ impl RelayInner {
             });
         }
         for (room, peer) in gone {
-            if self.room_door(&room).is_none() || !self.peer_in_room(&room, &peer) {
+            if self.room_door(&room).is_none() || !self.peer_in_room(&room, &peer) || self.sees_door(&room, &peer) {
                 continue;
             }
             self.broadcast_except(&room, &peer, WsEvent::PeerLeft { room: room.clone(), peer_id: peer.clone() });
@@ -1804,9 +1832,28 @@ pub(crate) struct TestNode {
     /// node's behalf needs it, because a CrdtOp is bound to its author by
     /// signature now.
     pub master_kp: NativeKeypair,
-    _join: tokio::task::JoinHandle<()>,
+    _join: AbortOnDrop,
     // Keep the tempdir alive for the node's lifetime.
-    _tmp: tempfile::TempDir,
+    _tmp: crate::test_tmp::TestDir,
+}
+
+/// Stops a node's event loop with its `TestNode`: a dropped `JoinHandle` only
+/// detaches the task, and a detached node goes on writing into its data dirs while
+/// the test tears them down. Waits until the loop is gone, not just told, since a
+/// poll still running would write after the drop too.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+        // Only another worker can finish the abort; a current-thread runtime waits on us.
+        let multi = tokio::runtime::Handle::try_current()
+            .is_ok_and(|rt| rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while multi && !self.0.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
 }
 
 impl TestNode {
@@ -1820,8 +1867,8 @@ impl TestNode {
     ///
     /// Aborting the join handle is what a process exit does to the event loop, and
     /// the store actors die with it, which is what lets the file be reopened.
-    fn into_storage(self) -> (String, tempfile::TempDir) {
-        self._join.abort();
+    fn into_storage(self) -> (String, crate::test_tmp::TestDir) {
+        self._join.0.abort();
         (self.db_path, self._tmp)
     }
 }
@@ -2452,7 +2499,7 @@ async fn spawn_node_seeded(
     let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
     let passphrase = passphrase_for(&master);
 
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crate::test_tmp::tempdir().expect("tempdir");
     let db_path = tmp.path().join("messages.db").to_str().unwrap().to_string();
 
     // Mirror production `start_node`: run the one-time storage-hygiene migration in
@@ -2514,7 +2561,7 @@ async fn spawn_node_seeded(
         db_path,
         passphrase,
         master_kp: master.clone(),
-        _join: join,
+        _join: AbortOnDrop(join),
         _tmp: tmp,
     }
 }
@@ -2528,7 +2575,7 @@ async fn spawn_node_on_db(
     master_tag: u8,
     device_tag: u8,
     db_path: &str,
-    tmp: tempfile::TempDir,
+    tmp: crate::test_tmp::TestDir,
 ) -> TestNode {
     let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
     let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
@@ -2587,7 +2634,7 @@ async fn spawn_node_on_db(
         db_path,
         passphrase,
         master_kp: master.clone(),
-        _join: join,
+        _join: AbortOnDrop(join),
         _tmp: tmp,
     }
 }
@@ -3052,7 +3099,7 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     // global-data-dir code path (vault/files/etc.) can't touch the developer's
     // REAL ~/.hollow DB (wrong passphrase → SQLCipher hmac failures). Each node
     // still uses its own injected per-node db_path for messages.
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     // SAFETY: set at the very start of this serialized test (HARNESS_GUARD); no
     // other thread reads the env concurrently here.
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -3209,7 +3256,7 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn server_join_forms_mls_and_channel_message_decrypts() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3335,7 +3382,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3470,7 +3517,7 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn node_emits_relay_connected_on_ws_connect() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3491,7 +3538,7 @@ async fn node_emits_relay_connected_on_ws_connect() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn nsfw_server_gates_join_until_confirmed() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3571,7 +3618,7 @@ async fn nsfw_server_gates_join_until_confirmed() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_typing_roundtrips_master_attributed() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3648,7 +3695,7 @@ async fn channel_typing_roundtrips_master_attributed() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3831,7 +3878,7 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn friend_is_warned_when_a_new_device_joins_their_contact() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -3939,7 +3986,7 @@ async fn friend_is_warned_when_a_new_device_joins_their_contact() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_buffers_for_offline_real_sibling_device() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4019,7 +4066,7 @@ async fn dm_buffers_for_offline_real_sibling_device() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn call_signal_routes_to_friend_device_and_drops_unknown() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4181,7 +4228,7 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn call_invite_never_exposes_sframe_key_to_the_relay() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4262,7 +4309,7 @@ async fn call_invite_never_exposes_sframe_key_to_the_relay() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn plaintext_call_signal_is_rejected() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4310,7 +4357,7 @@ async fn authz_olm_prekey_relay_cannot_open_a_session_as_another_device() {
     use super::types::{HavenMessage, MessageEnvelope};
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4512,7 +4559,7 @@ async fn authz_link_frames_from_a_stranger_are_refused() {
     use super::types::HavenMessage;
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4577,7 +4624,7 @@ async fn authz_link_frames_from_a_stranger_are_refused() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_a_remote_string_never_panics_the_node() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4616,7 +4663,7 @@ async fn authz_a_remote_string_never_panics_the_node() {
 #[test]
 fn pending_link_import_keeps_the_identity_when_the_blob_does_not_open() {
     let _g = test_guard();
-    let data_dir = tempfile::tempdir().expect("data dir");
+    let data_dir = crate::test_tmp::tempdir().expect("data dir");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", data_dir.path()); }
     for name in ["identity.key", "identity.device", "messages.db"] {
         std::fs::write(data_dir.path().join(name), b"the real one").unwrap();
@@ -4646,7 +4693,7 @@ fn pending_link_import_keeps_the_identity_when_the_blob_does_not_open() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_file_transfer_completes_and_decrypts() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4733,7 +4780,7 @@ async fn dm_file_transfer_completes_and_decrypts() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4845,7 +4892,7 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -4968,7 +5015,7 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_voice_message_bypasses_auto_download_gate() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -5066,7 +5113,7 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -5247,7 +5294,7 @@ async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -5380,7 +5427,7 @@ async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn file_unavailable_from_unasked_device_changes_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -5519,7 +5566,7 @@ async fn file_unavailable_from_unasked_device_changes_nothing() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn file_unavailable_never_answers_a_non_entitled_requester() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -5638,7 +5685,7 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn channel_file_request_rotates_to_next_holder_after_gone() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -5822,7 +5869,7 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn expired_answer_is_verified_locally_before_marking_our_row() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -6015,7 +6062,7 @@ async fn expired_answer_is_verified_locally_before_marking_our_row() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -6225,7 +6272,7 @@ async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -6345,7 +6392,7 @@ async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_video_send_carries_poster_thumb_and_dims() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -6370,8 +6417,8 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
     drain_events(&mut b);
 
     let src = global_tmp.path().join("clip.mp4");
-    let contents: &[u8] = b"not really h264 but streams all the same";
-    std::fs::write(&src, contents).expect("write src file");
+    // A container that parses: one that does not is refused before it leaves.
+    std::fs::write(&src, super::media_strip::fixtures::mp4_with_location()).expect("write src file");
     let poster_png = {
         let img = image::RgbaImage::from_pixel(64, 36, image::Rgba([40, 90, 160, 255]));
         let mut buf = Vec::new();
@@ -6427,6 +6474,96 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
     assert_eq!((meta.width, meta.height), (Some(64), Some(36)));
 }
 
+/// C-FILES-03: a video leaves without its location, and one whose container does
+/// not parse never leaves at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_video_send_strips_location_before_it_leaves() {
+    use super::media_strip::fixtures::{mp4_with_location, LOCATION};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 246;
+    const B_MASTER: u8 = 247;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // B's auto-download advert is permissive, so whether it has landed yet
+    // changes nothing here: the bytes are pushed either way.
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let send = |path: &std::path::Path, mid: &str| {
+        NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        }))
+    };
+
+    let broken = global_tmp.path().join("broken.mp4");
+    std::fs::write(&broken, b"not really h264").expect("write broken file");
+    a.cmd_tx.send(send(&broken, "video-broken-1")).await.unwrap();
+    let refused = wait_event(&mut a, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileFailed { file_id, error }
+            if file_id == "video-broken-1" && error == super::media_strip::REFUSED)
+    })
+    .await;
+    assert!(refused, "a video that cannot be cleaned is refused with a reason");
+
+    let src = global_tmp.path().join("holiday.mp4");
+    let original = mp4_with_location();
+    std::fs::write(&src, &original).expect("write src file");
+    a.cmd_tx.send(send(&src, "video-clean-1")).await.unwrap();
+
+    let mut header = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+            if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+                header = Some((file_id.clone(), file_name.clone()));
+                return true;
+            }
+            false
+        })
+        .await,
+        "the clean video's header arrives"
+    );
+    let (fid, name) = header.unwrap();
+    assert!(name.starts_with("holiday"), "the refused video sent nothing: first header was {name}");
+    let mut stored = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+            if let NetworkEvent::FileCompleted { file_id, disk_path } = ev {
+                if *file_id == fid {
+                    stored = Some(disk_path.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await,
+        "the video transfer completes"
+    );
+    let got = super::at_rest::read_all(std::path::Path::new(&stored.unwrap())).expect("receiver reads its copy");
+    assert_eq!(got.len(), original.len(), "same length: only metadata was blanked");
+    assert!(!got.windows(LOCATION.len()).any(|w| w == LOCATION), "the receiver holds no location");
+    assert!(got.windows(18).any(|w| w == b"VIDEO-SAMPLE-BYTES"), "the picture arrived intact");
+}
+
 // Voice-channel join/leave, participant tracking and signal routing. Real audio is
 // out of scope; the control path rides a plaintext fallback needing only server
 // membership and a Voice channel. Also guards the VC signal whitelist: an unknown
@@ -6436,7 +6573,7 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn voice_channel_join_leave_and_signal_routing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -6628,7 +6765,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn vc_self_participant_is_device_keyed_no_self_dial() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -6792,7 +6929,7 @@ async fn vc_self_participant_is_device_keyed_no_self_dial() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn vc_screen_origin_attribution_round_trip() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7027,7 +7164,7 @@ async fn vc_screen_origin_attribution_round_trip() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn vc_reconnecting_peer_can_receive_signals_again() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7154,7 +7291,7 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn vc_leg_restart_signal_round_trips() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7288,7 +7425,7 @@ async fn vc_leg_restart_signal_round_trips() {
 async fn authz_a_vc_signal_flood_over_olm_is_rate_limited() {
     use super::types::VC_SIGNAL_RATE_BURST;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7432,7 +7569,7 @@ async fn authz_a_vc_signal_flood_over_olm_is_rate_limited() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_a_vc_signal_from_outside_the_call_is_refused() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7692,7 +7829,7 @@ fn vault_store_of(node: &TestNode) -> crate::vault::content_store::ContentStore 
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_planted_vault_shard_is_dropped_and_the_real_one_pulled() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7747,7 +7884,7 @@ async fn a_planted_vault_shard_is_dropped_and_the_real_one_pulled() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_holder_that_answers_with_a_wrong_shard_is_not_asked_again() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -7867,7 +8004,7 @@ fn inline_shard_store(server_id: &str, cid: &str, si: u16, bytes: &[u8]) -> supe
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn the_holder_we_asked_wins_over_unasked_stores_of_a_shard() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8000,6 +8137,223 @@ async fn the_holder_we_asked_wins_over_unasked_stores_of_a_shard() {
     );
 }
 
+// ── Shard transfers in flight at once ──────────────────────────────────────────
+//
+// Every shard stream used to ride under its file's content id: a holder sending several
+// shards of one file over data channels kept one temp and one retry entry for all of
+// them, and a device pulling shards of one file from several holders over the relay
+// refused every stream but the one open first.
+
+/// A holder with data channels to A and M sends shard 0 to both and shard 1 to M. Each
+/// send has its own transfer id and a temp holding its own shard; a repeat of a send
+/// still on its channel rides the relay; shard 1 lands off M's data channel, the two
+/// sends that fail there land over the relay, and no temp outlives its send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn shard_sends_over_data_channels_keep_their_own_ids_temps_and_bytes() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, mut m, server_id) = vault_trio(&relay, 162, 163, 164).await;
+    let (manifest, shards) = recovery_vault_file();
+    let cid = manifest.content_id.clone();
+    let store = |si: u16, to: &TestNode| NodeCommand::StoreShardOnPeer {
+        server_id: server_id.clone(),
+        content_id: cid.clone(),
+        shard_index: si,
+        shard_key: crate::vault::content_store::shard_key(&cid, si),
+        k: manifest.k,
+        m: manifest.m,
+        total_data_size: manifest.original_size,
+        storage_tier: "standard".into(),
+        data: shards[si as usize].1.clone(),
+        target_peer: to.master_id.clone(),
+    };
+    for dev in [&a.device_id, &m.device_id] {
+        o.cmd_tx.send(NodeCommand::WebRtcPeerConnected { peer_id: dev.clone() }).await.unwrap();
+    }
+    for (si, to) in [(0, &a), (0, &m), (1, &m)] {
+        o.cmd_tx.send(store(si, to)).await.unwrap();
+    }
+    // (peer, transfer id, temp, shard index) of each send Dart is handed.
+    let mut sends: Vec<(String, String, String, u16)> = Vec::new();
+    wait_event(&mut o, std::time::Duration::from_secs(20), |ev| {
+        if let NetworkEvent::WebRtcSendFile { peer_id, transfer_id, file_path, kind, shard_index, .. } = ev
+            && kind == "shard"
+        {
+            sends.push((peer_id.clone(), transfer_id.clone(), file_path.clone(), *shard_index));
+        }
+        sends.len() == 3
+    })
+    .await;
+    assert_eq!(sends.len(), 3, "the holder sends each shard over its data channel: {sends:?}");
+    let ids: HashSet<&String> = sends.iter().map(|s| &s.1).collect();
+    assert_eq!(ids.len(), 3, "two shard sends share one transfer id: {sends:?}");
+    for (peer, _, path, si) in &sends {
+        assert_eq!(
+            std::fs::read(path).ok().as_ref(),
+            Some(&shards[*si as usize].1),
+            "the temp of shard {si} for {peer} holds other bytes",
+        );
+    }
+    expect_relay_drained(&relay, &o, "shard-stores").await;
+    flush_frames(&relay, &mut a).await;
+    flush_frames(&relay, &mut m).await;
+
+    o.cmd_tx.send(store(0, &a)).await.unwrap();
+    assert!(shard_lands(&mut a, &cid, 0, &o.device_id).await, "a repeat of a send still on its data channel never reached A");
+    assert_eq!(
+        vault_store_of(&a).read_shard_unchecked(&server_id, &crate::vault::content_store::shard_key(&cid, 0)).ok().as_ref(),
+        Some(&shards[0].1),
+    );
+
+    // Dart's part: shard 1 crosses M's data channel, both sends of shard 0 fail there.
+    let one = sends.iter().find(|s| s.3 == 1).expect("the send of shard 1");
+    let received = crate::node::file_transfer::files_dir().join(format!(".webrtc_recv_{}.tmp", one.1));
+    std::fs::copy(&one.2, &received).expect("M's copy off the data channel");
+    m.cmd_tx
+        .send(NodeCommand::WebRtcTransferComplete {
+            transfer_id: one.1.clone(),
+            temp_path: received.to_string_lossy().into_owned(),
+            sender_peer_id: o.device_id.clone(),
+            kind: "shard".into(),
+            shard_index: 1,
+            chunk_index: 0,
+        })
+        .await
+        .unwrap();
+    o.cmd_tx.send(NodeCommand::WebRtcSendComplete { transfer_id: one.1.clone() }).await.unwrap();
+    for (peer, id, _, _) in sends.iter().filter(|s| s.3 == 0) {
+        o.cmd_tx
+            .send(NodeCommand::WebRtcTransferFailed { transfer_id: id.clone(), peer_id: peer.clone(), error: "data channel closed".into() })
+            .await
+            .unwrap();
+    }
+    let mut landed = HashSet::new();
+    wait_event(&mut m, std::time::Duration::from_secs(20), |ev| {
+        if let NetworkEvent::ShardStored { content_id, shard_index, from_peer, .. } = ev
+            && *content_id == cid
+            && *from_peer == o.device_id
+        {
+            landed.insert(*shard_index);
+        }
+        landed.len() == 2
+    })
+    .await;
+    assert_eq!(landed, HashSet::from([0, 1]), "M takes shard 1 off its data channel and shard 0 over the relay");
+    for si in [0u16, 1] {
+        assert_eq!(
+            vault_store_of(&m).read_shard_unchecked(&server_id, &crate::vault::content_store::shard_key(&cid, si)).ok().as_ref(),
+            Some(&shards[si as usize].1),
+            "M holds other bytes as shard {si}",
+        );
+    }
+    assert!(
+        wait_until(10, async || sends.iter().all(|s| !std::path::Path::new(&s.2).exists())).await,
+        "a shard send's temp outlived its send",
+    );
+}
+
+/// A pulls three shards of a file whose shards each span several relay frames: two from
+/// the owner, one from M, while an unasked copy of shard 0 from M is on the way too. The
+/// streams cross on the relay and every shard A asked for lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn shard_streams_of_one_file_from_two_holders_cross_and_all_land() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let (o, mut a, mut m, server_id) = vault_trio(&relay, 165, 166, 167).await;
+
+    let plaintext: Vec<u8> = (0..900_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    let sealed = crate::vault::pipeline::aes_encrypt(&plaintext).expect("encrypt");
+    let cid = crate::vault::content_store::content_id(&sealed.ciphertext);
+    let members: Vec<String> = (0..6).map(|i| format!("member-{i}")).collect();
+    let crate::vault::pipeline::UploadPlan { manifest, shards, .. } = crate::vault::pipeline::prepare_upload(
+        &sealed.ciphertext, &cid, &sealed.key, &sealed.nonce, "big.bin", "application/octet-stream",
+        &general_channel_of(&server_id), plaintext.len() as u64, &o.master_id, &members, &HashMap::new(), "",
+    )
+    .expect("split the file");
+    assert_eq!((manifest.k, manifest.m), (3, 2));
+    assert!(shards.iter().all(|(_, s)| s.len() > 300_000), "every shard spans two relay frames");
+    let tier = crate::vault::content_store::StorageTier::Standard;
+    for (node, held) in [(&o, [0u16, 2].as_slice()), (&m, [1u16].as_slice())] {
+        for si in held {
+            vault_store_of(node)
+                .store_shard(&server_id, &cid, *si, 3, 2, manifest.original_size, tier, &shards[*si as usize].1)
+                .expect("a holder keeps its shards");
+        }
+    }
+    let placed = |si: u16, holder: &TestNode| crate::vault::placement::ShardPlacement {
+        shard_index: si,
+        target_peer: holder.master_id.clone(),
+        shard_key: crate::vault::content_store::shard_key(&cid, si),
+    };
+    let a_store = vault_store_of(&a);
+    a_store.save_manifest(&server_id, &manifest.channel_id, &manifest).expect("A holds the manifest");
+    a_store.save_placements(&server_id, &cid, &[placed(0, &o), placed(1, &m), placed(2, &o)]).expect("A knows the holders");
+    drop(a_store);
+
+    relay.hold_streams(&o.device_id, &a.device_id);
+    relay.hold_streams(&m.device_id, &a.device_id);
+    m.cmd_tx
+        .send(NodeCommand::StoreShardOnPeer {
+            server_id: server_id.clone(),
+            content_id: cid.clone(),
+            shard_index: 0,
+            shard_key: crate::vault::content_store::shard_key(&cid, 0),
+            k: 3,
+            m: 2,
+            total_data_size: manifest.original_size,
+            storage_tier: "standard".into(),
+            data: vec![0x5a; shards[0].1.len()],
+            target_peer: a.master_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(20, async || relay.held_stream_count(&m.device_id, &a.device_id) >= 2).await, "M streams its unasked copy");
+    expect_relay_drained(&relay, &m, "unasked-store").await;
+    flush_frames(&relay, &mut a).await;
+    drain_events(&mut m);
+
+    a.cmd_tx
+        .send(NodeCommand::VaultDownloadFile { server_id: server_id.clone(), content_id: cid.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || relay.held_stream_count(&o.device_id, &a.device_id) >= 4
+            && relay.held_stream_count(&m.device_id, &a.device_id) >= 4)
+        .await,
+        "both holders stream the shards A asked for",
+    );
+    relay.release_streams_interleaved(&[&m.device_id, &o.device_id], &a.device_id);
+    let mut outcome = None;
+    wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
+        match ev {
+            NetworkEvent::VaultDownloadComplete { content_id, disk_path, .. } if *content_id == cid => {
+                outcome = Some(Ok(disk_path.clone()));
+            }
+            NetworkEvent::VaultDownloadFailed { content_id, error, .. } if *content_id == cid => {
+                outcome = Some(Err(error.clone()));
+            }
+            _ => {}
+        }
+        outcome.is_some()
+    })
+    .await;
+    let path = outcome
+        .unwrap_or_else(|| Err("the download never finished".into()))
+        .unwrap_or_else(|e| panic!("a holder's shard stream was refused while another's was open: {e}"));
+    assert_eq!(
+        crate::node::at_rest::read_all(std::path::Path::new(&path)).expect("read the rebuilt file"),
+        plaintext,
+    );
+}
+
 /// A-V4: an order to delete vault content counts only from a member holding Manage
 /// Server, on both lanes. A plain member is refused over Olm and over MLS; once the
 /// member role holds Manage Server its order counts; kicked, the same peer (whose role
@@ -8009,7 +8363,7 @@ async fn the_holder_we_asked_wins_over_unasked_stores_of_a_shard() {
 async fn authz_a_vault_delete_needs_a_member_with_manage_server_on_both_lanes() {
     use crate::crdt::operations::{MemberRole, Permission};
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8071,7 +8425,7 @@ async fn authz_a_vault_delete_needs_a_member_with_manage_server_on_both_lanes() 
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn recovery_pool_membership_forms() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8130,7 +8484,7 @@ async fn authz_recovery_frames_count_only_from_the_pool_room() {
     use super::types::HavenMessage;
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8200,7 +8554,7 @@ async fn authz_a_recovery_frame_counts_only_with_the_pool_token() {
     use super::types::HavenMessage;
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8275,7 +8629,7 @@ async fn authz_a_recovery_plan_counts_only_from_the_coordinator() {
     use super::types::HavenMessage;
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8354,7 +8708,7 @@ async fn authz_a_recovery_plan_counts_only_from_the_coordinator() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn c24_a_recovery_pool_shows_the_relay_neither_its_token_nor_its_frames() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8470,7 +8824,7 @@ async fn shard_lands(node: &mut TestNode, cid: &str, si: u16, from: &str) -> boo
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn a_recovery_transfer_reaches_a_device_that_is_not_its_master() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8517,7 +8871,7 @@ async fn a_recovery_transfer_reaches_a_device_that_is_not_its_master() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn the_recovery_coordinator_carries_out_its_own_part_of_the_plan() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8556,10 +8910,10 @@ async fn the_recovery_coordinator_carries_out_its_own_part_of_the_plan() {
 }
 
 /// One whole-shard stream frame: [type 1][id padded to 64][size u64 LE][index u16 LE][bytes].
-fn shard_stream_frame(cid: &str, si: u16, bytes: &[u8]) -> Vec<u8> {
+fn shard_stream_frame(stream_id: &str, si: u16, bytes: &[u8]) -> Vec<u8> {
     let mut frame = vec![1u8];
     let mut id = [0u8; 64];
-    id[..cid.len()].copy_from_slice(cid.as_bytes());
+    id[..stream_id.len()].copy_from_slice(stream_id.as_bytes());
     frame.extend_from_slice(&id);
     frame.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     frame.extend_from_slice(&si.to_le_bytes());
@@ -8568,15 +8922,16 @@ fn shard_stream_frame(cid: &str, si: u16, bytes: &[u8]) -> Vec<u8> {
 }
 
 /// A shard the plan asks of V lands only from V: X, another member, sends the same bytes
-/// first and is refused. M's manifest predates per-shard hashes, so nothing but the
-/// plan's source decides whose bytes land. A repeated hello lists no member twice.
+/// first under V's stream id and is refused. M's manifest predates per-shard hashes, so
+/// nothing but the plan's source decides whose bytes land. A repeated hello lists no
+/// member twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_a_recovery_shard_lands_only_from_the_plans_source() {
     use super::types::HavenMessage;
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8624,10 +8979,11 @@ async fn authz_a_recovery_shard_lands_only_from_the_plans_source() {
     flush_frames(&relay, &mut m).await;
 
     let bytes = &shards[0].1;
-    relay.inject_binary(&room, &x, &m.device_id, shard_stream_frame(&cid, 0, bytes));
+    let from_v = super::vault_ops::shard_stream_id(&cid, 0, &v, &m.device_id);
+    relay.inject_binary(&room, &x, &m.device_id, shard_stream_frame(&from_v, 0, bytes));
     let stored = |ev: &NetworkEvent| matches!(ev, NetworkEvent::ShardStored { content_id, .. } if *content_id == cid);
     assert!(!seen_before_flush(&relay, &mut m, stored).await, "a member the plan does not name completed V's transfer");
-    relay.inject_binary(&room, &v, &m.device_id, shard_stream_frame(&cid, 0, bytes));
+    relay.inject_binary(&room, &v, &m.device_id, shard_stream_frame(&from_v, 0, bytes));
     assert!(shard_lands(&mut m, &cid, 0, &v).await, "the plan's source still delivers");
 }
 
@@ -8640,7 +8996,7 @@ async fn authz_a_recovery_shard_lands_only_from_the_plans_source() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn sibling_recovers_own_channel_messages_from_present_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8800,7 +9156,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -8922,7 +9278,7 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn moderation_action_converges_on_actor_sibling_without_restart() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9066,7 +9422,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn admin_flips_owner_setting_and_all_nodes_converge() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9232,7 +9588,7 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn linked_sibling_resolves_both_devices_at_startup() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9286,7 +9642,7 @@ async fn linked_sibling_resolves_both_devices_at_startup() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn sibling_nickname_fans_directly_with_no_relayer() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9350,7 +9706,7 @@ async fn sibling_nickname_fans_directly_with_no_relayer() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn offline_member_reconciles_server_deletion_on_reconnect() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9423,7 +9779,7 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn server_create_auto_onboards_online_sibling() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9493,7 +9849,7 @@ async fn server_create_auto_onboards_online_sibling() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9611,7 +9967,7 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn manual_state_sync_pulls_servers_from_source_device() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9671,7 +10027,7 @@ async fn manual_state_sync_pulls_servers_from_source_device() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn restricted_channel_subgroup_enforces_visibility() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -9875,7 +10231,7 @@ async fn restricted_channel_subgroup_enforces_visibility() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn label_gated_channel_subgroup_and_fallback() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -10122,7 +10478,7 @@ async fn label_gated_channel_subgroup_and_fallback() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn access_label_self_assign_locked() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -10244,7 +10600,7 @@ async fn access_label_self_assign_locked() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_grant_lifecycle_mls() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -10368,7 +10724,7 @@ async fn channel_grant_lifecycle_mls() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_grant_expiry_sweep() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -10508,7 +10864,7 @@ async fn channel_grant_expiry_sweep() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -10753,7 +11109,7 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -10906,7 +11262,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn moderation_trio_mute_slowmode_mediaonly() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11191,7 +11547,7 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn friend_request_between_strangers_does_not_merge() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11295,7 +11651,7 @@ async fn friend_request_between_strangers_does_not_merge() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn friend_converges_to_master_across_distinct_device() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11360,7 +11716,7 @@ async fn friend_converges_to_master_across_distinct_device() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn showcase_board_replicates_preserves_and_clears() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11478,7 +11834,7 @@ async fn showcase_board_replicates_preserves_and_clears() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn siblings_converge_on_their_rosters() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11553,7 +11909,7 @@ async fn siblings_converge_on_their_rosters() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn friend_removal_is_symmetric_across_distinct_device() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11662,7 +12018,7 @@ async fn friend_removal_is_symmetric_across_distinct_device() {
 #[allow(clippy::await_holding_lock)]
 async fn requester_gets_accepted_row_after_acceptance() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11739,7 +12095,7 @@ async fn requester_gets_accepted_row_after_acceptance() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn nickname_friend_request_reaches_multi_device_claimer() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11834,7 +12190,7 @@ async fn nickname_friend_request_reaches_multi_device_claimer() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_a_nickname_names_only_a_master_that_signed_for_it() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11897,7 +12253,7 @@ async fn authz_a_nickname_names_only_a_master_that_signed_for_it() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_the_relay_cannot_name_a_known_person_as_its_forwarder() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -11942,7 +12298,7 @@ async fn authz_the_relay_cannot_name_a_known_person_as_its_forwarder() {
 #[allow(clippy::await_holding_lock)]
 async fn remove_then_readd_does_not_pingpong() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12034,7 +12390,7 @@ async fn remove_then_readd_does_not_pingpong() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn readd_while_online_requires_fresh_consent() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12181,7 +12537,7 @@ async fn readd_while_online_requires_fresh_consent() {
 async fn authz_a_friend_accept_lands_only_on_a_request_we_sent() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12247,7 +12603,7 @@ async fn authz_a_friend_accept_lands_only_on_a_request_we_sent() {
 async fn stale_friend_accept_replayed_after_readd_is_dropped() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12406,7 +12762,7 @@ async fn stale_friend_accept_replayed_after_readd_is_dropped() {
 #[allow(clippy::await_holding_lock)]
 async fn startup_canonicalizes_device_keyed_friend_row() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12421,7 +12777,7 @@ async fn startup_canonicalizes_device_keyed_friend_row() {
     // Build the local node's DB path the same way spawn_node does, so we can
     // pre-seed it before start. (spawn_node uses its own tempdir, so instead we
     // pre-seed via a throwaway dir and point the node at it.)
-    let tmp = tempfile::tempdir().expect("tmp");
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
     let db_path = tmp.path().join("messages.db").to_str().unwrap().to_string();
     let local_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(LOCAL_MASTER));
     let passphrase = passphrase_for(&local_master_kp);
@@ -12502,7 +12858,7 @@ fn stale_session_errors(events: &[NetworkEvent]) -> Vec<String> {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn olm_glare_with_a_repeated_key_request_settles_on_one_session() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12608,7 +12964,7 @@ async fn olm_glare_with_a_repeated_key_request_settles_on_one_session() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn olm_key_request_crossing_a_prekey_is_answered_on_the_same_session() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12738,7 +13094,7 @@ async fn read_dm_burst(node: &mut TestNode, tag: &str, count: usize, secs: u64) 
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn olm_a_direct_burst_behind_a_waiting_carry_keeps_the_session() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12781,7 +13137,7 @@ async fn olm_a_direct_burst_behind_a_waiting_carry_keeps_the_session() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn fresh_single_device_friends_dm_both_ways() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -12931,7 +13287,7 @@ async fn fresh_single_device_friends_dm_both_ways() {
 #[allow(clippy::await_holding_lock)]
 async fn reject_cancels_own_queued_request_no_refriend() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -13004,7 +13360,7 @@ async fn reject_cancels_own_queued_request_no_refriend() {
 #[allow(clippy::await_holding_lock)]
 async fn mutual_request_accepted_before_the_request_lands_shares_one_stamp() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -13058,7 +13414,7 @@ async fn mutual_request_accepted_before_the_request_lands_shares_one_stamp() {
 #[allow(clippy::await_holding_lock)]
 async fn mutual_friend_requests_auto_converge() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -13112,7 +13468,7 @@ async fn mutual_friend_requests_auto_converge() {
 #[allow(clippy::await_holding_lock)]
 async fn dm_delivers_with_multiple_shared_rooms() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -13193,7 +13549,7 @@ async fn dm_delivers_with_multiple_shared_rooms() {
 #[allow(clippy::await_holding_lock)]
 async fn friend_request_delivers_without_recipient_restart() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -13253,7 +13609,7 @@ async fn friend_request_delivers_without_recipient_restart() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -13401,7 +13757,7 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -13483,7 +13839,7 @@ async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -13602,7 +13958,7 @@ async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_only_the_servers_authority_changes_its_rings() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -13699,7 +14055,7 @@ async fn authz_only_the_servers_authority_changes_its_rings() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const O: u8 = 131;
@@ -13818,7 +14174,7 @@ async fn authz_a_legacy_servers_rings_follow_its_owner_not_the_first_signer() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_relay_catchup_covers_all_channels() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -13950,7 +14306,7 @@ async fn channel_relay_catchup_covers_all_channels() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_relay_catchup_delivers_public_channel_file_caption() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14085,7 +14441,7 @@ async fn channel_relay_catchup_delivers_public_channel_file_caption() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_relay_catchup_survives_subscribe_before_room_join() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14215,7 +14571,7 @@ async fn channel_relay_catchup_survives_subscribe_before_room_join() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_relay_catchup_delivers_file_message_and_header() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14325,7 +14681,7 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14482,7 +14838,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14744,7 +15100,7 @@ async fn post_channel_file(node: &mut TestNode, server_id: &str, channel_id: &st
 async fn authz_a_guest_takes_a_public_file_header_only_from_the_peer_it_asked() {
     use super::types::HavenMessage;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14861,7 +15217,7 @@ async fn authz_a_guest_takes_a_public_file_header_only_from_the_peer_it_asked() 
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn self_dm_saved_messages_stores_locally_and_replicates_to_sibling() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -14996,17 +15352,17 @@ impl Drop for BlocklistClearGuard {
     }
 }
 
-/// A-DM-19: a blocked friend pulls none of our conversation. B took A's DM live, then
-/// lost its copy while A restarted (so A holds no copy to resend), and only B's catch-up
-/// sync brings it back: answered for a friend (the control round), never once A has
-/// blocked B.
+/// A-DM-19: a blocked friend pulls none of our conversation. B misses A's DM (the relay
+/// swallows A's frames to B, and A's restart forgets the copy it keeps to resend), so
+/// only B's catch-up sync on A's return can bring it: answered for a friend (the
+/// control round), never once A has blocked B.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_blocked_friend_pulls_no_dm_history() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
     let _block_guard = BlocklistClearGuard;
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -15018,7 +15374,11 @@ async fn authz_a_blocked_friend_pulls_no_dm_history() {
     let b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
     expect_dm_pair_ready(&relay, &a, &b, 20).await;
 
-    let lost_round = async |a: TestNode, text: &str, mid: &str, block_while_away: bool| -> TestNode {
+    // A copy that left A before the block (the DM, the resend A queued, an answer to an
+    // older sync ask) is no pull, so none may reach B: A's frames to B are swallowed until
+    // A is down, and B can learn of the DM only from what A answers after its restart.
+    let missed_round = async |mut a: TestNode, text: &str, mid: &str, block: bool| -> TestNode {
+        relay.swallow_direct(&a.device_id, &b.device_id);
         a.cmd_tx
             .send(NodeCommand::SendMessage {
                 peer_id: b_master.clone(),
@@ -15030,32 +15390,29 @@ async fn authz_a_blocked_friend_pulls_no_dm_history() {
             .await
             .unwrap();
         assert!(
-            wait_until(15, async || b.dm_thread(&a_master).iter().any(|m| m.text == text)).await,
-            "B takes the DM live",
+            wait_event(&mut a, std::time::Duration::from_secs(15), |ev| matches!(
+                ev, NetworkEvent::MessageSent { message_id, .. } if message_id == mid
+            ))
+            .await,
+            "A stores and sends the DM",
         );
-        relay.set_online(&b.device_id, false);
-        assert!(wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await, "B must be off the relay");
-        {
-            let conn = rusqlite::Connection::open(&b.db_path).expect("open B's DB");
-            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", b.passphrase)).expect("key B's DB");
-            conn.execute_batch("PRAGMA busy_timeout = 8000;").expect("busy timeout");
-            conn.execute("DELETE FROM messages WHERE message_id = ?1", [mid]).expect("B loses its copy");
-        }
-        let a = restart_node(&relay, a, A_MASTER, A_MASTER).await;
-        if block_while_away {
-            super::blocklist::block(&b_master);
-        }
-        relay.set_online(&b.device_id, true);
-        a
+        let (a_device, b_device) = (a.device_id.clone(), b.device_id.clone());
+        restart_node_with(&relay, a, A_MASTER, A_MASTER, |_, _| {
+            relay.release_direct(&a_device, &b_device);
+            if block {
+                super::blocklist::block(&b_master);
+            }
+        })
+        .await
     };
 
-    let a = lost_round(a, "first copy lost", "dm19-1", false).await;
+    let a = missed_round(a, "first copy lost", "dm19-1", false).await;
     assert!(
         wait_until(20, async || b.dm_thread(&a_master).iter().any(|m| m.text == "first copy lost")).await,
-        "control: a friend's catch-up sync brings back what it lost",
+        "control: a friend's catch-up sync brings what it missed",
     );
 
-    let a = lost_round(a, "lost, then blocked", "dm19-2", true).await;
+    let a = missed_round(a, "lost, then blocked", "dm19-2", true).await;
     sleep_ms(4000).await; // ABSENCE: a reply that must never come
     assert!(
         !b.dm_thread(&a_master).iter().any(|m| m.text == "lost, then blocked"),
@@ -15070,7 +15427,7 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
     let _block_guard = BlocklistClearGuard;
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -15255,7 +15612,7 @@ struct ScalePoint {
 #[allow(clippy::await_holding_lock)]
 async fn scaling_benchmark_mls_fanout() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -15408,7 +15765,7 @@ async fn scaling_benchmark_mls_fanout() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn server_emote_replicates_and_bytes_pull_on_demand() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -15555,7 +15912,7 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn personal_emotes_converge_across_siblings() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -15708,7 +16065,7 @@ async fn personal_emotes_converge_across_siblings() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn personal_emote_sync_from_non_sibling_is_dropped() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -15759,7 +16116,7 @@ async fn personal_emote_sync_from_non_sibling_is_dropped() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn personal_emote_lww_keeps_the_newer_row() {
     let _g = test_guard();
-    let tmp = tempfile::tempdir().expect("tmp");
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
     let db_path = tmp.path().join("messages.db").to_str().unwrap().to_string();
     let kp = NativeKeypair::from_secret_bytes(&seed_bytes(169));
     let passphrase = passphrase_for(&kp);
@@ -15810,7 +16167,7 @@ async fn personal_emote_lww_keeps_the_newer_row() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn sticker_set_replicates_and_converges_on_removal() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -15989,7 +16346,7 @@ async fn sticker_set_replicates_and_converges_on_removal() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_cap_enforced_per_kind() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16070,7 +16427,7 @@ async fn asset_cap_enforced_per_kind() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_request_not_answered_for_unrequested_hash() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16144,7 +16501,7 @@ async fn asset_request_not_answered_for_unrequested_hash() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16281,7 +16638,7 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn banner_write_rejected_without_manage_server() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16349,7 +16706,7 @@ async fn banner_write_rejected_without_manage_server() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16494,7 +16851,7 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16643,7 +17000,7 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -16809,7 +17166,7 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn conference_waiting_room_admits_denies_and_chats() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -17048,7 +17405,7 @@ async fn conference_waiting_room_admits_denies_and_chats() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn synced_channel_deletion_hides_for_late_joiner() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -17139,7 +17496,7 @@ async fn synced_channel_deletion_hides_for_late_joiner() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn synced_channel_deletion_rejects_unproven_hidden_flags() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -17230,7 +17587,7 @@ async fn synced_channel_deletion_rejects_unproven_hidden_flags() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn synced_dm_deletion_requires_proof() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -17388,7 +17745,7 @@ async fn setup_sframe_heal_pair(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn sframe_heal_reemits_current_epoch_key() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut b, server_id) = setup_sframe_heal_pair(&relay, 90, 91).await;
@@ -17424,7 +17781,7 @@ async fn sframe_heal_reemits_current_epoch_key() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn sframe_heal_escalation_rebootstraps_non_authority() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut b, server_id) = setup_sframe_heal_pair(&relay, 92, 93).await;
@@ -17471,7 +17828,7 @@ async fn sframe_heal_escalation_rebootstraps_non_authority() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn sframe_heal_escalation_authority_removes_and_readds_peer() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut b, server_id) = setup_sframe_heal_pair(&relay, 94, 95).await;
@@ -17682,7 +18039,7 @@ async fn make_b_stale(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn stale_epoch_heal_probe_converges_via_commit_replay() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 96, 97, 98).await;
@@ -17735,7 +18092,7 @@ async fn stale_epoch_heal_probe_converges_via_commit_replay() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn stale_epoch_vc_join_probe_converges_via_commit_replay() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 99, 100, 101).await;
@@ -17803,7 +18160,7 @@ async fn stale_epoch_vc_join_probe_converges_via_commit_replay() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn stale_epoch_first_contact_hint_converges_on_reconnect() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 102, 103, 104).await;
@@ -17873,7 +18230,7 @@ async fn stale_epoch_first_contact_hint_converges_on_reconnect() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18038,7 +18395,7 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn clearing_a_link_preview_re_signs_and_propagates() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18148,7 +18505,7 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn backfilled_member_gets_link_preview_through_channel_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18429,7 +18786,7 @@ fn assert_album_row_verifies(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn album_files_over_dm_persist_and_verify_album_id() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18492,7 +18849,7 @@ async fn album_files_over_dm_persist_and_verify_album_id() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn album_files_over_channel_reach_live_and_backfilled_members() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18591,7 +18948,7 @@ async fn album_files_over_channel_reach_live_and_backfilled_members() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18765,7 +19122,7 @@ fn plant_signed_dm(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn sibling_fills_a_dm_gap_behind_its_newest_message() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18852,7 +19209,7 @@ async fn sibling_fills_a_dm_gap_behind_its_newest_message() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn offline_sibling_gets_a_buffered_copy_of_an_own_send() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -18995,7 +19352,7 @@ fn plant_signed_channel_row(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn channel_member_fills_a_gap_behind_its_newest_message() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -19080,7 +19437,7 @@ async fn channel_member_fills_a_gap_behind_its_newest_message() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn forwarder_room_and_signal_round_trip() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -19208,6 +19565,140 @@ async fn forwarder_room_and_signal_round_trip() {
     drop(f);
 }
 
+// C-RP-07: the VPS forwarder keeps its Olm sessions in RAM only. A restart forgets them,
+// so a client still writing on its old session must be asked to re-key, or it never
+// reaches the forwarder again. The REAL forwarder control plane, on a raw socket in its
+// room, against a real client node (the disk side: forwarder::signaling's tests).
+
+/// Runs the forwarder's side of the room until `done` holds or `secs` pass.
+#[cfg(feature = "forwarder")]
+async fn pump_forwarder(
+    ctl: &mut crate::forwarder::signaling::Control,
+    room: &str,
+    f_tx: &mpsc::UnboundedSender<WsCommand>,
+    f_rx: &mut mpsc::UnboundedReceiver<WsEvent>,
+    secs: u64,
+    mut done: impl FnMut(&crate::forwarder::signaling::Control) -> bool,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if done(ctl) {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        match tokio::time::timeout(left.min(std::time::Duration::from_millis(100)), f_rx.recv()).await {
+            Ok(Some(WsEvent::DirectMessage { room: from_room, from, data })) => {
+                for (to, msg) in ctl.on_direct(&from_room, &from, &data) {
+                    if let Some(data) = ctl.wire(room, &to, &msg) {
+                        f_tx.send(WsCommand::SendDirect { room_code: room.to_string(), target_peer: to, data }).unwrap();
+                    }
+                }
+            }
+            Ok(None) => return false,
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "forwarder")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_restarted_forwarder_heals_its_clients_sessions() {
+    use crate::forwarder::engine::{EngineCmd, OutSignal};
+    use crate::forwarder::signaling::Control;
+    use super::types::{MessageEnvelope, StreamOrigin};
+
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    let mut a = spawn_node_with_friends(&relay, 221, 221, &[]).await;
+    let a_id = a.device_id.clone();
+    let fwd = keys(231);
+    let f_id = fwd.peer_id();
+    let room = format!("fwd:{f_id}");
+    let (f_tx, mut f_rx) = relay.attach_raw(&f_id);
+    f_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&room).contains(&f_id)).await, "F is in its room");
+
+    let db = global_tmp.path().join("forwarder.db").to_string_lossy().into_owned();
+    let pass = "cd".repeat(32);
+    let start = || {
+        let olm = crate::forwarder::load_olm(&db, &pass).expect("the forwarder's account loads");
+        let store = CryptoStore::open(db.clone(), pass.clone()).expect("its store opens");
+        let (engine_tx, engine_rx) = mpsc::unbounded_channel::<EngineCmd>();
+        (Control::new(fwd.clone(), olm, store, engine_tx), engine_rx)
+    };
+    let attach = || NodeCommand::ForwarderSendSignal {
+        forwarder_peer_id: f_id.clone(),
+        signal_type: "fwd_attach".to_string(),
+        payload: serde_json::json!({"origin": {"peer": a_id, "kind": "screen", "stream": "c0ffee01"}}).to_string(),
+    };
+    let heard = |rx: &mut mpsc::UnboundedReceiver<EngineCmd>| {
+        let mut any = false;
+        while let Ok(cmd) = rx.try_recv() {
+            any |= matches!(cmd, EngineCmd::Signal { ref sender, envelope: MessageEnvelope::FwdAttach { .. } } if *sender == a_id);
+        }
+        any
+    };
+    let answer = |ctl: &mut Control| {
+        let origin = StreamOrigin { peer: a_id.clone(), kind: "screen".into(), stream: "c0ffee01".into() };
+        let reply = OutSignal {
+            to_peer: a_id.clone(),
+            envelope: MessageEnvelope::FwdError { origin: Box::new(origin), code: "over_budget".into(), detail: String::new() },
+        };
+        for (to, msg) in ctl.reply(reply) {
+            let data = ctl.wire(&room, &to, &msg).expect("sealed");
+            f_tx.send(WsCommand::SendDirect { room_code: room.clone(), target_peer: to, data }).unwrap();
+        }
+    };
+    // Waits for the forwarder's answer, noting an alert that its identity key changed.
+    let answered = async |a: &mut TestNode, alerted: &mut bool| {
+        wait_event(a, std::time::Duration::from_secs(8), |ev| {
+            *alerted |= matches!(ev, NetworkEvent::SecurityAlert { detail, .. } if *detail == f_id);
+            matches!(ev, NetworkEvent::ForwarderSignal { from_peer, signal_type, .. } if *from_peer == f_id && signal_type == "fwd_error")
+        })
+        .await
+    };
+
+    // First life: the client keys with the forwarder, is heard and answered.
+    let (mut ctl, mut engine_rx) = start();
+    a.cmd_tx.send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: f_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&room).contains(&a_id)).await, "A is in the room");
+    a.cmd_tx.send(attach()).await.unwrap();
+    assert!(pump_forwarder(&mut ctl, &room, &f_tx, &mut f_rx, 15, |_| heard(&mut engine_rx)).await, "the forwarder hears A");
+    answer(&mut ctl);
+    assert!(answered(&mut a, &mut false).await, "A reads the forwarder's answer, so A's session is confirmed");
+
+    // A restart forgets every session; A still writes on its old one.
+    drop(ctl);
+    drop(engine_rx);
+    let (mut ctl, mut engine_rx) = start();
+    drain_events(&mut a);
+    a.cmd_tx.send(attach()).await.unwrap();
+    assert!(
+        pump_forwarder(&mut ctl, &room, &f_tx, &mut f_rx, 15, |c| c.confirmed_with(&a_id)).await,
+        "the restarted forwarder and A never re-keyed"
+    );
+    a.cmd_tx.send(attach()).await.unwrap();
+    assert!(
+        pump_forwarder(&mut ctl, &room, &f_tx, &mut f_rx, 15, |_| heard(&mut engine_rx)).await,
+        "the restarted forwarder never hears A again"
+    );
+    answer(&mut ctl);
+    let mut alerted = false;
+    assert!(answered(&mut a, &mut alerted).await, "A reads the restarted forwarder's answer");
+    while let Ok(ev) = a.event_rx.try_recv() {
+        alerted |= matches!(ev, NetworkEvent::SecurityAlert { ref detail, .. } if *detail == f_id);
+    }
+    assert!(!alerted, "the restart changed the identity key A pinned for the forwarder");
+    drop(a);
+}
+
 // fwd-room discovery-cascade suppression. A forwarder discards every profile, sync,
 // friend, MLS and DM frame a client could send it, so presence in a `fwd:` room must
 // NOT run the peer-discovery cascade (~45 junk frames per join). Verified: no
@@ -19219,7 +19710,7 @@ async fn forwarder_room_and_signal_round_trip() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn fwd_room_join_skips_discovery_but_keeps_olm() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -19328,7 +19819,7 @@ async fn fwd_room_join_skips_discovery_but_keeps_olm() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -19408,7 +19899,7 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn vc_screen_assign_and_route_round_trip() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -19629,7 +20120,7 @@ async fn vc_screen_assign_and_route_round_trip() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_succeeds_while_owner_is_offline() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -19753,7 +20244,7 @@ async fn join_succeeds_while_owner_is_offline() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn owner_returns_from_a_join_it_missed_and_converges() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -19965,7 +20456,7 @@ fn first_join_answer(relay: &MockRelay, member: &str, joiner: &str) -> Option<us
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_survives_a_coordinator_that_vanished_silently() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -20028,7 +20519,7 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_join_whose_lock_read_lands_late_is_still_asked_again() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -20075,7 +20566,7 @@ async fn a_join_whose_lock_read_lands_late_is_still_asked_again() {
 async fn a_join_timer_acts_only_on_the_ask_that_armed_it() {
     use super::support_creds::{self, testing};
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -20287,7 +20778,7 @@ fn buffered_request_ats(relay: &MockRelay, target: &str) -> Vec<i64> {
 async fn friend_request_delivered_with_no_overlap() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -20345,7 +20836,7 @@ async fn friend_request_delivered_with_no_overlap() {
 async fn friend_accept_and_dms_with_zero_overlap() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -20509,7 +21000,7 @@ async fn friend_accept_and_dms_with_zero_overlap() {
 async fn friend_accept_survives_mailbox_redelivery() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -20606,7 +21097,7 @@ async fn friend_accept_survives_mailbox_redelivery() {
 async fn friend_request_carries_a_sealed_card() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -20733,7 +21224,7 @@ async fn friend_request_carries_a_sealed_card() {
 async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21138,7 +21629,7 @@ fn carried_bundle_freshness_is_its_own_rule() {
     let our_master = NativeKeypair::from_secret_bytes(&seed_bytes(93)).peer_id();
     let our_device = NativeKeypair::from_secret_bytes(&seed_bytes(94)).peer_id();
     let list = crate::identity::roster::Roster::legacy_for_test(&sender_master, &[&sender_device]);
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::test_tmp::tempdir().unwrap();
     let db = tmp.path().join("carried.db").to_str().unwrap().to_string();
     let pass = "cd".repeat(32);
     crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -21210,7 +21701,7 @@ fn carried_bundle_freshness_is_its_own_rule() {
 async fn mailbox_redeposit_dedups() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21292,7 +21783,7 @@ async fn mailbox_redeposit_dedups() {
 async fn blocked_sender_mailbox_request_dropped() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21344,7 +21835,7 @@ async fn authz_a_blocked_identitys_unknown_device_is_dropped_once_its_roster_bin
     let _g = test_guard();
     super::blocklist::clear_for_test();
     let _block_guard = BlocklistClearGuard;
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21426,7 +21917,7 @@ async fn authz_a_blocked_identitys_unknown_device_is_dropped_once_its_roster_bin
 async fn friend_reject_delivered_with_no_overlap() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21601,7 +22092,7 @@ async fn friend_reject_delivered_with_no_overlap() {
 async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21772,7 +22263,7 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
 async fn redeposit_keeps_original_requested_at_and_dedups() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21846,7 +22337,7 @@ async fn redeposit_keeps_original_requested_at_and_dedups() {
 async fn newer_request_advances_stored_requested_at() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -21936,7 +22427,7 @@ async fn newer_request_advances_stored_requested_at() {
 async fn stale_reject_never_deletes_an_accepted_friendship() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -22046,7 +22537,7 @@ async fn stale_reject_never_deletes_an_accepted_friendship() {
 async fn friend_reject_with_bad_carried_list_is_dropped() {
     let _g = test_guard();
     super::blocklist::clear_for_test();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -22167,7 +22658,7 @@ fn join_ring(relay: &MockRelay, server_id: &str) -> Vec<(String, super::types::H
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_join_request_counts_only_in_the_join_box() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     // Friends, so an Olm session exists for the carried attempt.
@@ -22377,7 +22868,7 @@ async fn go_offline(relay: &MockRelay, node: &TestNode, room: &str) {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_completes_with_zero_overlap() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -22683,7 +23174,7 @@ async fn expect_quiet_group(nodes: &[&TestNode], group_id: &str, secs: u64) -> u
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn three_member_live_join_lands_at_minimal_epoch() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -22864,7 +23355,7 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -22971,7 +23462,7 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn empty_server_join_parks_on_the_full_window_behind_its_door() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23028,7 +23519,7 @@ async fn empty_server_join_parks_on_the_full_window_behind_its_door() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_with_a_silent_member_present_keeps_the_long_window() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23115,7 +23606,7 @@ async fn join_with_a_silent_member_present_keeps_the_long_window() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_rejection_reaches_an_offline_joiner() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23226,7 +23717,7 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn late_member_does_not_reserve_a_parked_join() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23359,7 +23850,7 @@ async fn late_member_does_not_reserve_a_parked_join() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_redeposit_is_interval_bounded() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23440,7 +23931,7 @@ async fn parked_join_redeposit_is_interval_bounded() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23573,7 +24064,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn discarded_parked_join_ignores_a_late_answer() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23703,7 +24194,7 @@ async fn discarded_parked_join_ignores_a_late_answer() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23850,7 +24341,7 @@ async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity()
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -23999,7 +24490,7 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -24173,7 +24664,7 @@ fn count_queued(node: &mut TestNode, mut pred: impl FnMut(&NetworkEvent) -> bool
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn member_added_and_pledge_ops_reach_a_deaf_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -24364,7 +24855,7 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn vc_state_signal_reaches_a_deaf_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -24497,7 +24988,7 @@ async fn vc_state_signal_reaches_a_deaf_member() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -24721,7 +25212,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn channel_file_header_reaches_a_member_without_a_leaf() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -24945,7 +25436,7 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -25331,7 +25822,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // ends with nothing sealable (4.5 s).
     // 2026-10-03: HOL-SEC-121's live-ask test keeps a member hidden past the join hold,
     // a late door with nothing to poll (11.0 s).
-    const BUDGET_MS: u64 = 696_450;
+    // 2026-10-04: C-MLS-01's replayed-KeyPackage test proves an absence over two held
+    // commit retries (4.5 s).
+    const BUDGET_MS: u64 = 700_950;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -25400,7 +25893,7 @@ fn harness_fixed_sleep_budget_does_not_grow() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -25507,7 +26000,7 @@ async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -25685,7 +26178,7 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -25791,7 +26284,7 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn friend_request_from_an_unlisted_device_does_not_bind() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -25929,7 +26422,7 @@ fn crafted_announce(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn stripped_support_creds_never_clears_a_pinned_mark() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26060,7 +26553,7 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn support_credential_replicates_and_transplant_is_dropped() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26277,7 +26770,7 @@ async fn three_member_server(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26396,7 +26889,7 @@ async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn crdt_future_hlc_op_is_rejected_and_owner_can_still_rename() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26479,7 +26972,7 @@ async fn crdt_future_hlc_op_is_rejected_and_owner_can_still_rename() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn crdt_signed_op_relayed_by_another_member_is_accepted() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26560,7 +27053,7 @@ fn asset_blob(tint: u8) -> (Vec<u8>, String) {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_pull_retries_when_the_holder_comes_online() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26647,7 +27140,7 @@ async fn asset_pull_retries_when_the_holder_comes_online() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_pull_rotates_to_another_holder_after_a_miss() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26772,7 +27265,7 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_pull_asks_are_bounded_per_connection() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26859,7 +27352,7 @@ async fn asset_pull_asks_are_bounded_per_connection() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -26951,7 +27444,7 @@ async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn emote_request_for_unheld_hashes_answers_missing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -27012,7 +27505,7 @@ async fn emote_request_for_unheld_hashes_answers_missing() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn asset_pull_rotates_after_invalid_bytes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -27149,7 +27642,7 @@ async fn asset_pull_rotates_after_invalid_bytes() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn read_markers_reach_siblings_on_verify_and_live() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -27238,12 +27731,12 @@ fn plaintext_hits_under(root: &std::path::Path, needle: &[u8]) -> Vec<String> {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn at_rest_dm_file_lands_encrypted_on_receiver_disk() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     super::at_rest::reset_for_test();
     // The SOURCE the sender picks lives outside the data root, so the scan below
     // measures only what Hollow itself wrote.
-    let outside = tempfile::tempdir().expect("source tmp");
+    let outside = crate::test_tmp::tempdir().expect("source tmp");
 
     let relay = MockRelay::new();
 
@@ -27334,7 +27827,7 @@ async fn at_rest_dm_file_lands_encrypted_on_receiver_disk() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn at_rest_channel_file_served_from_encrypted_copy_after_migration() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     super::at_rest::reset_for_test();
 
@@ -27461,10 +27954,10 @@ async fn at_rest_channel_file_served_from_encrypted_copy_after_migration() {
 async fn at_rest_delete_for_me_erases_key_row_and_bytes() {
     let _g = test_guard();
     let _store_g = crate::api::storage::store_test_lock();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     super::at_rest::reset_for_test();
-    let outside = tempfile::tempdir().expect("source tmp");
+    let outside = crate::test_tmp::tempdir().expect("source tmp");
 
     let relay = MockRelay::new();
 
@@ -27542,6 +28035,8 @@ async fn at_rest_delete_for_me_erases_key_row_and_bytes() {
         "the in-memory key ring must drop it too",
     );
 
+    // The process-global slot outlives the test and would hold B's database open.
+    crate::api::storage::get_store().lock().unwrap_or_else(|e| e.into_inner()).take();
     drop(a);
     drop(b);
 }
@@ -27557,7 +28052,7 @@ async fn at_rest_delete_for_me_erases_key_row_and_bytes() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn at_rest_share_partial_written_encrypted_and_resumes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     super::at_rest::reset_for_test();
 
@@ -27567,7 +28062,7 @@ async fn at_rest_share_partial_written_encrypted_and_resumes() {
     super::at_rest::init(&db_path, &passphrase).expect("key ring");
 
     // The source the sharer picked, outside the data root.
-    let outside = tempfile::tempdir().expect("source tmp");
+    let outside = crate::test_tmp::tempdir().expect("source tmp");
     const MARKER: &[u8] = b"HOLLOW-PLAIN-atrest-share-marker";
     let contents: Vec<u8> = MARKER.repeat(30_000);
     let src = outside.path().join("big.bin");
@@ -28298,7 +28793,7 @@ async fn destroy_friend_announce_flips_verified_and_banner() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn friend_liveness_check_is_device_keyed() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -28422,7 +28917,7 @@ async fn expect_channel_post_arrives(sender: &TestNode, receiver: &mut TestNode,
             server_id: server_id.to_string(),
             channel_id: general_channel_of(server_id),
             text: text.to_string(),
-            message_id: format!("mid-{text}"),
+            message_id: format!("mid-{}", text.replace(|c: char| !c.is_ascii_alphanumeric(), "-")),
             reply_to_mid: None,
             link_preview: None,
         })
@@ -28442,7 +28937,7 @@ async fn expect_channel_post_arrives(sender: &TestNode, receiver: &mut TestNode,
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_no_one_seats_a_leaf_in_another_devices_name() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, v, c, server_id) = setup_epoch_race_trio(&relay, 150, 151, 152).await;
@@ -28470,7 +28965,7 @@ async fn authz_no_one_seats_a_leaf_in_another_devices_name() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_cannot_evict_a_member_or_add_an_outsider() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, v, c, server_id) = setup_epoch_race_trio(&relay, 153, 154, 155).await;
@@ -28503,6 +28998,189 @@ async fn authz_a_member_cannot_evict_a_member_or_add_an_outsider() {
     drain_events(&mut o);
 }
 
+/// R-MLS-09: every member sees each KeyPackage that seats a leaf, so a re-add counts as
+/// a repair only with a KeyPackage minted for this group after the leaf it replaces. A
+/// member replaying V's spent KeyPackage would otherwise evict V, who can never open
+/// the Welcome, as often as it liked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_cannot_evict_a_member_with_its_old_key_package() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 185, 186, 187).await;
+    let before = o.mls_epoch(&server_id).await.unwrap();
+
+    // An honest repair: the owner asks V for a KeyPackage and re-seats V with it.
+    relay.set_recording(&v.device_id, true);
+    relay.inject_direct(&server_id, &o.device_id, &v.device_id, frame(&super::types::HavenMessage::MlsKeyPackageRequest {
+        server_id: server_id.clone(),
+        channel_id: None,
+    }));
+    let settled = wait_until(20, async || {
+        let (oe, ve, ce) = (o.mls_epoch(&server_id).await, v.mls_epoch(&server_id).await, c.mls_epoch(&server_id).await);
+        oe.is_some_and(|e| e > before) && oe == ve && ve == ce
+            && o.mls_members_checked(&server_id).await == v.mls_members_checked(&server_id).await
+    })
+    .await;
+    assert!(settled, "the owner's repair of V lands everywhere");
+    let spent = recorded_key_packages(&relay, &v.device_id, &server_id).pop().expect("V answered with a KeyPackage");
+    let epoch = o.mls_epoch(&server_id).await.unwrap();
+    let members = o.mls_members_checked(&server_id).await.unwrap();
+
+    // C replays the KeyPackage that now seats V as a "repair" of V's leaf.
+    let mut hostile = hostile_mls_copy(&c, 187, &server_id).await;
+    let replay = hostile
+        .commit_membership(&server_id, std::slice::from_ref(&v.device_id), &[(v.device_id.clone(), spent)])
+        .expect("OpenMLS takes a removal and a re-add of one key in one commit");
+    let f = frame(&super::types::HavenMessage::MlsCommit {
+        server_id: server_id.clone(),
+        commit: b64(&replay.commit),
+        channel_id: None,
+        epoch: Some(epoch + 1),
+    });
+    relay.inject_direct(&server_id, &c.device_id, &o.device_id, f.clone());
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, f);
+    // ABSENCE: held commits are retried every tick; two ticks must change nothing.
+    sleep_ms(4500).await;
+    expect_group_unchanged(&[&o, &v], &server_id, epoch, &members, "a replayed KeyPackage").await;
+    expect_channel_post_arrives(&o, &mut v, &server_id, "not evicted").await;
+}
+
+/// R-MLS-20: a removal is one unbuffered room broadcast, which a relay can withhold
+/// from a member that still learns of the kick from the carried op. That member never
+/// encrypts to the removed leaf: its posts reach the members over Olm until it has
+/// fetched the commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_that_missed_a_removal_commit_never_encrypts_to_the_removed_leaf() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut v, m, server_id) = setup_epoch_race_trio(&relay, 188, 189, 190).await;
+    let epoch = v.mls_epoch(&server_id).await.unwrap();
+    let mut removed = hostile_mls_copy(&m, 190, &server_id).await;
+
+    relay.set_broadcast_deaf(&v.device_id, true);
+    drain_events(&mut v);
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    let heard = wait_event(&mut v, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::MemberLeft { peer_id, .. } if *peer_id == m.master_id)
+    })
+    .await;
+    assert!(heard, "V learns of the kick from the carried op");
+    // Nor does V get the commit through a catch-up.
+    relay.swallow_direct(&o.device_id, &v.device_id);
+    assert_eq!(v.mls_epoch(&server_id).await, Some(epoch), "V missed the removal commit");
+
+    relay.set_recording(&v.device_id, true);
+    drain_events(&mut o);
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general_channel_of(&server_id),
+            text: "after the kick".to_string(),
+            message_id: "mid-after-the-kick".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "after the kick")
+    })
+    .await;
+    assert!(got, "the owner still reads V's post");
+    for f in relay.recorded_frames(&v.device_id) {
+        if let Ok(super::types::HavenMessage::MlsChannelMessage { body, .. }) =
+            serde_json::from_slice::<super::types::HavenMessage>(super::frame_auth::unchecked_body(&f))
+        {
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body).unwrap();
+            assert!(removed.decrypt(&server_id, &bytes).is_err(), "the removed member read what V sent after the kick");
+        }
+    }
+
+    // Signals that ride MLS plus a copy to leafless devices reach every member instead.
+    drain_events(&mut o);
+    v.cmd_tx
+        .send(NodeCommand::SendTypingIndicator { server_id: server_id.clone(), channel_id: general_channel_of(&server_id) })
+        .await
+        .unwrap();
+    let typing = wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::TypingStarted { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(typing, "the owner still sees V typing");
+
+    // Once the owner's answer gets through, V's probe fetches the commit it missed.
+    relay.release_direct(&o.device_id, &v.device_id);
+    let caught_up = wait_until(30, async || {
+        v.mls_epoch(&server_id).await == o.mls_epoch(&server_id).await
+            && !v.mls_members(&server_id).await.contains(&m.device_id)
+    })
+    .await;
+    assert!(caught_up, "V asks for the removal it missed instead of waiting for a newer frame");
+}
+
+/// A leaving device cannot take its own leaf out of the group, so the committer does,
+/// at the next tick: until then no member's send may use the group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_member_that_leaves_loses_its_leaf_at_once() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 194, 195, 196).await;
+
+    c.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    let swept = wait_until(15, async || {
+        let (ol, vl) = (o.mls_members(&server_id).await, v.mls_members(&server_id).await);
+        !ol.contains(&c.device_id) && ol == vl && o.mls_epoch(&server_id).await == v.mls_epoch(&server_id).await
+    })
+    .await;
+    assert!(swept, "the committer takes the leaver's leaf out");
+    expect_channel_post_arrives(&o, &mut v, &server_id, "after the leave").await;
+}
+
+/// C-MLS-08: a frame that decrypts as a replay may be the twin of a message a crash
+/// made its sender re-encrypt under a generation we already used, which we can never
+/// read. A member's replay is answered with a channel sync request, so it comes back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_replayed_channel_frame_from_a_member_asks_it_for_the_channel() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 191, 192, 193).await;
+    use super::types::HavenMessage;
+    v.cmd_tx
+        .send(NodeCommand::SubscribeChannels { server_id: server_id.clone(), channel_ids: vec![general_channel_of(&server_id)] })
+        .await
+        .unwrap();
+    relay.set_recording(&c.device_id, true);
+    expect_channel_post_arrives(&c, &mut v, &server_id, "read once").await;
+    let replay = relay.recorded_frames(&c.device_id).into_iter().find_map(|f| {
+        match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+            Ok(m @ HavenMessage::MlsChannelMessage { .. }) => Some(m),
+            _ => None,
+        }
+    }).expect("C's post went out over MLS");
+
+    let asked = async || {
+        v.carried_to(&c.device_id).await.iter().filter(|m| matches!(m, HavenMessage::ChannelSyncRequest { .. })).count()
+    };
+    let before = asked().await;
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&replay));
+    assert!(
+        wait_until(10, async || asked().await > before).await,
+        "a member's replayed frame is answered with a channel sync request",
+    );
+}
+
 /// D3, D5: a member that may not repair us gets no KeyPackage, and when the relay
 /// spoofs the owner to extract one, a Welcome built on it by anyone but the owner
 /// still cannot replace our group.
@@ -28510,7 +29188,7 @@ async fn authz_a_member_cannot_evict_a_member_or_add_an_outsider() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_welcome_never_replaces_a_group_unasked() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 156, 157, 158).await;
@@ -28546,7 +29224,7 @@ async fn authz_a_welcome_never_replaces_a_group_unasked() {
         server_id: server_id.clone(),
         welcome: b64(&welcome),
         channel_id: None,
-        conf_nonce: None,
+        conf_host: None,
     }));
     // ABSENCE: a refused Welcome leaves nothing to poll for (BUDGET_MS).
     sleep_ms(1000).await;
@@ -28554,12 +29232,190 @@ async fn authz_a_welcome_never_replaces_a_group_unasked() {
     expect_channel_post_arrives(&o, &mut v, &server_id, "not partitioned").await;
 }
 
+/// `node` joins `server_id` while the relay holds every direct it sends `holder`, passing
+/// on all of them but its KeyPackage, which stays held. Returns that KeyPackage.
+async fn join_holding_key_package(relay: &MockRelay, node: &mut TestNode, holder: &TestNode, server_id: &str) -> Vec<u8> {
+    let (from, to) = (node.device_id.clone(), holder.device_id.clone());
+    let pass_on = || {
+        for kind in relay.held_kinds(&from, &to) {
+            if kind != "mls_kp" {
+                relay.release_held_kind(&from, &to, &kind);
+            }
+        }
+    };
+    relay.set_recording(&from, true);
+    relay.hold_direct(&from, &to);
+    node.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.to_string(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(server_id),
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut joined = false;
+    while !joined && tokio::time::Instant::now() < deadline {
+        pass_on();
+        joined = wait_event(node, std::time::Duration::from_millis(200), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if sid == server_id)
+        })
+        .await;
+    }
+    assert!(joined, "{from} must join {server_id}");
+    assert!(
+        wait_until(10, async || {
+            pass_on();
+            relay.held_kinds(&from, &to).iter().any(|k| k == "mls_kp")
+        })
+        .await,
+        "{from} asks {to} for a leaf",
+    );
+    recorded_key_packages(relay, &from, server_id).remove(0)
+}
+
+/// C-MLS-03: a member Welcomes a joiner that has no leaf yet into a group of its own that
+/// also seats an outsider. The joiner never reads beside the outsider, and takes its seat
+/// in the server's real group once the owner's Welcome comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_welcome_never_seats_a_non_member() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, c_tag, v_tag, x_tag) = (171u8, 172u8, 173u8, 174u8);
+    let master = |tag: u8| keys(tag).peer_id();
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&master(c_tag), &master(v_tag)]).await;
+    let c = spawn_node_with_friends(&relay, c_tag, c_tag, &[&master(o_tag), &master(v_tag)]).await;
+    let mut v = spawn_node_with_friends(&relay, v_tag, v_tag, &[&master(o_tag), &master(c_tag)]).await;
+    expect_dm_pair_ready(&relay, &o, &c, 15).await;
+    expect_dm_pair_ready(&relay, &o, &v, 15).await;
+    expect_dm_pair_ready(&relay, &c, &v, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Seat Server").await;
+    c.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || o.mls_members(&server_id).await.contains(&c.device_id)).await,
+        "C takes its seat",
+    );
+    let v_key_package = join_holding_key_package(&relay, &mut v, &o, &server_id).await;
+
+    // C builds a group under the server's id seating itself, the outsider and V.
+    let outsider = crate::crypto::MlsManager::new(&keys(x_tag), &keys(x_tag)).unwrap();
+    let x_dev = keys(x_tag).peer_id();
+    let x_key_package = outsider.key_package_claiming(&outsider.own_credential_text());
+    let mut substitute = crate::crypto::MlsManager::new(&keys(c_tag), &keys(c_tag)).unwrap();
+    substitute.create_group(&server_id).unwrap();
+    let done = substitute
+        .commit_membership(&server_id, &[], &[(x_dev.clone(), x_key_package), (v.device_id.clone(), v_key_package)])
+        .unwrap();
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&super::types::HavenMessage::MlsWelcome {
+        server_id: server_id.clone(),
+        welcome: b64(&done.welcome.unwrap()),
+        channel_id: None,
+        conf_host: None,
+    }));
+    flush_frames(&relay, &mut v).await;
+    let seated = v.mls_members_checked(&server_id).await.expect("V answers");
+    assert!(!seated.contains(&x_dev), "V reads beside an outsider: {seated:?}");
+
+    relay.release_held(&v.device_id, &o.device_id);
+    assert!(
+        wait_until(20, async || {
+            let ours = v.mls_members(&server_id).await;
+            ours.contains(&v.device_id) && ours == o.mls_members(&server_id).await
+        })
+        .await,
+        "V takes its seat in the server's own group",
+    );
+    assert!(!v.mls_members(&server_id).await.contains(&x_dev));
+}
+
+/// C-MLS-03's other side: a Welcome may seat a member who joined after our view was last
+/// brought up to date (here while we were away, the Welcome waiting for us on the relay).
+/// It waits for our view instead of being refused, and the join completes once the ops
+/// arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn a_join_whose_view_lacks_a_newer_member_still_takes_its_seat() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, n_tag, j_tag) = (175u8, 176u8, 177u8);
+    let master = |tag: u8| keys(tag).peer_id();
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&master(n_tag), &master(j_tag)]).await;
+    let n = spawn_node_with_friends(&relay, n_tag, n_tag, &[&master(o_tag), &master(j_tag)]).await;
+    let mut j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&master(o_tag), &master(n_tag)]).await;
+    expect_dm_pair_ready(&relay, &o, &n, 15).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    expect_dm_pair_ready(&relay, &n, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Lag Server").await;
+    join_holding_key_package(&relay, &mut j, &o, &server_id).await;
+
+    // N joins and takes its seat while J is away.
+    relay.set_online(&j.device_id, false);
+    n.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || o.mls_members(&server_id).await.contains(&n.device_id)).await,
+        "N takes its seat",
+    );
+    let n_master = master(n_tag);
+    assert!(
+        j.live_server_state(&server_id).await.is_some_and(|s| !s.members.contains_key(&n_master)),
+        "control: J's view lacks N",
+    );
+
+    // J's leaf request goes through; the owner's Welcome, seating N beside J, waits on
+    // the relay and is the first thing J reads when it is back.
+    relay.release_held(&j.device_id, &o.device_id);
+    assert!(
+        wait_until(20, async || relay.buffered_frames(&j.device_id).iter().any(|f| {
+            serde_json::from_slice::<serde_json::Value>(super::frame_auth::unchecked_body(f))
+                .is_ok_and(|v| v["type"] == "mls_welcome")
+        }))
+        .await,
+        "the owner Welcomes J",
+    );
+    relay.set_online(&j.device_id, true);
+    assert!(
+        wait_until(30, async || {
+            let ours = j.mls_members(&server_id).await;
+            ours.contains(&j.device_id) && ours.contains(&n.device_id) && ours == o.mls_members(&server_id).await
+        })
+        .await,
+        "J takes its seat once its view catches up",
+    );
+}
+
 /// D5: a stranger gets no KeyPackage; the owner, who may repair us, does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_key_package_requests_need_a_member_who_may_repair() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, v, _c, server_id) = setup_epoch_race_trio(&relay, 159, 161, 162).await;
@@ -28590,7 +29446,7 @@ async fn authz_key_package_requests_need_a_member_who_may_repair() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_garbage_mls_frames_never_drop_a_group() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 165, 166, 167).await;
@@ -28601,7 +29457,7 @@ async fn authz_garbage_mls_frames_never_drop_a_group() {
 
     for msg in [
         HavenMessage::MlsCommit { server_id: server_id.clone(), commit: garbage.clone(), channel_id: None, epoch: None },
-        HavenMessage::MlsWelcome { server_id: server_id.clone(), welcome: garbage.clone(), channel_id: None, conf_nonce: None },
+        HavenMessage::MlsWelcome { server_id: server_id.clone(), welcome: garbage.clone(), channel_id: None, conf_host: None },
     ] {
         relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&msg));
     }
@@ -28630,7 +29486,7 @@ async fn authz_garbage_mls_frames_never_drop_a_group() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_frame_that_fails_to_decrypt_asks_only_a_member_to_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (_o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 172, 173, 174).await;
@@ -28692,7 +29548,7 @@ async fn authz_a_frame_that_fails_to_decrypt_asks_only_a_member_to_sync() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_held_commit_asks_only_a_member_to_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, v, c, server_id) = setup_epoch_race_trio(&relay, 176, 177, 178).await;
@@ -28740,7 +29596,7 @@ async fn authz_a_held_commit_asks_only_a_member_to_sync() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_welcome_asks_only_a_member_to_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, v, _c, server_id) = setup_epoch_race_trio(&relay, 181, 182, 183).await;
@@ -28793,7 +29649,7 @@ async fn authz_a_welcome_asks_only_a_member_to_sync() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_voice_frames_over_mls_come_from_their_leaf() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, v, c, server_id) = setup_epoch_race_trio(&relay, 168, 169, 171).await;
@@ -28865,7 +29721,7 @@ async fn authz_voice_frames_over_mls_come_from_their_leaf() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_same_epoch_fork_heals_through_the_probe() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut v, mut c, server_id) = setup_epoch_race_trio(&relay, 172, 173, 174).await;
@@ -28972,7 +29828,7 @@ async fn owner_member_and_joiner(
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 181, 182, 183).await;
@@ -29048,7 +29904,7 @@ async fn authz_a_joiner_takes_its_state_only_from_the_servers_anchor() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_pending_join_takes_its_answer_only_from_its_reply_key() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 238, 239, 240).await;
@@ -29152,7 +30008,7 @@ async fn expect_parked(node: &mut TestNode, server_id: &str) -> bool {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_a_removed_members_door_neither_reads_nor_answers_a_join() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, k, mut j, server_id) = owner_member_and_joiner(&relay, 241, 242, 243).await;
@@ -29253,7 +30109,7 @@ async fn join_lock_a_removed_members_door_neither_reads_nor_answers_a_join() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_moves_after_a_leave_and_a_leavers_refusal_never_ends_the_join() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, l, mut j, server_id) = owner_member_and_joiner(&relay, 244, 245, 246).await;
@@ -29264,7 +30120,14 @@ async fn join_lock_moves_after_a_leave_and_a_leavers_refusal_never_ends_the_join
         "the owner registers the join ring before it goes dark",
     );
 
-    go_offline(&relay, &o, &server_id).await;
+    // The owner's connection dies without a goodbye, so the leaver still addresses it
+    // and the relay holds the leave for its return. After a clean goodbye the leave
+    // reaches nobody offline: `a_leave_reaches_an_owner_offline_when_it_was_sent`.
+    relay.drop_socket_silently(&o.device_id);
+    assert!(
+        wait_until(10, async || !relay.room_devices(&server_id).contains(&o.device_id)).await,
+        "the owner is off the relay",
+    );
     l.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
     assert!(
         wait_until(10, async || l.store().load_server_state(&server_id).ok().flatten().is_none()).await,
@@ -29314,6 +30177,45 @@ async fn join_lock_moves_after_a_leave_and_a_leavers_refusal_never_ends_the_join
     );
 }
 
+/// A member leaves while nobody else is online and after the owner said goodbye: the
+/// owner, back, still learns of it, so the leaver leaves its member list and the lock
+/// moves past it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "a leave reaches only the members online when it is sent; how it reaches the others is not decided"]
+async fn a_leave_reaches_an_owner_offline_when_it_was_sent() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, mut l, _j, server_id) = owner_member_and_joiner(&relay, 241, 242, 243).await;
+    let first = relay_tip(&relay, &server_id);
+
+    go_offline(&relay, &o, &server_id).await;
+    assert!(
+        wait_event(&mut l, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == o.device_id
+        ))
+        .await,
+        "L sees the owner go",
+    );
+    l.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || l.store().load_server_state(&server_id).ok().flatten().is_none()).await,
+        "L leaves",
+    );
+
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(20, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&l.master_id))).await,
+        "the owner, back, learns that L left",
+    );
+    assert!(
+        wait_until(15, async || relay_tip(&relay, &server_id).n > first.n).await,
+        "and moves the lock past the leave",
+    );
+}
+
 /// The one thing a leaver keeping its door can still do before the lock moves is
 /// hand a joiner a stale "you're in". The real admission lands on top of it: the
 /// joiner ends up in the real server, with the leaver gone from it.
@@ -29321,7 +30223,7 @@ async fn join_lock_moves_after_a_leave_and_a_leavers_refusal_never_ends_the_join
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_a_stale_admission_is_overtaken_by_the_real_one() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut m, mut j, server_id) = owner_member_and_joiner(&relay, 247, 248, 249).await;
@@ -29384,7 +30286,7 @@ async fn join_lock_a_stale_admission_is_overtaken_by_the_real_one() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_a_demoted_mod_loses_the_change_key() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, _j, server_id) = owner_member_and_joiner(&relay, 252, 253, 254).await;
@@ -29433,7 +30335,7 @@ async fn join_lock_a_demoted_mod_loses_the_change_key() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_a_member_puts_the_chain_back_on_a_relay_that_forgot_it() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 203, 230, 231).await;
@@ -29459,7 +30361,7 @@ async fn join_lock_a_member_puts_the_chain_back_on_a_relay_that_forgot_it() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_the_owner_resets_a_rogue_mods_fork() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, r, mut j, server_id) = owner_member_and_joiner(&relay, 235, 202, 201).await;
@@ -29504,7 +30406,7 @@ async fn join_lock_the_owner_resets_a_rogue_mods_fork() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_the_card_rides_inside_the_request() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 206, 206, &[]).await;
@@ -29571,7 +30473,7 @@ async fn join_lock_the_card_rides_inside_the_request() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_a_lock_read_before_a_removal_is_read_again_before_an_answer_counts() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, k, mut j, server_id) = owner_member_and_joiner(&relay, 204, 205, 208).await;
@@ -29628,7 +30530,7 @@ async fn join_lock_a_lock_read_before_a_removal_is_read_again_before_an_answer_c
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_an_answer_from_a_door_that_moved_is_answered_again() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, x, mut j, server_id) = owner_member_and_joiner(&relay, 209, 210, 211).await;
@@ -29680,7 +30582,7 @@ async fn join_lock_an_answer_from_a_door_that_moved_is_answered_again() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn join_lock_a_joiner_seals_only_to_a_chain_its_owner_signed() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 212, 212, &[]).await;
@@ -29712,7 +30614,7 @@ async fn join_lock_a_joiner_seals_only_to_a_chain_its_owner_signed() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_cannot_admit_past_the_join_gates() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, server_id) = three_member_server(&relay, 184, 185, 186).await;
@@ -29768,7 +30670,7 @@ async fn authz_a_member_cannot_admit_past_the_join_gates() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_lists_only_someone_who_asked_to_join() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, server_id) = three_member_server(&relay, 215, 216, 217).await;
@@ -29833,7 +30735,7 @@ async fn authz_a_member_lists_only_someone_who_asked_to_join() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_join_restored_after_a_restart_still_carries_its_ask() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const A_MASTER: u8 = 223;
@@ -29879,7 +30781,7 @@ async fn a_join_restored_after_a_restart_still_carries_its_ask() {
 async fn authz_a_hidden_channel_never_shows_to_a_guest() {
     use crate::crdt::operations::CrdtPayload;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, server_id) = three_member_server(&relay, 226, 227, 228).await;
@@ -29909,12 +30811,15 @@ async fn authz_a_hidden_channel_never_shows_to_a_guest() {
     // Any member can tell a guest anything about the server's name and channels (the
     // preview is unauthenticated, accepted); the honest ones never name a closed one.
     relay.swallow_direct(&m.device_id, &g.device_id);
-    let guest_lists = async |g: &mut TestNode| {
+    // A guest asks again on every relay connect, so answers to an earlier ask can still
+    // be on their way: `lobby_named` picks the answers given after the room held that name.
+    let guest_lists = async |g: &mut TestNode, lobby_named: &str| {
         g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
         let mut listed: Vec<Vec<String>> = Vec::new();
         wait_event(g, std::time::Duration::from_secs(10), |ev| {
             if let NetworkEvent::PublicChannelListReceived { server_id: sid, channels, .. } = ev
                 && *sid == server_id
+                && channels.iter().any(|c| c.channel_id == lobby && c.name == lobby_named)
             {
                 listed.push(channels.iter().map(|c| c.channel_id.clone()).collect());
             }
@@ -29924,7 +30829,7 @@ async fn authz_a_hidden_channel_never_shows_to_a_guest() {
         assert_eq!(listed.len(), 2, "O and X both answer the guest");
         listed
     };
-    for ids in guest_lists(&mut g).await {
+    for ids in guest_lists(&mut g, "lobby").await {
         assert!(ids.contains(&general), "the guest sees the public channel");
     }
 
@@ -29959,8 +30864,8 @@ async fn authz_a_hidden_channel_never_shows_to_a_guest() {
     for (node, who) in [(&o, "O"), (&x, "X")] {
         assert!(!node.live_server_state(&server_id).await.unwrap().is_channel_public(&general), "{who} holds a closed channel public");
     }
-    for ids in guest_lists(&mut g).await {
-        assert!(ids.contains(&lobby) && !ids.contains(&general), "a guest was shown {ids:?}");
+    for ids in guest_lists(&mut g, "hall").await {
+        assert!(!ids.contains(&general), "a guest was shown {ids:?}");
     }
 }
 
@@ -29970,7 +30875,7 @@ async fn authz_a_hidden_channel_never_shows_to_a_guest() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_guest_keeps_public_posts_in_memory_only() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 232, 232, &[]).await;
@@ -30072,7 +30977,7 @@ async fn authz_a_guest_keeps_public_posts_in_memory_only() {
 async fn authz_a_guest_shows_an_author_only_by_its_own_card() {
     use base64::Engine as _;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, server_id) = three_member_server(&relay, 234, 235, 236).await;
@@ -30166,7 +31071,7 @@ async fn authz_a_guest_shows_an_author_only_by_its_own_card() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_backfill_refuses_a_post_by_someone_never_a_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const M: u8 = 191;
@@ -30210,7 +31115,7 @@ async fn authz_backfill_refuses_a_post_by_someone_never_a_member() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_backfill_drops_a_reaction_by_a_never_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const M: u8 = 247;
@@ -30269,7 +31174,7 @@ async fn authz_backfill_drops_a_reaction_by_a_never_member() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const O: u8 = 194;
@@ -30349,7 +31254,7 @@ async fn a_legacy_server_moves_onto_its_owners_checkpoint_and_pins_joiners() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_members_snapshot_of_an_older_server_decides_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const O: u8 = 219;
@@ -30496,7 +31401,7 @@ async fn seen_before_flush(relay: &MockRelay, to: &mut TestNode, mut pred: impl 
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn authz_the_relay_cannot_send_a_frame_in_a_members_name() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 181, 182).await;
@@ -30522,7 +31427,7 @@ async fn authz_the_relay_cannot_send_a_frame_in_a_members_name() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_sealed_frame_cannot_be_moved_to_another_room_or_device() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 184, 185).await;
@@ -30555,7 +31460,7 @@ async fn authz_a_sealed_frame_cannot_be_moved_to_another_room_or_device() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_the_relay_cannot_echo_a_devices_own_frame_back_to_it() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 187, 188).await;
@@ -30586,7 +31491,7 @@ async fn authz_the_relay_cannot_echo_a_devices_own_frame_back_to_it() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_removal_older_than_the_friendship_is_ignored() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 189, 190).await;
@@ -30617,7 +31522,7 @@ async fn authz_a_removal_older_than_the_friendship_is_ignored() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_live_frame_is_taken_once_and_only_while_fresh() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 191, 192).await;
@@ -30653,7 +31558,7 @@ async fn authz_a_live_frame_is_taken_once_and_only_while_fresh() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_call_invite_held_back_by_the_relay_never_rings() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 193, 194).await;
@@ -30700,7 +31605,7 @@ async fn authz_a_call_invite_held_back_by_the_relay_never_rings() {
 async fn authz_a_replayed_olm_frame_leaves_the_session_alone() {
     use super::types::HavenMessage;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 195, 196).await;
@@ -30833,7 +31738,7 @@ async fn dm_read(from: &TestNode, to: &mut TestNode, tag: &str) {
 #[allow(clippy::await_holding_lock)]
 async fn olm_a_frame_replayed_after_a_restart_leaves_the_session_alone() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -30906,7 +31811,7 @@ async fn olm_a_frame_replayed_after_a_restart_leaves_the_session_alone() {
 #[allow(clippy::await_holding_lock)]
 async fn olm_a_sender_back_on_an_older_copy_of_its_session_is_re_keyed() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a_tag, b_tag) = (199, 200);
@@ -30963,7 +31868,7 @@ async fn olm_a_sender_back_on_an_older_copy_of_its_session_is_re_keyed() {
 #[allow(clippy::await_holding_lock)]
 async fn olm_a_fresh_prekey_we_cannot_open_still_asks_for_a_key() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a_tag, b_tag) = (201, 202);
@@ -31004,7 +31909,7 @@ async fn olm_a_fresh_prekey_we_cannot_open_still_asks_for_a_key() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_one_device_holds_one_of_our_one_time_keys() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut b = spawn_node_with_friends(&relay, 240, 240, &[]).await;
@@ -31030,7 +31935,7 @@ async fn authz_one_device_holds_one_of_our_one_time_keys() {
 async fn authz_a_friend_request_from_before_a_removal_never_returns() {
     use super::types::HavenMessage;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (a, mut b) = friend_pair(&relay, 242, 243).await;
@@ -31091,7 +31996,7 @@ async fn authz_a_friend_request_from_before_a_removal_never_returns() {
 async fn authz_a_stale_siblings_friend_list_never_brings_back_a_removed_friend() {
     use super::types::{FriendListEntry, HavenMessage};
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -31222,7 +32127,7 @@ async fn drops_friend(node: &mut TestNode, master: &str) -> bool {
 async fn authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd() {
     use super::types::{FriendListEntry, HavenMessage};
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let other = NativeKeypair::from_secret_bytes(&seed_bytes(155)).peer_id();
@@ -31294,7 +32199,7 @@ async fn authz_a_removal_reaches_an_online_sibling_and_never_undoes_a_readd() {
 #[allow(clippy::await_holding_lock)]
 async fn a_removal_reaches_a_sibling_that_was_away() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let gone = NativeKeypair::from_secret_bytes(&seed_bytes(165)).peer_id();
@@ -31331,7 +32236,7 @@ async fn a_removal_reaches_a_sibling_that_was_away() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_only_our_own_device_tells_us_a_friendship_ended() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let f1 = NativeKeypair::from_secret_bytes(&seed_bytes(175)).peer_id();
@@ -31373,7 +32278,7 @@ fn mentions(frames: &[Vec<u8>], tag: &str) -> bool {
 #[allow(clippy::await_holding_lock)]
 async fn authz_only_a_member_is_served_the_op_log() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -31424,7 +32329,7 @@ async fn authz_only_a_member_is_served_the_op_log() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_full_profile_goes_only_to_someone_we_know() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -31463,57 +32368,38 @@ async fn authz_a_full_profile_goes_only_to_someone_we_know() {
     );
 
     // S asks B to be friends: while that is pending, each sees the other's card (A28).
-    let s = spawn_node_with_friends(&relay, 205, 205, &[]).await;
+    // The two share no room before an accept (C-OLM-02), so B's card reaches S sealed
+    // in S's own mailbox, and no Olm session forms between them.
+    let mut s = spawn_node_with_friends(&relay, 205, 205, &[]).await;
     s.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b.master_id.clone() }).await.unwrap();
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::FriendRequestReceived { .. })).await,
         "B must see S's request"
     );
-    expect_olm_confirmed(&s, &b, 20).await;
-    carry_as(&s, &b, super::types::HavenMessage::ProfileRequest).await;
-    assert!(
-        wait_until(10, async || {
-            b.carried_to(&s.device_id).await.iter().any(|m| matches!(m, super::types::HavenMessage::ProfileCard { avatar_b64, .. } if !avatar_b64.is_empty()))
-        })
-        .await,
-        "a pending requester's pull is answered with the card and its avatar"
-    );
-    let full = |sent: &[super::types::HavenMessage]| sent.iter().any(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. }));
-    assert!(!full(&b.carried_to(&s.device_id).await), "a pending requester must not get the full profile");
     assert!(
         wait_until(10, async || s.store().load_profile(&b.master_id).ok().flatten().is_some_and(|p| p.display_name == "B")).await,
         "S shows B's name on its outgoing card"
     );
-    assert!(s.store().load_profile(&b.master_id).unwrap().unwrap().status.is_empty(), "and nothing else of B's");
+    let b_profile = s.store().load_profile(&b.master_id).unwrap().unwrap();
+    assert!(b_profile.status.is_empty(), "and nothing else of B's");
+    let full = |sent: &[super::types::HavenMessage]| sent.iter().any(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { .. }));
+    assert!(!full(&b.carried_to(&s.device_id).await), "a pending requester must not get the full profile");
+    let seen = relay.wiretap().readable("only for friends");
+    assert!(seen.is_empty(), "the relay read B's status in {seen:?}");
 
-    // Declined, S is a stranger again: it gets nothing at all. B renames itself, so
-    // anything that reaches S from here on would carry the new name.
+    // Declined, S is a stranger again: it gets nothing more. B renames itself, and S,
+    // back from a reconnect that replays its mailbox, still knows only the old name.
     b.cmd_tx.send(NodeCommand::RejectFriendRequest { peer_id: s.master_id.clone() }).await.unwrap();
     assert!(wait_until(10, async || b.friend_status(&s.master_id).as_deref() == Some("declined")).await);
+    assert!(wait_until(10, async || s.friend_status(&b.master_id).is_none()).await, "S hears the decline");
     b.cmd_tx.send(profile_named("B renamed", "only for friends")).await.unwrap();
     assert!(wait_until(10, async || b.store().load_profile(&b.master_id).ok().flatten().is_some_and(|p| p.display_name == "B renamed")).await);
-    let (s_dev, b_dev) = (s.device_id.clone(), b.device_id.clone());
-    let s_to_b = || relay.wiretap().frames.iter().filter(|f| f.from == s_dev && f.to.as_deref() == Some(b_dev.as_str())).count();
-    let sent = s_to_b();
-    carry_as(&s, &b, super::types::HavenMessage::ProfileRequest).await;
-    assert!(wait_until(10, async || s_to_b() > sent).await, "the request reaches the relay");
-    flush_frames(&relay, &mut b).await;
-    let renamed = |m: &super::types::HavenMessage| match m {
-        super::types::HavenMessage::ProfileCard { card, .. } => card.display_name == "B renamed",
-        super::types::HavenMessage::ProfileUpdate { display_name, .. } => display_name == "B renamed",
-        _ => false,
-    };
-    // An answer would reach the carry log a hop after the request: watch for one.
-    let leaked = wait_until(1, async || b.carried_to(&s.device_id).await.iter().any(renamed)).await;
-    assert!(!leaked, "a stranger gets nothing, not even the name");
-
-    // Nor is a stranger's own full profile stored when it pushes one.
-    let sent = s_to_b();
-    carry_as(&s, &b, crafted_announce(&s, super::frame_auth::now_ms(), "pushed by a stranger", None, None)).await;
-    assert!(wait_until(10, async || s_to_b() > sent).await, "the push reaches the relay");
-    flush_frames(&relay, &mut b).await;
-    let held = b.store().load_profile(&s.master_id).unwrap().map(|p| p.status).unwrap_or_default();
-    assert_ne!(held, "pushed by a stranger", "a stranger's full profile must not be stored");
+    relay.set_online(&s.device_id, false);
+    relay.set_online(&s.device_id, true);
+    let inbox = format!("inbox:{}", s.master_id);
+    assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&s.device_id)).await, "S is back");
+    flush_frames(&relay, &mut s).await;
+    assert_eq!(s.store().load_profile(&b.master_id).unwrap().unwrap().display_name, "B", "a stranger gets nothing, not even the new name");
 }
 
 fn profile_named(name: &str, status: &str) -> NodeCommand {
@@ -31539,7 +32425,7 @@ fn profile_named(name: &str, status: &str) -> NodeCommand {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_a_profile_never_rides_in_the_clear() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -31568,7 +32454,7 @@ async fn c24_a_profile_never_rides_in_the_clear() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn authz_a_card_or_a_relayed_profile_speaks_only_for_its_owner() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (b, c) = friend_pair(&relay, 223, 224).await;
@@ -31653,7 +32539,7 @@ async fn authz_a_card_or_a_relayed_profile_speaks_only_for_its_owner() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn meeting_participants_see_each_others_card_once_admitted() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut host = spawn_node_on(&relay, 226, 226).await;
@@ -31729,7 +32615,7 @@ async fn meeting_participants_see_each_others_card_once_admitted() {
 async fn a_meeting_card_claiming_another_master_is_not_stored() {
     use base64::Engine as _;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut host = spawn_node_on(&relay, 232, 232).await;
@@ -31800,7 +32686,7 @@ async fn a_meeting_card_claiming_another_master_is_not_stored() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn a_joiner_shows_its_card_to_the_members_it_asks() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_on(&relay, 228, 228).await;
@@ -31845,7 +32731,7 @@ async fn a_joiner_shows_its_card_to_the_members_it_asks() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_join_request_from_before_a_leave_never_readmits() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, m, x, server_id) = three_member_server(&relay, 206, 207, 208).await;
@@ -31923,7 +32809,7 @@ async fn carried_barrier(from: &TestNode, to: &mut TestNode) {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_kick_notice_without_its_removal_op_is_ignored() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut m, x, server_id) = three_member_server(&relay, 237, 238, 239).await;
@@ -31958,7 +32844,7 @@ async fn authz_a_kick_notice_without_its_removal_op_is_ignored() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_kick_or_ban_carrying_its_op_still_lands() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, server_id) = three_member_server(&relay, 240, 241, 242).await;
@@ -31986,7 +32872,7 @@ async fn a_kick_or_ban_carrying_its_op_still_lands() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_ban_of_us_heard_as_an_op_leaves_the_server() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, _m, x, server_id) = three_member_server(&relay, 243, 244, 245).await;
@@ -32011,7 +32897,7 @@ async fn a_ban_of_us_heard_as_an_op_leaves_the_server() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_kick_from_before_a_rejoin_is_ignored() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut m, _x, server_id) = three_member_server(&relay, 209, 210, 211).await;
@@ -32116,7 +33002,7 @@ fn assert_told_only_up_to(told: &[crate::crdt::operations::CrdtOp], removal: &cr
 async fn authz_a_member_kicked_while_away_learns_it_when_it_asks_for_the_door() {
     use crate::crdt::operations::MemberRole;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 246, 246, &[]).await;
@@ -32194,7 +33080,7 @@ async fn authz_a_member_kicked_while_away_learns_it_when_it_asks_for_the_door() 
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_banned_while_away_learns_it_from_its_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, b, j, server_id) = owner_member_and_joiner(&relay, 249, 250, 251).await;
@@ -32289,7 +33175,7 @@ fn ring_verdicts_on(relay: &MockRelay, server_id: &str, from_device: &str, joine
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_removed_joiners_parked_ask_read_back_gets_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32447,7 +33333,7 @@ async fn assert_back_member_gave_the_old_ask_nothing(relay: &MockRelay, o: &Test
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_back_from_away_gives_a_kicked_joiners_old_ask_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32463,7 +33349,7 @@ async fn authz_a_member_back_from_away_gives_a_kicked_joiners_old_ask_nothing() 
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_back_from_away_learns_a_kick_from_its_sync_alone() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32481,7 +33367,7 @@ async fn authz_a_member_back_from_away_learns_a_kick_from_its_sync_alone() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_restarted_while_away_learns_an_admission_from_its_sync() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32533,7 +33419,7 @@ async fn authz_a_member_restarted_while_away_learns_an_admission_from_its_sync()
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_back_from_away_gives_a_banned_joiners_old_ask_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32551,7 +33437,7 @@ async fn authz_a_member_back_from_away_gives_a_banned_joiners_old_ask_nothing() 
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_back_alone_gives_an_answered_ask_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32614,7 +33500,7 @@ async fn admitted_by(node: &TestNode, server_id: &str, master: &str) -> Vec<Stri
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_read_beside_a_present_member_is_admitted_once() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.set_unsubscribed_topic(super::types::JOIN_TOPIC);
@@ -32662,7 +33548,7 @@ async fn parked_join_read_beside_a_present_member_is_admitted_once() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn parked_join_is_judged_when_the_relay_never_marks_the_rings_end() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.withhold_catchup_end();
@@ -32692,7 +33578,7 @@ async fn parked_join_is_judged_when_the_relay_never_marks_the_rings_end() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_back_from_away_admits_no_banned_identitys_live_ask() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32817,7 +33703,7 @@ fn join_answers_addressed(relay: &MockRelay, from: &str, to: &str) -> Vec<String
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_back_hidden_answers_no_direct_ask() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32908,7 +33794,7 @@ async fn authz_a_member_back_hidden_answers_no_direct_ask() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_member_that_loses_the_room_answers_no_direct_ask() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -32957,7 +33843,7 @@ async fn authz_a_member_that_loses_the_room_answers_no_direct_ask() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn sync_answers_a_member_that_misses_nothing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 208, 208, &[]).await;
@@ -33005,7 +33891,7 @@ async fn sync_answers_a_member_that_misses_nothing() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_holder_cannot_substitute_a_files_bytes() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut m, mut x, server_id) = three_member_server(&relay, 212, 213, 214).await;
@@ -33175,7 +34061,7 @@ async fn surfaces_before_barrier(
 #[allow(clippy::await_holding_lock)]
 async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut host = spawn_node_on(&relay, 215, 215).await;
@@ -33219,7 +34105,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
         cert: crate::crypto::certificate_for_test(&rogue_key, &rogue_key),
     };
     use super::types::HavenMessage;
-    for proof in [host_proof.clone(), own_proof] {
+    for proof in [host_proof.clone(), own_proof.clone()] {
         for msg in [
             HavenMessage::ConferenceLobbyInfo {
                 conf_id: conf_id.clone(), host_name: "Rogue".into(), host_avatar_hash: String::new(), host: proof.clone(),
@@ -33237,7 +34123,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
     assert!(!obeyed, "a room member ran the knocker's lobby");
 
     // The rogue builds its own group under the meeting's id around the knocker's
-    // KeyPackage, and Welcomes it with a nonce of its own.
+    // KeyPackage, and Welcomes it with the host's proof and with one of its own.
     let knock = meeting_frames_of_type(&relay, &knocker.device_id, &conf_id, "conf_join_req").remove(0);
     let key_package = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, knock["key_package"].as_str().unwrap())
         .unwrap();
@@ -33245,27 +34131,21 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
     substitute.create_group(&conf_sid).unwrap();
     let (_, welcome) = substitute.add_member(&conf_sid, &key_package).unwrap();
     drain_events(&mut host);
-    relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, meeting_frame(&conf_id, &rogue.device_id, &HavenMessage::MlsWelcome {
-        server_id: conf_sid.clone(),
-        welcome: b64(&welcome),
-        channel_id: None,
-        conf_nonce: Some("lobby-n1".into()),
-    }));
+    for proof in [host_proof.clone(), own_proof] {
+        relay.inject_direct(&conf_sid, &rogue.device_id, &knocker.device_id, meeting_frame(&conf_id, &rogue.device_id, &HavenMessage::MlsWelcome {
+            server_id: conf_sid.clone(),
+            welcome: b64(&welcome),
+            channel_id: None,
+            conf_host: Some(proof),
+        }));
+    }
     let admitted = surfaces_before_barrier(&relay, &mut knocker, |ev| {
         matches!(ev, NetworkEvent::ConferenceAdmitted { .. })
     })
     .await;
     assert!(!admitted, "the rogue's Welcome admitted the knocker");
 
-    // Refusing it spent the KeyPackage the host holds, so the knocker knocks again.
-    let knocker_dev = knocker.device_id.clone();
-    assert!(
-        wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
-            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == knocker_dev)
-        })
-        .await,
-        "the knocker re-knocks with a fresh KeyPackage",
-    );
+    // Turned away before staging, it spent nothing: the host admits the first knock.
     host.cmd_tx
         .send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: knocker.device_id.clone() })
         .await
@@ -33308,7 +34188,7 @@ async fn authz_only_the_host_a_meeting_id_names_runs_its_lobby() {
 #[allow(clippy::await_holding_lock)]
 async fn c24_a_meeting_shows_the_relay_no_name_and_no_host() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -33388,7 +34268,7 @@ async fn c24_a_meeting_shows_the_relay_no_name_and_no_host() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_meeting_frame_counts_only_under_its_link_key() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut host = spawn_node_on(&relay, 226, 226).await;
@@ -33467,7 +34347,7 @@ async fn authz_a_meeting_frame_counts_only_under_its_link_key() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_knock_proves_its_code_only_for_its_own_device() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut host = spawn_node_on(&relay, 218, 218).await;
@@ -33587,7 +34467,7 @@ async fn admit_to_meeting(host: &mut TestNode, node: &mut TestNode, conf_id: &st
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_device_the_hosts_roster_leaves_out_runs_no_lobby() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -33704,7 +34584,7 @@ async fn authz_a_device_the_hosts_roster_leaves_out_runs_no_lobby() {
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_device_its_roster_leaves_out_never_joins_or_speaks_in_a_meeting() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -33837,7 +34717,7 @@ async fn authz_a_device_its_roster_leaves_out_never_joins_or_speaks_in_a_meeting
 #[allow(clippy::await_holding_lock)]
 async fn authz_the_host_unseats_a_device_its_roster_drops_mid_meeting() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -34000,15 +34880,16 @@ async fn authz_the_host_unseats_a_device_its_roster_drops_mid_meeting() {
     assert_eq!(host.mls_epoch(&conf_sid).await, Some(next), "the host takes the seat in one commit");
 }
 
-/// A device out of the meeting's group (kicked here, deaf to the commit and staying in
-/// the room) loses its call at the host and at each participant once the commit lands,
+/// A device out of the meeting's group (kicked here, deaf to the commit and to the
+/// courtesy signal, so it keeps its copy of the group, and staying in the room) loses
+/// its call at the host and at each participant once the commit lands,
 /// and a join sealed at the epoch it still holds, which still decrypts for a few epochs,
 /// never seats it in the call again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn authz_a_device_out_of_the_meeting_group_loses_its_call_for_good() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut host = spawn_node_on(&relay, 252, 252).await;
@@ -34042,6 +34923,7 @@ async fn authz_a_device_out_of_the_meeting_group_loses_its_call_for_good() {
     }
 
     relay.set_broadcast_deaf(&b_dev, true);
+    relay.swallow_direct(&host.device_id, &b_dev);
     relay.set_recording(&b_dev, true);
     host.cmd_tx.send(NodeCommand::ConferenceKick { conf_id: conf_id.clone(), peer_id: b_dev.clone() }).await.unwrap();
     assert!(
@@ -34066,6 +34948,531 @@ async fn authz_a_device_out_of_the_meeting_group_loses_its_call_for_good() {
     }
 }
 
+/// The host proof `host`'s lobby frames in `conf_id` carry (recording armed on `host`).
+async fn recorded_host_proof(relay: &MockRelay, host: &TestNode, conf_id: &str) -> super::types::ConfHost {
+    assert!(
+        wait_until(10, async || !meeting_frames_of_type(relay, &host.device_id, conf_id, "conf_lobby").is_empty()).await,
+        "the host sends its lobby",
+    );
+    let lobby = meeting_frames_of_type(relay, &host.device_id, conf_id, "conf_lobby").remove(0);
+    serde_json::from_value(lobby["host"].clone()).unwrap()
+}
+
+/// The KeyPackage a device's first knock on `conf_id` carried.
+fn knocked_key_package(relay: &MockRelay, device: &str, conf_id: &str) -> Vec<u8> {
+    let knock = meeting_frames_of_type(relay, device, conf_id, "conf_join_req").remove(0);
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, knock["key_package"].as_str().unwrap()).unwrap()
+}
+
+/// The keys of every entry in a persisted MLS store blob.
+fn mls_blob_keys(blob: &[u8]) -> Vec<Vec<u8>> {
+    let word = |at: usize| u64::from_be_bytes(blob[at..at + 8].try_into().unwrap()) as usize;
+    let mut keys = Vec::new();
+    let mut at = 8;
+    for _ in 0..word(0) {
+        let (k_len, v_len) = (word(at), word(at + 8));
+        keys.push(blob[at + 16..at + 16 + k_len].to_vec());
+        at += 16 + k_len + v_len;
+    }
+    keys
+}
+
+/// Whether `node`'s persisted MLS store holds any entry of group `group_key`.
+fn persisted_mls_mentions(node: &TestNode, group_key: &str) -> bool {
+    let store = crate::storage::MessageStore::open(&node.db_path, &node.passphrase).expect("open store");
+    let Ok(Some((_, _, Some(blob)))) = store.load_mls_identity() else { return false };
+    let needle = serde_json::to_vec(&openmls::prelude::GroupId::from_slice(group_key.as_bytes())).unwrap();
+    mls_blob_keys(&blob).iter().any(|k| k.windows(needle.len()).any(|w| w == needle.as_slice()))
+}
+
+/// Wait until `node` no longer holds `group_key` and its persisted store says the same.
+/// The store is written by an actor after the live drop, so the disk is polled slowly.
+async fn expect_group_gone_from_disk(node: &TestNode, group_key: &str, what: &str) {
+    assert!(
+        wait_until(10, async || node.mls_epoch(group_key).await.is_none()).await,
+        "{what}: {} still holds the group",
+        node.device_id,
+    );
+    let mut gone = false;
+    for _ in 0..20 {
+        if !persisted_mls_mentions(node, group_key) {
+            gone = true;
+            break;
+        }
+        sleep_ms(300).await;
+    }
+    assert!(gone, "{what}: {}'s disk still holds the group's secrets", node.device_id);
+}
+
+/// C-MLS-05: a guest holding the link reads every knock, KeyPackage included. A Welcome
+/// it builds around another guest's KeyPackage costs that guest nothing, so the host's
+/// admission still opens and the guest takes its seat in the call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_guest_cannot_spend_another_guests_key_package() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 241, 241).await;
+    let mut guest = spawn_node_on(&relay, 242, 242).await;
+    let rogue = spawn_node_on(&relay, 243, 243).await;
+    expect_on_relay(&relay, &[&host, &guest, &rogue]).await;
+
+    relay.set_recording(&host.device_id, true);
+    relay.set_recording(&guest.device_id, true);
+    let conf_id = start_pinned_meeting(&relay, &mut host, "spend-n1", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    let guest_dev = guest.device_id.clone();
+    knock_on_meeting(&guest, &conf_id, "Gee").await;
+    expect_in_waiting_room(&mut host, &conf_id, &guest_dev).await;
+
+    // The rogue opens the knock and Welcomes the guest into a group of its own around the
+    // guest's KeyPackage, with the host's proof. The host hears no knock of the guest's
+    // meanwhile.
+    relay.set_broadcast_deaf(&host.device_id, true);
+    let key_package = knocked_key_package(&relay, &guest_dev, &conf_id);
+    let host_proof = recorded_host_proof(&relay, &host, &conf_id).await;
+    let rogue_key = keys(243);
+    let mut substitute = crate::crypto::MlsManager::new(&rogue_key, &rogue_key).unwrap();
+    substitute.create_group(&conf_sid).unwrap();
+    let (_, welcome) = substitute.add_member(&conf_sid, &key_package).unwrap();
+    relay.inject_direct(&conf_sid, &rogue.device_id, &guest_dev, meeting_frame(&conf_id, &rogue.device_id, &HavenMessage::MlsWelcome {
+        server_id: conf_sid.clone(),
+        welcome: b64(&welcome),
+        channel_id: None,
+        conf_host: Some(host_proof),
+    }));
+    flush_frames(&relay, &mut guest).await;
+    relay.set_broadcast_deaf(&host.device_id, false);
+
+    // The host admits the guest, and every knock of the guest's that reaches it after.
+    let admit = || NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: guest_dev.clone() };
+    host.cmd_tx.send(admit()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut admitted = false;
+    while !admitted && tokio::time::Instant::now() < deadline {
+        admitted = wait_event(&mut guest, std::time::Duration::from_millis(500), |ev| {
+            matches!(ev, NetworkEvent::ConferenceAdmitted { conf_id: c } if *c == conf_id)
+        })
+        .await;
+        let knocked_again = wait_event(&mut host, std::time::Duration::from_millis(100), |ev| {
+            matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == guest_dev)
+        })
+        .await;
+        if !admitted && knocked_again {
+            host.cmd_tx.send(admit()).await.unwrap();
+        }
+    }
+    assert!(admitted, "a guest's Welcome spent the knocker's KeyPackage and the host never got it in");
+
+    guest.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin { server_id: conf_sid.clone(), channel_id: "main".to_string() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut host, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::VoiceChannelJoined { server_id, peer_id, .. } if *server_id == conf_sid && *peer_id == guest_dev)
+        })
+        .await,
+        "the admitted guest takes its seat in the call",
+    );
+}
+
+/// A guest that left a meeting knocks again with a fresh KeyPackage, and the host seats it
+/// again in place of the leaf it left behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_guest_who_left_a_meeting_is_admitted_again() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 244, 244).await;
+    let mut guest = spawn_node_on(&relay, 245, 245).await;
+    expect_on_relay(&relay, &[&host, &guest]).await;
+
+    let conf_id = start_pinned_meeting(&relay, &mut host, "again-n1", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    let guest_dev = guest.device_id.clone();
+    admit_to_meeting(&mut host, &mut guest, &conf_id, "Gee").await;
+    guest.cmd_tx.send(NodeCommand::ConferenceLeave { conf_id: conf_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || !relay.room_devices(&conf_sid).contains(&guest_dev)).await, "the guest leaves the room");
+
+    admit_to_meeting(&mut host, &mut guest, &conf_id, "Gee").await;
+    let seats = host.mls_members_checked(&conf_sid).await.expect("the host answers");
+    assert_eq!(seats.iter().filter(|d| **d == guest_dev).count(), 1, "one seat for the guest: {seats:?}");
+    let epoch = host.mls_epoch(&conf_sid).await;
+    assert!(
+        wait_until(10, async || guest.mls_epoch(&conf_sid).await == epoch).await,
+        "the guest sits in the host's group at its epoch {epoch:?}",
+    );
+}
+
+/// C-MLS-05: a Welcome from the host's own device that names nothing of ours, or that we
+/// turn away, spends no KeyPackage, so the knocker does not knock again and the host's
+/// admission of its first knock still opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_welcome_that_spends_nothing_sends_no_new_knock() {
+    use super::types::HavenMessage;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 246, 246).await;
+    let mut guest = spawn_node_on(&relay, 247, 247).await;
+    expect_on_relay(&relay, &[&host, &guest]).await;
+
+    relay.set_recording(&host.device_id, true);
+    relay.set_recording(&guest.device_id, true);
+    let conf_id = start_pinned_meeting(&relay, &mut host, "nospend-n1", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    let guest_dev = guest.device_id.clone();
+    knock_on_meeting(&guest, &conf_id, "Gee").await;
+    expect_in_waiting_room(&mut host, &conf_id, &guest_dev).await;
+
+    let key_package = knocked_key_package(&relay, &guest_dev, &conf_id);
+    let host_proof = recorded_host_proof(&relay, &host, &conf_id).await;
+    let stranger = keys(248);
+    let mut substitute = crate::crypto::MlsManager::new(&stranger, &stranger).unwrap();
+    substitute.create_group(&conf_sid).unwrap();
+    let (_, foreign) = substitute.add_member(&conf_sid, &key_package).unwrap();
+    // Past the re-knock throttle, so a knock the Welcomes caused would go out.
+    super::conference::age_pending_knock(&conf_id);
+    for welcome in [vec![0u8; 48], foreign] {
+        relay.inject_direct(&conf_sid, &host.device_id, &guest_dev, meeting_frame(&conf_id, &host.device_id, &HavenMessage::MlsWelcome {
+            server_id: conf_sid.clone(),
+            welcome: b64(&welcome),
+            channel_id: None,
+            conf_host: Some(host_proof.clone()),
+        }));
+    }
+    flush_frames(&relay, &mut guest).await;
+    expect_relay_drained(&relay, &guest, "no-reknock").await;
+    let knocks = meeting_frames_of_type(&relay, &guest_dev, &conf_id, "conf_join_req").len();
+    assert_eq!(knocks, 1, "the guest knocked again after Welcomes that spent nothing");
+
+    host.cmd_tx
+        .send(NodeCommand::ConferenceAdmit { conf_id: conf_id.clone(), peer_id: guest_dev.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut guest, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ConferenceAdmitted { conf_id: c } if *c == conf_id)
+        })
+        .await,
+        "the host's Welcome for the first knock opens",
+    );
+}
+
+/// C-MLS-06: a meeting a participant left, was removed from (hearing only the courtesy
+/// signal) or saw end leaves none of its group's secrets in that participant's store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_meeting_left_leaves_no_group_secret_on_disk() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 230, 230).await;
+    let mut a = spawn_node_on(&relay, 231, 231).await;
+    let mut b = spawn_node_on(&relay, 232, 232).await;
+    let mut c = spawn_node_on(&relay, 233, 233).await;
+    expect_on_relay(&relay, &[&host, &a, &b, &c]).await;
+
+    // One meeting each: the knock and link-key registries are process-global, so in one
+    // test process a guest that leaves would forget the link key for every guest.
+    let mut meetings = Vec::new();
+    for (node, nonce) in [(&mut a, "disk-leave"), (&mut c, "disk-kick"), (&mut b, "disk-end")] {
+        let conf_id = start_pinned_meeting(&relay, &mut host, nonce, None).await;
+        let conf_sid = super::conference::conf_server_id(&conf_id);
+        admit_to_meeting(&mut host, node, &conf_id, nonce).await;
+        let epoch = host.mls_epoch(&conf_sid).await.expect("the host holds the meeting");
+        assert!(
+            wait_until(10, async || node.mls_epoch(&conf_sid).await == Some(epoch)).await,
+            "{} must reach the meeting's epoch {epoch}",
+            node.device_id,
+        );
+        assert!(
+            wait_until(10, async || persisted_mls_mentions(node, &conf_sid)).await,
+            "control: {} keeps the meeting's group on disk while in it",
+            node.device_id,
+        );
+        meetings.push((conf_id, conf_sid));
+    }
+    let [(left, left_sid), (kicked, kicked_sid), (ended, ended_sid)] = <[(String, String); 3]>::try_from(meetings).unwrap();
+
+    a.cmd_tx.send(NodeCommand::ConferenceLeave { conf_id: left }).await.unwrap();
+    expect_group_gone_from_disk(&a, &left_sid, "a participant that left").await;
+
+    relay.set_broadcast_deaf(&c.device_id, true);
+    host.cmd_tx
+        .send(NodeCommand::ConferenceKick { conf_id: kicked, peer_id: c.device_id.clone() })
+        .await
+        .unwrap();
+    expect_group_gone_from_disk(&c, &kicked_sid, "a participant that heard only that it was removed").await;
+
+    host.cmd_tx.send(NodeCommand::ConferenceEnd { conf_id: ended }).await.unwrap();
+    expect_group_gone_from_disk(&b, &ended_sid, "a participant whose meeting ended").await;
+}
+
+/// C-MLS-06: meetings never outlive the process, so a restart drops every meeting group
+/// left on disk, and keeps the groups of the servers it holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_restart_keeps_no_meeting_group_and_every_server_group() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut host = spawn_node_on(&relay, 234, 234).await;
+    let mut d = spawn_node_on(&relay, 235, 235).await;
+    expect_on_relay(&relay, &[&host, &d]).await;
+
+    let server_id = create_server_and_wait(&mut d, "Kept Server").await;
+    assert!(wait_until(10, async || d.mls_epoch(&server_id).await.is_some()).await, "D holds its server's group");
+    let conf_id = start_pinned_meeting(&relay, &mut host, "restart-n1", None).await;
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+    admit_to_meeting(&mut host, &mut d, &conf_id, "Dee").await;
+    assert!(
+        wait_until(10, async || persisted_mls_mentions(&d, &conf_sid)).await,
+        "control: the meeting's group is on disk before the restart",
+    );
+
+    let d = restart_node(&relay, d, 235, 235).await;
+    assert!(
+        wait_until(10, async || d.mls_epoch(&server_id).await.is_some()).await,
+        "the server's group survives the restart",
+    );
+    expect_group_gone_from_disk(&d, &conf_sid, "a restart").await;
+    assert!(persisted_mls_mentions(&d, &server_id), "the server's group stays on disk");
+}
+
+// ---------------------------------------------------------------------------
+// C-MEDIA-01: a seat in a server's voice call lasts only as long as what grants it
+// (membership, sight of the channel, the device's roster). The device that loses it
+// ignores its loss here, as a modified client would, and its room keeps showing it, as
+// on a server whose lock the relay does not hold.
+// ---------------------------------------------------------------------------
+
+/// Each of `nodes` joins voice channel `cid` of `server_id`, and each sees every other
+/// one sit down.
+async fn sit_all_in_voice(nodes: &mut [&mut TestNode], server_id: &str, cid: &str) {
+    for node in nodes.iter_mut() {
+        drain_events(node);
+    }
+    for node in nodes.iter() {
+        node.cmd_tx
+            .send(NodeCommand::VoiceChannelJoin { server_id: server_id.to_string(), channel_id: cid.to_string() })
+            .await
+            .unwrap();
+    }
+    let devices: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    for node in nodes.iter_mut() {
+        let mut waiting: HashSet<String> = devices.iter().filter(|d| **d != node.device_id).cloned().collect();
+        let seen = wait_event(node, std::time::Duration::from_secs(20), |ev| {
+            if let NetworkEvent::VoiceChannelJoined { server_id: s, channel_id: c, peer_id, is_self: false } = ev
+                && s == server_id
+                && c == cid
+            {
+                waiting.remove(peer_id);
+            }
+            waiting.is_empty()
+        })
+        .await;
+        assert!(seen, "{} must see {waiting:?} in the call", node.device_id);
+    }
+}
+
+/// A voice channel `owner` makes in `server_id`, once every node of `members` holds it.
+async fn new_voice_channel(owner: &TestNode, members: &[&TestNode], server_id: &str) -> String {
+    let cid = crate::node::new_channel_id(server_id);
+    owner
+        .cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.to_string(),
+            channel_id: cid.clone(),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    for node in std::iter::once(owner).chain(members.iter().copied()) {
+        assert!(
+            wait_until(20, async || node.live_server_state(server_id).await.is_some_and(|s| s.channels.contains_key(&cid))).await,
+            "{} must hold the voice channel",
+            node.device_id,
+        );
+    }
+    cid
+}
+
+/// `gone` hears nothing more from the room or from `others`, and the room keeps
+/// showing it.
+fn ignores_its_loss(relay: &MockRelay, gone: &TestNode, others: &[&TestNode], server_id: &str) {
+    relay.set_broadcast_deaf(&gone.device_id, true);
+    for other in others {
+        relay.swallow_direct(&other.device_id, &gone.device_id);
+    }
+    relay.keep_in_view(&gone.device_id, server_id);
+}
+
+/// Every node of `stay` drops `gone` from voice channel `cid`; with `probe`, a screen
+/// watch it then sends `stay[0]` counts for nothing.
+async fn expect_unseated(stay: &mut [&mut TestNode], gone: &TestNode, server_id: &str, cid: &str, probe: bool) {
+    let gone_dev = gone.device_id.clone();
+    for node in stay.iter_mut() {
+        let left = wait_event(node, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::VoiceChannelLeft { server_id: s, channel_id: c, peer_id, .. }
+                if s == server_id && c == cid && *peer_id == gone_dev)
+        })
+        .await;
+        assert!(left, "{} kept {gone_dev} seated in the voice call", node.device_id);
+    }
+    if !probe {
+        return;
+    }
+    let target = &mut *stay[0];
+    gone.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.to_string(),
+            channel_id: cid.to_string(),
+            peer_id: target.master_id.clone(),
+            signal_type: "screen_watch".to_string(),
+            payload: serde_json::json!({ "want": true }).to_string(),
+        })
+        .await
+        .unwrap();
+    // One Olm session in order: the DM lands after the watch.
+    gone.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: target.master_id.clone(),
+            text: "after the watch".to_string(),
+            message_id: format!("unseated-{gone_dev}"),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let mut watched = false;
+    let done = wait_event(target, std::time::Duration::from_secs(20), |ev| match ev {
+        NetworkEvent::VoiceChannelSignal { signal_type, peer_id, .. } if signal_type == "screen_watch" && *peer_id == gone_dev => {
+            watched = true;
+            false
+        }
+        NetworkEvent::MessageReceived { text, .. } => text == "after the watch",
+        _ => false,
+    })
+    .await;
+    assert!(done, "the DM sent after the watch must arrive");
+    assert!(!watched, "{} took a screen watch from a device that lost its seat", target.device_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_kicked_member_loses_its_voice_seat_at_every_participant() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut m, server_id) = vault_trio(&relay, 33, 34, 35).await;
+    let cid = new_voice_channel(&o, &[&b, &m], &server_id).await;
+    sit_all_in_voice(&mut [&mut o, &mut b, &mut m], &server_id, &cid).await;
+
+    ignores_its_loss(&relay, &m, &[&o, &b], &server_id);
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    expect_unseated(&mut [&mut o, &mut b], &m, &server_id, &cid, true).await;
+    assert!(
+        m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m.master_id)),
+        "control: M never heard its kick",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_member_who_loses_sight_of_a_voice_channel_loses_its_seat() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut m, server_id) = vault_trio(&relay, 37, 38, 39).await;
+    let cid = new_voice_channel(&o, &[&b, &m], &server_id).await;
+    sit_all_in_voice(&mut [&mut o, &mut b, &mut m], &server_id, &cid).await;
+
+    o.cmd_tx
+        .send(NodeCommand::CreateLabel { server_id: server_id.clone(), name: "Crew".to_string(), color: "#0f0".to_string(), access: true })
+        .await
+        .unwrap();
+    let mut crew = None;
+    assert!(
+        wait_until(10, async || {
+            crew = o.live_server_state(&server_id).await.and_then(|s| s.labels.values().find(|l| l.name == "Crew").map(|l| l.label_id.clone()));
+            crew.is_some()
+        })
+        .await,
+        "the owner makes the label",
+    );
+    let crew = crew.expect("label id");
+    o.cmd_tx
+        .send(NodeCommand::AssignLabel { server_id: server_id.clone(), label_id: crew.clone(), peer_id: b.master_id.clone() })
+        .await
+        .unwrap();
+    ignores_its_loss(&relay, &m, &[&o, &b], &server_id);
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibilityLabels { server_id: server_id.clone(), channel_id: cid.clone(), labels: vec![crew] })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || {
+            b.live_server_state(&server_id).await.is_some_and(|s| {
+                s.can_see_channel(&b.master_id, &cid) && !s.can_see_channel(&m.master_id, &cid)
+            })
+        })
+        .await,
+        "B sees the channel through its label and M does not",
+    );
+    expect_unseated(&mut [&mut o, &mut b], &m, &server_id, &cid, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_device_its_roster_drops_loses_its_voice_seat() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O_MASTER: u8 = 41;
+    const P_MASTER: u8 = 42;
+    const P1_DEV: u8 = 43;
+    const P2_DEV: u8 = 44;
+    let (o_master, p_master) = (tag_kp(O_MASTER).peer_id(), tag_kp(P_MASTER).peer_id());
+    let p1_dev = tag_kp(P1_DEV).peer_id();
+    let now = super::roster_book::now_ms();
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&p_master]).await;
+    let p_roster = protected_roster(P_MASTER, &[P1_DEV, P2_DEV], now - 60_000);
+    let mut p1 = spawn_node_seeded(&relay, P_MASTER, P1_DEV, &[&o_master], Some(p_roster.clone())).await;
+    let p2 = spawn_node_seeded(&relay, P_MASTER, P2_DEV, &[&o_master], Some(p_roster)).await;
+    expect_dm_pair_ready(&relay, &o, &p1, 20).await;
+    assert!(
+        wait_until(20, async || o.known_devices(&p_master).contains(&p1_dev)).await,
+        "O must hold P's roster first, got {:?}",
+        o.known_devices(&p_master),
+    );
+    let server_id = create_server_and_wait(&mut o, "Roster Voice").await;
+    p1.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut p1, &server_id, 25).await, "P1 joins");
+    let cid = new_voice_channel(&o, &[&p1], &server_id).await;
+    sit_all_in_voice(&mut [&mut o, &mut p1], &server_id, &cid).await;
+
+    ignores_its_loss(&relay, &p1, &[&o, &p2], &server_id);
+    p2.cmd_tx.send(NodeCommand::RevokeDevice { device_peer_id: p1_dev.clone() }).await.unwrap();
+    // Nothing a removed device sends counts any more, so there is no watch to probe.
+    expect_unseated(&mut [&mut o], &p1, &server_id, &cid, false).await;
+}
+
 // ---------------------------------------------------------------------------
 // Claim C-24: what a relay reads. Each test runs a real flow under the wiretap and
 // asserts on what reached the relay in a form it can read.
@@ -34075,7 +35482,7 @@ async fn authz_a_device_out_of_the_meeting_group_loses_its_call_for_good() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_the_sibling_lane_rides_olm() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34151,7 +35558,7 @@ async fn authz_a_sibling_lane_stamp_never_runs_ahead_of_its_frame() {
     use super::types::{FriendListEntry, HavenMessage, PersonalEmoteEntry};
 
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34248,7 +35655,7 @@ fn recorded_frame(relay: &MockRelay, from: &str, kind: &str, marker: &str) -> Ve
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn authz_a_replayed_public_unreaction_or_card_never_undoes_a_later_one() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34391,7 +35798,7 @@ async fn authz_a_replayed_public_unreaction_or_card_never_undoes_a_later_one() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn authz_a_sibling_announce_for_a_held_server_starts_no_join() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34443,7 +35850,7 @@ async fn authz_a_sibling_announce_for_a_held_server_starts_no_join() {
 async fn join_with_a_malformed_server_id_starts_nothing() {
     use super::types::HavenMessage;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34501,7 +35908,7 @@ async fn join_with_a_malformed_server_id_starts_nothing() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_a_plaintext_copy_of_an_olm_only_message_is_dropped() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34546,7 +35953,7 @@ async fn c24_a_plaintext_copy_of_an_olm_only_message_is_dropped() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_server_traffic_rides_mls_or_olm() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34673,7 +36080,7 @@ async fn c24_server_traffic_rides_mls_or_olm() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_a_restricted_channel_hint_rides_its_subgroup() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34761,7 +36168,7 @@ async fn c24_a_restricted_channel_hint_rides_its_subgroup() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn authz_a_dm_typing_dot_shows_only_from_a_friend() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34793,7 +36200,7 @@ async fn authz_a_dm_typing_dot_shows_only_from_a_friend() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_a_dm_room_is_named_by_the_two_master_keys() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34839,7 +36246,7 @@ async fn c24_a_dm_room_is_named_by_the_two_master_keys() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_file_and_asset_traffic_rides_olm() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -34944,7 +36351,7 @@ async fn c24_file_and_asset_traffic_rides_olm() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
 async fn c24_share_control_opens_only_with_the_link_key() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
 
     let relay = MockRelay::new();
@@ -35012,6 +36419,73 @@ async fn c24_share_control_opens_only_with_the_link_key() {
     drain_events(&mut a);
 }
 
+/// C-MEDIA-04: a Share-lane answer carries our addresses from a STUN-only connection,
+/// "Always relay calls" or not, so only a peer that proved a share's link key in that
+/// share's room gets one. A device that only sits in a room with us gets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn authz_only_a_link_holder_gets_a_share_lane_answer() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut a = spawn_node_on(&relay, 46, 46).await;
+    let mut b = spawn_node_on(&relay, 47, 47).await;
+    let m = spawn_node_on(&relay, 49, 49).await;
+
+    let src = global_tmp.path().join("share-lane.bin");
+    std::fs::write(&src, vec![5u8; 300_000]).expect("write src file");
+    a.cmd_tx.send(NodeCommand::ShareCreate { source_path: src.to_str().unwrap().to_string() }).await.unwrap();
+    let mut created = None;
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| match ev {
+            NetworkEvent::ShareCreated { root_hash, link, .. } => {
+                created = Some((root_hash.clone(), link.clone()));
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "A creates the share"
+    );
+    let (root_hash, link) = created.unwrap();
+    let room = format!("share:{root_hash}");
+    assert!(wait_until(10, async || relay.room_devices(&room).contains(&a.device_id)).await, "the seeder sits in its room");
+
+    m.cmd_tx.send(NodeCommand::JoinRoom { room_code: room.clone() }).await.unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&room).contains(&m.device_id)).await, "M sits in the swarm room");
+    let offer = |conn_id: &str| {
+        serde_json::to_vec(&super::types::HavenMessage::RtcShareOffer { sdp: "v=0".into(), conn_id: conn_id.into() }).unwrap()
+    };
+    let answered = |ev: &NetworkEvent, who: &str| {
+        matches!(ev, NetworkEvent::WebRtcSignal { peer_id, signal_type, .. } if signal_type == "share_offer" && peer_id == who)
+    };
+    drain_events(&mut a);
+    relay.inject(&room, &m.device_id, &a.device_id, offer("from-the-room"));
+    relay.inject(&format!("inbox:{}", a.master_id), &m.device_id, &a.device_id, offer("from-the-inbox"));
+    let m_dev = m.device_id.clone();
+    assert!(
+        !surfaces_before_barrier(&relay, &mut a, |ev| answered(ev, &m_dev)).await,
+        "A answered the Share lane of a device that holds no link of its",
+    );
+
+    b.cmd_tx.send(NodeCommand::ShareOpenLink { link, server_id: None, context_type: None }).await.unwrap();
+    let b_dev = b.device_id.clone();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::ShareNeedWebRtc { peer_id, .. } if *peer_id == b_dev)
+        })
+        .await,
+        "A learns the link holder from its sealed Have"
+    );
+    relay.inject(&room, &b.device_id, &a.device_id, offer("from-the-holder"));
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| answered(ev, &b_dev)).await,
+        "control: the link holder's offer reaches the app",
+    );
+    drain_events(&mut b);
+}
+
 // ---------------------------------------------------------------------------
 // DESIGN ID-1: the recovery phrase, not the master key, decides which devices are an
 // identity's. Every party below signs correctly; what is tested is that a correct
@@ -35072,7 +36546,7 @@ const EIGHT_DAYS_MS: i64 = 8 * 24 * 60 * 60 * 1000;
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35221,7 +36695,7 @@ async fn authz_a_stolen_backup_is_never_a_member_until_approved() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_the_master_key_alone_never_speaks_as_the_bare_master_id() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35315,7 +36789,7 @@ async fn authz_the_master_key_alone_never_speaks_as_the_bare_master_id() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_waiting_backup_asks_again_when_the_wait_is_turned_off() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35380,7 +36854,7 @@ async fn a_waiting_backup_asks_again_when_the_wait_is_turned_off() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_restored_device_with_no_contacts_hears_its_answer() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35478,7 +36952,7 @@ async fn a_restored_device_with_no_contacts_hears_its_answer() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_joiner_who_is_nobodys_friend_learns_every_members_devices() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35535,7 +37009,7 @@ async fn a_joiner_who_is_nobodys_friend_learns_every_members_devices() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn an_owner_back_from_a_join_it_missed_learns_the_joiners_devices() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35657,7 +37131,7 @@ async fn an_owner_back_from_a_join_it_missed_learns_the_joiners_devices() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn the_owners_new_device_gets_its_leaf_and_every_post() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35731,7 +37205,7 @@ async fn the_owners_new_device_gets_its_leaf_and_every_post() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_new_device_whose_first_leaf_ask_is_lost_asks_again() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35802,7 +37276,7 @@ async fn a_new_device_whose_first_leaf_ask_is_lost_asks_again() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_leafless_devices_post_reaches_its_sibling() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35892,7 +37366,7 @@ async fn a_leafless_devices_post_reaches_its_sibling() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_siblings_burst_is_never_rate_limited() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -35956,7 +37430,7 @@ async fn a_siblings_burst_is_never_rate_limited() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_share_backed_dm_file_reaches_the_friend_as_a_share() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const A_MASTER: u8 = 202;
@@ -36021,7 +37495,7 @@ async fn a_share_backed_dm_file_reaches_the_friend_as_a_share() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_removed_device_loses_the_inbox_at_once() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -36079,7 +37553,7 @@ async fn authz_a_removed_device_loses_the_inbox_at_once() {
 async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
     use crate::identity::roster;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -36202,7 +37676,7 @@ async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_destroy_order_needs_the_phrase() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -36299,7 +37773,7 @@ async fn authz_a_destroy_order_needs_the_phrase() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_restored_device_matures_at_a_contact_after_seven_quiet_days() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -36375,7 +37849,7 @@ async fn a_restored_device_matures_at_a_contact_after_seven_quiet_days() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_restored_device_tells_its_ui_once_it_waits() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
 
@@ -36414,7 +37888,7 @@ async fn a_restored_device_tells_its_ui_once_it_waits() {
 
 /// A populated device whose identity and database sit in the process data root, the
 /// way an export reads them. `HOLLOW_DATA_DIR` must already point at `root`.
-async fn spawn_presenter_in_data_root(relay: &MockRelay, root: &tempfile::TempDir, master_tag: u8, device_tag: u8) -> TestNode {
+async fn spawn_presenter_in_data_root(relay: &MockRelay, root: &crate::test_tmp::TestDir, master_tag: u8, device_tag: u8) -> TestNode {
     let master = tag_kp(master_tag);
     let device = tag_kp(device_tag);
     std::fs::write(root.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
@@ -36429,7 +37903,7 @@ async fn spawn_presenter_in_data_root(relay: &MockRelay, root: &tempfile::TempDi
         );
     }
     // The node owns a throwaway dir of its own; its database is the data root's.
-    spawn_node_on_db(relay, master_tag, device_tag, &db_path, tempfile::tempdir().unwrap()).await
+    spawn_node_on_db(relay, master_tag, device_tag, &db_path, crate::test_tmp::tempdir().unwrap()).await
 }
 
 /// The whole link with the relay recording every frame: the snapshot opens with
@@ -36439,7 +37913,7 @@ async fn spawn_presenter_in_data_root(relay: &MockRelay, root: &tempfile::TempDi
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn link_the_relay_cannot_open_the_snapshot() {
     let _g = test_guard();
-    let root = tempfile::tempdir().expect("data root");
+    let root = crate::test_tmp::tempdir().expect("data root");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", root.path()); }
     crate::identity::encryption::clear_session_key();
     let relay = MockRelay::new();
@@ -36521,7 +37995,7 @@ async fn link_the_relay_cannot_open_the_snapshot() {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
     let mut db = Vec::new();
     std::io::Read::read_to_end(&mut archive.by_name("messages.db").unwrap(), &mut db).unwrap();
-    let out = tempfile::tempdir().unwrap();
+    let out = crate::test_tmp::tempdir().unwrap();
     let db_path = out.path().join("linked.db");
     std::fs::write(&db_path, db).unwrap();
     let store = crate::storage::MessageStore::open(db_path.to_str().unwrap(), &passphrase_for(&tag_kp(P_MASTER))).unwrap();
@@ -36545,7 +38019,7 @@ async fn authz_a_relay_that_answers_the_code_gets_one_guess() {
     use super::types::HavenMessage;
     let b64 = base64::engine::general_purpose::STANDARD;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     relay.start_wiretap();
@@ -36723,7 +38197,7 @@ async fn next_sibling_call(node: &mut TestNode, device: &str, secs: u64) -> Opti
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_call_rings_every_device_and_the_first_accept_takes_it() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut f, mut n1, mut n2) = call_trio(&relay, 91, 92, 93, 94).await;
@@ -36761,7 +38235,7 @@ async fn a_call_rings_every_device_and_the_first_accept_takes_it() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_decline_on_one_device_stops_the_others_ringing() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut f, mut n1, mut n2) = call_trio(&relay, 95, 96, 97, 98).await;
@@ -36788,7 +38262,7 @@ async fn a_decline_on_one_device_stops_the_others_ringing() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_device_in_a_call_makes_the_whole_identity_busy() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut f, mut n1, mut n2) = call_trio(&relay, 99, 100, 101, 102).await;
@@ -36835,7 +38309,7 @@ async fn a_device_in_a_call_makes_the_whole_identity_busy() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_sibling_back_online_learns_the_call_from_the_device_in_it() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (f, n1, mut n2) = call_trio(&relay, 103, 104, 105, 106).await;
@@ -36882,7 +38356,7 @@ async fn a_sibling_back_online_learns_the_call_from_the_device_in_it() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn an_answer_to_the_callers_master_reaches_the_device_that_rang() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     // M (D1, D2) calls F from D2; F's app answers M by master, as the UI does.
@@ -36956,7 +38430,7 @@ fn door_grants_from(relay: &MockRelay, device: &str, n: u64) -> usize {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_an_outsider_holding_a_server_id_sees_nobody_in_its_room() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut m, j, server_id) = owner_member_and_joiner(&relay, 201, 202, 203).await;
@@ -37026,7 +38500,7 @@ async fn authz_an_outsider_holding_a_server_id_sees_nobody_in_its_room() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_socket_the_room_hides_leaves_no_channel_copy() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 216, 216, &[]).await;
@@ -37070,7 +38544,7 @@ async fn authz_a_socket_the_room_hides_leaves_no_channel_copy() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_removed_member_stops_seeing_the_room_once_the_lock_moves() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, k, j, server_id) = owner_member_and_joiner(&relay, 205, 206, 207).await;
@@ -37135,7 +38609,7 @@ async fn authz_a_removed_member_stops_seeing_the_room_once_the_lock_moves() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_member_offline_through_a_lock_move_gets_the_door_and_sees_again() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_with_friends(&relay, 208, 208, &[]).await;
@@ -37194,7 +38668,7 @@ async fn a_member_offline_through_a_lock_move_gets_the_door_and_sees_again() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn a_joiner_completes_its_join_in_a_room_that_hides_its_members() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 211, 212, 213).await;
@@ -37216,7 +38690,7 @@ async fn a_joiner_completes_its_join_in_a_room_that_hides_its_members() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_resolution_never_answers_an_ask_made_after_it() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, j, server_id) = owner_member_and_joiner(&relay, 214, 215, 216).await;
@@ -37258,7 +38732,7 @@ async fn authz_a_resolution_never_answers_an_ask_made_after_it() {
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_a_resolution_counts_only_from_a_member() {
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, j, server_id) = owner_member_and_joiner(&relay, 227, 228, 229).await;
@@ -37302,7 +38776,7 @@ async fn authz_a_resolution_counts_only_from_a_member() {
 async fn authz_a_kick_notice_needs_a_kicker_with_the_right_and_the_rank() {
     use crate::crdt::operations::{CrdtPayload, MemberRole, Permission};
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, mut m, x, server_id) = three_member_server(&relay, 217, 218, 219).await;
@@ -37368,7 +38842,7 @@ async fn authz_a_kick_notice_needs_a_kicker_with_the_right_and_the_rank() {
 async fn authz_a_data_channel_op_takes_the_one_ingest() {
     use crate::crdt::operations::CrdtPayload;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let mut o = spawn_node_on(&relay, 220, 220).await;
@@ -37420,7 +38894,7 @@ fn signed_channel_batch(
     mid: &str,
     text: &str,
 ) -> super::types::MessageEnvelope {
-    let dir = tempfile::tempdir().expect("scratch dir");
+    let dir = crate::test_tmp::tempdir().expect("scratch dir");
     let path = dir.path().join("batch.db");
     let store = crate::storage::MessageStore::open(path.to_str().unwrap(), "scratch").expect("scratch store");
     plant_signed_channel_row(&store, signer_tag, server_id, channel_id, false, ts, mid, text);
@@ -37432,15 +38906,15 @@ fn signed_channel_batch(
 /// A-CH02: both channel batch arms take backfill only from a current member who can
 /// read the channel, judged by our state. Over Olm, a member who cannot see a
 /// restricted channel sends its own post into it; over MLS, a member our state has
-/// removed sends its own post from before the removal, from the leaf no commit has
-/// taken out yet. Neither lands; the same batches from a reader do.
+/// removed sends its own post from before the removal, from its old leaf, which the
+/// past epochs we keep still read. Neither lands; the same batches from a reader do.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn authz_both_batch_arms_take_backfill_only_from_a_reader() {
     use crate::crdt::operations::CrdtPayload;
     use super::types::HavenMessage;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     const V: u8 = 223;
@@ -37484,7 +38958,8 @@ async fn authz_both_batch_arms_take_backfill_only_from_a_reader() {
     relay.inject_direct(&server_id, &c.device_id, &o.device_id, from_c("ch02-mls-member", "while a member", ts));
     assert!(wait_until(10, async || holds(&o, &general, "while a member")).await, "control: a member's MLS batch lands");
 
-    // The owner's state drops C while its leaf stays: C never hears of it.
+    // The owner's state drops C, and C never hears of it. The owner's next tick takes
+    // C's leaf out, but the past epochs it keeps still read a frame from that leaf.
     relay.swallow_direct(&o.device_id, &c.device_id);
     relay.swallow_direct(&v.device_id, &c.device_id);
     let removal = forge_crdt_op(
@@ -37495,7 +38970,6 @@ async fn authz_both_batch_arms_take_backfill_only_from_a_reader() {
         wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&c.master_id))).await,
         "the owner's state drops C",
     );
-    assert!(o.mls_members(&server_id).await.contains(&c.device_id), "precondition: C's leaf is still in the owner's group");
     let before_removal = removal.hlc.physical_ms as i64 - 1_000;
     relay.inject_direct(&server_id, &c.device_id, &o.device_id, from_c("ch02-mls-removed", "after the removal", before_removal));
     flush_frames(&relay, &mut o).await;
@@ -37510,7 +38984,7 @@ async fn authz_both_batch_arms_take_backfill_only_from_a_reader() {
 async fn a_sync_answer_stores_exactly_what_the_fold_admitted() {
     use crate::crdt::operations::CrdtPayload;
     let _g = test_guard();
-    let global_tmp = tempfile::tempdir().expect("global tmp");
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (mut o, mut m) = friend_pair(&relay, 225, 226).await;
@@ -37545,4 +39019,276 @@ async fn a_sync_answer_stores_exactly_what_the_fold_admitted() {
         .map(|op| crate::crdt::sync::payload_name(&op.payload))
         .collect();
     assert!(overwritten.is_empty(), "the store keeps ops the checkpoint overwrote: {overwritten:?}");
+}
+
+/// C-OLM-01 (DM sync): a friend serving our own message back cannot move a colon-led
+/// chunk of its text into the preview slot, neither as a row we lost nor as an edit
+/// of the row we hold. Genuine items in the same batches show each batch was taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_dm_sync_item_cannot_move_text_into_another_slot() {
+    use base64::Engine as _;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, b) = friend_pair(&relay, 227, 228).await;
+    const MID: &str = "0123456789abcdef0123456789abcdef";
+    const CONTROL: &str = "fedcba9876543210fedcba9876543210";
+    let (text, tail) = ("Do not click this: https://x.example", " https://x.example");
+    a.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: b.master_id.clone(),
+            text: text.to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(15, async || b.dm_thread(&a.master_id).iter().any(|m| m.text == text)).await, "B takes the DM");
+    let row = a.store().get_dm_message_sig_row(MID).expect("A's own row");
+    {
+        let conn = rusqlite::Connection::open(&a.db_path).expect("open A's DB");
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", a.passphrase)).expect("key A's DB");
+        conn.execute_batch("PRAGMA busy_timeout = 8000;").expect("busy timeout");
+        conn.execute("DELETE FROM messages WHERE message_id = ?1", [MID]).expect("A loses its copy");
+    }
+
+    let item = |t: &str, edited_at: Option<i64>, lp_digest: Option<&str>| {
+        serde_json::from_value::<super::types::DmSyncItem>(serde_json::json!({
+            "t": t, "ts": row.timestamp, "mine": false, "sig": row.signature, "pk": row.public_key,
+            "mid": MID, "edited_at": edited_at, "order_us": row.order_us, "lp_digest": lp_digest,
+        }))
+        .unwrap()
+    };
+    let b_pk = base64::engine::general_purpose::STANDARD.encode(b.master_kp.public_key_protobuf());
+    let ts = row.timestamp + 1;
+    let extras = super::crypto_handler::SignedExtras { mid: Some(CONTROL), order_us: Some(ts * 1000), ..Default::default() };
+    let control = |t: &str, signed_at: i64, edited_at: Option<i64>| {
+        let (sig, pk) = super::crypto_handler::sign_message_versioned(
+            &b.master_kp, &b_pk, "dm", &a.master_id, &b.master_id, signed_at, &extras, t,
+        );
+        serde_json::from_value::<super::types::DmSyncItem>(serde_json::json!({
+            "t": t, "ts": ts, "mine": true, "sig": sig, "pk": pk, "mid": CONTROL,
+            "edited_at": edited_at, "order_us": ts * 1000,
+        }))
+        .unwrap()
+    };
+    let shows = async |text: &str, mid: &str| {
+        wait_until(15, async || a.store().get_dm_message_sig_row(mid).is_some_and(|r| r.text == text)).await
+    };
+
+    let batch = vec![item(tail, None, Some(":Do not click this")), control("control", ts, None)];
+    olm_envelope_as(&b, &a, super::types::MessageEnvelope::DmSyncBatch { messages: batch, has_more: None }).await;
+    assert!(shows("control", CONTROL).await, "A takes the first batch");
+    assert!(
+        a.store().get_dm_message_sig_row(MID).is_none_or(|r| r.text == text),
+        "a lost message came back as a text its author never sent",
+    );
+
+    let batch = vec![item(text, None, None)];
+    olm_envelope_as(&b, &a, super::types::MessageEnvelope::DmSyncBatch { messages: batch, has_more: None }).await;
+    assert!(shows(text, MID).await, "control: the genuine copy lands");
+
+    let batch = vec![
+        item(tail, Some(row.timestamp), Some(":Do not click this")),
+        control("control, edited", ts + 5, Some(ts + 5)),
+    ];
+    olm_envelope_as(&b, &a, super::types::MessageEnvelope::DmSyncBatch { messages: batch, has_more: None }).await;
+    assert!(shows("control, edited", CONTROL).await, "control: a genuine edit in a synced batch applies");
+    assert_eq!(a.store().get_dm_message_sig_row(MID).unwrap().text, text, "the held row keeps its text");
+}
+
+/// C-OLM-02: a stranger's friend request must not show it the target's devices. The
+/// target stays out of the DM room while the request waits, after a decline, and
+/// across a reconnect and the liveness heal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_friend_request_never_shows_the_stranger_our_devices() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let v = spawn_node_on(&relay, 229, 229).await;
+    let s = spawn_node_on(&relay, 230, 230).await;
+    let room = super::types::dm_room_code(&s.master_id, &v.master_id);
+    let shows_v = || relay.room_devices(&room).contains(&v.device_id);
+
+    s.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: v.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || friend_row(&v, &s.master_id) == Some(("pending".into(), "incoming".into()))).await,
+        "V holds the request",
+    );
+    assert!(relay.room_devices(&room).contains(&s.device_id), "the requester waits in the DM room for its answer");
+    assert!(!wait_until(7, async || shows_v()).await, "a request we never answered showed our device to its sender");
+    let inbox = format!("inbox:{}", v.master_id);
+    let bounce = async || {
+        relay.set_online(&v.device_id, false);
+        relay.set_online(&v.device_id, true);
+        assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&v.device_id)).await, "V is back");
+    };
+    bounce().await;
+    assert!(!wait_until(7, async || shows_v()).await, "a pending request's DM room was joined on connect");
+
+    v.cmd_tx.send(NodeCommand::RejectFriendRequest { peer_id: s.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(10, async || friend_row(&v, &s.master_id).is_some_and(|(status, _)| status == "declined")).await,
+        "V declines",
+    );
+    assert!(
+        wait_until(10, async || !relay.room_devices(&room).contains(&s.device_id)).await,
+        "a declined requester has no answer left to wait for in the DM room",
+    );
+    bounce().await;
+    assert!(!wait_until(7, async || shows_v()).await, "a declined request's DM room was joined again");
+}
+
+/// C-OLM-02: cancelling our own request ends the wait in its DM room, there and then
+/// and on the next connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_cancelled_request_leaves_its_dm_room() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let r = spawn_node_on(&relay, 235, 235).await;
+    let target = tag_kp(236).peer_id();
+    let room = super::types::dm_room_code(&r.master_id, &target);
+    let shows_r = || relay.room_devices(&room).contains(&r.device_id);
+
+    r.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: target.clone() }).await.unwrap();
+    assert!(wait_until(10, async || shows_r()).await, "a request waits for its answer in the DM room");
+    r.cmd_tx.send(NodeCommand::RejectFriendRequest { peer_id: target.clone() }).await.unwrap();
+    assert!(wait_until(10, async || !shows_r()).await, "a cancelled request still waits in the DM room");
+    relay.set_online(&r.device_id, false);
+    relay.set_online(&r.device_id, true);
+    let inbox = format!("inbox:{}", r.master_id);
+    assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&r.device_id)).await, "R is back");
+    assert!(!wait_until(5, async || shows_r()).await, "a cancelled request's DM room was joined again");
+}
+
+/// C-OLM-02: a removal takes both sides out of their DM room, and one made while the
+/// friend is away reaches them through their mailbox, since neither side waits in the
+/// room any more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_removal_takes_both_sides_out_of_the_dm_room() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, b) = friend_pair(&relay, 237, 238).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let shows = |node: &TestNode| relay.room_devices(&room).contains(&node.device_id);
+
+    a.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: b.master_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || friend_row(&b, &a.master_id).is_none()).await, "B hears the removal");
+    assert!(wait_until(10, async || !shows(&a)).await, "the remover stays in the ex-friend's DM room");
+    assert!(wait_until(10, async || !shows(&b)).await, "the removed side stays in the DM room");
+
+    let (c, d) = friend_pair(&relay, 239, 240).await;
+    relay.set_online(&d.device_id, false);
+    assert!(wait_until(10, async || !c.sees_peer(&d.device_id).await).await, "C sees D leave");
+    c.cmd_tx.send(NodeCommand::RemoveFriend { peer_id: d.master_id.clone() }).await.unwrap();
+    assert!(wait_until(10, async || friend_row(&c, &d.master_id).is_none_or(|(s, _)| s == "removed")).await, "C removes D");
+    relay.set_online(&d.device_id, true);
+    assert!(
+        wait_until(15, async || friend_row(&d, &c.master_id).is_none()).await,
+        "a removal made while the friend was away never reached them",
+    );
+}
+
+/// C-OLM-02: a block takes our devices out of the DM room the blocked friend sees, a
+/// reconnect does not put them back, and an unblock does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_block_takes_our_devices_out_of_the_friends_dm_room() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, b) = friend_pair(&relay, 231, 232).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let shows_a = || relay.room_devices(&room).contains(&a.device_id);
+
+    super::blocklist::block(&b.master_id);
+    a.cmd_tx.send(NodeCommand::BlockChanged { master: b.master_id.clone(), blocked: true }).await.unwrap();
+    assert!(wait_until(10, async || !shows_a()).await, "a block leaves the blocked friend's DM room");
+    relay.set_online(&a.device_id, false);
+    relay.set_online(&a.device_id, true);
+    let inbox = format!("inbox:{}", a.master_id);
+    assert!(wait_until(10, async || relay.room_devices(&inbox).contains(&a.device_id)).await, "A is back");
+    assert!(!wait_until(7, async || shows_a()).await, "a blocked friend's DM room was joined again");
+
+    // B is away, so only the unblock itself can put A back (the liveness heal needs B online).
+    relay.set_online(&b.device_id, false);
+    super::blocklist::unblock(&b.master_id);
+    a.cmd_tx.send(NodeCommand::BlockChanged { master: b.master_id.clone(), blocked: false }).await.unwrap();
+    assert!(wait_until(10, async || shows_a()).await, "an unblock rejoins the friend's DM room");
+}
+
+/// A DM the relay lost waits in our resend queue for the friend's next appearance. A
+/// block in between drops it: nothing written before a block reaches the blocked
+/// person after it, even when the drain runs before the node hears of the block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn authz_a_block_drops_dms_still_queued_for_the_blocked_friend() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a, b) = friend_pair(&relay, 233, 234).await;
+
+    let send = async |text: &str, mid: &str| {
+        a.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: b.master_id.clone(),
+                text: text.to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+    };
+    let lost_then_back = async |text: &str, mid: &str, block: bool| {
+        relay.hold_direct(&a.device_id, &b.device_id);
+        send(text, mid).await;
+        let held = || relay.held_kinds(&a.device_id, &b.device_id);
+        assert!(wait_until(10, async || !held().is_empty()).await, "A sent it");
+        for kind in held() {
+            relay.discard_held_kind(&a.device_id, &b.device_id, &kind);
+        }
+        relay.release_held(&a.device_id, &b.device_id);
+        if block {
+            super::blocklist::block(&b.master_id);
+        }
+        relay.set_online(&b.device_id, false);
+        assert!(wait_until(10, async || !a.sees_peer(&b.device_id).await).await, "A sees B leave");
+        relay.set_online(&b.device_id, true);
+        assert!(wait_until(15, async || a.sees_peer(&b.device_id).await).await, "A sees B back");
+    };
+
+    lost_then_back("lost on the way", "a1b2c3d4e5f60718293a4b5c6d7e8f90", false).await;
+    assert!(
+        wait_until(15, async || b.dm_thread(&a.master_id).iter().any(|m| m.text == "lost on the way")).await,
+        "control: the resend queue delivers a lost DM when the friend is back",
+    );
+
+    lost_then_back("written before the block", "0f1e2d3c4b5a69788796a5b4c3d2e1f0", true).await;
+    // A DM sent now is a barrier: whatever the drain sent is ahead of it on the wire.
+    send("barrier", "1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a").await;
+    assert!(wait_until(15, async || b.dm_thread(&a.master_id).iter().any(|m| m.text == "barrier")).await, "B takes the barrier");
+    assert!(
+        !b.dm_thread(&a.master_id).iter().any(|m| m.text == "written before the block"),
+        "a DM queued before the block reached the blocked friend",
+    );
 }

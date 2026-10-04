@@ -295,6 +295,54 @@ pub(crate) fn deposit_friend_request_to_inbox(
     send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, target_master, msg.clone());
 }
 
+/// Our card sealed to a requester and left in its mailbox: what a pending requester
+/// sees of us (A28) while we share no room with it.
+pub(crate) fn deposit_own_card(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    requester_master: &str,
+    requested_at: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Some(sealed_card) = super::profile_card::own_card(master_keypair, db_path, db_passphrase)
+        .and_then(|card| super::profile_card::seal_for(&card, requester_master, requested_at))
+    else {
+        return;
+    };
+    let inbox_room = format!("inbox:{requester_master}");
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: inbox_room.clone() });
+    send_message_to_peer_in_room(
+        ws_cmd_tx, &inbox_room, requester_master, HavenMessage::FriendCard { requested_at, sealed_card },
+    );
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: inbox_room });
+}
+
+/// Keep the card a target sealed back to a request of ours. Only the pair key of a
+/// pending outgoing row stamped `requested_at` opens it, so it speaks for that target
+/// alone. Out of line so the swarm's request handler holds no store.
+pub(crate) async fn take_friend_card(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    local_master: &str,
+    requested_at: i64,
+    sealed_card: &super::types::SealedCard,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let rows = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .and_then(|st| st.load_friends(Some("pending")))
+        .unwrap_or_default();
+    let card = rows
+        .iter()
+        .filter(|(_, _, direction, stamp, _)| direction == "outgoing" && *stamp == requested_at)
+        .find_map(|(master, ..)| super::profile_card::open_from(sealed_card, local_master, master, requested_at));
+    if let Some(card) = card
+        && super::profile_card::store_card(&card, None, db_path, db_passphrase)
+    {
+        let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: card.master }).await;
+    }
+}
+
 /// Deliver a decline to the requester by every leg that can reach it: the live
 /// fan to its ONLINE devices, AND a deposit into the requester's own master-keyed
 /// mailbox `inbox:{requester_master}`, which the relay replays (TTL-only) to
@@ -398,6 +446,69 @@ pub(crate) fn share_friend_with_siblings(
     super::olm_lane::carry_to_own_siblings(
         ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, &msg, super::olm_lane::NoSession::Queue,
     );
+}
+
+/// Whether a friend row keeps us in the DM room with `master`: an accepted friendship
+/// we have not blocked, or our own request waiting for its answer. The relay shows a
+/// room's members to each other, so a request we have not accepted, a decline or a
+/// removal would show our devices coming and going to the other side.
+pub(crate) fn holds_dm_room(master: &str, status: &str, direction: &str) -> bool {
+    !super::blocklist::is_blocked(master)
+        && (status == "accepted" || (status == "pending" && direction == "outgoing"))
+}
+
+/// Every master whose DM room [`holds_dm_room`] keeps us in.
+pub(crate) fn dm_room_masters(store: &crate::storage::MessageStore) -> Vec<String> {
+    store
+        .load_friends(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(master, status, direction, ..)| holds_dm_room(master, status, direction))
+        .map(|(master, ..)| master)
+        .collect()
+}
+
+/// Leave the DM room with `master` once nothing keeps us there.
+pub(crate) fn leave_dm_room(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    master: &str,
+) {
+    // Our own pair room is the roster room every device of ours sits in.
+    if super::resolver::same_identity(local_master, master) {
+        return;
+    }
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+        room_code: dm_room_code(local_master, master),
+    });
+}
+
+/// Act on a block or unblock of `master` the FFI just stored: leave the DM room and
+/// drop the DMs still waiting to be resent, or rejoin a room the row holds again.
+pub(crate) fn handle_block_changed(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    local_master: &str,
+    master: &str,
+    blocked: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let master = super::resolver::resolve(master);
+    if blocked {
+        leave_dm_room(ws_cmd_tx, local_master, &master);
+        super::message_ops::drop_blocked_queues(pending_messages);
+        return;
+    }
+    let holds = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.get_friend_row(&master).ok().flatten())
+        .is_some_and(|(status, direction, _)| holds_dm_room(&master, &status, &direction));
+    if holds && !super::resolver::same_identity(local_master, &master) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+            room_code: dm_room_code(local_master, &master),
+        });
+    }
 }
 
 /// True when `master` is an accepted friend on disk. A queued accept for anyone else
@@ -843,6 +954,7 @@ pub(crate) async fn handle_reject_friend_request(
         ws_cmd_tx, ws_room_peers, &peer_id_str, &master, original_requested_at,
         super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase),
     );
+    leave_dm_room(ws_cmd_tx, &master_keypair.peer_id(), &master);
 
     let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
         peer_id: peer_id_str,
@@ -902,7 +1014,13 @@ pub(crate) async fn handle_remove_friend(
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.save_friend(&master, "removed", "outgoing", 0);
         }
-        hollow_log!("[HOLLOW-FRIENDS] Friend {master} not reachable, queued removal for delivery");
+        // A removed row never rejoins the DM room where the queue would meet them,
+        // so the removal also waits in their mailbox for their next boot.
+        let inbox_room = format!("inbox:{master}");
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: inbox_room.clone() });
+        send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, &master, HavenMessage::FriendRemove);
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: inbox_room });
+        hollow_log!("[HOLLOW-FRIENDS] Friend {master} not reachable, queued removal and deposited it in inbox:{master}");
     } else {
         for t in &targets {
             send_message_to_peer(
@@ -913,10 +1031,9 @@ pub(crate) async fn handle_remove_friend(
         hollow_log!("[HOLLOW-FRIENDS] Sent FriendRemove for {master} to {} device(s)", targets.len());
     }
 
-    // Deliberately no LeaveRoom for the DM room here. Leaving right after the send
-    // raced our own FriendRemove: the relay dropped us from the room's routing set
-    // BEFORE it fanned the message out, so the peer never received the removal. The
-    // lingering ex-friend presence is a UI-count concern, not a room teardown.
+    // After the sends: the sealer keeps our commands in order, so the relay forwards
+    // the removal before it drops us from the room.
+    leave_dm_room(ws_cmd_tx, local_peer_str, &master);
 
     let _ = event_tx.send(NetworkEvent::FriendRemoved {
         peer_id: master,
@@ -995,7 +1112,7 @@ pub(crate) fn handle_send_typing_indicator(
         hollow_log!("[HOLLOW-TYPING] Channel typing send for {server_id}/{channel_id} (mls={mls_ok})");
         if mls_ok {
             let envelope = MessageEnvelope::Typing { sid: server_id.clone(), cid: channel_id.clone() };
-            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, crypto_store) {
+            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store, server_states.get(&server_id)) {
                 hollow_log!("[HOLLOW-MLS] Typing broadcast failed: {e}");
             }
         }
@@ -1198,7 +1315,7 @@ pub(crate) async fn handle_update_profile(
     for sid in server_states.keys() {
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
         if mls_ok {
-            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, sid, &envelope, crypto_store) {
+            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, sid, &envelope, crypto_store, server_states.get(sid)) {
                 hollow_log!("[HOLLOW-MLS] Profile broadcast to server {sid} failed: {e}");
             } else {
                 // Track members ACTUALLY reached via MLS so we skip them in
@@ -2518,7 +2635,7 @@ mod tests {
     /// a sibling's entry made before it is from the friendship that ended.
     #[test]
     fn a_removal_bounds_only_what_was_made_before_it() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("removal.db").to_str().unwrap().to_string();
         let pass = "ef".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -2543,7 +2660,7 @@ mod tests {
     #[test]
     fn a_siblings_removal_ends_only_what_was_made_before_it() {
         use super::super::types::FriendRemoval;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("sibling_removal.db").to_str().unwrap().to_string();
         let pass = "ef".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -2599,7 +2716,7 @@ mod tests {
     fn authz_an_incoming_profile_keeps_only_what_its_owner_signed() {
         let _lock = crate::node::resolver::test_lock();
         crate::node::resolver::clear_all();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("n1.db").to_str().unwrap().to_string();
         let pass = "ef".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -2672,7 +2789,7 @@ mod tests {
     /// A throwaway store, a master keypair, and the mark that master has already
     /// been given. Returns everything the announces below need.
     struct CredsFixture {
-        _tmp: tempfile::TempDir,
+        _tmp: crate::test_tmp::TestDir,
         db: String,
         pass: String,
         master: NativeKeypair,
@@ -2682,7 +2799,7 @@ mod tests {
 
     impl CredsFixture {
         fn new(seed: u8) -> Self {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = crate::test_tmp::tempdir().unwrap();
             let db = tmp.path().join("creds.db").to_str().unwrap().to_string();
             let pass = "ef".repeat(32);
             crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -2837,5 +2954,60 @@ mod tests {
         // future client must not wipe a frame the user picked.
         assert_eq!(sanitize_incoming_frame(Some("nonsense")), None);
         assert_eq!(sanitize_incoming_frame(Some("b:999")), None);
+    }
+
+    /// A block leaves the DM room and drops what waits for the blocked identity in
+    /// the resend queue at once, not only when its device next shows up.
+    #[test]
+    fn a_block_leaves_the_dm_room_and_empties_the_resend_queue() {
+        use crate::node::ws_client::WsCommand;
+        let _g = crate::node::resolver::test_lock();
+        let (me, blocked, kept) = (
+            NativeKeypair::from_secret_bytes(&[61; 32]).peer_id(),
+            NativeKeypair::from_secret_bytes(&[62; 32]).peer_id(),
+            NativeKeypair::from_secret_bytes(&[63; 32]).peer_id(),
+        );
+        let mut queued: std::collections::HashMap<String, Vec<String>> =
+            [(blocked.clone(), vec!["dm".to_string()]), (kept.clone(), vec!["dm".to_string()])].into();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::node::blocklist::block(&blocked);
+        super::handle_block_changed(&tx, &mut queued, &me, &blocked, true, "", "");
+        crate::node::blocklist::unblock(&blocked);
+        assert!(!queued.contains_key(&blocked), "the blocked identity's queue survived the block");
+        assert!(queued.contains_key(&kept), "another friend's queue went with it");
+        let left = matches!(rx.try_recv(), Ok(WsCommand::LeaveRoom { room_code }) if room_code == crate::node::types::dm_room_code(&me, &blocked));
+        assert!(left, "a block left no DM room");
+    }
+
+    /// A target's card sealed back to us counts only for the request of ours it names.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_friend_card_counts_only_for_the_request_it_answers() {
+        use base64::Engine as _;
+        let _g = crate::node::resolver::test_lock();
+        let (me, target) = (NativeKeypair::from_secret_bytes(&[64; 32]), NativeKeypair::from_secret_bytes(&[65; 32]));
+        // The two ends of one process: the target seals, we open.
+        crate::node::dm_room::register(&me);
+        crate::node::dm_room::register(&target);
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("cards.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        store.save_friend(&target.peer_id(), "pending", "outgoing", 100).unwrap();
+        let payload = crate::node::crypto_handler::card_signing_payload(&target.peer_id(), 7, "Target", "");
+        let pk = base64::engine::general_purpose::STANDARD.encode(target.public_key_protobuf());
+        let (Some(sig), Some(pk)) = crate::node::crypto_handler::sign_message(&target, &pk, &payload) else { panic!("signs") };
+        let card = crate::node::types::SignedCard {
+            master: target.peer_id(), display_name: "Target".into(), avatar_hash: String::new(), updated_at: 7, sig, pk,
+        };
+        let seal = |at: i64| crate::node::profile_card::seal_for(&card, &me.peer_id(), at).unwrap();
+        let name = || store.load_profile(&target.peer_id()).ok().flatten().map(|p| p.display_name);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+
+        super::take_friend_card(&tx, &me.peer_id(), 50, &seal(50), &db, &pass).await;
+        assert_eq!(name(), None, "a card answering another request of ours");
+        super::take_friend_card(&tx, &me.peer_id(), 100, &seal(100), &db, &pass).await;
+        assert_eq!(name().as_deref(), Some("Target"));
     }
 }

@@ -14,6 +14,12 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 class WebRtcNativeLog {
   static bool _started = false;
 
+  /// Whether [line] holds key material: the frame cryptor logs each key it
+  /// derives (raw and derived) at info level. The stderr sink in
+  /// `flutter_webrtc_base.cc` drops the same lines.
+  static bool carriesKey(String line) =>
+      line.contains('derived_key') || line.contains('raw_key');
+
   /// Desktop only: the mobile plugins have no log sink method.
   static void start() {
     if (_started) return;
@@ -23,7 +29,7 @@ class WebRtcNativeLog {
       final map = data['onLogData'];
       if (map is! Map) return;
       final line = '${map['data'] ?? ''}'.trimRight();
-      if (line.isEmpty) return;
+      if (line.isEmpty || carriesKey(line)) return;
       network_api
           .logFromDart(message: '[WEBRTC-NATIVE] $line')
           .catchError((_) {});

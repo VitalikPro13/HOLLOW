@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn data_dir_respects_env_override() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("hollow_test");
         // SAFETY: test runs single-threaded (cargo test default); no other
         // thread reads HOLLOW_DATA_DIR concurrently.

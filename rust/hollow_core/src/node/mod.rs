@@ -32,6 +32,7 @@ pub(crate) mod lock_keeper;
 pub(crate) mod link_handler;
 pub(crate) mod link_pake;
 pub(crate) mod link_preview;
+pub(crate) mod media_strip;
 pub(crate) mod message_ops;
 pub(crate) mod nick_claim;
 pub(crate) mod olm_lane;

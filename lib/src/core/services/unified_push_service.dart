@@ -145,6 +145,16 @@ class UnifiedPushController {
     await UnifiedPush.register();
   }
 
+  /// Tells the distributor this install no longer takes wake-ups, with no
+  /// fallback to Firebase: the identity they were for is gone.
+  Future<void> forget() async {
+    if (!supported) return;
+    if (await UnifiedPush.getDistributor() == null) return;
+    onFallBackToFirebase = null;
+    status.value = UnifiedPushStatus.off;
+    await UnifiedPush.unregister();
+  }
+
   /// Goes back to Firebase.
   Future<void> useFirebase() async {
     if (!supported) return;

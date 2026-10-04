@@ -81,6 +81,16 @@ Binary name: `hollow-relay`
   connects from its own 127.0.x.y; no push token is ever registered (the sidecar on
   127.0.0.1:3001 is production's). Needs the uWebSockets/uSockets submodules and the
   `openssl` CLI, else it skips. ~25 s plain, ~70 s under `SANITIZE=1`.
+- **Client JSON depth cap (C-RP-01, session 34)**: every JSON text a client sends (text
+  frames, auth frames, a kill deposit's decoded blob) is parsed only through
+  `client_json::parse` (`client_json.h`), which refuses nesting past 32 before nlohmann
+  builds anything. nlohmann parses and frees any depth iteratively, but `dump()`, copies
+  and `==` recurse per level: one join with a 200,000-deep `inbox_roster` (or a deep
+  `subscribe` topics array, copied by a ternary) overflowed the stack, a crash that
+  skips the snapshot. Real frames nest 5 deep at most. A new client-JSON parse site uses
+  it, never `json::parse`; the roster's size is measured as held
+  (`roster::to_json(*shown)`), never by re-dumping client JSON. Tests:
+  `test_client_json.cpp`, `test_kill_order.cpp`, live `test_deep_json`.
 
 ## Door-proof server rooms (design D1, 2026-10-02, HOL-SEC-091)
 
@@ -373,12 +383,12 @@ Until session 19 the relay, the push sidecar and the forwarder ran as `ubuntu` (
 |---|---|---|---|---|---|
 | hollow-relay | `hollow-relay` | `/usr/local/bin/hollow-relay` (root 0755) | `/etc/hollow-relay/` (0750 root:hollow-relay): `keys.json` 0640, `fullchain.pem` 0644, `privkey.pem` 0640, `relay.env` 0600 root (`TURN_SECRET`, `HOLLOW_PUSH_TOKEN`) | `/var/lib/hollow-relay` (reports) | 1.4 |
 | hollow-push | `hollow-push` | `/opt/hollow-push` (root-owned copy of index.js, unifiedpush.js, node_modules) | `/etc/hollow-push/` (0700 root): `service-account.json` (via `LoadCredential=`, `FIREBASE_KEY_PATH=%d/...`), `push.env` (`PUSH_TOKEN`) | none | 1.2 |
-| hollow-forwarder | `hollow-fwd` | `/usr/local/bin/hollow-forwarder` | `/etc/hollow-forwarder/forwarder.toml` 0640 root:hollow-fwd | `/var/lib/hollow-forwarder` (key, db; `hollow_debug.log` -> `/dev/null`) | 1.1 |
+| hollow-forwarder | `hollow-fwd` | `/usr/local/bin/hollow-forwarder` | `/etc/hollow-forwarder/forwarder.toml` 0640 root:hollow-fwd | `/var/lib/hollow-forwarder` (key; db = the Olm account only from 0.12, sessions in RAM, C-RP-07; no log file, the old `hollow_debug.log` -> `/dev/null` link is dead) | 1.1 |
 | coturn (distro unit) | `turnserver` (in `ssl-cert`) | `/usr/bin/turnserver` | `/etc/turnserver.conf`, LE keys `0640 root:ssl-cert` | none | 1.2 (drop-in `coturn.service.d/hollow-sandbox.conf` = `deploy/coturn-sandbox.conf`) |
 
 The units in the repo ARE the box's units (`deploy/hollow-relay.service`, `deploy/hollow-forwarder.service`, `push-sidecar/hollow-push.service`, no secrets in them). The relay keeps hot-reloading its certificate from its own copy: the certbot deploy hook is `deploy/renewal-hook.sh` (installed as `/etc/letsencrypt/renewal-hooks/deploy/hollow-relay.sh`), it rewrites the copy with those modes, sets the LE keys `0640 root:ssl-cert` and restarts coturn (which reads its cert only at start). The relay logs `TLS certificate reloaded` within 60 s.
 
-**Deploy (relay):** scp sources to `~/relay-uws/`, build there as `ubuntu`, then `sudo install -m 0755 build/hollow-relay /usr/local/bin/hollow-relay && sudo systemctl restart hollow-relay`. NO `setcap` (the capability is ambient from the unit; a file capability plus the empty bounding set of another unit would refuse to exec). Push: copy the changed JS into `/opt/hollow-push` with `sudo install`, then restart. Forwarder: `sudo install` the binary, restart. After any change on the box: `sudo bash relay-uws/deploy/check-host.sh` must print only `ok`.
+**Deploy (relay):** scp sources to `~/relay-uws/`, build there as `ubuntu`, then `sudo install -m 0755 build/hollow-relay /usr/local/bin/hollow-relay && sudo systemctl restart hollow-relay`. NO `setcap` (the capability is ambient from the unit; a file capability plus the empty bounding set of another unit would refuse to exec). Push: copy the changed JS into `/opt/hollow-push` with `sudo install`, then restart. Forwarder: `sudo install` the binary, restart. After any change on the box: `sudo bash relay-uws/deploy/check-host.sh` must print only `ok`. Since session 34 it also checks the sidecar's `PUSH_TOKEN` (set, and equal to the relay's `HOLLOW_PUSH_TOKEN`), kdump and `/var/crash`, the `/etc/hollow-*` and `/var/lib/hollow-*` modes and owners, coturn's live config (`no-cli`, `log-file=/dev/null`, the peer lock against this host's own addresses, read through `/proc/PID/root` so a container's file counts) and stray `turn_*.log` files. The push unit carries `IPAddressDeny=` for every private range under `unifiedpush.js`'s guard (`IPAddressAllow=localhost` for the relay's calls and the 127.0.0.53 resolver; proven with transient units, the filter works without the BPF framework), and the guard also refuses this machine's own addresses (C-RP-13).
 
 **Sandbox rules learned the hard way:**
 - `SystemCallErrorNumber=EPERM`, never the default kill: a SIGSYS is an abnormal exit, which skips the snapshot and loses every buffer.

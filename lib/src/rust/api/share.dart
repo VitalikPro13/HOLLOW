@@ -20,6 +20,14 @@ Future<void> shareCreateFromFile({required String sourcePath}) => RustLib
     .api
     .crateApiShareShareCreateFromFile(sourcePath: sourcePath);
 
+/// Shares a chat file too big to send directly. A photo or video is shared
+/// from a copy without its location and camera details (C-FILES-03); one that
+/// cannot be cleaned is refused here, before anything is shared.
+Future<void> shareCreateForSend({required String sourcePath}) => RustLib
+    .instance
+    .api
+    .crateApiShareShareCreateForSend(sourcePath: sourcePath);
+
 /// Decode a share link, persist a placeholder row, join the swarm room, and
 /// queue a manifest request. Emits NetworkEvent::ShareManifestReady when the
 /// manifest arrives (or ShareFailed on error).

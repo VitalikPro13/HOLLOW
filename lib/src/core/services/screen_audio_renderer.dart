@@ -148,10 +148,23 @@ class ScreenAudioRenderer {
     }
   }
 
+  /// Whether a sharer's [packet] may reach the exe: never a control frame (seq
+  /// 0xFFFFFFFF, which sets the gain over the viewer's own volume and deafen),
+  /// and only a length the exe reads whole. It skips any other without reading
+  /// its bytes, which would then be read as frames.
+  static bool isPlayable(Uint8List packet) =>
+      packet.length >= 5 &&
+      packet.length <= 4004 &&
+      !(packet[0] == 0xFF &&
+          packet[1] == 0xFF &&
+          packet[2] == 0xFF &&
+          packet[3] == 0xFF);
+
   /// Feed a received Opus packet for playback.
   /// [packet] is `[uint32_le: seq][...opus_bytes...]` (from data channel).
   void pushPacket(Uint8List packet) {
     if (!_active || _process == null) return;
+    if (!isPlayable(packet)) return;
 
     // Frame it: [uint16_le: payload_len][payload...]
     final payloadLen = packet.length;

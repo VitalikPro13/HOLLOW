@@ -144,3 +144,15 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   `GatedNotifier`. `feedback_ticker_is_a_frame_request`.
 - Perf sentinels: `[SENTINEL]`, `timedChannelCall`, `FrameCensus`, `FrameScheduleProbe`
   (release too), `scripts/perf_*.ps1`.
+- A URL our code did not build (chat text, link cards, news and status feeds, game cards,
+  shop, Twitch) opens ONLY via `openUntrustedUrl` (`core/services/untrusted_link.dart`):
+  https (http where real links need it), `hollow://` handled in-app by `DeepLinkService`,
+  everything else refused; a link card's domain is derived from its url, never the wire
+  field. Never `launchUrl` on someone else's string (Windows = ShellExecute). HOL-SEC-146.
+- Markdown from a feed renders with an `imageBuilder` that fetches nothing (news posts).
+- A secret the user copies (recovery phrase, redeem codes) goes through `SecretClipboard`
+  (sensitive flag, local-only, cleared after 60 s); a screen showing the phrase wraps
+  `SecretScreen` (Android FLAG_SECURE, iOS cover). HOL-SEC-158.
+- A typed password or PIN in Settings goes through `withTypedSecret` (duress check, ends
+  the session like a duress unlock); a new PIN needs 6 digits, a backup passphrase 12
+  characters. HOL-SEC-157, -159.

@@ -135,3 +135,18 @@ whitelist) stay in CLAUDE.md.
 
 - The bundled ffmpeg is MINIMAL: test flags against `vendor/ffmpeg`'s binary, NEVER the
   system ffmpeg. `project_ffmpeg_minimal_build`.
+- ffmpeg never runs on a file someone else sent before the user taps it (C-FILES-02,
+  `rules_files_assets.md`); the seams are `VideoThumbnailService.debugStartProcess` and
+  `AudioProbeService.debugRunner`.
+- FrameCryptor `ratchetWindowSize` stays 0: Hollow never ratchets, and a window makes every
+  undecryptable frame cost PBKDF2 runs (HOL-SEC-139). Keys move by `rotateKey`/key index;
+  a slot left behind is overwritten with random bytes 15 s after a rotation.
+- Media reaches the forwarder only from a keyed cryptor (`forwarderMayCarry`); a keyless
+  share takes direct legs, a keyless viewer refuses a forwarder. HOL-SEC-140.
+- Server voice seats are re-judged at the loop head (`voice_handler::unseat_unqualified`):
+  a kick, ban, lost channel sight or roster removal drops the device from the call at
+  every member. HOL-SEC-138.
+- The Share lane answers only a peer that proved one of our share links
+  (`holds_a_link_we_serve`); Always relay does not cover files over 34 MB (Settings says
+  so). HOL-SEC-141.
+- Log lines carrying `derived_key`/`raw_key` from libwebrtc are dropped in both sinks.

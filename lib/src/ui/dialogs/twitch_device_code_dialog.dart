@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -10,7 +11,6 @@ import 'package:hollow/src/ui/components/hollow_copy_field.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 void showTwitchDeviceCodeDialog(BuildContext context,
     {VoidCallback? onSuccess}) {
@@ -157,13 +157,8 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
           ),
           if (_verificationUri != null)
             HollowButton.filled(
-              onPressed: () {
-                final uri = Uri.tryParse(_verificationUri!);
-                if (uri != null) {
-                  launchUrl(uri, mode: LaunchMode.externalApplication)
-                      .catchError((_) => false);
-                }
-              },
+              onPressed: () => openUntrustedUrl(_verificationUri!)
+                  .catchError((_) => false),
               icon: const Icon(BrandIcons.twitch, size: 14),
               child: const Text('Open Twitch'),
             ),

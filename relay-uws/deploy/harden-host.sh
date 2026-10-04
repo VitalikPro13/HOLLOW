@@ -108,6 +108,16 @@ if [ -f /etc/default/apport ] || systemctl list-unit-files 2>/dev/null | grep -q
     fi
     note "apport disabled"
 fi
+if systemctl list-unit-files 2>/dev/null | grep -q '^kdump-tools'; then
+    # A kernel crash would write all memory, the relay's included, to /var/crash.
+    run_ok systemctl disable --now kdump-tools.service
+    if [ "$DRY" = "1" ]; then
+        echo "  would write: /etc/default/kdump-tools (USE_KDUMP=0)"
+    elif [ -f /etc/default/kdump-tools ]; then
+        sed -i 's/^USE_KDUMP=.*/USE_KDUMP=0/' /etc/default/kdump-tools
+    fi
+    note "kdump disabled"
+fi
 write_file /etc/sysctl.d/90-hollow-relay.conf <<'EOF'
 # A core dump would write the relay's whole heap, buffered messages included,
 # to the disk.

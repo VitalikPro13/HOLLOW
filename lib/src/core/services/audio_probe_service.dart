@@ -37,34 +37,73 @@ class AudioProbeService {
   @visibleForTesting
   static void debugResetCache() => _cache.clear();
 
-  /// Cheap container sniff: true when the file opens with the Ogg capture
-  /// pattern, four bytes off the front and no decoder involved.
-  ///
-  /// This is what stands between an auto-downloaded attachment and ffmpeg: an
-  /// extension is the sender's choice, the magic is not. It proves only that
-  /// the container claims to be Ogg, which is enough to refuse the obvious
-  /// forgeries before anything memory-unsafe reads the bytes.
-  static Future<bool> looksLikeOgg(String path) async {
+  /// Duration of the Ogg file at [path] from its page headers, or null. Reads
+  /// the bytes in Dart and decodes nothing, so it is the one duration a
+  /// received file may get before the user asks for it.
+  static Future<int?> oggDurationMs(String path) async {
     try {
-      final head = await AtRest.readRange(path, 0, _oggMagic.length);
-      if (head.length < _oggMagic.length) return false;
-      for (var i = 0; i < _oggMagic.length; i++) {
-        if (head[i] != _oggMagic[i]) return false;
-      }
-      return true;
+      return oggDurationFromBytes(await AtRest.read(path));
     } catch (_) {
-      // Missing, locked, or vanished between the check and the read.
-      return false;
+      return null;
     }
+  }
+
+  /// The last page's granule position over the stream's sample rate, less
+  /// the Opus pre-skip. Opus and Vorbis only; null for anything else.
+  static int? oggDurationFromBytes(Uint8List b) {
+    if (!_oggPageAt(b, 0)) return null;
+    final view = ByteData.sublistView(b);
+    final serial = view.getUint32(14, Endian.little);
+    final body = 27 + b[26];
+    if (b.length < body + 19) return null;
+    final int rate;
+    final int preSkip;
+    if (_bytesAt(b, body, _opusHead)) {
+      rate = 48000;
+      preSkip = view.getUint16(body + 10, Endian.little);
+    } else if (_bytesAt(b, body, _vorbisIdent)) {
+      rate = view.getUint32(body + 12, Endian.little);
+      preSkip = 0;
+    } else {
+      return null;
+    }
+    if (rate <= 0) return null;
+    for (var i = b.length - 27; i > 0; i--) {
+      if (!_oggPageAt(b, i)) continue;
+      if (view.getUint32(i + 14, Endian.little) != serial) continue;
+      // -1 marks a page on which no packet ends.
+      final granule = view.getInt64(i + 6, Endian.little);
+      if (granule <= 0) continue;
+      final samples = granule - preSkip;
+      if (samples <= 0 || samples > rate * 86400) return null;
+      return samples * 1000 ~/ rate;
+    }
+    return null;
+  }
+
+  static const List<int> _opusHead = [
+    0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, // "OpusHead"
+  ];
+  static const List<int> _vorbisIdent = [
+    0x01, 0x76, 0x6F, 0x72, 0x62, 0x69, 0x73, // "\x01vorbis"
+  ];
+
+  static bool _oggPageAt(Uint8List b, int i) =>
+      i + 27 <= b.length && _bytesAt(b, i, _oggMagic) && b[i + 4] == 0;
+
+  static bool _bytesAt(Uint8List b, int i, List<int> want) {
+    if (i + want.length > b.length) return false;
+    for (var k = 0; k < want.length; k++) {
+      if (b[i + k] != want[k]) return false;
+    }
+    return true;
   }
 
   /// Duration in milliseconds for the audio file at [audioPath], or null when
   /// probing fails (missing ffmpeg, corrupt file, timeout). Cached by path.
   ///
-  /// This runs a decoder over bytes a stranger sent. Callers decide WHEN that
-  /// is allowed: see [AudioMessageBubble], which runs it without a tap only
-  /// for a file that passes every voice-note test, and otherwise waits for
-  /// the user to press play.
+  /// This runs a decoder over bytes a stranger sent, so it runs only once the
+  /// user has pressed play ([AudioMessageBubble]).
   static Future<int?> probeDurationMs(String audioPath) async {
     final cached = _cache[audioPath];
     if (cached != null) return cached;

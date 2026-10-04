@@ -53,3 +53,15 @@ release pipeline is the `release` skill.
 ## Fonts
 
 - Emoji font: NotoColorEmoji = an emoji-only subset (`scripts/subset_emoji_font.py`).
+
+## Tests and logs (session 34)
+
+- Rust test temp dirs ONLY via `crate::test_tmp::tempdir()` / `TestDir` (root
+  `HOLLOW_TEST_TMP`, else `%TEMP%/hollow-tests`; leftovers named `hollow-test-*` are swept
+  after 3 h); a source scan refuses any new `tempfile::`. A dropped harness `TestNode` aborts
+  its loop (`AbortOnDrop`). On this box `HOLLOW_TEST_TMP=D:\dev\tmp\hollow-tests`.
+- Release builds keep stderr quiet (`mirror_to_stderr`: debug builds and the forwarder only):
+  the systemd journal would keep a copy no wipe reaches. The log file exists only while an
+  identity does and is erased by the wipe. HOL-SEC-156.
+- The updater accepts a manifest version only as three numeric parts (`is_release_version`),
+  and Windows script paths go through `bat_quoted_path`. HOL-SEC-147.

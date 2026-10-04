@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:super_clipboard/super_clipboard.dart';
@@ -121,10 +122,14 @@ Future<bool> _pasteImageForFormat(
 
   final ext = _extensionForFormat(format);
 
-  final tempDir = Directory.systemTemp;
+  // The data root's temp, never the OS one: emptied at every launch and by a
+  // wipe, where a copy in the shared temp dir outlived both.
+  final sep = Platform.pathSeparator;
+  final tempDir = Directory('$hollowDataDir${sep}temp');
+  await tempDir.create(recursive: true);
   final timestamp = DateTime.now().millisecondsSinceEpoch;
   final fileName = 'clipboard_$timestamp.$ext';
-  final tempFile = File('${tempDir.path}${Platform.pathSeparator}$fileName');
+  final tempFile = File('${tempDir.path}$sep$fileName');
   await tempFile.writeAsBytes(bytes);
 
   onPasteImage(tempFile.path, fileName);

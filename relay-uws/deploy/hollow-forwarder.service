@@ -9,13 +9,14 @@
 #   sudo cp hollow-forwarder.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now hollow-forwarder
 #
-# forwarder.toml sets data_dir = "/var/lib/hollow-forwarder". First start
+# forwarder.toml sets data_dir = "/var/lib/hollow-forwarder", the StateDirectory
+# below (ProtectHome keeps anything under /home out of reach). First start
 # prints "[HOLLOW-FWD] forwarder peer_id: 12D3KooW..." to the journal; that id
-# goes into the relay's --forwarder-peer-id flag. Back up forwarder.key in the
-# data dir; rotation = DELETE the key (new identity) + update the relay flag,
-# never re-key the same peer_id. The engine also writes hollow_debug.log there:
-# make it a symlink to /dev/null so its activity lines live only in the RAM
-# journal.
+# goes into the relay's --forwarder-peer-id flag. forwarder.key and forwarder.db
+# (the Olm identity key clients pin, never who used the forwarder) are its
+# identity: back up both; rotation = DELETE both (new identity) + update the
+# relay flag, never re-key the same peer_id. It writes no log file: its lines
+# live only in the RAM journal.
 #
 # UDP media ports (default 40000-40199) must be open in ufw / the provider
 # firewall. SIGTERM simply kills the process — viewers recover via the

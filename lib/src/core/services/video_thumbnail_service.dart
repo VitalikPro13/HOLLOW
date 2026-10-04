@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
@@ -11,9 +12,12 @@ import 'package:path/path.dart' as p;
 
 import '../../rust/api/network.dart' as network_api;
 
-/// Log to hollow_debug.log (visible in release builds).
+/// Log to hollow_debug.log (visible in release builds). A log line never
+/// fails the caller, before the node is up or in a widget test.
 void _log(String msg) {
-  network_api.logFromDart(message: msg);
+  try {
+    network_api.logFromDart(message: msg).catchError((Object _) {});
+  } catch (_) {}
 }
 
 /// Result of a successful video thumbnail extraction.
@@ -48,10 +52,22 @@ class VideoThumbnailService {
   static String? _cachedFfmpegPath;
   static bool _searchedForFfmpeg = false;
 
+  /// Replaces the binary lookup in tests, so a test can tell whether ffmpeg
+  /// would have run on a machine that has it.
+  @visibleForTesting
+  static String? debugFfmpegPath;
+
+  /// Replaces [Process.start] for every bundled-ffmpeg run in tests.
+  @visibleForTesting
+  static Future<Process> Function(String executable, List<String> arguments)?
+      debugStartProcess;
+
   /// Absolute path to the bundled ffmpeg binary, or null. Looks next to the
   /// running executable, where CMake and Xcode put it. Cached after the first
   /// call.
   static String? findFfmpegBinary() {
+    final override = debugFfmpegPath;
+    if (override != null) return override;
     if (_searchedForFfmpeg) return _cachedFfmpegPath;
     _searchedForFfmpeg = true;
 
@@ -258,7 +274,7 @@ class VideoThumbnailService {
     Uint8List? stdinBytes,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final proc = await Process.start(ffmpeg, args);
+    final proc = await (debugStartProcess ?? Process.start)(ffmpeg, args);
     final out = BytesBuilder(copy: false);
     final err = BytesBuilder(copy: false);
     final drained = Future.wait<void>([

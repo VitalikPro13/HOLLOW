@@ -4,9 +4,12 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
+#include "client_json.h"
 #include "json.hpp"
 #include "roster.h"
+#include "validate.h"
 
 // Whether a destruction order parked on the kill list is the target identity's own:
 // its master signed it, and the recovery key pinned in the roster the relay holds for
@@ -76,12 +79,20 @@ inline std::optional<Order> from_json(const nlohmann::json& j) {
     return o;
 }
 
+// The order in the text a deposit's blob decodes to (client JSON, so depth-capped).
+inline std::optional<Order> parse(std::string_view text) { return from_json(client_json::parse(text)); }
+
 // The signature half, once per deposit: the master signed `o` for the stamp it was
 // deposited under, and `held`'s pinned recovery key stands behind it. `state` is
 // `held` folded now; only a delegation reads it.
 inline bool authorised(const Order& o, int64_t issued_at_ms, const roster::Roster& held, const roster::State& state,
                        const RosterCrypto& c, const DerivePeerId& derive) {
     if (held.r_pub.empty() || o.master_peer_id != held.master || o.issued_at_ms != issued_at_ms) return false;
+    // Targets join with ',' under the signature: only a peer id may stand in one, or
+    // ["A","B"] re-signs as ["A,B"] and [] as [""].
+    if (!std::all_of(o.targets.begin(), o.targets.end(), [](const std::string& t) { return is_peer_id_shape(t); })) {
+        return false;
+    }
     const std::string p = payload(o);
     if (derive(o.master_pubkey_b64) != o.master_peer_id || !c.verify_by_id(o.master_peer_id, o.sig_b64, p)) {
         return false;

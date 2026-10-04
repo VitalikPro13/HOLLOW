@@ -71,6 +71,7 @@ pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
             .await
             .map_err(|e| format!("Failed to fetch manifest signature: {e}"))?;
         verify_manifest_signature(&manifest, &String::from_utf8_lossy(&sig))?;
+        manifest_versions_well_formed(&manifest)?;
         String::from_utf8(manifest).map_err(|_| "Update manifest is not UTF-8".to_string())
     })
 }
@@ -144,6 +145,31 @@ fn verify_manifest_signature_with(
     } else {
         Err("Update manifest signature does not verify. The download host may have been tampered with; nothing was installed.".to_string())
     }
+}
+
+/// True for a release version as the manifest carries it: three dot-separated
+/// decimal parts, `0.12.0`.
+///
+/// SECURITY (C-DIST-06): a version names the download and the staging folder and
+/// is written into the generated update script, so nothing else may reach them.
+pub(crate) fn is_release_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Refuses a signed manifest whose `latest` or any listed `version` is not
+/// [`is_release_version`], before Dart can pick one to download.
+fn manifest_versions_well_formed(manifest: &[u8]) -> Result<(), String> {
+    let refused = || "Update manifest names a malformed version; nothing was installed.".to_string();
+    let doc: serde_json::Value = serde_json::from_slice(manifest).map_err(|_| refused())?;
+    let latest = doc.get("latest").and_then(|v| v.as_str());
+    let listed = doc.get("versions").and_then(|v| v.as_array()).ok_or_else(refused)?;
+    let all_ok = latest.is_some_and(is_release_version)
+        && listed.iter().all(|e| e.get("version").and_then(|v| v.as_str()).is_some_and(is_release_version));
+    if all_ok { Ok(()) } else { Err(refused()) }
 }
 
 /// A checksum the manifest hands us must be 64 hex characters before a
@@ -317,7 +343,16 @@ pub fn apply_update(
     version: String,
 ) -> Result<String, String> {
     let data = data_dir()?;
-    apply_update_impl(&data, &zip_path, &app_dir, &version)
+    apply_update_at(&data, &zip_path, &app_dir, &version)
+}
+
+/// Every platform's apply, behind the version check: nothing is extracted,
+/// staged or scripted for a version that is not [`is_release_version`].
+fn apply_update_at(data: &Path, archive_path: &str, app_dir: &str, version: &str) -> Result<String, String> {
+    if !is_release_version(version) {
+        return Err("Update version is malformed; nothing was installed.".to_string());
+    }
+    apply_update_impl(data, archive_path, app_dir, version)
 }
 
 /// Linux: the download is either the portable tarball or a `.flatpak` bundle,
@@ -377,14 +412,17 @@ fn apply_update_impl(
 
     #[cfg(target_os = "windows")]
     {
+    let staging_str = bat_quoted_path(
+        staging_dir
+            .to_str()
+            .ok_or("Staging dir path is not valid UTF-8")?,
+    )?;
+    let zip_path_str = bat_quoted_path(&zip_path.replace('/', "\\"))?;
+    let app_dir = bat_quoted_path(app_dir)?;
+
     extract_zip_to(zip_path, &staging_dir)?;
 
-    let staging_str = staging_dir
-        .to_str()
-        .ok_or("Staging dir path is not valid UTF-8")?;
-
     let bat_path = data.join("updates").join("update.bat");
-    let zip_path_str = zip_path.replace('/', "\\");
     let bat_content = format!(
         "@echo off\r\n\
          title Hollow Update\r\n\
@@ -539,6 +577,17 @@ fn linux_install_kind_inner() -> &'static str {
     } else {
         "tarball"
     }
+}
+
+/// A path as it may sit between the double quotes `update.bat` puts around it: `%`
+/// doubled so cmd does not expand it, refused if it carries a quote or a control
+/// character, which would end the argument or the line.
+#[cfg(target_os = "windows")]
+fn bat_quoted_path(path: &str) -> Result<String, String> {
+    if path.chars().any(|c| c == '"' || c.is_control()) {
+        return Err("An update path holds a character the update script cannot carry".to_string());
+    }
+    Ok(path.replace('%', "%%"))
 }
 
 /// POSIX single-quoting: wrap in `'…'`, write an embedded `'` as `'\''`. Every
@@ -1045,7 +1094,11 @@ fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), S
         if name.is_empty() {
             continue;
         }
-        if name.split('/').any(|part| part == "..") {
+        // An absolute, drive or `..` name would make the join below leave the staging dir.
+        let inside = std::path::Path::new(&name)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
+        if entry.enclosed_name().is_none() || !inside {
             return Err(format!("Unsafe zip entry path: {name}"));
         }
 
@@ -1213,6 +1266,99 @@ mod extract_zip_tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C-DIST-06: a manifest version that is not digits and dots stages nothing.
+    #[test]
+    fn a_malformed_version_stages_nothing() {
+        let tmp = std::env::temp_dir().join(format!("hollow_updater_ver_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+        let zip_path = tmp.join("update.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("create zip");
+            let mut writer = zip::ZipWriter::new(file);
+            writer.start_file("hollow.exe", zip::write::SimpleFileOptions::default()).expect("entry");
+            writer.write_all(b"exe").expect("write");
+            writer.finish().expect("finish");
+        }
+        let app = tmp.join("app");
+        std::fs::create_dir_all(&app).expect("app dir");
+        let r = super::apply_update_at(&tmp, zip_path.to_str().unwrap(), app.to_str().unwrap(), "0.12.0 & calc");
+        let staged = tmp.join("updates").exists();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(r.is_err(), "a malformed version was applied: {r:?}");
+        assert!(!staged, "a malformed version staged files");
+    }
+
+    #[test]
+    fn release_versions_are_three_decimal_parts() {
+        for ok in ["0.12.0", "0.11.1", "10.0.0", "1.22.333"] {
+            assert!(super::is_release_version(ok), "{ok} refused");
+        }
+        for bad in [
+            "", "0.12", "0.12.0.1", "0.12.0-beta", "v0.12.0", "0.12.x", "0..1", ".1.2", "0.12.0 ",
+            "0.12.0\" & calc & \"", "..\\..\\x", "0.1.2/../3", "0.1.123456", "０.1.2",
+        ] {
+            assert!(!super::is_release_version(bad), "{bad:?} accepted");
+        }
+    }
+
+    /// The signed manifest is refused whole when any version in it is malformed,
+    /// before Dart can offer it for download.
+    #[test]
+    fn a_manifest_with_a_malformed_version_is_refused() {
+        let shipped = include_str!("../../../../legal/manifest.json");
+        assert!(super::manifest_versions_well_formed(shipped.as_bytes()).is_ok());
+        for bad in [
+            r#"{"latest":"0.12.0 & calc","versions":[{"version":"0.12.0"}]}"#,
+            r#"{"latest":"0.12.0","versions":[{"version":"0.12.0"},{"version":"..\\..\\evil"}]}"#,
+            r#"{"latest":"0.12.0","versions":[{"notes":"no version"}]}"#,
+            r#"{"versions":[{"version":"0.12.0"}]}"#,
+            r#"{"latest":"0.12.0"}"#,
+            "not json",
+        ] {
+            assert!(super::manifest_versions_well_formed(bad.as_bytes()).is_err(), "{bad} accepted");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn bat_paths_keep_percent_literal_and_refuse_quotes() {
+        assert_eq!(
+            super::bat_quoted_path(r"C:\Users\a%PATH%b\Hollow").unwrap(),
+            r"C:\Users\a%%PATH%%b\Hollow"
+        );
+        for bad in ["C:\\a\"&calc&\"", "C:\\a\r\ncalc", "C:\\a\tb"] {
+            assert!(super::bat_quoted_path(bad).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    /// An absolute entry name aborts extraction: `Path::join` would drop the staging
+    /// dir and write wherever the name points.
+    #[test]
+    fn rejects_absolute_entries() {
+        let tmp = std::env::temp_dir().join(format!("hollow_updater_abs_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+        let outside = tmp.join("outside.txt");
+        let zip_path = tmp.join("evil.zip");
+        {
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path).expect("create zip"));
+            let opts = zip::write::SimpleFileOptions::default();
+            writer.start_file("hollow.exe", opts).expect("exe entry");
+            writer.write_all(b"exe-bytes").expect("write exe");
+            writer.start_file(outside.to_str().unwrap(), opts).expect("absolute entry");
+            writer.write_all(b"planted").expect("write planted");
+            writer.finish().expect("finish zip");
+        }
+        let staging = tmp.join("staging");
+        std::fs::create_dir_all(&staging).expect("create staging");
+        let result = super::extract_zip_to(zip_path.to_str().unwrap(), &staging);
+        let escaped = outside.exists();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!escaped, "an absolute entry escaped the staging dir");
+        assert!(result.is_err(), "an absolute entry was extracted somewhere");
     }
 }
 

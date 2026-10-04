@@ -208,13 +208,13 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
             : kDuressScopeDevice,
         initialNotifyFriends: current?.notifyFriends ?? false,
         isChange: current?.enabled ?? false,
-        onSave: (entry) => identity_api.setDuressCode(
-          password: entry.password,
-          duressCode: entry.code,
-          scope: entry.scope,
-          notifyFriends: entry.notifyFriends,
-          phrase: entry.phrase,
-        ),
+        onSave: (entry) => withTypedSecret(() => identity_api.setDuressCode(
+              password: entry.password,
+              duressCode: entry.code,
+              scope: entry.scope,
+              notifyFriends: entry.notifyFriends,
+              phrase: entry.phrase,
+            )),
       ),
     );
     if (saved != true || !mounted) return;
@@ -230,8 +230,8 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
         title: 'Remove duress code',
         message: 'Enter your app password to remove the duress code.',
         confirmLabel: 'Remove',
-        onSubmit: (password) =>
-            identity_api.clearDuressCode(password: password),
+        onSubmit: (password) => withTypedSecret(
+            () => identity_api.clearDuressCode(password: password)),
       ),
     );
     if (removed != true || !mounted) return;

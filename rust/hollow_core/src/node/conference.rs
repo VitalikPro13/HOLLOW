@@ -91,6 +91,16 @@ pub(crate) fn verified_host(conf_id: &str, sender_device: &str, host: &ConfHost)
         .then(|| host.master.clone())
 }
 
+/// The host a meeting Welcome from `sender` may come from, decided before it is staged
+/// (staging spends the KeyPackage it names, and every knock shows that KeyPackage to the
+/// whole room): we knock on the meeting, and `host` proves `sender` is the host's device.
+pub(crate) fn welcome_host(conf_id: &str, sender: &str, host: Option<&ConfHost>) -> Option<String> {
+    if !has_pending_knock(conf_id) {
+        return None;
+    }
+    verified_host(conf_id, sender, host?)
+}
+
 /// Whether `device` holds a seat among a meeting group's `leaves`: a leaf bound to it
 /// that its master's roster does not refuse.
 pub(crate) fn seated(leaves: &[LeafView], device: &str) -> bool {
@@ -327,6 +337,19 @@ pub(crate) fn clear_pending_knock(conf_id: &str) {
     }
 }
 
+/// The least time between two knocks on one meeting: each mints a KeyPackage.
+const REKNOCK_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Date our last knock on `conf_id` back past [`REKNOCK_GAP`], as if it went out long ago.
+#[cfg(test)]
+pub(crate) fn age_pending_knock(conf_id: &str) {
+    if let Ok(mut g) = PENDING_KNOCKS.lock()
+        && let Some(knock) = g.as_mut().and_then(|map| map.get_mut(conf_id))
+    {
+        knock.last_sent = knock.last_sent.checked_sub(REKNOCK_GAP * 2).unwrap_or(knock.last_sent);
+    }
+}
+
 /// A peer appeared in a conf room we are still knocking on: re-broadcast the join
 /// request with a FRESH KeyPackage, since the arrival may be the host starting the
 /// meeting. Throttled, and the host side dedups by peer anyway.
@@ -337,20 +360,31 @@ pub(crate) fn reknock_if_pending(
     room_code: &str,
 ) {
     if let Some(mls_mgr) = mls.as_mut() {
-        reknock(mls_mgr, crypto_store, ws_cmd_tx, room_code, std::time::Duration::from_secs(2));
+        reknock(mls_mgr, crypto_store, ws_cmd_tx, room_code, REKNOCK_GAP);
     }
 }
 
-/// A Welcome for a meeting we knock on was refused or unreadable. Staging it spent
-/// the KeyPackage the host holds for us, so knock again at once with a fresh one, or
-/// a room member's bogus Welcome would leave the real host's admission unreadable.
+/// A Welcome for a meeting we knock on spent the KeyPackage the host holds for us
+/// without seating us, so the host's admission could never be read: knock again with
+/// a fresh one. A Welcome we turn away spends nothing (`join_from_welcome_judged`), so
+/// this is never a lever for whoever can send us one.
 pub(crate) fn reknock_after_bad_welcome(
     mls_mgr: &mut MlsManager,
     crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     room_code: &str,
 ) {
-    reknock(mls_mgr, crypto_store, ws_cmd_tx, room_code, std::time::Duration::ZERO);
+    reknock(mls_mgr, crypto_store, ws_cmd_tx, room_code, REKNOCK_GAP);
+}
+
+/// Drop our copy of a meeting's group once we are out of it, so none of its secrets
+/// (the SFrame key among them) stays on disk (C-MLS-06).
+pub(crate) fn forget_meeting_group(mls_mgr: &mut MlsManager, crypto_store: &CryptoStore, conf_id: &str) {
+    let sid = conf_server_id(conf_id);
+    if mls_mgr.has_group(&sid) {
+        mls_mgr.remove_group(&sid);
+        persist_mls_state(mls_mgr, crypto_store);
+    }
 }
 
 fn reknock(
@@ -551,14 +585,19 @@ pub(crate) fn handle_conference_request_join(
 }
 
 /// Leave a conference (joiner side, or a host tile closing without ending the
-/// meeting is not supported in v1 — hosts end). Group state is left in place;
-/// a re-admission's Welcome replaces it (the Welcome arm drops stale groups).
+/// meeting is not supported in v1 — hosts end). Our copy of its group goes too; a
+/// later knock is seated afresh.
 pub(crate) fn handle_conference_leave(
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     voice_channel_participants: &mut HashMap<String, HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     conf_id: &str,
 ) {
+    if let Some(mls_mgr) = mls.as_mut() {
+        forget_meeting_group(mls_mgr, crypto_store, conf_id);
+    }
     clear_pending_knock(conf_id);
     forget_meeting_key(conf_id);
     clear_card_audience(conf_id);
@@ -628,10 +667,10 @@ pub(crate) async fn handle_inbound_join_request(
         });
 
     if !host_state.waiting_room {
-        let nonce = host_state.host.nonce.clone();
+        let host = host_state.host.clone();
         let seal = host_state.seal.clone();
         admit_peer(mls, crypto_store, ws_cmd_tx, event_tx,
-            &conf_id, &nonce, &seal, sender_peer, &key_package_b64).await;
+            &conf_id, &host, &seal, sender_peer, &key_package_b64).await;
         return;
     }
 
@@ -650,7 +689,7 @@ fn seat_of(key_package_b64: &str, device: &str) -> Option<crate::crypto::LeafIde
 }
 
 /// Host accepted a waiting joiner (or the waiting room is off): commit the MLS
-/// add, Welcome the joiner directly (with the nonce that proves us its host),
+/// add, Welcome the joiner directly (with the proof that we are its host),
 /// broadcast the commit to the room with the Tier-1 epoch guard, and rotate our
 /// own SFrame key.
 #[allow(clippy::too_many_arguments)]
@@ -660,7 +699,7 @@ pub(crate) async fn admit_peer(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     conf_id: &str,
-    nonce: &str,
+    host: &ConfHost,
     seal: &MeetingSeal,
     peer_id: &str,
     key_package_b64: &str,
@@ -679,24 +718,32 @@ pub(crate) async fn admit_peer(
             return;
         }
     };
-    let (commit, welcome) = match mls_mgr.add_member(&sid, &kp_bytes) {
-        Ok(cw) => cw,
+    // A device that knocks with a fresh KeyPackage while a leaf of it is seated (it
+    // left, or never read our Welcome) gets that seat back in the same commit.
+    let stale: Vec<String> = mls_mgr.group_members(&sid).into_iter().filter(|d| d == peer_id).collect();
+    let done = match mls_mgr.commit_membership(&sid, &stale, &[(peer_id.to_string(), kp_bytes)]) {
+        Ok(done) => done,
         Err(e) => {
-            hollow_log!("[HOLLOW-CONF] add_member failed for {conf_id}: {e}");
+            hollow_log!("[HOLLOW-CONF] Seating {peer_id} failed for {conf_id}: {e}");
             return;
         }
+    };
+    let Some(welcome) = done.welcome else {
+        hollow_log!("[HOLLOW-CONF] Seating {peer_id} in {conf_id} made no Welcome");
+        return;
     };
     if let Err(e) = mls_mgr.merge_pending_commit(&sid) {
         hollow_log!("[HOLLOW-CONF] merge_pending_commit failed for {conf_id}: {e}");
         return;
     }
     persist_mls_state(mls_mgr, crypto_store);
+    let commit = done.commit;
 
     let welcome_b64 = base64::engine::general_purpose::STANDARD.encode(welcome);
     send_sealed_to(ws_cmd_tx, seal, conf_id, peer_id,
         &HavenMessage::MlsWelcome {
             server_id: sid.clone(), welcome: welcome_b64, channel_id: None,
-            conf_nonce: Some(nonce.to_string()),
+            conf_host: Some(host.clone()),
         });
     let epoch = mls_mgr.epoch(&sid).ok();
     broadcast_mls_commit(mls_mgr, ws_cmd_tx, &sid, None,
@@ -727,10 +774,10 @@ pub(crate) async fn handle_conference_admit(
         hollow_log!("[HOLLOW-CONF] Admit for {peer_id} with no pending request in {conf_id}");
         return;
     };
-    let nonce = host_state.host.nonce.clone();
+    let host = host_state.host.clone();
     let seal = host_state.seal.clone();
     admit_peer(mls, crypto_store, ws_cmd_tx, event_tx,
-        conf_id, &nonce, &seal, peer_id, &pending.key_package_b64).await;
+        conf_id, &host, &seal, peer_id, &pending.key_package_b64).await;
 }
 
 /// Host declines a waiting-room entry (FFI `conference_deny`).
@@ -1231,6 +1278,32 @@ mod tests {
         resolver::clear_for_test();
     }
 
+    /// C-MLS-05: a meeting Welcome is staged only while we knock, and only from the host
+    /// device its proof binds; anyone else holding the link is turned away before it
+    /// could spend the KeyPackage our knock showed the room.
+    #[test]
+    fn a_meeting_welcome_is_staged_only_from_its_host_while_we_knock() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let (host_master, host_device, rogue) = (kp(21), kp(22), kp(23));
+        let conf_id = derive_conf_id(&host_master.peer_id(), "welcome-n1");
+        let proof = ConfHost {
+            master: host_master.peer_id(),
+            nonce: "welcome-n1".into(),
+            cert: crate::crypto::certificate_for_test(&host_device, &host_master),
+        };
+        let host = Some(host_master.peer_id());
+        assert_eq!(welcome_host(&conf_id, &host_device.peer_id(), Some(&proof)), None, "no knock pending");
+
+        let seal = MeetingSeal { link_key: new_link_key().unwrap(), device: "knocker".into() };
+        note_pending_knock(&conf_id, String::new(), String::new(), String::new(), seal);
+        assert_eq!(welcome_host(&conf_id, &host_device.peer_id(), Some(&proof)), host);
+        assert_eq!(welcome_host(&conf_id, &host_device.peer_id(), None), None, "no proof");
+        assert_eq!(welcome_host(&conf_id, &rogue.peer_id(), Some(&proof)), None, "the host's proof from another device");
+        clear_pending_knock(&conf_id);
+        crate::node::resolver::clear_for_test();
+    }
+
     /// A meeting seat (the voice arm's membership check) is a leaf bound to the device
     /// that its master's roster, where we hold it, counts.
     #[test]
@@ -1338,7 +1411,8 @@ mod tests {
         assert!(open_meeting(&key, &room_a, "dev", &n, &c).is_none(), "a frame sealed in A never speaks for B");
 
         let welcome = |sid: &str| HavenMessage::MlsWelcome {
-            server_id: sid.to_string(), welcome: String::new(), channel_id: None, conf_nonce: Some("n1".into()),
+            server_id: sid.to_string(), welcome: String::new(), channel_id: None,
+            conf_host: Some(ConfHost { master: "m".into(), nonce: "n1".into(), cert: "c".into() }),
         };
         let (n, c) = sealed_parts(&seal_meeting(&key, &conf_a, "dev", &welcome(&room_a)).unwrap());
         assert!(open_meeting(&key, &room_a, "dev", &n, &c).is_some(), "a meeting's Welcome rides its lane");

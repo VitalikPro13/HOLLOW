@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -12,7 +14,24 @@ void _fcLog(String msg) {
 /// wrapping flutter_webrtc's FrameCryptor and KeyProvider. One instance per
 /// call session or voice channel session.
 class FrameCryptorService {
+  FrameCryptorService({
+    FrameCryptorFactory? factory,
+    this.staleKeyGrace = const Duration(seconds: 15),
+  }) : _factory = factory ?? frameCryptorFactory;
+
+  final FrameCryptorFactory _factory;
+
+  /// How long an earlier epoch's key keeps decrypting after a rotation: frames in
+  /// flight, and members whose commit lands a moment later. After it, a device the
+  /// rotation took out is not heard under the key it still holds.
+  final Duration staleKeyGrace;
+
   KeyProvider? _keyProvider;
+
+  /// Key-ring slots holding a real epoch key.
+  final Set<int> _keyedSlots = {};
+
+  final Set<Timer> _retireTimers = {};
 
   /// Sender-side frame cryptors, keyed "peerId:kind" where kind is 'audio' or
   /// 'video', so each track type has its own cryptor per peer.
@@ -73,12 +92,14 @@ class FrameCryptorService {
     final options = KeyProviderOptions(
       sharedKey: sharedKey,
       ratchetSalt: Uint8List.fromList('hollow-sframe-salt'.codeUnits),
-      ratchetWindowSize: 16,
+      // Keys change by epoch index, never by ratchet; a ratchet window costs
+      // every frame that fails to decrypt two PBKDF2 runs per step.
+      ratchetWindowSize: 0,
       failureTolerance: -1, // unlimited
       keyRingSize: 16,
       discardFrameWhenCryptorNotReady: false,
     );
-    _keyProvider = await frameCryptorFactory.createDefaultKeyProvider(options);
+    _keyProvider = await _factory.createDefaultKeyProvider(options);
     _fcLog('[HOLLOW-SFRAME] KeyProvider initialized (sharedKey=$sharedKey)');
   }
 
@@ -127,7 +148,7 @@ class FrameCryptorService {
     if (_senderCryptors.containsKey(key)) return;
 
     try {
-      final cryptor = await frameCryptorFactory.createFrameCryptorForRtpSender(
+      final cryptor = await _factory.createFrameCryptorForRtpSender(
         participantId: peerId,
         sender: sender,
         algorithm: Algorithm.kAesGcm,
@@ -137,6 +158,8 @@ class FrameCryptorService {
         _fcLog('[HOLLOW-SFRAME] Sender $pid ($kind) state: $state');
         onCryptorStateChanged?.call(peerId, kind, false, state);
       };
+      // A new cryptor starts on slot 0, which can hold an older epoch's key.
+      await cryptor.setKeyIndex(currentKeyIndex);
       await cryptor.setEnabled(true);
       _senderCryptors[key] = cryptor;
       _enabled = true;
@@ -160,7 +183,7 @@ class FrameCryptorService {
 
     try {
       final cryptor =
-          await frameCryptorFactory.createFrameCryptorForRtpReceiver(
+          await _factory.createFrameCryptorForRtpReceiver(
         participantId: peerId,
         receiver: receiver,
         algorithm: Algorithm.kAesGcm,
@@ -170,6 +193,7 @@ class FrameCryptorService {
         _fcLog('[HOLLOW-SFRAME] Receiver $pid ($kind) state: $state');
         onCryptorStateChanged?.call(peerId, kind, true, state);
       };
+      await cryptor.setKeyIndex(currentKeyIndex);
       await cryptor.setEnabled(true);
       _receiverCryptors[key] = cryptor;
       _fcLog('[HOLLOW-SFRAME] Receiver decryption enabled for $key');
@@ -178,25 +202,54 @@ class FrameCryptorService {
     }
   }
 
-  /// Rotates the encryption key, on an MLS epoch change.
-  Future<void> rotateKey(int newIndex, Uint8List newKey) async {
-    if (_keyProvider == null) return;
-    currentKeyIndex = newIndex;
-    await _keyProvider!.setSharedKey(key: newKey, index: newIndex);
-    // CRITICAL: key material present means cryptors may be created. This flag
-    // was historically only set in enableForSender while every VC enable path
-    // guards on it, so voice-channel SFrame never engaged until a screen share
-    // flipped it on ONE side, and the first epoch change then made that side
-    // encrypt while the other had no decryptor (issue #27).
-    _enabled = true;
-    for (final cryptor in _senderCryptors.values) {
-      await cryptor.setKeyIndex(newIndex);
-    }
-    for (final cryptor in _receiverCryptors.values) {
-      await cryptor.setKeyIndex(newIndex);
-    }
-    _fcLog('[HOLLOW-SFRAME] Key rotated to index $newIndex');
-  }
+  /// Rotates the encryption key, on an MLS epoch change. The slot it leaves
+  /// stops decrypting after [staleKeyGrace].
+  Future<void> rotateKey(int newIndex, Uint8List newKey) =>
+      _serialize(() async {
+        if (_keyProvider == null) return;
+        final previous = currentKeyIndex;
+        currentKeyIndex = newIndex;
+        await _keyProvider!.setSharedKey(key: newKey, index: newIndex);
+        _keyedSlots.add(newIndex);
+        // CRITICAL: key material present means cryptors may be created. This
+        // flag was historically only set in enableForSender while every VC
+        // enable path guards on it, so voice-channel SFrame never engaged until
+        // a screen share flipped it on ONE side, and the first epoch change then
+        // made that side encrypt while the other had no decryptor (issue #27).
+        _enabled = true;
+        for (final cryptor in _senderCryptors.values) {
+          await cryptor.setKeyIndex(newIndex);
+        }
+        for (final cryptor in _receiverCryptors.values) {
+          await cryptor.setKeyIndex(newIndex);
+        }
+        if (previous != newIndex && _keyedSlots.contains(previous)) {
+          late final Timer timer;
+          timer = Timer(staleKeyGrace, () {
+            _retireTimers.remove(timer);
+            unawaited(_retireSlot(previous));
+          });
+          _retireTimers.add(timer);
+        }
+        _fcLog('[HOLLOW-SFRAME] Key rotated to index $newIndex');
+      });
+
+  /// Overwrites [slot] with a random key unless the epochs came back to it. The
+  /// provider has no way to empty a slot, and an empty one would report
+  /// MissingKey into the heal ladder for every frame of a removed device.
+  Future<void> _retireSlot(int slot) => _serialize(() async {
+        if (_keyProvider == null || slot == currentKeyIndex) return;
+        if (!_keyedSlots.remove(slot)) return;
+        final rng = Random.secure();
+        final junk =
+            Uint8List.fromList(List<int>.generate(32, (_) => rng.nextInt(256)));
+        try {
+          await _keyProvider!.setSharedKey(key: junk, index: slot);
+          _fcLog('[HOLLOW-SFRAME] Retired key slot $slot');
+        } catch (e) {
+          _fcLog('[HOLLOW-SFRAME] Failed to retire key slot $slot: $e');
+        }
+      });
 
   /// Disposes the SENDER cryptor for (peerId, kind) so a REPLACEMENT RTP
   /// sender can be re-enabled. Without this, [enableForSender], idempotent per
@@ -311,6 +364,11 @@ class FrameCryptorService {
   bool get isEnabled => _enabled;
 
   Future<void> dispose() async {
+    for (final timer in _retireTimers) {
+      timer.cancel();
+    }
+    _retireTimers.clear();
+    _keyedSlots.clear();
     for (final cryptor in _senderCryptors.values) {
       try { await cryptor.setEnabled(false); } catch (_) {}
       try { await cryptor.dispose(); } catch (_) {}

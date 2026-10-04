@@ -1,0 +1,80 @@
+# cargo-deny policy for every Rust crate in the repo: hollow_core (with the
+# `forwarder` feature), hollow_dfn, hollow_art and hollow_manifest. Each has
+# its own Cargo.lock, so CI runs it once per crate:
+#   cargo deny --manifest-path rust/<crate>/Cargo.toml --config rust/deny.toml check
+#
+# The bar for an advisory ignore: we cannot fix it by bumping, and one
+# sentence says why it does not reach a Hollow user. "It is only a warning" is
+# not a reason. Re-read the list whenever a dependency moves; several entries
+# die the moment their parent crate updates. osv-scanner.toml at the repo root
+# carries the same ids for the OSV scan of the same lockfiles.
+#
+# Not covered here: the bundled SQLCipher amalgamation. RustSec does not track
+# bundled C, so SQLite's own CVEs are tracked by hand in
+# reports/shipped/security/DEPENDENCY_SECURITY_AUDIT_2026-06.md and closed by
+# the rusqlite version in hollow_core/Cargo.toml.
+
+[graph]
+# The forwarder (str0m, aws-lc) ships in every desktop build.
+all-features = true
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin timing attack) via blind-rsa-signatures: it recovers a PRIVATE key by timing private-key operations; the app only blinds and verifies (every blind_sign/keygen call in hollow_core is #[cfg(test)]), and the issuing key lives on the shop host in hollow_art's CLI, never on a user's machine. No patched rsa exists." },
+  { id = "RUSTSEC-2026-0217", reason = "tract-nnef OOB read on NNEF tensor parse, via deep_filter: reached only by loading a model file, and the only model we load is the DeepFilterNet3 blob we ship. deep_filter v0.5.6 pins the tract 0.19 line; the fix is in 0.21+." },
+  { id = "RUSTSEC-2026-0186", reason = "memmap2 0.5 unchecked pointer offset in advise_range/flush_range, via tract-onnx via deep_filter: tract maps our own bundled model file and never calls those functions with an attacker's range." },
+  { id = "RUSTSEC-2026-0253", reason = "lru 0.7 use-after-free when a key's Drop panics inside pop(), via reed-solomon-erasure 6.0: its one cache maps Vec<usize> to Arc<Matrix>, and neither Drop can panic." },
+  { id = "RUSTSEC-2024-0436", reason = "paste unmaintained, via tract-linalg via deep_filter: a build-time proc macro that ships no code." },
+  { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, via parking_lot 0.11 via reed-solomon-erasure 6.0: a wasm shim, std::time on our six native targets." },
+  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained, via hax-lib-macros under libcrux (the openmls crypto provider): build-time only, carried upstream." },
+  { id = "RUSTSEC-2026-0319", reason = "anymap2 unmaintained, via liquid-core, a build-dependency of tract-linalg's build script under deep_filter: build-time only, no code ships." },
+]
+
+[licenses]
+# Everything here is compatible with the repo's AGPL-3.0 (LICENSE). Note what
+# is absent: GPL-2.0-only, SSPL, BUSL and the OpenSSL licence are not.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates carry no `license` field: they are the repo, under LICENSE.
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+  # TLS is rustls with webpki-roots everywhere; a system TLS stack would bring
+  # the platform's trust store and a second TLS implementation back.
+  { crate = "openssl-sys", reason = "TLS is rustls + webpki-roots (SQLCipher links libcrypto through its own build, not this crate)" },
+  { crate = "openssl", reason = "TLS is rustls + webpki-roots" },
+  { crate = "native-tls", reason = "TLS is rustls + webpki-roots" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# deep_filter 0.5.x was never published to crates.io (see hollow_dfn/Cargo.toml).
+allow-git = ["https://github.com/Rikorose/DeepFilterNet"]

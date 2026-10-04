@@ -955,7 +955,7 @@ fn send_vc_mls(
         None => server_id.to_string(),
     };
     if mgr.has_group(&group) {
-        let _ = super::crypto_handler::send_mls_broadcast_in(mgr, ws_cmd_tx, server_id, restricted, envelope, crypto_store);
+        let _ = super::crypto_handler::send_mls_broadcast_in(mgr, ws_cmd_tx, server_id, restricted, envelope, crypto_store, server_states.get(server_id));
     }
 }
 
@@ -1206,7 +1206,7 @@ pub(crate) async fn handle_voice_sframe_heal(
             hollow_log!("[HOLLOW-VC-SFRAME] HEAL: repair for {group_key} already in flight");
             return;
         }
-        match super::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
+        match super::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &group_key, false) {
             Ok(kp_bytes) => {
                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                 let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
@@ -1333,6 +1333,73 @@ pub(crate) async fn auto_leave_invisible_voice_channels(
             voice_channel_participants, voice_channel_gossip_mode,
             gossip_overlays, local_peer_str, device_peer_id, event_tx,
         ).await;
+    }
+}
+
+// ── Seats that lost their authority ──────────────────────────────────
+
+const SEAT_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Paces [`unseat_unqualified`] at the loop head, so a seat outlives whatever takes it
+/// away (anyone's op, ours included, a grant running out, a roster) by one beat.
+#[derive(Default)]
+pub(crate) struct SeatSweep(Option<std::time::Instant>);
+
+impl SeatSweep {
+    pub(crate) fn due(&mut self) -> bool {
+        if self.0.is_some_and(|t| t.elapsed() < SEAT_SWEEP_EVERY) {
+            return false;
+        }
+        self.0 = Some(std::time::Instant::now());
+        true
+    }
+}
+
+/// The (server, channel, device, reason) of each seat in our servers' voice calls that
+/// [`voice_join_refusal`] would refuse now. Our own seat leaves through
+/// [`auto_leave_invisible_voice_channels`]; a meeting's seats are judged by its group.
+pub(crate) fn unqualified_seats(
+    server_states: &HashMap<String, ServerState>,
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+) -> Vec<(String, String, String, &'static str)> {
+    let mut gone = Vec::new();
+    for (vc_key, devices) in voice_channel_participants {
+        if super::conference::is_conference_sid(vc_key) {
+            continue;
+        }
+        let Some((sid, cid)) = vc_key.split_once(':') else { continue };
+        let Some(state) = server_states.get(sid) else { continue };
+        for device in devices.iter().filter(|d| *d != local_peer_str && *d != device_peer_id) {
+            if let Some(reason) = voice_join_refusal(Some(state), device, cid) {
+                gone.push((sid.to_string(), cid.to_string(), device.clone(), reason));
+            }
+        }
+    }
+    gone
+}
+
+/// Each seat [`unqualified_seats`] names leaves the call on our side as if its device
+/// had left, so Dart closes its peer, cryptors and share audio: a removed member's
+/// client may ignore its removal, and its old SFrame keys stay in every key ring.
+pub(crate) async fn unseat_unqualified(
+    server_states: &HashMap<String, ServerState>,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+) {
+    let gone = unqualified_seats(server_states, voice_channel_participants, local_peer_str, device_peer_id);
+    for (sid, cid, device, reason) in gone {
+        hollow_log!("[HOLLOW-SECURITY] {device} loses its seat in voice channel {cid} of {sid}: {reason}");
+        Box::pin(handle_envelope_voice_channel_leave(
+            voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, event_tx,
+            local_peer_str, device_peer_id, device, sid, cid,
+        ))
+        .await;
     }
 }
 
@@ -1861,7 +1928,7 @@ pub(crate) async fn handle_envelope_voice_channel_join(
             .is_some_and(|p| p.contains(device_peer_id) || p.contains(local_peer_str))
     {
         let ours = MessageEnvelope::VoiceChannelJoin { sid: sid.clone(), cid: cid.clone() };
-        if let Err(e) = send_mls_broadcast(mls, ws_cmd_tx, &sid, &ours, crypto_store) {
+        if let Err(e) = send_mls_broadcast(mls, ws_cmd_tx, &sid, &ours, crypto_store, None) {
             hollow_log!("[HOLLOW-VC] Meeting roster reply to {sender_peer_id} failed: {e}");
         }
     }
@@ -1887,6 +1954,9 @@ pub(crate) fn voice_join_refusal(
     cid: &str,
 ) -> Option<&'static str> {
     let Some(state) = state else { return Some("a server we do not hold") };
+    if super::resolver::is_revoked(sender) || super::resolver::is_bare_master(sender) {
+        return Some("a device its roster does not count");
+    }
     let master = super::resolver::resolve(sender);
     if !state.is_member(&master) {
         Some("not a member")
@@ -2396,7 +2466,7 @@ mod tests {
         let _g = super::super::resolver::test_lock();
         super::super::resolver::clear_all();
         super::super::blocklist::clear_for_test();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("j1.db").to_str().unwrap().to_string();
         let pass = "ab".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -2476,7 +2546,7 @@ mod tests {
         state.roles.insert(admin.into(), AdminLwwReg::new(MemberRole::Admin, HlcTimestamp::zero(me), 3));
         let states = HashMap::from([("srv".to_string(), state)]);
         let rooms = HashMap::from([("srv".to_string(), std::collections::HashSet::from([admin.to_string(), member.to_string()]))]);
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("d4.db").to_str().unwrap().to_string();
         let pass = "ab".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
@@ -2523,7 +2593,7 @@ mod tests {
         let _g = super::super::resolver::test_lock();
         super::super::resolver::clear_all();
         super::super::blocklist::clear_for_test();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("m2.db").to_str().unwrap().to_string();
         let pass = "ab".repeat(32);
         crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();

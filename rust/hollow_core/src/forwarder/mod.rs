@@ -43,7 +43,7 @@ pub struct ForwarderConfig {
     /// `HOLLOW_FWD_LICENSE_KEY`.
     #[serde(default)]
     pub license_key: Option<String>,
-    /// Data directory (identity keypair, Olm DB, debug log).
+    /// Data directory (identity keypair and Olm account).
     pub data_dir: String,
     /// The public IP advertised in ICE host candidates; sockets bind 0.0.0.0. EMPTY
     /// means an embedded peer forwarder (LAN IP + per-leg STUN mapping instead).
@@ -145,8 +145,9 @@ fn load_or_mint_identity(data_dir: &std::path::Path) -> Result<NativeKeypair, St
 /// storage failure); the signaling loop reconnects forever otherwise.
 pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     crate::identity::set_data_dir(cfg.data_dir.clone())?;
-    // No log file: hollow_log! still reaches stderr, which the relay box keeps
+    // No log file: hollow_log! reaches stderr only, which the relay box keeps
     // in its RAM-only journal. A file would put share activity on the disk.
+    crate::log::mirror_to_stderr();
     let data_dir = crate::identity::data_dir()?;
     let keypair = load_or_mint_identity(&data_dir)?;
     let peer_id = keypair.peer_id();
@@ -162,20 +163,8 @@ pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
         .ok_or("invalid data dir encoding")?
         .to_string();
 
-    let olm = {
-        let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
-        match store.load_olm_account()? {
-            Some(account_json) => {
-                let sessions = store.load_all_olm_sessions()?;
-                crate::crypto::OlmManager::from_pickles(&account_json, sessions)?
-            }
-            None => crate::crypto::OlmManager::new(),
-        }
-    };
-    let crypto_store = crate::crypto::CryptoStore::open(db_path.clone(), passphrase.clone())?;
-    if let Ok(pickle) = olm.account_pickle_json() {
-        crypto_store.save_account(pickle);
-    }
+    let olm = load_olm(&db_path, &passphrase)?;
+    let account_store = crate::crypto::CryptoStore::open(db_path, passphrase)?;
     // master == device: seed the resolver so shared id-resolving paths behave.
     crate::node::resolver::seed_self(&peer_id, &[peer_id.clone()]);
 
@@ -183,7 +172,20 @@ pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     let (engine_tx, engine_rx) = mpsc::unbounded_channel::<engine::EngineCmd>();
     let (out_tx, out_rx) = mpsc::unbounded_channel::<engine::OutSignal>();
     tokio::spawn(engine::run(cfg.clone(), engine_rx, out_tx));
-    signaling::run(cfg, keypair, olm, crypto_store, engine_tx, out_rx).await
+    signaling::run(cfg, keypair, olm, account_store, engine_tx, out_rx).await
+}
+
+/// The Olm account, whose identity key clients pin, and nothing else: sessions live in
+/// RAM (C-RP-07). What older builds kept beside it, every client's session and who was
+/// handed which key, is erased here.
+pub(crate) fn load_olm(db_path: &str, passphrase: &str) -> Result<crate::crypto::OlmManager, String> {
+    let store = crate::storage::MessageStore::open(db_path, passphrase)?;
+    let olm = match store.load_olm_account()? {
+        Some(account_json) => crate::crypto::OlmManager::from_pickles(&account_json, Vec::new())?,
+        None => crate::crypto::OlmManager::new(),
+    };
+    store.keep_only_olm_account(&olm.identity_pickle_json()?)?;
+    Ok(olm)
 }
 
 #[cfg(test)]
@@ -196,5 +198,40 @@ mod tests {
         let body = src.split("pub async fn run(").nth(1).expect("run() exists");
         let body = &body[..body.find("\n}\n").expect("end of run()")];
         assert!(!body.contains(concat!("log::", "init")), "forwarder::run opens hollow_debug.log");
+    }
+
+    /// C-RP-07: what an older forwarder kept beside its account (every client's session,
+    /// who was handed which key, read marks) is erased at start; the identity key stays.
+    #[test]
+    fn a_forwarder_start_erases_what_older_builds_kept_of_its_clients() {
+        use crate::crypto::OlmManager;
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = crate::node::resolver::test_lock();
+        let local = NativeKeypair::from_secret_bytes(&[1; 32]).peer_id();
+        let from = NativeKeypair::from_secret_bytes(&[2; 32]).peer_id();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("forwarder.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let mut old = OlmManager::new();
+        let (otk, _) = old.key_for_requester(&from);
+        store.save_olm_account(&old.account_pickle_json().unwrap()).unwrap();
+        let mut client = OlmManager::new();
+        client.create_outbound_session(&local, &old.identity_key_base64(), &otk).unwrap();
+        let (_, prekey) = client.encrypt(&local, b"{}").unwrap();
+        old.open_prekey(&from, &client.identity_key_base64(), &prekey, &local).unwrap();
+        store.save_olm_session(&from, &old.session_pickle_json(&from).unwrap().unwrap()).unwrap();
+        store.save_olm_read_mark(&from, 5).unwrap();
+        assert!(store.load_olm_account().unwrap().unwrap().contains(&from), "the old account row names its requester");
+        drop(store);
+
+        let olm = super::load_olm(&path, &pass).unwrap();
+        assert_eq!(olm.identity_key_base64(), old.identity_key_base64(), "the start changed the identity key clients pin");
+        assert!(!olm.has_session(&from), "a session came back from the disk");
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        assert!(store.load_all_olm_sessions().unwrap().is_empty(), "a client's session is still on the disk");
+        assert!(store.load_olm_read_marks().unwrap().is_empty(), "a client's read mark is still on the disk");
+        assert!(!store.load_olm_account().unwrap().unwrap().contains(&from), "the account row still names a client");
     }
 }

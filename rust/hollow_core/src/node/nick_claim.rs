@@ -39,7 +39,7 @@ pub(crate) fn sign(master: &NativeKeypair, nickname: &str, device: &str, ts_ms: 
 /// The master a resolved nickname speaks for: only when that master signed a claim
 /// for this nickname and the device holding it, recently.
 pub(crate) fn verified_master(nickname: &str, device: &str, master: &str, claim: &NickClaim, now_ms: i64) -> Option<String> {
-    if (now_ms - claim.ts_ms).abs() > MAX_CLAIM_AGE_MS {
+    if now_ms.abs_diff(claim.ts_ms) > MAX_CLAIM_AGE_MS as u64 {
         return None;
     }
     let key = base64::engine::general_purpose::STANDARD.decode(&claim.master_key).ok()?;
@@ -87,5 +87,17 @@ mod tests {
             sig: base64::engine::general_purpose::STANDARD.encode(other.sign(bytes.as_bytes())),
         };
         assert_eq!(verified_master("nick", "dev-a", &master.peer_id(), &own_key, now), None, "a key that is not the master's");
+    }
+
+    /// The claim's stamp is read before its signature, so the extremes are refused
+    /// rather than overflowing the age check (the class of C-OLM-04).
+    #[test]
+    fn a_claim_stamped_at_the_i64_extremes_is_refused() {
+        let master = NativeKeypair::from_secret_bytes(&[3; 32]);
+        let now: i64 = 1_790_000_000_000;
+        for ts in [i64::MIN, i64::MAX, now.wrapping_add(i64::MIN)] {
+            let claim = sign(&master, "nick", "dev-a", ts);
+            assert_eq!(verified_master("nick", "dev-a", &master.peer_id(), &claim, now), None, "stamp {ts}");
+        }
     }
 }

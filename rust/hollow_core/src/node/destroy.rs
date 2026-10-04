@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::storage::MessageStore;
 use super::crypto_handler::{
     destroy_order_authorised, online_devices_for, send_encrypted_message,
-    send_encrypted_message_in_room, verify_destroy_identity,
+    send_encrypted_message_in_room, verify_destroy_identity, MAX_FUTURE_SKEW_MS,
 };
 use super::types::*;
 
@@ -87,15 +87,28 @@ pub(crate) fn stamp_device_link(db_path: &str, db_passphrase: &str, device_peer_
 }
 
 /// Whether the identity's authority stands behind `order`, judged against the roster
-/// we hold for it: its pinned recovery key, and its members for a permission.
-fn authorised(store: &MessageStore, order: &DestroyIdentity) -> bool {
-    match super::roster_book::load(store, &order.master_peer_id) {
-        Some(roster) => {
+/// we hold for it: its pinned recovery key, and its members for a permission. `None`
+/// when it cannot be judged: what we hold does not read, or for our own identity we
+/// hold neither a roster nor a 0.11 list, so the master key alone never stands in.
+fn authorised(store: &MessageStore, order: &DestroyIdentity, own: bool) -> Option<bool> {
+    match super::roster_book::load_strict(store, &order.master_peer_id) {
+        Ok(Some(roster)) => {
             let state = super::roster_book::fold(store, &roster);
-            destroy_order_authorised(order, &roster.r_pub, &state)
+            Some(destroy_order_authorised(order, &roster.r_pub, &state))
         }
-        None => destroy_order_authorised(order, "", &Default::default()),
+        Ok(None) if own && !matches!(store.load_device_list(&order.master_peer_id), Ok(Some(_))) => None,
+        Ok(None) => Some(destroy_order_authorised(order, "", &Default::default())),
+        Err(e) => {
+            hollow_log!("[HOLLOW-DESTROY] The roster an order is judged against does not read: {e}");
+            None
+        }
     }
+}
+
+/// An order dated past our clock by more than any signed statement may be: it would
+/// outlive every device linked before its date and floor every genuine order after it.
+fn from_the_future(order: &DestroyIdentity) -> bool {
+    order.issued_at_ms > now_ms().saturating_add(MAX_FUTURE_SKEW_MS)
 }
 
 pub(crate) fn identity_destroyed_at(store: &MessageStore, master: &str) -> Option<i64> {
@@ -134,11 +147,16 @@ pub(crate) fn judge_own_order(
     if !order.targets.is_empty() && !order.targets.iter().any(|t| t == local_device) {
         return Verdict::RejectPermanent("targets do not name this device");
     }
+    if from_the_future(order) {
+        return Verdict::RejectPermanent("dated in the future");
+    }
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else {
         return Verdict::RejectTransient("database unavailable");
     };
-    if !authorised(&store, order) {
-        return Verdict::RejectPermanent("not signed with the recovery phrase");
+    match authorised(&store, order, true) {
+        Some(true) => {}
+        Some(false) => return Verdict::RejectPermanent("not signed with the recovery phrase"),
+        None => return Verdict::RejectTransient("our roster could not be read"),
     }
     let linked_at = read_i64(&store, &link_key(local_device));
     if linked_at > 0 && order.issued_at_ms < linked_at {
@@ -188,8 +206,12 @@ async fn apply_friend_order(
         hollow_log!("[HOLLOW-DESTROY] Refused a friend destruction order: bad signature");
         return;
     }
+    if from_the_future(order) {
+        hollow_log!("[HOLLOW-DESTROY] Refused a friend destruction order: dated in the future");
+        return;
+    }
     let Ok(store) = MessageStore::open(db_path, db_passphrase) else { return };
-    if !authorised(&store, order) {
+    if authorised(&store, order, false) != Some(true) {
         hollow_log!("[HOLLOW-DESTROY] Refused a friend destruction order: not signed with the recovery phrase");
         return;
     }
@@ -444,12 +466,19 @@ mod tests {
     use crate::identity::native_identity::NativeKeypair;
     use super::super::crypto_handler::build_destroy_identity;
 
-    fn temp_db() -> (tempfile::TempDir, String, String) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn temp_db() -> (crate::test_tmp::TestDir, String, String) {
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         let path = dir.path().join("destroy.db").to_string_lossy().to_string();
         let pass = "7b".repeat(32);
         MessageStore::open(&path, &pass).expect("open");
         (dir, path, pass)
+    }
+
+    /// Our own identity as a node holds it before its phrase was typed on 0.12: a
+    /// roster with no recovery key, so the master key still speaks for it.
+    fn legacy_own(path: &str, pass: &str, master: &str) {
+        let row = serde_json::json!({ "master": master }).to_string();
+        MessageStore::open(path, pass).unwrap().save_device_list(master, &row, 0, &[], 0).unwrap();
     }
 
     fn is_apply(v: &Verdict) -> bool {
@@ -471,7 +500,9 @@ mod tests {
         let master = NativeKeypair::from_secret_bytes(&[0x11u8; 32]);
         let stranger = NativeKeypair::from_secret_bytes(&[0x22u8; 32]);
         let me = master.peer_id();
-        let device = "12D3KooWThisDevice".to_string();
+        let device = NativeKeypair::from_secret_bytes(&[0x12u8; 32]).peer_id();
+        let other = NativeKeypair::from_secret_bytes(&[0x13u8; 32]).peer_id();
+        legacy_own(&path, &pass, &me);
 
         let mut tampered = build_destroy_identity(&master, None, 5_000, Vec::new(), false);
         tampered.issued_at_ms = 6_000;
@@ -486,8 +517,7 @@ mod tests {
             "foreign master",
         );
 
-        let elsewhere =
-            build_destroy_identity(&master, None, 5_000, vec!["12D3KooWOther".into()], false);
+        let elsewhere = build_destroy_identity(&master, None, 5_000, vec![other.clone()], false);
         assert_eq!(
             reason(&judge_own_order(&elsewhere, &me, &device, &path, &pass)),
             "targets do not name this device",
@@ -516,9 +546,31 @@ mod tests {
             "older than the last applied destroy",
         );
 
-        let mine = build_destroy_identity(&master, None, good.issued_at_ms + 1, vec![device.clone(), "12D3KooWOther".into()], false,
-        );
+        let mine = build_destroy_identity(&master, None, good.issued_at_ms + 1, vec![device.clone(), other], false);
         assert!(is_apply(&judge_own_order(&mine, &me, &device, &path, &pass)));
+    }
+
+    /// The targets join with ',' under the signature, so a carrier must not be able to
+    /// re-split them: ["A","B"] as ["A,B"] names nobody, and an every-device order []
+    /// would sign the same as [""].
+    #[test]
+    fn a_destroy_orders_targets_cannot_be_re_split_under_its_signature() {
+        let master = NativeKeypair::from_secret_bytes(&[0x14u8; 32]);
+        let (a, b) = (
+            NativeKeypair::from_secret_bytes(&[0x15u8; 32]).peer_id(),
+            NativeKeypair::from_secret_bytes(&[0x16u8; 32]).peer_id(),
+        );
+        let order = build_destroy_identity(&master, None, 5_000, vec![a.clone(), b.clone()], false);
+        assert!(verify_destroy_identity(&order), "control");
+
+        let mut merged = order.clone();
+        merged.targets = vec![format!("{},{}", merged.targets[0], merged.targets[1])];
+        assert!(!verify_destroy_identity(&merged), "two targets re-split as one still verified");
+
+        let everyone = build_destroy_identity(&master, None, 5_000, Vec::new(), false);
+        let mut blank = everyone.clone();
+        blank.targets = vec![String::new()];
+        assert!(!verify_destroy_identity(&blank), "an every-device order verified as naming \"\"");
     }
 
     /// A never-stamped device (a pre-upgrade install) must not be immune: with no
@@ -528,6 +580,7 @@ mod tests {
         let (_dir, path, pass) = temp_db();
         let master = NativeKeypair::from_secret_bytes(&[0x33u8; 32]);
         let me = master.peer_id();
+        legacy_own(&path, &pass, &me);
         let order = build_destroy_identity(&master, None, 42, Vec::new(), false);
         assert!(is_apply(&judge_own_order(&order, &me, "dev-nostamp", &path, &pass)));
         assert!(!is_apply(&judge_own_order(&order, &me, "dev-nostamp", &path, &pass)));
@@ -541,6 +594,7 @@ mod tests {
         let (_dir, path, pass) = temp_db();
         let master = NativeKeypair::from_secret_bytes(&[0x55u8; 32]);
         let me = master.peer_id();
+        legacy_own(&path, &pass, &me);
         let device = "dev-restart";
         let order = build_destroy_identity(&master, None, 4_242, Vec::new(), false);
 
@@ -607,5 +661,68 @@ mod tests {
         assert_eq!(back.sig_b64, order.sig_b64);
         assert_eq!(back.targets, order.targets);
         assert!(decode_kill_blob("not base64 at all !!").is_none());
+    }
+
+    /// C-IDENTITY-10. An order dated past our clock by more than any signed statement
+    /// may be is refused for good, on our own devices and at friends: it would outlive
+    /// every device linked before its date and floor every genuine order after it.
+    #[tokio::test]
+    async fn a_destroy_order_from_the_future_is_refused() {
+        let (_dir, path, pass) = temp_db();
+        let master = NativeKeypair::from_secret_bytes(&[0x77u8; 32]);
+        let me = master.peer_id();
+        legacy_own(&path, &pass, &me);
+        let ahead = now_ms() + super::super::crypto_handler::MAX_FUTURE_SKEW_MS + 60_000;
+        let order = build_destroy_identity(&master, None, ahead, Vec::new(), false);
+        assert!(
+            matches!(judge_own_order(&order, &me, "dev-future", &path, &pass), Verdict::RejectPermanent(_)),
+            "an order from the future wiped this device",
+        );
+
+        let friend = NativeKeypair::from_secret_bytes(&[0x78u8; 32]);
+        MessageStore::open(&path, &pass).unwrap().save_friend(&friend.peer_id(), "accepted", "outgoing", 1).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(16);
+        let order = build_destroy_identity(&friend, None, ahead, Vec::new(), true);
+        apply_friend_order(&event_tx, &order, &path, &pass).await;
+        let store = MessageStore::open(&path, &pass).unwrap();
+        assert_eq!(identity_destroyed_at(&store, &friend.peer_id()), None, "a friend's order from the future applied");
+    }
+
+    /// C-IDENTITY-11. Our own roster unread is never "no recovery key yet": an order
+    /// waits (never acked) until it can be judged, and only a 0.11 list still lets the
+    /// master key speak alone.
+    #[test]
+    fn a_destroy_order_is_never_judged_without_our_roster() {
+        let (_dir, path, pass) = temp_db();
+        let master = NativeKeypair::from_secret_bytes(&[0x79u8; 32]);
+        let me = master.peer_id();
+        let order = build_destroy_identity(&master, None, now_ms(), Vec::new(), false);
+        let judge = || judge_own_order(&order, &me, "dev-unread", &path, &pass);
+        assert!(matches!(judge(), Verdict::RejectTransient(_)), "no roster at all judged as legacy");
+
+        let store = MessageStore::open(&path, &pass).unwrap();
+        store.save_device_list(&me, r#"{"master": 5}"#, 0, &[], 0).unwrap();
+        assert!(matches!(judge(), Verdict::RejectTransient(_)), "a roster that does not read judged as legacy");
+
+        let old = super::super::crypto_handler::build_signed_device_list(&master, 3, vec!["12D3KooWOld".into()], vec![]);
+        store.save_device_list(&me, &serde_json::to_string(&old).unwrap(), 3, &old.devices, 0).unwrap();
+        assert!(is_apply(&judge()), "a 0.11 list is the legacy identity's");
+    }
+
+    /// C-IDENTITY-11 at a friend: a roster we hold for it that does not read never lets
+    /// the master key alone report the identity destroyed.
+    #[tokio::test]
+    async fn a_friend_order_is_never_judged_without_its_roster() {
+        let (_dir, path, pass) = temp_db();
+        let store = MessageStore::open(&path, &pass).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(16);
+        for (tag, row) in [(0x7au8, r#"{"master": 5}"#), (0x7b, "{not json")] {
+            let friend = NativeKeypair::from_secret_bytes(&[tag; 32]);
+            let master = friend.peer_id();
+            store.save_friend(&master, "accepted", "outgoing", 1).unwrap();
+            store.save_device_list(&master, row, 0, &[], 0).unwrap();
+            apply_friend_order(&event_tx, &build_destroy_identity(&friend, None, 7_000, Vec::new(), true), &path, &pass).await;
+            assert_eq!(identity_destroyed_at(&store, &master), None, "{row}: an unread roster judged as legacy");
+        }
     }
 }

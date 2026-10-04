@@ -1,11 +1,11 @@
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 /// Parses message text with lightweight markup (bold, italic, strikethrough,
 /// inline code, code blocks, spoilers, mentions, links) into styled spans. No
@@ -761,13 +761,7 @@ Widget buildMessageText(
       tiling: tiling);
 }
 
-Future<void> _openUrl(String url) async {
-  final uri = Uri.tryParse(url);
-  if (uri == null) return;
-  try {
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-  } catch (_) {}
-}
+Future<void> _openUrl(String url) => openUntrustedUrl(url, allowHttp: true);
 
 bool _looksLikeUrlStart(String text, int start) {
   if (start + 7 > text.length) return false;

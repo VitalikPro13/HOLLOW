@@ -7,10 +7,12 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/link_preview_card.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
@@ -32,12 +34,14 @@ network_api.LinkPreviewRef _preview({
   String title = 'A Page Title',
   String description = 'Some description text',
   bool withThumb = true,
+  String url = 'https://example.com/thing',
+  String domain = 'example.com',
 }) {
   return network_api.LinkPreviewRef(
-    url: 'https://example.com/thing',
+    url: url,
     title: title,
     description: description,
-    domain: 'example.com',
+    domain: domain,
     siteName: 'Example',
     thumbWebpB64: withThumb ? _kTinyPngB64 : null,
     thumbW: withThumb ? 800 : null,
@@ -215,6 +219,78 @@ void main() {
           tester, _preview(kind: 'large', author: '@a', withThumb: false));
       expect(find.text('@a'), findsOneWidget);
       expect(find.byType(AspectRatio), findsNothing);
+    });
+  });
+
+  // C-DIST-01: the sender chose `url` AND `domain`, so the card shows its url's
+  // host and opens only a web url, through the untrusted link helper.
+  group('LinkPreviewCard links', () {
+    final launched = <String>[];
+    setUp(() {
+      launched.clear();
+      untrustedLinkLauncher = (uri) async {
+        launched.add(uri.toString());
+        return true;
+      };
+    });
+
+    testWidgets('the domain shown is the url host, never the wire domain',
+        (tester) async {
+      await _pumpCard(
+        tester,
+        _preview(url: 'https://evil.example/login', domain: 'github.com'),
+      );
+      expect(find.text('Example · evil.example'), findsOneWidget);
+      expect(find.textContaining('github.com'), findsNothing);
+
+      await tester.tap(find.text('A Page Title'));
+      await tester.pump();
+      expect(launched, ['https://evil.example/login']);
+    });
+
+    testWidgets('an http card a person posted still opens', (tester) async {
+      await _pumpCard(tester, _preview(url: 'http://example.com/old'));
+      await tester.tap(find.text('A Page Title'));
+      await tester.pump();
+      expect(launched, ['http://example.com/old']);
+    });
+
+    for (final url in [
+      'file:///C:/Windows/System32/calc.exe',
+      r'\\attacker.example\share\x.exe',
+      'javascript:alert(1)',
+      'ms-msdt:/id PCWDiagnostic',
+      'https:///nohost',
+    ]) {
+      testWidgets('a card whose url is $url has no tap target', (tester) async {
+        await _pumpCard(
+          tester,
+          _preview(url: url, domain: 'github.com', kind: 'large', author: '@a',
+              videoUrl: 'https://www.youtube.com/watch?v=x'),
+        );
+        expect(find.textContaining('github.com'), findsNothing);
+        expect(tester.widget<HollowPressable>(find.byType(HollowPressable)).onTap,
+            isNull,
+            reason: 'the card offers no tap target at all');
+        final poster = find.ancestor(
+            of: find.byIcon(LucideIcons.externalLink),
+            matching: find.byType(GestureDetector));
+        expect(tester.widget<GestureDetector>(poster.first).onTap, isNull,
+            reason: 'nor does its poster');
+        await tester.tap(find.text('@a'));
+        await tester.tap(find.byIcon(LucideIcons.externalLink));
+        await tester.pump();
+        expect(launched, isEmpty);
+      });
+    }
+
+    test('linkPreviewDomain reads the host off a web url only', () {
+      expect(linkPreviewDomain('https://Sub.Example.com:8443/a'),
+          'sub.example.com');
+      expect(linkPreviewDomain('http://example.com'), 'example.com');
+      expect(linkPreviewDomain('file:///etc/passwd'), '');
+      expect(linkPreviewDomain('hollow://join?server=x'), '');
+      expect(linkPreviewDomain(''), '');
     });
   });
 

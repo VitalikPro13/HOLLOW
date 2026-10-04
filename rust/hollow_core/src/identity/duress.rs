@@ -160,8 +160,8 @@ mod tests {
         crate::node::resolver::test_lock()
     }
 
-    fn temp_root() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn temp_root() -> crate::test_tmp::TestDir {
+        let tmp = crate::test_tmp::tempdir().expect("tempdir");
         // SAFETY: serialized by `guard()`.
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
         tmp

@@ -15,6 +15,9 @@ import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
+import 'package:hollow/src/core/services/privacy_screen.dart';
+import 'package:hollow/src/core/services/push_hints_cache.dart';
+import 'package:hollow/src/ui/settings/longer_pin_prompt.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/node_status.dart';
@@ -148,16 +151,6 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 const _kDesktopBreakpoint = 1024.0;
 const _kTabletBreakpoint = 600.0;
 
-/// A duress code was typed and Rust has already destroyed the data. Matched on
-/// the exact word rather than a substring, because a mistyped password must
-/// never take this branch.
-bool _isDuressResult(Object error) {
-  final message = error.toString().trim();
-  return message == 'duress' ||
-      message.endsWith('(duress)') ||
-      message.endsWith(': duress');
-}
-
 /// Main application shell.
 ///
 /// Desktop is ServerStrip | ChannelSidebar | ChatPane | MemberPanel, tablet
@@ -239,6 +232,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
     DesktopNotificationService.registerOpenHandler((payload) async {
       // A toast can be tapped while we are in the background or the tray.
       await ref.read(systemNotificationProvider.notifier).bringWindowToFront();
+      if (!mounted || payload == DesktopNotificationService.lockedPayload) {
+        return;
+      }
+      // A toast from before the lock opens its conversation only once the
+      // cover lifts.
+      await _untilUnlocked();
       if (!mounted) return;
       if (payload.startsWith('channel:')) {
         final rest = payload.substring('channel:'.length);
@@ -253,7 +252,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     DesktopNotificationService.registerReplyHandler((peerId, text) {
       // Inline Reply sends straight away, with no window focus needed.
-      ref.read(chatProvider.notifier).sendMessage(peerId, text);
+      ref
+          .read(systemNotificationProvider.notifier)
+          .replyFromToast(peerId, text);
     });
   }
 
@@ -299,9 +300,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       } else {
         _shellFade.animateTo(1.0, duration: HollowDurations.normal);
       }
-      // A cold-start protocol launch buffers in the service until the shell is
-      // mounted.
-      DeepLinkService.instance.notifyShellReady();
     });
     _bootstrap();
     _listenForLicenseErrors();
@@ -398,9 +396,16 @@ class _HollowShellState extends ConsumerState<HollowShell>
   /// Desktop app lock, armed once the store is open. The node keeps running:
   /// only the UI is covered, and the same prompt a launch uses lifts it.
   void _armAppLock() {
-    // Kept warm so a lock decision never waits on the FFI.
-    ref.listenManual(identityProtectionProvider, (_, _) {},
-        fireImmediately: true);
+    // Kept warm so a lock decision never waits on the FFI. The app switcher
+    // cover and the push hints follow whether App Lock is on.
+    ref.listenManual<AsyncValue<identity_api.ProtectionStatus>>(
+        identityProtectionProvider, (prev, next) {
+      final on = next.valueOrNull?.hasPassword;
+      if (on == null) return;
+      PrivacyScreen.setAppLockOn(on);
+      final was = prev?.valueOrNull?.hasPassword;
+      if (was != null && was != on) PushHintsCache.rewriteLast();
+    }, fireImmediately: true);
     ref.listenManual(windowFocusedProvider, (_, focused) {
       if (focused) IdleClock.stamp();
     });
@@ -462,6 +467,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final nav = hollowNavigatorKey.currentState;
     final route = lockCoverRoute();
     nav?.push(route);
+    if (DesktopNotificationService.isSupported) {
+      unawaited(DesktopNotificationService.instance.withdrawAll());
+    }
     try {
       while (mounted && ref.read(appLockedProvider)) {
         if (await _showPasswordUnlockDialog()) break;
@@ -476,7 +484,35 @@ class _HollowShellState extends ConsumerState<HollowShell>
       _setUnlocking(false);
       if (mounted) ref.read(appLockedProvider.notifier).setLocked(false);
       _lockFlowRunning = false;
+      _maybeOfferLongerPin();
     }
+  }
+
+  /// A PIN shorter than [kMinPinDigits] typed at the last unlock. It still
+  /// opens the identity; the person is asked once to choose a longer one.
+  ({String secret, bool isPin})? _shortPinTyped;
+
+  void _noteUnlockSecret(String secret, bool isPin) {
+    if (isShortPin(secret)) _shortPinTyped = (secret: secret, isPin: isPin);
+  }
+
+  void _maybeOfferLongerPin() {
+    final typed = _shortPinTyped;
+    if (typed == null) return;
+    _shortPinTyped = null;
+    unawaited(_offerLongerPin(typed.secret, isPin: typed.isPin));
+  }
+
+  Future<void> _offerLongerPin(String pin, {required bool isPin}) async {
+    await _untilUnlocked();
+    if (!mounted || ref.read(rosterGateProvider).kind != RosterGateKind.none) {
+      return;
+    }
+    final appLock = AppLockService();
+    if (await appLock.longerPinAsked() || !mounted) return;
+    await appLock.markLongerPinAsked();
+    if (!mounted) return;
+    await offerLongerPin(context, current: pin, isPin: isPin);
   }
 
   Route<void>? _rosterLock;
@@ -642,6 +678,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       try {
         await identity_api.unlockIdentity(password: secret);
         appLock.sessionSecret = secret;
+        _noteUnlockSecret(secret, isPin);
         return true;
       } catch (_) {
         _setUnlocking(false);
@@ -694,14 +731,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
       try {
         await identity_api.unlockIdentity(password: result);
         appLock.sessionSecret = result;
+        _noteUnlockSecret(result, isPin);
         return true;
       } catch (e) {
-        if (_isDuressResult(e)) {
+        if (isDuressResult(e)) {
           // A duress code was typed and Rust has already wiped. The spinner
           // stays and nothing is said: the next thing this person sees is
           // Welcome, never a hint that the code did anything.
-          await clearLocalSecretsAfterDestroy();
-          await relaunchApp();
+          await endSessionAfterDuress();
         }
         // Wrong secret: let the dialog re-prompt.
         _setUnlocking(false);
@@ -780,6 +817,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     final hasExisting = await storage_api.hasIdentity();
+    if (!hasExisting) unawaited(clearTracesOfAGoneIdentity());
 
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
@@ -942,10 +980,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(lockAfterMinutesProvider.notifier).load();
     _armAppLock();
     await _lockAtLaunchIfNeeded();
+    // A cold-start protocol launch waits in the service until the launch
+    // unlock is behind us and the app lock, if any, is up to hold it.
+    DeepLinkService.instance.notifyShellReady();
     // A removed device, or one restored from a backup and still waiting, locks
     // before the local lists show.
     await ref.read(rosterGateProvider.notifier).refresh();
     _armRosterGate();
+    _maybeOfferLongerPin();
     // Whether the shop has been woken up here. The dock bar watches the gate on
     // the first frame, so it loads here, never in build().
     await ref.read(shopUnlockedProvider.notifier).load();

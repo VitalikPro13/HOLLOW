@@ -353,6 +353,77 @@ pub(crate) fn delete_key() -> Result<(), String> {
     }
 }
 
+/// Serializes every test that touches a named keystore slot: they share them.
+#[cfg(test)]
+fn keystore_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Snapshot of the REAL wrapping-key slots (and the Windows DPAPI blob), restored on
+/// drop. Turning protection on or off writes or deletes the machine-global legacy
+/// slot, which used to nuke a keychain-protected dev profile's key on every
+/// `cargo test`. Capture AFTER pointing the data dir at the test root.
+#[cfg(test)]
+pub(crate) struct SlotGuard {
+    slots: Vec<(String, Option<Vec<u8>>)>,
+    blob: Option<Vec<u8>>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl SlotGuard {
+    pub(crate) fn capture() -> Self {
+        let _lock = keystore_test_lock();
+        #[cfg(windows)]
+        let slots = windows_targets()
+            .into_iter()
+            .map(|t| {
+                let v = win::cred_retrieve(&t).unwrap_or(None);
+                (t, v)
+            })
+            .collect();
+        #[cfg(target_os = "macos")]
+        let slots = mac_accounts()
+            .into_iter()
+            .map(|a| {
+                let v = mac::retrieve(&a).unwrap_or(None);
+                (a, v)
+            })
+            .collect();
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let slots = Vec::new();
+        let blob = dpapi_blob_path().ok().and_then(|p| std::fs::read(p).ok());
+        Self { slots, blob, _lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        for (_slot, _value) in &self.slots {
+            #[cfg(windows)]
+            match _value {
+                Some(v) => { let _ = win::cred_store(_slot, v); }
+                None => { let _ = win::cred_delete(_slot); }
+            }
+            #[cfg(target_os = "macos")]
+            match _value {
+                Some(v) => { let _ = mac::store(_slot, v); }
+                None => { let _ = mac::delete(_slot); }
+            }
+        }
+        if cfg!(windows)
+            && let Ok(p) = dpapi_blob_path()
+        {
+            match &self.blob {
+                Some(b) => { let _ = std::fs::write(p, b); }
+                None => { let _ = std::fs::remove_file(p); }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,12 +475,9 @@ mod tests {
         assert_eq!(recovered, secret);
     }
 
-    /// Both round-trip tests store and delete the SAME named Windows credential, so in
-    /// parallel they race: serialize them.
     #[cfg(windows)]
     fn cred_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static CRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        CRED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::keystore_test_lock()
     }
 
     #[cfg(windows)]
@@ -427,52 +495,9 @@ mod tests {
         assert_eq!(after_delete, None);
     }
 
-    /// Snapshot of the REAL wrapping-key slots + DPAPI blob, restored on
-    /// drop. The store/retrieve tests exercise the real slot names and used
-    /// to nuke a keychain-protected dev profile's key on every `cargo test`.
-    #[cfg(windows)]
-    struct SlotGuard {
-        slots: Vec<(String, Option<Vec<u8>>)>,
-        blob: Option<Vec<u8>>,
-    }
-
-    #[cfg(windows)]
-    impl SlotGuard {
-        fn capture() -> Self {
-            let slots = windows_targets()
-                .into_iter()
-                .map(|t| {
-                    let v = win::cred_retrieve(&t).unwrap_or(None);
-                    (t, v)
-                })
-                .collect();
-            let blob = dpapi_blob_path().ok().and_then(|p| std::fs::read(p).ok());
-            Self { slots, blob }
-        }
-    }
-
-    #[cfg(windows)]
-    impl Drop for SlotGuard {
-        fn drop(&mut self) {
-            for (t, v) in &self.slots {
-                match v {
-                    Some(v) => { let _ = win::cred_store(t, v); }
-                    None => { let _ = win::cred_delete(t); }
-                }
-            }
-            if let Ok(p) = dpapi_blob_path() {
-                match &self.blob {
-                    Some(b) => { let _ = std::fs::write(p, b); }
-                    None => { let _ = std::fs::remove_file(p); }
-                }
-            }
-        }
-    }
-
     #[cfg(windows)]
     #[test]
     fn dual_store_retrieve() {
-        let _lock = cred_test_lock();
         let _guard = SlotGuard::capture();
         let secret = vec![0x42u8; 32];
         store_key(&secret).unwrap();
@@ -488,7 +513,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn per_profile_slot_outranks_legacy() {
-        let _lock = cred_test_lock();
         let _guard = SlotGuard::capture();
         let targets = windows_targets();
         assert!(targets.len() >= 2, "profile suffix must resolve");

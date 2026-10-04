@@ -327,7 +327,7 @@ mod tests {
     /// File-backed on purpose: `:memory:` gives each connection its own database.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn channel_watermarks_answers_from_the_actor_connection() {
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tmp::tempdir().expect("tmp");
         let path = dir.path().join("watermarks.db");
         let path_str = path.to_string_lossy().to_string();
         let passphrase = "ab".repeat(32);

@@ -1600,7 +1600,7 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             return;
         }
         ServerMsg::NicknameClaimed { nickname } => {
-            hollow_log!("[HOLLOW-WS] Nickname claimed: {nickname}");
+            hollow_log!("[HOLLOW-WS] Nickname claimed");
             WsEvent::NicknameClaimed { nickname }
         }
         ServerMsg::NicknameReleased => {
@@ -1608,16 +1608,16 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             WsEvent::NicknameReleased
         }
         ServerMsg::NicknameError { error, nickname } => {
-            hollow_log!("[HOLLOW-WS] Nickname error: {error} (nickname={nickname})");
+            hollow_log!("[HOLLOW-WS] Nickname error: {error}");
             WsEvent::NicknameError { error, nickname }
         }
         ServerMsg::NicknameResolved { nickname, peer_id, master_id, master_key, ts, sig } => {
-            hollow_log!("[HOLLOW-WS] Nickname resolved: {nickname} -> {peer_id} (master: {master_id})");
+            hollow_log!("[HOLLOW-WS] Nickname resolved");
             let claim = super::nick_claim::NickClaim { master_key, ts_ms: ts, sig };
             WsEvent::NicknameResolved { nickname, peer_id, master_id, claim }
         }
         ServerMsg::LinkCodeClaimed { code } => {
-            hollow_log!("[HOLLOW-LINK] Link code claimed: {code}");
+            hollow_log!("[HOLLOW-LINK] Link code claimed");
             WsEvent::LinkCodeClaimed { code }
         }
         ServerMsg::LinkCodeReleased => {
@@ -1625,11 +1625,11 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             WsEvent::LinkCodeReleased
         }
         ServerMsg::LinkCodeError { error, code } => {
-            hollow_log!("[HOLLOW-LINK] Link code error: {error} (code={code})");
+            hollow_log!("[HOLLOW-LINK] Link code error: {error}");
             WsEvent::LinkCodeError { error, code }
         }
         ServerMsg::LinkCodeResolved { code, peer_id } => {
-            hollow_log!("[HOLLOW-LINK] Link code resolved: {code} -> {peer_id}");
+            hollow_log!("[HOLLOW-LINK] Link code resolved");
             WsEvent::LinkCodeResolved { code, peer_id }
         }
         ServerMsg::KillSignal { blob, issued_at_ms, issuer } => {

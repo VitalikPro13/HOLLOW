@@ -6,8 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `close_store_singleton`, `destroy_data_root`, `publish_scope`, `run_duress`, `wait_for`, `zero_and_remove`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Signal`
+// These functions are ignored because they are not marked as `pub`: `clear_beside`, `clear`, `close_store_singleton`, `destroy_data_root`, `destroy_with`, `is_hollow_temp`, `is_pasted_image`, `kept_by_wipe`, `of_this_process`, `publish_scope`, `run_duress`, `scrub`, `sweep_root`, `wait_for`, `zero_and_remove`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Outside`, `Signal`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Scope (a), and the tail of every other. Leaves the node RUNNING for Dart's step 5.
 Future<void> destroyLocal() => RustLib.instance.api.crateApiWipeDestroyLocal();

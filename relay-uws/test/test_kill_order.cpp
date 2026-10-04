@@ -32,11 +32,24 @@ static void check(const std::string& label, bool ok) {
 
 using json = nlohmann::json;
 
+// The signature half alone, which decides the proven slot whatever the target.
+static std::optional<bool> authorised_alone(const json& c, const RosterCrypto& crypto) {
+    std::string text;
+    if (!base64_decode(c["blob"].get<std::string>(), text)) return std::nullopt;
+    auto order = kill_order::parse(text);
+    if (!order || c["held"].is_null()) return std::nullopt;
+    auto held = roster::from_json(c["held"]);
+    if (!held) return std::nullopt;
+    auto state = held->fold([](const std::string&) -> std::optional<int64_t> { return std::nullopt; },
+                            c["now_ms"].get<int64_t>(), crypto);
+    return kill_order::authorised(*order, c["issued_at_ms"].get<int64_t>(), *held, state, crypto, derive_peer_id);
+}
+
 // The relay's flow on one deposit (ws_handler.cpp handle_kill_deposit).
 static std::optional<bool> judge(const json& c, const RosterCrypto& crypto) {
     std::string text;
     if (!base64_decode(c["blob"].get<std::string>(), text)) return std::nullopt;
-    auto order = kill_order::from_json(json::parse(text, nullptr, false));
+    auto order = kill_order::parse(text);
     if (!order) return std::nullopt;
     if (c["held"].is_null()) return false;
     auto held = roster::from_json(c["held"]);
@@ -83,6 +96,19 @@ int main() {
         check("every vector lands where the Rust code does (" + std::to_string(ok) + "/" + std::to_string(total) + ")",
               ok == total && total > 0);
         check("the vectors prove some and refuse the rest", proven >= 8 && total - proven >= 15);
+
+        // Targets join with ',' under the signature, so a re-split order verifies under
+        // the old rule; only the shape check keeps it off the proven slot.
+        for (const char* name : {"targets-re-split-after-signing", "every-device-signed-as-a-blank-target"}) {
+            bool found = false;
+            for (const auto& c : v["cases"]) {
+                if (c["name"].get<std::string>() != name) continue;
+                found = true;
+                auto got = authorised_alone(c, crypto);
+                check(std::string(name) + ": the signature half refuses it", got && !*got);
+            }
+            check(std::string(name) + ": the vector exists", found);
+        }
     }
 
     // An order's JSON is read as strictly as serde reads it.
@@ -97,6 +123,10 @@ int main() {
               !kill_order::from_json(json::parse(R"({"delegation":[]})")) &&
                   !kill_order::from_json(json::parse(R"({"delegation":{"at_ms":"x"}})")));
         check("a non-object refuses the order", !kill_order::from_json(json::parse("[]")));
+        const std::string deep = std::string(client_json::MAX_DEPTH, '[') + std::string(client_json::MAX_DEPTH, ']');
+        check("an order nested past the depth cap is no order, one within it is",
+              !kill_order::parse(R"({"master_peer_id":"x","extra":)" + deep + "}") &&
+                  kill_order::parse(R"({"master_peer_id":"x","extra":[[1]]})").has_value());
         std::string out;
         check("base64 that is not base64 is refused", !base64_decode("not base64!", out));
         check("base64 decodes", base64_decode("aGk=", out) && out == "hi");

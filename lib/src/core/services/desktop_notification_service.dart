@@ -14,6 +14,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart'
     show NotificationResponse;
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
+import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:local_notifier/local_notifier.dart';
@@ -24,9 +25,13 @@ import 'package:local_notifier/local_notifier.dart';
 /// appeared" is only ever reported FROM a release build, so a completely dead
 /// toast path used to look identical to a healthy one.
 void notifLog(String msg) {
-  network_api
-      .logFromDart(message: '[HOLLOW-NOTIF] $msg')
-      .catchError((_) {});
+  try {
+    network_api
+        .logFromDart(message: '[HOLLOW-NOTIF] $msg')
+        .catchError((_) {});
+  } catch (_) {
+    // Rust not loaded yet: a breadcrumb is never worth a crash.
+  }
 }
 
 /// Desktop OS-level notifications (Windows / macOS / Linux).
@@ -89,6 +94,14 @@ class DesktopNotificationService {
 
   /// The user submitted an inline Reply on a DM toast. Windows only.
   static void Function(String peerId, String text)? _replyHandler;
+
+  /// The payload of the toast posted while the app is locked: a tap only
+  /// brings the window, and with it the unlock prompt, to the front.
+  static const String lockedPayload = 'locked';
+
+  /// While locked every message replaces this one toast, so not even the
+  /// number of conversations shows. Outside the per-message counter's range.
+  static const int _lockedToastId = 0x7ffffff0;
 
   static void registerOpenHandler(void Function(String payload) handler) {
     _openHandler = handler;
@@ -225,6 +238,24 @@ class DesktopNotificationService {
     notifLog('test toast posted id=$id');
   }
 
+  /// The wipe's step: every toast Hollow left in the OS history goes, since
+  /// Windows keeps them on disk with names and previews until dismissed.
+  Future<void> clearAll() async {
+    if (!_initialized) return;
+    try {
+      if (Platform.isWindows) {
+        await _win.cancelAll();
+      } else if (Platform.isMacOS) {
+        await _mac.cancelAll();
+      } else {
+        for (final n in _activeNative.values) {
+          await n.close();
+        }
+        _activeNative.clear();
+      }
+    } catch (_) {}
+  }
+
   /// Writes the bundled icon to a temp file and returns its path, since the
   /// Windows toast needs a real on-disk one. Null on failure, which costs
   /// only the header icon.
@@ -352,6 +383,55 @@ class DesktopNotificationService {
       );
     } else {
       await _showNative(sourceKey: 'ch:$key', title: title, body: body);
+    }
+  }
+
+  /// The toast App Lock allows (C-35): no name, no text, no avatar, no Reply.
+  Future<void> showHidden() async {
+    await init();
+    if (!_initialized) {
+      notifLog('DROPPED locked toast — backend never initialized');
+      return;
+    }
+    try {
+      if (Platform.isWindows) {
+        await _win.show(_lockedToastId, kHiddenNotificationTitle,
+            kHiddenNotificationBody,
+            payload: lockedPayload, details: const WindowsNotificationDetails());
+      } else if (Platform.isMacOS) {
+        await _mac.show(_lockedToastId, kHiddenNotificationTitle,
+            kHiddenNotificationBody,
+            payload: lockedPayload,
+            notificationDetails: const DarwinNotificationDetails());
+      } else {
+        await _showNative(
+            sourceKey: lockedPayload,
+            title: kHiddenNotificationTitle,
+            body: kHiddenNotificationBody);
+      }
+      notifLog('locked toast posted');
+    } catch (e) {
+      notifLog('locked toast FAILED: $e');
+    }
+  }
+
+  /// Takes every Hollow toast back out of the notification centre as the lock
+  /// goes up: a preview posted a minute before must not outlive it.
+  Future<void> withdrawAll() async {
+    if (!_initialized) return;
+    try {
+      if (Platform.isWindows) {
+        await _win.cancelAll();
+      } else if (Platform.isMacOS) {
+        await _mac.cancelAll();
+      } else {
+        for (final n in _activeNative.values) {
+          n.close();
+        }
+        _activeNative.clear();
+      }
+    } catch (e) {
+      notifLog('withdrawing toasts FAILED: $e');
     }
   }
 
@@ -498,6 +578,8 @@ class DesktopNotificationService {
         _openHandler?.call(sourceKey.substring(3));
       } else if (sourceKey.startsWith('ch:')) {
         _openHandler?.call('channel:${sourceKey.substring(3)}');
+      } else if (sourceKey == lockedPayload) {
+        _openHandler?.call(lockedPayload);
       }
     };
     _activeNative[sourceKey] = notification;

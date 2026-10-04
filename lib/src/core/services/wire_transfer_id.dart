@@ -5,9 +5,9 @@ import 'dart:typed_data';
 /// end up inside a temp file name, so the parser IS the gate: anything outside
 /// the characters our own ids use is a hostile frame, and a `/../` there
 /// escapes the files directory on Windows, which normalises paths lexically
-/// before the filesystem sees them. Own ids are 32-hex file ids, `hex:index`
-/// share chunks and shards, and `link_<code>` snapshots. Mirrors `parse_id`
-/// in `ws_stream_transfer.rs`.
+/// before the filesystem sees them. Own ids are hex file ids and shard stream
+/// ids, `hex:index` share chunks, and `link_<code>` snapshots. Mirrors
+/// `parse_id` in `ws_stream_transfer.rs`.
 final RegExp _wireTransferIdPattern = RegExp(r'^[A-Za-z0-9:_-]{1,64}$');
 
 bool isSafeWireTransferId(String id) => _wireTransferIdPattern.hasMatch(id);

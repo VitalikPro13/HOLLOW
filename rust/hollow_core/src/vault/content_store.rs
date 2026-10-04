@@ -942,11 +942,11 @@ fn row_to_record(row: &rusqlite::Row) -> ShardRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use crate::test_tmp::TestDir;
 
     /// Create a ContentStore backed by in-memory SQLCipher and a temp directory.
-    fn test_store() -> (ContentStore, TempDir) {
-        let tmp = TempDir::new().unwrap();
+    fn test_store() -> (ContentStore, TestDir) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let store = ContentStore::open(":memory:", "testkey", tmp.path()).unwrap();
         (store, tmp)
     }
@@ -1042,7 +1042,7 @@ mod tests {
     /// expired the missing-file sweeps must stop asking for it.
     #[test]
     fn retention_query_includes_never_fetched_rows() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("retention.db").to_str().unwrap().to_string();
         let pass = "00112233445566778899aabbccddeeff";
 

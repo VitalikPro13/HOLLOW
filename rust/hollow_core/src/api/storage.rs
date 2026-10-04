@@ -128,6 +128,7 @@ pub fn load_messages(peer_id: String, limit: i32) -> Result<Vec<StoredMessage>, 
     let ms = guard.as_ref().ok_or("Message store is not open")?;
 
     let rows = ms.load_for_peer(&peer_id, limit)?;
+    drop(guard);
     Ok(rows
         .into_iter()
         .map(|r| StoredMessage {
@@ -158,6 +159,7 @@ pub fn load_all_dm_messages(peer_id: String) -> Result<Vec<StoredMessage>, Strin
     let ms = guard.as_ref().ok_or("Message store is not open")?;
 
     let rows = ms.load_all_dm_messages(&peer_id)?;
+    drop(guard);
     Ok(rows
         .into_iter()
         .map(|r| StoredMessage {
@@ -188,6 +190,7 @@ pub fn load_all_channel_messages(server_id: String, channel_id: String) -> Resul
     let ms = guard.as_ref().ok_or("Message store is not open")?;
 
     let rows = ms.load_all_channel_messages(&server_id, &channel_id)?;
+    drop(guard);
     Ok(rows
         .into_iter()
         .map(|r| StoredChannelMessage {
@@ -688,6 +691,8 @@ pub fn block_peer(peer_id: String) -> Result<(), String> {
         ms.block_peer(&master)?;
     }
     crate::node::blocklist::block(&master);
+    // A node that is not running has no room to leave, and its next start joins none.
+    let _ = crate::api::network::send_node_command(crate::node::NodeCommand::BlockChanged { master, blocked: true });
     Ok(())
 }
 
@@ -702,6 +707,7 @@ pub fn unblock_peer(peer_id: String) -> Result<(), String> {
         ms.unblock_peer(&master)?;
     }
     crate::node::blocklist::unblock(&master);
+    let _ = crate::api::network::send_node_command(crate::node::NodeCommand::BlockChanged { master, blocked: false });
     Ok(())
 }
 
@@ -726,7 +732,9 @@ pub fn search_channel_messages(
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.search_channel_messages(&server_id, &channel_id, &query, limit)
+    let found = ms.search_channel_messages(&server_id, &channel_id, &query, limit);
+    drop(guard);
+    found
         .map(|rows| {
             rows.into_iter()
                 .map(|m| StoredChannelMessage {
@@ -761,7 +769,9 @@ pub fn search_dm_messages(
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.search_dm_messages(&peer_id, &query, limit)
+    let found = ms.search_dm_messages(&peer_id, &query, limit);
+    drop(guard);
+    found
         .map(|rows| {
             rows.into_iter()
                 .map(|m| StoredMessage {
@@ -849,6 +859,7 @@ pub fn load_channel_messages(
     let ms = guard.as_ref().ok_or("Message store is not open")?;
 
     let rows = ms.load_channel_messages(&server_id, &channel_id, limit)?;
+    drop(guard);
     Ok(rows
         .into_iter()
         .map(|r| StoredChannelMessage {
@@ -932,17 +943,23 @@ fn stored_file_to_ffi(f: crate::storage::messages::StoredFile) -> StoredFileInfo
         video_thumb: f.video_thumb.map(crate::api::network::VideoThumbRef::from),
         share_root_hash: f.share_ref.as_ref().map(|s| s.root_hash.clone()),
         share_key_hex: f.share_ref.map(|s| s.key),
-        thumb_b64: f.thumb_b64,
+        thumb_b64: f
+            .thumb_b64
+            .and_then(|t| crate::node::image_convert::peer_thumb_for_display(&t))
+            .map(|(b64, _, _)| b64),
     }
 }
 
 /// Get file metadata by file ID.
 #[frb]
 pub fn get_file_metadata(file_id: String) -> Result<Option<StoredFileInfo>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    Ok(ms.get_file_metadata(&file_id)?.map(stored_file_to_ffi))
+    let row = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.get_file_metadata(&file_id)?
+    };
+    Ok(row.map(stored_file_to_ffi))
 }
 
 /// Get the vault content_id linked to a file by its file_id.
@@ -958,13 +975,13 @@ pub fn get_content_id_for_file(file_id: String) -> Result<Option<String>, String
 /// Get all files attached to a message.
 #[frb]
 pub fn get_files_for_message(message_id: String) -> Result<Vec<StoredFileInfo>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    Ok(ms.get_files_for_message(&message_id)?
-        .into_iter()
-        .map(stored_file_to_ffi)
-        .collect())
+    let rows = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.get_files_for_message(&message_id)?
+    };
+    Ok(rows.into_iter().map(stored_file_to_ffi).collect())
 }
 
 /// One image or video of a conversation, for the media viewer.
@@ -988,11 +1005,13 @@ pub fn list_media_for_context(
     after_ts: Option<i64>,
     limit: u32,
 ) -> Result<Vec<MediaListItem>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    Ok(ms
-        .list_media_for_context(&context_type, &context_id, before_ts, after_ts, limit)?
+    let rows = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.list_media_for_context(&context_type, &context_id, before_ts, after_ts, limit)?
+    };
+    Ok(rows
         .into_iter()
         .map(|m| MediaListItem {
             file: stored_file_to_ffi(m.file),
@@ -1006,13 +1025,13 @@ pub fn list_media_for_context(
 /// Get all incomplete files (for sync resume).
 #[frb]
 pub fn get_incomplete_files() -> Result<Vec<StoredFileInfo>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    Ok(ms.get_incomplete_files()?
-        .into_iter()
-        .map(stored_file_to_ffi)
-        .collect())
+    let rows = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.get_incomplete_files()?
+    };
+    Ok(rows.into_iter().map(stored_file_to_ffi).collect())
 }
 
 /// Mark a file as complete with its disk path (used for share-backed files). A
@@ -1488,8 +1507,9 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
                 for entry in std::fs::read_dir(&vault_dir).map_err(|e| format!("Failed to read vault dir: {e}"))? {
                     if let Ok(entry) = entry {
                         let path = entry.path();
-                        if path.is_file() {
-                            let name = format!("vault/{}", entry.file_name().to_string_lossy());
+                        let leaf = entry.file_name().to_string_lossy().into_owned();
+                        if path.is_file() && snapshot_leaf(&leaf) {
+                            let name = format!("vault/{leaf}");
                             let data = std::fs::read(&path).map_err(|e| format!("Failed to read vault file: {e}"))?;
                             zip.start_file(&name, options).map_err(|e| format!("Zip error: {e}"))?;
                             zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
@@ -1505,8 +1525,9 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
                 for entry in std::fs::read_dir(&files_dir).map_err(|e| format!("Failed to read files dir: {e}"))? {
                     if let Ok(entry) = entry {
                         let path = entry.path();
-                        if path.is_file() {
-                            let name = format!("files/{}", entry.file_name().to_string_lossy());
+                        let leaf = entry.file_name().to_string_lossy().into_owned();
+                        if path.is_file() && snapshot_leaf(&leaf) {
+                            let name = format!("files/{leaf}");
                             let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {e}"))?;
                             zip.start_file(&name, options).map_err(|e| format!("Zip error: {e}"))?;
                             zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
@@ -1521,13 +1542,78 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
     Ok(zip_buf.into_inner())
 }
 
-/// Whether a snapshot ZIP carries `identity.key`, without which it is no identity.
-fn snapshot_has_identity(zip_bytes: &[u8]) -> bool {
-    zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).is_ok_and(|mut archive| {
-        (0..archive.len()).any(|i| {
-            archive.by_index(i).map(|f| f.name() == "identity.key").unwrap_or(false)
+// What a snapshot may unpack to. A real one is nearly all ciphertext (the database,
+// at-rest files) and barely compresses, so a generous multiple of its own size, with a
+// floor for a small account: a link or backup of any size still lands. Every entry also
+// pays for the file it lands as, so a flood of empty entries is bounded too.
+const SNAPSHOT_MIN_UNPACKED: u64 = 64 << 20;
+const SNAPSHOT_UNPACK_RATIO: u64 = 32;
+const SNAPSHOT_ENTRY_COST: u64 = 4096;
+
+/// A transfer's reassembly or send temp (`.ws_recv_*.tmp`, `.stream_send_*.tmp`, ...),
+/// never content.
+fn transfer_temp(leaf: &str) -> bool {
+    leaf.starts_with('.') && leaf.ends_with(".tmp")
+}
+
+/// A file of `vault/` or `files/` a snapshot carries.
+fn snapshot_leaf(leaf: &str) -> bool {
+    !transfer_temp(leaf) && crate::node::share_handler::is_inert_file_name(leaf)
+}
+
+/// Where a snapshot entry lands under the data folder; `None` for a transfer temp an
+/// older export carried. Only what `build_snapshot_bytes` writes lands: any other entry
+/// (a path out of the folder, a key file, a marker, the profile registry) refuses the
+/// whole snapshot.
+fn snapshot_landing(entry: &zip::read::ZipFile<'_>) -> Result<Option<std::path::PathBuf>, String> {
+    let foreign = || "This backup holds a file Hollow never puts in a backup, so nothing was restored.".to_string();
+    let path = entry.enclosed_name().filter(|_| entry.is_file()).ok_or_else(foreign)?;
+    let parts: Option<Vec<&str>> = path
+        .components()
+        .map(|c| match c {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
         })
-    })
+        .collect();
+    match parts.as_deref() {
+        Some(["identity.key"] | ["messages.db"]) => Ok(Some(path.clone())),
+        Some(["vault" | "files", leaf]) if transfer_temp(leaf) => Ok(None),
+        Some([dir @ ("vault" | "files"), leaf]) if snapshot_leaf(leaf) => Ok(Some([dir, leaf].iter().collect())),
+        _ => Err(foreign()),
+    }
+}
+
+/// A snapshot every entry of which was judged and measured: `(index, landing, bytes)`.
+struct CheckedSnapshot<'a> {
+    archive: zip::ZipArchive<std::io::Cursor<&'a [u8]>>,
+    landings: Vec<(usize, std::path::PathBuf, u64)>,
+}
+
+/// Judge every entry and unpack it into nothing, so a snapshot that holds anything it
+/// should not, unpacks past its budget or holds no identity costs the data folder nothing.
+fn check_snapshot(zip_bytes: &[u8]) -> Result<CheckedSnapshot<'_>, String> {
+    use std::io::Read;
+    let too_big = || "This backup unpacks to far more than its size, so nothing was restored.".to_string();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|e| format!("Invalid snapshot data: {e}"))?;
+    let mut left = (zip_bytes.len() as u64)
+        .saturating_mul(SNAPSHOT_UNPACK_RATIO)
+        .max(SNAPSHOT_MIN_UNPACKED);
+    let mut landings = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("Zip read error: {e}"))?;
+        let landing = snapshot_landing(&entry)?;
+        left = left.checked_sub(SNAPSHOT_ENTRY_COST).ok_or_else(too_big)?;
+        let Some(path) = landing else { continue };
+        let size = std::io::copy(&mut (&mut entry).take(left.saturating_add(1)), &mut std::io::sink())
+            .map_err(|e| format!("Failed to read zip entry: {e}"))?;
+        left = left.checked_sub(size).ok_or_else(too_big)?;
+        landings.push((i, path, size));
+    }
+    if !landings.iter().any(|(_, path, _)| path.as_os_str() == "identity.key") {
+        return Err("Snapshot does not contain identity.key".into());
+    }
+    Ok(CheckedSnapshot { archive, landings })
 }
 
 /// The database as it may leave this device: a copy with this device's Olm and MLS
@@ -1556,17 +1642,16 @@ fn scrubbed_db_copy(data_dir: &std::path::Path, db_path: &std::path::Path) -> Re
 
 /// Extract a plaintext snapshot ZIP into the data directory (REPLACES existing
 /// files of the same name). Shared core of `import_backup` and the link-snapshot
-/// import. Requires the zip to contain `identity.key`.
+/// import.
 pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
+    land_snapshot(check_snapshot(zip_bytes)?)
+}
+
+fn land_snapshot(snapshot: CheckedSnapshot<'_>) -> Result<(), String> {
     use std::io::Read;
 
+    let CheckedSnapshot { mut archive, landings } = snapshot;
     let data_dir = crate::identity::data_dir()?;
-    if !snapshot_has_identity(zip_bytes) {
-        return Err("Snapshot does not contain identity.key".into());
-    }
-    let cursor = std::io::Cursor::new(zip_bytes.to_vec());
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Invalid snapshot data: {e}"))?;
 
     // CRITICAL: the link import runs while the node is LIVE on a throwaway identity, so
     // the global STORE holds an open SQLCipher connection with its own WAL. Overwriting
@@ -1594,23 +1679,20 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
         hollow_log!("[HOLLOW-LINK] Removed throwaway identity.device — fresh device key on restart");
     }
 
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("Zip read error: {e}"))?;
-        let name = entry.name().to_string();
-        let out_path = data_dir.join(&name);
-        hollow_log!("[HOLLOW-LINK] Import writing {name} → {}", out_path.display());
-
+    let mut landed = 0u64;
+    for (i, rel, size) in &landings {
+        let mut entry = archive.by_index(*i).map_err(|e| format!("Zip read error: {e}"))?;
+        let out_path = data_dir.join(rel);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
         }
-
-        if entry.is_file() {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).map_err(|e| format!("Failed to read zip entry: {e}"))?;
-            std::fs::write(&out_path, &data).map_err(|e| format!("Failed to write {name}: {e}"))?;
-            hollow_log!("[HOLLOW-LINK] Import wrote {name} ({} bytes)", data.len());
-        }
+        let mut out = std::fs::File::create(&out_path)
+            .map_err(|e| format!("Failed to write {}: {e}", rel.display()))?;
+        std::io::copy(&mut (&mut entry).take(*size), &mut out)
+            .map_err(|e| format!("Failed to write {}: {e}", rel.display()))?;
+        landed = landed.saturating_add(*size);
     }
+    hollow_log!("[HOLLOW-LINK] Import wrote {} file(s), {landed} bytes", landings.len());
 
     // messages.db was just replaced, so the key ring must re-register against the
     // IMPORTED database rather than the one that is gone.
@@ -1709,8 +1791,19 @@ pub(crate) fn export_backup_bytes(passphrase: &str, include_vault: bool, include
     Ok(output)
 }
 
+/// The shortest passphrase a new `.hollow` file is sealed with. The file holds the
+/// master key and the whole history and can be attacked offline, so the passphrase is
+/// all that guards it; twelve characters is a few words, well beyond a search at
+/// Argon2id's 64 MiB a guess. Opening an older file asks nothing of its passphrase.
+const MIN_BACKUP_PASSPHRASE_CHARS: usize = 12;
+
 #[frb]
 pub fn export_backup(output_path: String, include_vault: bool, include_files: bool, passphrase: String) -> Result<u64, String> {
+    if passphrase.trim().chars().count() < MIN_BACKUP_PASSPHRASE_CHARS {
+        return Err(format!(
+            "Use a passphrase of at least {MIN_BACKUP_PASSPHRASE_CHARS} characters."
+        ));
+    }
     let output = export_backup_bytes(&passphrase, include_vault, include_files)?;
     std::fs::write(&output_path, &output)
         .map_err(|e| format!("Failed to write backup: {e}"))?;
@@ -1814,12 +1907,10 @@ pub fn import_pending_link() -> Result<(), String> {
     crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(&device)
         .map_err(|_| "The link didn't finish on this device. Link it again.".to_string())?;
 
-    // Open the blob BEFORE the identity it replaces is deleted: a snapshot that does
-    // not decrypt, or holds no identity, must cost us nothing.
+    // Open and check the blob BEFORE the identity it replaces is deleted: a snapshot
+    // that does not decrypt, or that the check refuses, must cost us nothing.
     let zip_bytes = decrypt_backup_bytes(&blob, code.trim())?;
-    if !snapshot_has_identity(&zip_bytes) {
-        return Err("Snapshot does not contain identity.key".into());
-    }
+    let snapshot = check_snapshot(&zip_bytes)?;
 
     // Discard the throwaway identity so import lands on a clean slate, exactly like
     // a fresh "Restore from backup" (which runs on first launch with no identity).
@@ -1829,7 +1920,7 @@ pub fn import_pending_link() -> Result<(), String> {
         if p.exists() { let _ = std::fs::remove_file(&p); }
     }
 
-    let result = import_snapshot_bytes(&zip_bytes).and_then(|()| {
+    let result = land_snapshot(snapshot).and_then(|()| {
         std::fs::write(data_dir.join("identity.device"), &device[..])
             .map_err(|e| format!("Failed to install the new device key: {e}"))
     });
@@ -1870,44 +1961,68 @@ pub fn has_pending_wipe() -> Result<bool, String> {
 
 /// (At launch, BEFORE start_node) Delete every file and directory in the data dir so
 /// the next Welcome starts from a clean slate, keeping only the wipe marker (removed
-/// last) and any single-instance lock. Idempotent.
+/// last), any single-instance lock and the profile registry, and what Hollow wrote
+/// beside the dir. The same sweep as the wipe itself. Idempotent.
 #[frb]
 pub fn perform_pending_wipe() -> Result<(), String> {
     let marker = pending_wipe_marker_path()?;
     let data_dir = crate::identity::data_dir()?;
-    let marker_name = marker.file_name().map(|n| n.to_os_string());
-
-    let entries = std::fs::read_dir(&data_dir)
-        .map_err(|e| format!("Failed to read data dir for wipe: {e}"))?;
-    let mut removed = 0u32;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        // Keep the marker (removed last) + any single-instance lock file.
-        if Some(&name) == marker_name.as_ref() { continue; }
-        if name.to_string_lossy().ends_with(".lock") { continue; }
-        // Keep the profile registry: it is app-level config anchored in the default data
-        // root, not identity data, so erasing this profile must not forget the others.
-        if name.to_string_lossy() == "profiles.json" { continue; }
-        let res = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match res {
-            Ok(()) => removed += 1,
-            Err(e) => hollow_log!("[HOLLOW-WIPE] Failed to remove {}: {e}", path.display()),
-        }
-    }
-    // Remove the marker last so a crash mid-wipe re-runs the wipe next launch.
+    std::fs::read_dir(&data_dir).map_err(|e| format!("Failed to read data dir for wipe: {e}"))?;
+    crate::api::wipe::sweep_root(&data_dir);
+    crate::api::wipe::clear_beside(&data_dir);
+    // Last, whatever the sweep left: a marker that never clears would refuse every
+    // new identity, and a crash before this line re-runs the wipe next launch.
     let _ = std::fs::remove_file(&marker);
-    hollow_log!("[HOLLOW-WIPE] Data dir wiped for clean Welcome ({removed} entries removed)");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C-FILES-04: a stored file's thumb reaches Dart re-encoded, or not at all.
+    #[test]
+    fn a_stored_file_thumb_reaches_dart_only_reencoded() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let stored = |thumb: String| crate::storage::messages::StoredFile {
+            file_id: "f".into(),
+            file_name: "a.mp4".into(),
+            file_ext: "mp4".into(),
+            mime_type: "video/mp4".into(),
+            size_bytes: 1,
+            chunk_count: 1,
+            chunks_received: 0,
+            is_image: false,
+            width: None,
+            height: None,
+            message_id: None,
+            context_type: "dm".into(),
+            context_id: "p".into(),
+            sender_id: "p".into(),
+            is_mine: false,
+            created_at: 0,
+            completed_at: None,
+            disk_path: None,
+            hidden_at: None,
+            expired_at: None,
+            video_thumb: None,
+            share_ref: None,
+            thumb_b64: Some(thumb),
+            sha256: None,
+        };
+        let img = image::RgbaImage::from_fn(96, 54, |x, y| image::Rgba([x as u8, y as u8, 9, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let poster = crate::node::image_convert::convert_to_webp_preview(&png, 400).unwrap().0;
+
+        let theirs = b64(&poster);
+        let ours = stored_file_to_ffi(stored(theirs.clone())).thumb_b64;
+        assert!(ours.is_some_and(|t| t != theirs), "the stored bytes were handed on as they came");
+        assert!(stored_file_to_ffi(stored(b64(&poster[..40]))).thumb_b64.is_none());
+    }
 
     /// Install a fresh in-memory store into the process-global slot and hold
     /// the lock that serializes every test which swaps it.
@@ -1981,7 +2096,7 @@ mod tests {
         use std::io::{Read, Write};
         let _g = crate::node::resolver::test_lock();
         let _s = store_test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         // SAFETY: serialized by the locks above.
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
         crate::identity::encryption::clear_session_key();
@@ -2025,11 +2140,25 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
         let mut exported = Vec::new();
         archive.by_name("messages.db").unwrap().read_to_end(&mut exported).unwrap();
-        let out = tempfile::tempdir().unwrap();
+        let out = crate::test_tmp::tempdir().unwrap();
         let exported_path = out.path().join("exported.db");
         std::fs::write(&exported_path, exported).unwrap();
         assert_eq!(secrets(&exported_path), Vec::<&str>::new(), "the export carries device secrets");
         assert_eq!(secrets(&db).len(), 4, "the live database keeps its own");
+
+        // A transfer's temp file never travels, and what does an import takes back whole.
+        std::fs::create_dir_all(tmp.path().join("files")).unwrap();
+        std::fs::write(tmp.path().join("files").join("ab12.png"), b"HFE1").unwrap();
+        std::fs::write(tmp.path().join("files").join(".stream_send_ab12.tmp"), b"half").unwrap();
+        let with_files = build_snapshot_bytes(false, true).unwrap();
+        let names: Vec<String> = zip::ZipArchive::new(std::io::Cursor::new(&with_files[..]))
+            .unwrap()
+            .file_names()
+            .map(str::to_string)
+            .collect();
+        assert!(names.contains(&"files/ab12.png".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".tmp")), "a temp file travels: {names:?}");
+        assert!(check_snapshot(&with_files).is_ok(), "an import refuses what an export writes");
 
         // An older snapshot, made before exports were scrubbed.
         let mut old = std::io::Cursor::new(Vec::new());
@@ -2046,6 +2175,134 @@ mod tests {
         assert_eq!(secrets(&db), Vec::<&str>::new(), "the import keeps the source device's secrets");
     }
 
+    /// A data folder of its own under a fresh temp dir, set as `HOLLOW_DATA_DIR`. The
+    /// caller holds the resolver and store test locks.
+    fn snapshot_target() -> (crate::test_tmp::TestDir, std::path::PathBuf) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        // SAFETY: serialized by the caller's locks.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", &data) };
+        crate::identity::encryption::clear_session_key();
+        (tmp, data)
+    }
+
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut z = zip::ZipWriter::new(&mut out);
+        for (name, bytes) in entries {
+            z.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+        z.finish().unwrap();
+        out.into_inner()
+    }
+
+    /// C-IDENTITY-01. A snapshot (a link presenter's or a backup file someone handed
+    /// over) lands only what `build_snapshot_bytes` writes. A name out of the data
+    /// folder, absolute or relative, or a file Hollow keeps beside the identity refuses
+    /// it whole, before anything lands.
+    #[test]
+    fn a_snapshot_lands_only_what_a_snapshot_holds() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let (tmp, data) = snapshot_target();
+        let key = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x65; 32])
+            .to_protobuf_encoding()
+            .unwrap();
+        let absolute = tmp.path().join("absolute.txt");
+        let absolute_name = absolute.to_str().unwrap().to_string();
+        for hostile in [
+            "../escaped.txt",
+            absolute_name.as_str(),
+            "files/../../escaped.txt",
+            "files/../escaped.txt",
+            "identity.duress",
+            "identity.device",
+            "pending_wipe.marker",
+            "roster_bootstrap.json",
+            "pending_link.hollow",
+            "profiles.json",
+            "files/nested/x.bin",
+            "files/x.bin:stream",
+            "files/CON",
+            "audio_cache/x.bin",
+        ] {
+            let zip = zip_of(&[("identity.key", &key), (hostile, b"planted")]);
+            assert!(import_snapshot_bytes(&zip).is_err(), "{hostile} was accepted");
+            assert!(!tmp.path().join("escaped.txt").exists(), "{hostile} wrote out of the data folder");
+            assert!(!absolute.exists(), "{hostile} wrote to an absolute path");
+            let landed: Vec<_> = std::fs::read_dir(&data).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert!(landed.is_empty(), "{hostile}: a refused snapshot left {landed:?}");
+        }
+
+        let mut link = std::io::Cursor::new(Vec::new());
+        {
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(&mut link);
+            z.start_file("identity.key", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&key).unwrap();
+            z.add_symlink("files/link.png", absolute_name.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
+            z.finish().unwrap();
+        }
+        assert!(import_snapshot_bytes(&link.into_inner()).is_err(), "a link entry was accepted");
+
+        let zip = zip_of(&[
+            ("identity.key", &key),
+            ("files/ab12.png", b"HFE1"),
+            ("files/.ws_recv_ab12.0.tmp", b"half a transfer"),
+            ("vault/cd34", b"shard"),
+        ]);
+        import_snapshot_bytes(&zip).unwrap();
+        assert_eq!(std::fs::read(data.join("files").join("ab12.png")).unwrap(), b"HFE1");
+        assert_eq!(std::fs::read(data.join("vault").join("cd34")).unwrap(), b"shard");
+        assert!(!data.join("files").join(".ws_recv_ab12.0.tmp").exists(), "a transfer's temp file landed");
+    }
+
+    /// C-IDENTITY-01. A snapshot unpacks to no more than a real one could from its
+    /// size, whatever its entries declare, so a small file never fills the disk.
+    #[test]
+    fn a_snapshot_that_unpacks_past_its_size_is_refused() {
+        use std::io::Write;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let (_tmp, data) = snapshot_target();
+        let key = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x66; 32])
+            .to_protobuf_encoding()
+            .unwrap();
+        let zeros = {
+            let mut one = std::io::Cursor::new(Vec::new());
+            let mut z = zip::ZipWriter::new(&mut one);
+            z.start_file("z", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&vec![0u8; 4 << 20]).unwrap();
+            z.finish().unwrap();
+            one.into_inner()
+        };
+        let mut src = zip::ZipArchive::new(std::io::Cursor::new(zeros)).unwrap();
+        let mut bomb = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut bomb);
+            z.start_file("identity.key", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&key).unwrap();
+            for i in 0..40 {
+                z.raw_copy_file_rename(src.by_index(0).unwrap(), format!("files/z{i}.bin")).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        let bomb = bomb.into_inner();
+        assert!(bomb.len() < 1 << 20, "the test bomb is {} bytes", bomb.len());
+        assert!(import_snapshot_bytes(&bomb).is_err(), "160 MiB unpacked from a small snapshot");
+        assert!(!data.join("files").exists() && !data.join("identity.key").exists(), "a refused snapshot wrote files");
+
+        // Empty entries cost nothing to store but a file each to land.
+        let names: Vec<String> = (0..20_000).map(|i| format!("files/e{i}")).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![("identity.key", &key)];
+        entries.extend(names.iter().map(|n| (n.as_str(), &b""[..])));
+        assert!(import_snapshot_bytes(&zip_of(&entries)).is_err(), "twenty thousand empty files landed");
+        assert!(!data.join("files").exists());
+    }
+
     /// HOL-SEC-002: a link's stash installs the device key the presenter vouched for,
     /// so the linked device runs as exactly that device, never as a fresh one.
     #[test]
@@ -2053,7 +2310,7 @@ mod tests {
         use crate::identity::native_identity::NativeKeypair;
         let _g = crate::node::resolver::test_lock();
         let _s = store_test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         // SAFETY: serialized by the locks above.
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
         crate::identity::encryption::clear_session_key();
@@ -2079,5 +2336,45 @@ mod tests {
         for stash in ["pending_link.hollow", "pending_link.code", "pending_link.device"] {
             assert!(!tmp.path().join(stash).exists(), "{stash} outlived the import");
         }
+    }
+}
+
+#[cfg(test)]
+mod backup_passphrase_tests {
+    use super::*;
+
+    /// A `.hollow` file carries the master key and the whole history, so a new
+    /// export refuses a short passphrase, while a file made under one still opens.
+    #[test]
+    fn a_backup_needs_a_long_passphrase_and_an_old_short_one_still_opens() {
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = crate::node::resolver::test_lock();
+        let _s = store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let out_dir = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let master = NativeKeypair::from_secret_bytes(&[0x72; 32]);
+        std::fs::write(tmp.path().join("identity.key"), master.to_protobuf_encoding().unwrap()).unwrap();
+        let pass = derive_db_key().unwrap();
+        let db = tmp.path().join("messages.db");
+        crate::storage::MessageStore::migrate_auto_vacuum_once(db.to_str().unwrap(), &pass).unwrap();
+        crate::storage::MessageStore::open(db.to_str().unwrap(), &pass).unwrap().save_setting("kept", "yes").unwrap();
+
+        let out = out_dir.path().join("backup.hollow");
+        let out_str = out.to_string_lossy().to_string();
+        for short in ["hunter2", "eleven char", "   padded   "] {
+            let err = export_backup(out_str.clone(), false, false, short.into())
+                .expect_err("a short passphrase is refused");
+            assert!(err.contains("12 characters"), "unexpected message: {err}");
+            assert!(!out.exists(), "a refused export writes nothing");
+        }
+        export_backup(out_str, false, false, "correct horse battery".into())
+            .expect("a long passphrase exports");
+        assert!(out.exists());
+
+        let old = export_backup_bytes("hunter2", false, false).unwrap();
+        assert!(decrypt_backup_bytes(&old, "hunter2").is_ok(), "an old short-passphrase file opens");
     }
 }

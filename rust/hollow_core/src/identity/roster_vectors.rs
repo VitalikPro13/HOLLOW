@@ -405,6 +405,15 @@ fn cases() -> Vec<Case> {
     strict.add_pending(sign_pending(&k.m, &sbase, &k.devices[5].peer_id()));
     let waited = BTreeMap::from([(seen_key(&sbase, &k.devices[5].peer_id()), NOW - 8 * DAY)]);
     out.push(relay_case("no-wait", NOW, &m, &k.devices[5].peer_id(), Some((strict.clone().verified(NOW), waited)), strict));
+    // A refused join waits out its seven days and still removes nobody (C-IDENTITY-04).
+    let mut refused = Roster::genesis(&k.m, &k.r, &k.devices[0], NOW - 9 * DAY);
+    let rbase = refused.base();
+    refused.add_consent(sign_consent(&k.devices[5], &m));
+    refused.add_pending(sign_pending(&k.m, &rbase, &k.devices[5].peer_id()));
+    refused.add_removal(sign_removal(&k.devices[5], &m, &rbase, &k.devices[0].peer_id(), &[]));
+    refused.add_removal(sign_removal(&k.devices[0], &m, &rbase, &k.devices[5].peer_id(), &[]));
+    let waited = BTreeMap::from([(seen_key(&rbase, &k.devices[5].peer_id()), NOW - 8 * DAY)]);
+    out.push(relay_case("a-refused-join-removes-nobody", NOW, &m, &k.devices[0].peer_id(), Some((refused.clone().verified(NOW), waited)), refused));
     out
 }
 
@@ -437,4 +446,6 @@ fn roster_vectors_are_current() {
     let restarted = named("a-recovery-restarts-the-clock");
     assert!(!restarted.member && !restarted.pending.is_empty(), "a recovery restarts a left-out backup's seven days");
     assert!(!named("no-wait").member, "with the wait off nothing joins by waiting");
+    let refused = named("a-refused-join-removes-nobody");
+    assert!(refused.member && refused.removed.len() == 1, "a refused join gained removals by waiting");
 }

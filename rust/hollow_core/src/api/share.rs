@@ -40,6 +40,22 @@ pub fn share_create_from_file(source_path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Shares a chat file too big to send directly. A photo or video is shared
+/// from a copy without its location and camera details (C-FILES-03); one that
+/// cannot be cleaned is refused here, before anything is shared.
+#[frb]
+pub fn share_create_for_send(source_path: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+    let source_path = node::share_handler::cleaned_send_source(&source_path)?;
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareCreate { source_path }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 /// Decode a share link, persist a placeholder row, join the swarm room, and
 /// queue a manifest request. Emits NetworkEvent::ShareManifestReady when the
 /// manifest arrives (or ShareFailed on error).

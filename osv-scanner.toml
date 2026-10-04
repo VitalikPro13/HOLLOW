@@ -1,0 +1,42 @@
+# osv-scanner triage for the lockfiles CI scans (pubspec.lock files and the four
+# Cargo.lock files, see the "Supply Chain" job in .github/workflows/ci.yml).
+#
+# The RUSTSEC ids mirror the ignores in rust/deny.toml, where each reason is
+# written out in full; change both together. An id goes here only when no
+# compatible bump fixes it and one sentence says why it cannot reach a user.
+
+[[IgnoredVulns]]
+id = "GHSA-h668-6x6g-f8r5"
+reason = "tract-onnx 0.19 path traversal through an ONNX external_data location, via deep_filter: hollow_dfn loads only the DeepFilterNet3 model embedded in the binary (&'static bytes), which has no external data. Fixed in tract 0.21.17+, which deep_filter v0.5.6 cannot take."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0217"
+reason = "tract-nnef tensor parse overflow, via deep_filter: only our embedded model is ever parsed. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0186"
+reason = "memmap2 0.5 advise_range/flush_range, via tract-onnx: those functions are never called. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "rsa Marvin timing attack, via blind-rsa-signatures: no private-key operation runs on a user's machine. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+reason = "lru 0.7 pop() panic safety, via reed-solomon-erasure: no key or value Drop can panic. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+reason = "instant unmaintained, via reed-solomon-erasure: std::time on native targets. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste unmaintained: build-time proc macro. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 unmaintained: build-time only, under libcrux. See rust/deny.toml."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0319"
+reason = "anymap2 unmaintained: a build-dependency of tract-linalg's build script. See rust/deny.toml."

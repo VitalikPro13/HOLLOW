@@ -204,6 +204,73 @@ fn own_leaf_bound(group: &MlsGroup, signer_public: &[u8], cache: &LeafCache) -> 
     })
 }
 
+/// Leaf-node `application_id` of every KeyPackage minted for a group: this prefix, a
+/// 16-byte tag of the group key, the mint time in ms. Path updates carry it over, so a
+/// leaf always tells when the KeyPackage that seated it was minted.
+const MINT_STAMP: &[u8; 4] = b"hkp1";
+
+fn group_tag(group_key: &str) -> [u8; 16] {
+    let digest = Sha256::digest(format!("hollow-kp-group:{group_key}").as_bytes());
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&digest[..16]);
+    tag
+}
+
+/// Strictly increasing within a process, so two mints in one millisecond still order.
+fn next_mint_ms() -> u64 {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let prev = LAST
+        .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |last| {
+            Some(now.max(last + 1))
+        })
+        .unwrap_or(0);
+    now.max(prev + 1)
+}
+
+fn mint_stamp(group_key: &str) -> Extensions<LeafNode> {
+    let mut id = MINT_STAMP.to_vec();
+    id.extend_from_slice(&group_tag(group_key));
+    id.extend_from_slice(&next_mint_ms().to_be_bytes());
+    Extensions::single(Extension::ApplicationId(ApplicationIdExtension::new(&id)))
+        .expect("application_id is a leaf-node extension")
+}
+
+/// The group tag and mint time a leaf's stamp names, if it carries one.
+fn read_stamp(leaf: &LeafNode) -> Option<([u8; 16], u64)> {
+    let id = leaf.extensions().application_id()?.as_slice();
+    let rest = id.strip_prefix(MINT_STAMP.as_slice())?;
+    let (tag, ms) = (rest.get(..16)?, rest.get(16..)?);
+    Some((tag.try_into().ok()?, u64::from_be_bytes(ms.try_into().ok()?)))
+}
+
+/// When a leaf's KeyPackage was minted for `group_key`; `None` for another group or none.
+fn minted_for(leaf: &LeafNode, group_key: &str) -> Option<u64> {
+    read_stamp(leaf).filter(|(tag, _)| *tag == group_tag(group_key)).map(|(_, ms)| ms)
+}
+
+/// Whether we still hold the private half of the KeyPackage `hash_ref` names.
+fn key_package_held(provider: &OpenMlsRustCrypto, hash_ref: &KeyPackageRef) -> bool {
+    use openmls_traits::storage::StorageProvider;
+    provider
+        .storage()
+        .key_package::<KeyPackageRef, KeyPackageBundle>(hash_ref)
+        .is_ok_and(|kp| kp.is_some())
+}
+
+/// Who a held commit is from, one slot each: the committer's master, or its raw id.
+fn committer_key(facts: &CommitFacts) -> Option<String> {
+    facts.committer.as_ref().map(|c| c.bound().map_or(c.id(), |b| b.master.as_str()).to_string())
+}
+
+fn note_eviction(evictions: &mut HashMap<String, bool>, group_key: &str, facts: &CommitFacts) {
+    if facts.removes_us {
+        evictions.insert(group_key.to_string(), facts.readds_us_with_held_key == Some(true));
+    }
+}
+
 /// What a received commit would do, read from the staged commit before any merge.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CommitFacts {
@@ -213,9 +280,16 @@ pub(crate) struct CommitFacts {
     pub path_leaf: Option<LeafView>,
     pub adds: Vec<LeafView>,
     pub removes: Vec<LeafView>,
+    /// By device, when an added leaf's KeyPackage was minted for THIS group.
+    pub add_minted: HashMap<String, u64>,
+    /// By device, when a removed leaf's KeyPackage was minted, where it says.
+    pub remove_minted: HashMap<String, u64>,
     /// Any proposal besides the committer's own Add and Remove.
     pub other_proposals: bool,
     pub removes_us: bool,
+    /// The commit re-adds this device: whether we still hold that KeyPackage's private
+    /// half, without which its Welcome can never be opened.
+    pub readds_us_with_held_key: Option<bool>,
 }
 
 /// What a received Welcome would install, read before it replaces anything.
@@ -251,11 +325,30 @@ struct HeldCommit {
     since: std::time::Instant,
 }
 
+/// Held commits per group. One per committer, so a member's commit never pushes out
+/// another member's, whose bytes could never be processed again.
+const HELD_COMMITS_CAP: usize = 8;
+
+/// KeyPackages we minted for a group and may still be Welcomed with, by hash reference
+/// and mint time. A parked join's is not listed: its Welcome can come days later.
+type MintedKeyPackages = Mutex<HashMap<String, Vec<(KeyPackageRef, std::time::Instant)>>>;
+
+/// Per group, the other members' bound leaves at the epoch whose authenticator keys it.
+type SeatCache = Mutex<HashMap<String, (Vec<u8>, std::sync::Arc<Vec<LeafIdentity>>)>>;
+
+/// Once a newer KeyPackage for the group goes out, an older one is dropped after this.
+const KEY_PACKAGE_SUPERSEDED: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A KeyPackage no Welcome used within this is dropped (its ask has long timed out).
+pub(crate) const KEY_PACKAGE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Kept staged for the same reason: staging a Welcome consumes our KeyPackage.
 struct HeldWelcome {
     staged: StagedWelcome,
     facts: WelcomeFacts,
     since: std::time::Instant,
+    /// The KeyPackages it names, put back while it waits: spent only if it installs.
+    spent: Vec<KeyPackageRef>,
 }
 
 /// A decrypted application message, or why there is nothing to act on.
@@ -309,7 +402,7 @@ pub(crate) struct MlsManager {
     /// unbuffered room broadcast. Deliberately NOT persisted: after a restart the
     /// responder simply cannot bridge and falls back to a repair.
     commit_cache: HashMap<String, VecDeque<(u64, String)>>,
-    held_commits: HashMap<String, HeldCommit>,
+    held_commits: HashMap<String, Vec<HeldCommit>>,
     held_welcomes: HashMap<String, HeldWelcome>,
     /// A meeting's only committer, by master: the host that admitted us, or ourselves
     /// when we host it. RAM-only, like meetings.
@@ -317,6 +410,11 @@ pub(crate) struct MlsManager {
     /// Per group, the master we last answered with a KeyPackage and when. Outlives the
     /// group on purpose: the repair that evicts us arrives before its Welcome.
     answered_key_requests: HashMap<String, (String, std::time::Instant)>,
+    /// Per group, whether the commit that evicted us re-added this device with a
+    /// KeyPackage we hold, so its Welcome can be opened.
+    evictions: HashMap<String, bool>,
+    minted: MintedKeyPackages,
+    seat_cache: SeatCache,
     leaf_cache: LeafCache,
 }
 
@@ -360,6 +458,9 @@ impl MlsManager {
             held_welcomes: HashMap::new(),
             pinned_committers: HashMap::new(),
             answered_key_requests: HashMap::new(),
+            evictions: HashMap::new(),
+            minted: Mutex::new(HashMap::new()),
+            seat_cache: Mutex::new(HashMap::new()),
             leaf_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -497,7 +598,8 @@ impl MlsManager {
         Ok(buf)
     }
 
-    /// Generate a KeyPackage for distribution to the server owner.
+    /// Generate a KeyPackage bound to no group: a meeting's knock, which is never a
+    /// repair.
     pub fn generate_key_package(&self) -> Result<Vec<u8>, String> {
         let kp = KeyPackage::builder()
             .build(
@@ -510,6 +612,69 @@ impl MlsManager {
 
         TlsSerialize::tls_serialize_detached(kp.key_package())
             .map_err(|e| format!("Failed to serialize KeyPackage: {e:?}"))
+    }
+
+    /// Generate a KeyPackage stamped for `group_key` and its mint time, which is what
+    /// lets it repair our leaf there. Unless `parked` (a join's, Welcomed days later),
+    /// older ones for the group are dropped once superseded for a while.
+    pub fn generate_key_package_for(&self, group_key: &str, parked: bool) -> Result<Vec<u8>, String> {
+        let bundle = KeyPackage::builder()
+            .leaf_node_extensions(mint_stamp(group_key))
+            .build(CIPHERSUITE, &self.provider, &self.signer, self.credential_with_key.clone())
+            .map_err(|e| format!("Failed to build KeyPackage: {e:?}"))?;
+        let kp = bundle.key_package();
+        if !parked {
+            let hash_ref = kp.hash_ref(self.provider.crypto()).map_err(|e| format!("Failed to hash KeyPackage: {e:?}"))?;
+            if let Ok(mut minted) = self.minted.lock() {
+                let ours = minted.entry(group_key.to_string()).or_default();
+                ours.retain(|(old, at)| at.elapsed() < KEY_PACKAGE_SUPERSEDED || !self.drop_key_package(old));
+                ours.push((hash_ref, std::time::Instant::now()));
+            }
+        }
+        TlsSerialize::tls_serialize_detached(kp).map_err(|e| format!("Failed to serialize KeyPackage: {e:?}"))
+    }
+
+    /// Delete the private half of a KeyPackage we minted; whether it is gone.
+    fn drop_key_package(&self, hash_ref: &KeyPackageRef) -> bool {
+        use openmls_traits::storage::StorageProvider;
+        self.provider.storage().delete_key_package(hash_ref).is_ok()
+    }
+
+    /// Drop every listed KeyPackage minted at least `max_age` ago that no Welcome used.
+    /// Returns how many, so the caller persists only when something went.
+    pub fn discard_stale_key_packages(&self, max_age: std::time::Duration) -> usize {
+        let Ok(mut minted) = self.minted.lock() else { return 0 };
+        let mut dropped = 0;
+        for ours in minted.values_mut() {
+            ours.retain(|(hash_ref, at)| {
+                let stale = at.elapsed() >= max_age && self.drop_key_package(hash_ref);
+                dropped += usize::from(stale);
+                !stale
+            });
+        }
+        minted.retain(|_, ours| !ours.is_empty());
+        dropped
+    }
+
+    /// When a serialised KeyPackage was minted for `group_key`; `None` when it names
+    /// another group or none, or does not validate.
+    pub fn key_package_minted_for(&self, kp_bytes: &[u8], group_key: &str) -> Option<u64> {
+        let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes).ok()?;
+        let kp = kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10).ok()?;
+        minted_for(kp.leaf_node(), group_key)
+    }
+
+    /// By device, when each bound leaf's KeyPackage was minted, where its leaf says.
+    pub fn leaf_minted(&self, group_key: &str) -> HashMap<String, u64> {
+        let Some(group) = self.groups.get(group_key) else { return HashMap::new() };
+        group
+            .members()
+            .filter_map(|m| {
+                let device = member_view(&self.leaf_cache, &m).bound()?.device.clone();
+                let (_, ms) = read_stamp(group.public_group().leaf(m.index)?)?;
+                Some((device, ms))
+            })
+            .collect()
     }
 
     /// Drop a KeyPackage we minted but will never be Welcomed for.
@@ -560,6 +725,8 @@ impl MlsManager {
                 SENDER_RATCHET_TOLERANCE,
                 SENDER_RATCHET_MAX_FORWARD,
             ))
+            .with_leaf_node_extensions(mint_stamp(server_id))
+            .map_err(|e| format!("Failed to stamp our leaf: {e:?}"))?
             .build();
 
         let group = MlsGroup::new_with_group_id(
@@ -807,7 +974,7 @@ impl MlsManager {
                     signer: &self.signer,
                     credential_with_key: self.credential_with_key.clone(),
                 },
-                LeafNodeParameters::default(),
+                LeafNodeParameters::builder().with_extensions(mint_stamp(group_key)).build(),
             )
             .map_err(|e| format!("Failed to rebind our leaf: {e:?}"))?;
         TlsSerialize::tls_serialize_detached(bundle.commit())
@@ -853,6 +1020,8 @@ impl MlsManager {
         }
         self.commit_cache.remove(group_key);
         self.held_commits.remove(group_key);
+        // We are seated; a held Welcome must not replace this group later.
+        self.held_welcomes.remove(group_key);
         let group = staged
             .into_group(&self.provider)
             .map_err(|e| format!("Failed to create group from Welcome: {e:?}"))?;
@@ -861,10 +1030,70 @@ impl MlsManager {
         Ok(())
     }
 
+    /// Our KeyPackage bundles a Welcome names, as they are stored now.
+    fn bundles_named(&self, welcome_bytes: &[u8]) -> Vec<(KeyPackageRef, KeyPackageBundle)> {
+        use openmls_traits::storage::StorageProvider;
+        let Ok(msg_in) = <MlsMessageIn as TlsDeserialize>::tls_deserialize_exact(welcome_bytes) else {
+            return Vec::new();
+        };
+        let MlsMessageBodyIn::Welcome(welcome) = msg_in.extract() else { return Vec::new() };
+        welcome
+            .secrets()
+            .iter()
+            .filter_map(|secrets| {
+                let hash_ref = secrets.new_member();
+                let bundle = self.provider.storage().key_package(&hash_ref).ok()??;
+                Some((hash_ref, bundle))
+            })
+            .collect()
+    }
+
+    /// Whether a Welcome names a KeyPackage of ours that we still hold.
+    pub fn names_our_key_package(&self, welcome_bytes: &[u8]) -> bool {
+        !self.bundles_named(welcome_bytes).is_empty()
+    }
+
+    fn restore_key_packages(&self, bundles: &[(KeyPackageRef, KeyPackageBundle)]) {
+        use openmls_traits::storage::StorageProvider;
+        for (hash_ref, bundle) in bundles {
+            if let Err(e) = self.provider.storage().write_key_package(hash_ref, bundle) {
+                hollow_log!("[HOLLOW-MLS] Could not put back a KeyPackage a Welcome named: {e:?}");
+            }
+        }
+    }
+
+    fn forget_key_packages(&self, refs: &[KeyPackageRef]) {
+        use openmls_traits::storage::StorageProvider;
+        for hash_ref in refs {
+            let _ = self.provider.storage().delete_key_package(hash_ref);
+        }
+    }
+
     /// Stage a Welcome, let `judge` rule on what it would install, and only then
     /// install it, replacing any group we hold under that key. A held Welcome waits
-    /// for [`Self::retry_held_welcome`].
+    /// for [`Self::retry_held_welcome`]. Staging deletes the KeyPackage the Welcome
+    /// names before anything is checked, so it is put back unless the Welcome
+    /// installs: whoever saw it on the wire cannot spend it (C-MLS-05).
     pub fn join_from_welcome_judged(
+        &mut self,
+        group_key: &str,
+        welcome_bytes: &[u8],
+        judge: impl FnOnce(&WelcomeFacts) -> Verdict,
+    ) -> Result<Verdict, String> {
+        let named = self.bundles_named(welcome_bytes);
+        let verdict = self.stage_welcome(group_key, welcome_bytes, judge);
+        if !matches!(verdict, Ok(Verdict::Accept)) {
+            self.restore_key_packages(&named);
+        }
+        if matches!(verdict, Ok(Verdict::Hold(_)))
+            && let Some(held) = self.held_welcomes.get_mut(group_key)
+        {
+            held.spent = named.into_iter().map(|(hash_ref, _)| hash_ref).collect();
+        }
+        verdict
+    }
+
+    fn stage_welcome(
         &mut self,
         group_key: &str,
         welcome_bytes: &[u8],
@@ -876,8 +1105,12 @@ impl MlsManager {
             MlsMessageBodyIn::Welcome(w) => w,
             _ => return Err("Message is not a Welcome".to_string()),
         };
+        // A leaf nobody repairs keeps its KeyPackage's ~84-day lifetime for good, and
+        // seats are judged by the roster and the CRDT: an age check would lock everyone
+        // out of a long-lived group.
         let staged = StagedWelcome::build_from_welcome(&self.provider, &hollow_join_config(), welcome)
             .map_err(|e| format!("Failed to process Welcome: {e:?}"))?
+            .skip_lifetime_validation()
             .replace_old_group()
             .build()
             .map_err(|e| format!("Failed to stage Welcome: {e:?}"))?;
@@ -888,7 +1121,7 @@ impl MlsManager {
             Verdict::Hold(_) => {
                 self.held_welcomes.insert(
                     group_key.to_string(),
-                    HeldWelcome { staged, facts, since: std::time::Instant::now() },
+                    HeldWelcome { staged, facts, since: std::time::Instant::now(), spent: Vec::new() },
                 );
             }
             Verdict::Refuse(_) => {}
@@ -911,9 +1144,11 @@ impl MlsManager {
         let verdict = judge(&held.facts);
         match &verdict {
             Verdict::Accept => {
+                let spent = std::mem::take(&mut held.spent);
                 if let Err(e) = self.install_welcome(group_key, held.staged) {
                     return Some(Err(e));
                 }
+                self.forget_key_packages(&spent);
             }
             Verdict::Hold(_) => {
                 self.held_welcomes.insert(group_key.to_string(), held);
@@ -1044,21 +1279,33 @@ impl MlsManager {
         let mut facts = CommitFacts {
             committer,
             path_leaf: staged.update_path_leaf_node().map(|l| leaf_node_view(&self.leaf_cache, l)),
-            adds: staged
-                .add_proposals()
-                .map(|p| leaf_node_view(&self.leaf_cache, p.add_proposal().key_package().leaf_node()))
-                .collect(),
-            removes: Vec::new(),
             other_proposals: staged.queued_proposals().any(|p| {
                 !matches!(p.proposal().proposal_type(), ProposalType::Add | ProposalType::Remove)
             }),
             removes_us: staged.self_removed(),
+            ..Default::default()
         };
+        for proposal in staged.add_proposals() {
+            let kp = proposal.add_proposal().key_package();
+            let view = leaf_node_view(&self.leaf_cache, kp.leaf_node());
+            if let (Some(leaf), Some(ms)) = (view.bound(), minted_for(kp.leaf_node(), server_id)) {
+                facts.add_minted.insert(leaf.device.clone(), ms);
+            }
+            if kp.leaf_node().signature_key().as_slice() == self.signer.public() {
+                let held = kp.hash_ref(self.provider.crypto()).is_ok_and(|r| key_package_held(&self.provider, &r));
+                facts.readds_us_with_held_key = Some(held || facts.readds_us_with_held_key == Some(true));
+            }
+            facts.adds.push(view);
+        }
         for proposal in staged.remove_proposals() {
             let index = proposal.remove_proposal().removed();
             facts.removes_us |= index == own_index;
             if let Some(member) = group.member_at(index) {
-                facts.removes.push(member_view(&self.leaf_cache, &member));
+                let view = member_view(&self.leaf_cache, &member);
+                if let (Some(leaf), Some((_, ms))) = (view.bound(), group.public_group().leaf(index).and_then(read_stamp)) {
+                    facts.remove_minted.insert(leaf.device.clone(), ms);
+                }
+                facts.removes.push(view);
             }
         }
 
@@ -1069,49 +1316,75 @@ impl MlsManager {
                     .merge_staged_commit(&self.provider, staged)
                     .map_err(|e| format!("Failed to merge staged commit: {e:?}"))?;
                 hollow_log!("[HOLLOW-MLS] Processed commit for server {server_id}, new epoch: {:?}", group.epoch());
+                note_eviction(&mut self.evictions, server_id, &facts);
             }
             Verdict::Hold(_) => {
                 let epoch = group.epoch().as_u64();
-                self.held_commits.insert(
-                    server_id.to_string(),
-                    HeldCommit { staged, facts, epoch, since: std::time::Instant::now() },
-                );
+                let from = committer_key(&facts);
+                let held = self.held_commits.entry(server_id.to_string()).or_default();
+                held.retain(|h| committer_key(&h.facts) != from);
+                if held.len() < HELD_COMMITS_CAP {
+                    held.push(HeldCommit { staged, facts, epoch, since: std::time::Instant::now() });
+                } else {
+                    hollow_log!("[HOLLOW-MLS] Not holding another commit for {server_id}: {HELD_COMMITS_CAP} committers already wait");
+                }
             }
             Verdict::Refuse(_) => {}
         }
         Ok(verdict)
     }
 
-    /// Re-judge a held commit. `None` when nothing is held; one past
-    /// [`HELD_MAX_AGE`], or overtaken by another commit, is refused.
+    /// Re-judge the commits held for a group. `None` when nothing is held. The first
+    /// that passes merges and overtakes the rest; one past [`HELD_MAX_AGE`] or behind
+    /// our epoch is refused.
     pub fn retry_held_commit(
         &mut self,
         group_key: &str,
-        judge: impl FnOnce(&CommitFacts) -> Verdict,
+        mut judge: impl FnMut(&CommitFacts) -> Verdict,
     ) -> Option<Result<Verdict, String>> {
         let held = self.held_commits.remove(group_key)?;
         let Some(group) = self.groups.get_mut(group_key) else {
             return Some(Ok(Verdict::Refuse("group gone".to_string())));
         };
-        if group.epoch().as_u64() != held.epoch {
-            return Some(Ok(Verdict::Refuse("overtaken by another commit".to_string())));
-        }
-        if held.since.elapsed() >= HELD_MAX_AGE {
-            return Some(Ok(Verdict::Refuse("held too long".to_string())));
-        }
-        let verdict = judge(&held.facts);
-        match &verdict {
-            Verdict::Accept => {
-                if let Err(e) = group.merge_staged_commit(&self.provider, held.staged) {
-                    return Some(Err(format!("Failed to merge held commit: {e:?}")));
+        let (mut kept, mut ruling) = (Vec::new(), None);
+        for commit in held {
+            if matches!(ruling, Some(Verdict::Accept)) || group.epoch().as_u64() != commit.epoch {
+                ruling.get_or_insert(Verdict::Refuse("overtaken by another commit".to_string()));
+                continue;
+            }
+            if commit.since.elapsed() >= HELD_MAX_AGE {
+                ruling.get_or_insert(Verdict::Refuse("held too long".to_string()));
+                continue;
+            }
+            match judge(&commit.facts) {
+                Verdict::Accept => {
+                    if let Err(e) = group.merge_staged_commit(&self.provider, commit.staged) {
+                        return Some(Err(format!("Failed to merge held commit: {e:?}")));
+                    }
+                    note_eviction(&mut self.evictions, group_key, &commit.facts);
+                    ruling = Some(Verdict::Accept);
+                }
+                Verdict::Hold(why) => {
+                    kept.push(commit);
+                    if !matches!(ruling, Some(Verdict::Hold(_))) {
+                        ruling = Some(Verdict::Hold(why));
+                    }
+                }
+                refused @ Verdict::Refuse(_) => {
+                    ruling.get_or_insert(refused);
                 }
             }
-            Verdict::Hold(_) => {
-                self.held_commits.insert(group_key.to_string(), held);
-            }
-            Verdict::Refuse(_) => {}
         }
-        Some(Ok(verdict))
+        if !matches!(ruling, Some(Verdict::Accept)) && !kept.is_empty() {
+            self.held_commits.insert(group_key.to_string(), kept);
+        }
+        ruling.map(Ok)
+    }
+
+    /// Whether the Welcome that should follow the commit that evicted us from
+    /// `group_key` can be opened: it re-adds this device with a KeyPackage we hold.
+    pub fn take_eviction_welcome(&mut self, group_key: &str) -> bool {
+        self.evictions.remove(group_key).unwrap_or(true)
     }
 
     /// Group keys with a held commit or Welcome awaiting a retry.
@@ -1196,6 +1469,49 @@ impl MlsManager {
         self.held_commits.remove(server_id);
         self.held_welcomes.remove(server_id);
         self.pinned_committers.remove(server_id);
+        if let Ok(mut cache) = self.seat_cache.lock() {
+            cache.remove(server_id);
+        }
+    }
+
+    /// Delete a stored group we did not load: its epoch secrets must not outlive our
+    /// place in it (C-MLS-06).
+    fn erase_stored_group(&self, group_id: &GroupId) {
+        if let Ok(Some(mut group)) = MlsGroup::load(self.provider.storage(), group_id) {
+            let _ = group.delete(self.provider.storage());
+        }
+    }
+
+    /// The id of every group the provider store holds, loaded or not.
+    fn stored_group_ids(&self) -> Vec<GroupId> {
+        // openmls_memory_storage keys a group's context `b"GroupContext"`, its JSON id,
+        // then a two-byte version.
+        const GROUP_CONTEXT_LABEL: &[u8] = b"GroupContext";
+        let Ok(values) = self.provider.storage().values.read() else { return Vec::new() };
+        values
+            .keys()
+            .filter_map(|key| {
+                let id = key.strip_prefix(GROUP_CONTEXT_LABEL)?;
+                serde_json::from_slice(id.get(..id.len().checked_sub(2)?)?).ok()
+            })
+            .collect()
+    }
+
+    /// Erase every stored group this manager did not load, except those of
+    /// `keep_servers` (servers whose state could not be read this run). Meetings never
+    /// outlive the process and a server we hold is always loaded, so what is left is a
+    /// meeting's or a subgroup's whose channel lost its restriction. Returns their keys.
+    pub fn forget_unloaded_groups(&mut self, keep_servers: &[String]) -> Vec<String> {
+        let mut forgotten = Vec::new();
+        for group_id in self.stored_group_ids() {
+            let key = String::from_utf8_lossy(group_id.as_slice()).into_owned();
+            if self.groups.contains_key(&key) || keep_servers.contains(&split_group_key(&key).0) {
+                continue;
+            }
+            self.erase_stored_group(&group_id);
+            forgotten.push(key);
+        }
+        forgotten
     }
 
     /// Pin the only master whose commits a meeting group accepts.
@@ -1273,6 +1589,30 @@ impl MlsManager {
             .map(|g| g.members().map(|m| member_view(&self.leaf_cache, &m)).collect())
             .unwrap_or_default()
     }
+
+    /// The other members' bound leaves: what a send under the group reaches. Cached
+    /// per epoch, since every send asks.
+    pub fn other_bound_leaves(&self, group_key: &str) -> std::sync::Arc<Vec<LeafIdentity>> {
+        let Some(group) = self.groups.get(group_key) else { return Default::default() };
+        let epoch = group.epoch_authenticator().as_slice().to_vec();
+        if let Some((at, leaves)) = self.seat_cache.lock().ok().and_then(|c| c.get(group_key).cloned())
+            && at == epoch
+        {
+            return leaves;
+        }
+        let own = group.own_leaf_index();
+        let leaves: std::sync::Arc<Vec<LeafIdentity>> = std::sync::Arc::new(
+            group
+                .members()
+                .filter(|m| m.index != own)
+                .filter_map(|m| member_view(&self.leaf_cache, &m).bound().cloned())
+                .collect(),
+        );
+        if let Ok(mut cache) = self.seat_cache.lock() {
+            cache.insert(group_key.to_string(), (epoch, leaves.clone()));
+        }
+        leaves
+    }
 }
 
 /// Read a u64 from a byte reader (big-endian).
@@ -1312,6 +1652,22 @@ impl MlsManager {
         };
         let kp = KeyPackage::builder()
             .build(CIPHERSUITE, &self.provider, &self.signer, credential_with_key)
+            .unwrap();
+        TlsSerialize::tls_serialize_detached(kp.key_package()).unwrap()
+    }
+
+    /// Whether the private half of a KeyPackage we minted is still stored.
+    pub(crate) fn holds_key_package_for_test(&self, kp_bytes: &[u8]) -> bool {
+        let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes).unwrap();
+        let kp = kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10).unwrap();
+        key_package_held(&self.provider, &kp.hash_ref(self.provider.crypto()).unwrap())
+    }
+
+    /// A KeyPackage of this manager's own leaf that expires `secs` from now.
+    pub(crate) fn key_package_expiring_in(&self, secs: u64) -> Vec<u8> {
+        let kp = KeyPackage::builder()
+            .key_package_lifetime(Lifetime::new(secs))
+            .build(CIPHERSUITE, &self.provider, &self.signer, self.credential_with_key.clone())
             .unwrap();
         TlsSerialize::tls_serialize_detached(kp.key_package()).unwrap()
     }
@@ -1929,6 +2285,100 @@ mod tests {
         assert_eq!(member.decrypt("s", &ct).unwrap().0, b"still ours".to_vec());
     }
 
+    /// C-MLS-05: staging a Welcome looks up and deletes the KeyPackage it names before
+    /// anything is checked. One we refuse, one that fails after that lookup, or one we
+    /// hold spends nothing: the Welcome we wait for still opens.
+    #[test]
+    fn a_welcome_that_is_not_installed_spends_no_key_package() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut joiner, _) = bound(3, 4);
+        let kp = joiner.generate_key_package().unwrap();
+        let (_, welcome) = owner.add_member("s", &kp).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+
+        let (mut bystander, _) = bound(7, 8);
+        bystander.create_group("s").unwrap();
+        let (_, junk) = bystander.add_member("s", &kp).unwrap();
+        let mut torn = junk.clone();
+        *torn.last_mut().unwrap() ^= 1;
+
+        let refused = joiner.join_from_welcome_judged("s", &junk, |_| Verdict::Refuse("not the host".into()));
+        assert_eq!(refused.unwrap(), Verdict::Refuse("not the host".into()));
+        assert!(joiner.join_from_welcome_judged("s", &torn, |_| Verdict::Accept).is_err(), "a torn Welcome");
+        let held = joiner.join_from_welcome_judged("s", &junk, |_| Verdict::Hold("lag".into()));
+        assert_eq!(held.unwrap(), Verdict::Hold("lag".into()));
+
+        joiner.join_from_welcome("s", &welcome).expect("the Welcome we waited for still opens");
+        assert!(!joiner.names_our_key_package(&welcome), "the Welcome that installed spent it");
+        assert!(joiner.retry_held_welcome("s", |_| Verdict::Accept).is_none(), "the installed group ends the held one");
+        let ct = owner.encrypt("s", b"in").unwrap();
+        assert_eq!(joiner.decrypt("s", &ct).unwrap().0, b"in".to_vec());
+
+        // A held Welcome that installs later spends the KeyPackage it named.
+        let (mut other, _) = bound(9, 10);
+        other.create_group("t").unwrap();
+        let (_, held_welcome) = other.add_member("t", &joiner.generate_key_package().unwrap()).unwrap();
+        joiner.join_from_welcome_judged("t", &held_welcome, |_| Verdict::Hold("lag".into())).unwrap();
+        assert!(joiner.names_our_key_package(&held_welcome), "put back while it waits");
+        assert_eq!(joiner.retry_held_welcome("t", |_| Verdict::Accept).unwrap().unwrap(), Verdict::Accept);
+        assert!(!joiner.names_our_key_package(&held_welcome), "spent once it installed");
+    }
+
+    /// Whether any key of the store names group `group_key`.
+    fn stored_mentions(mgr: &MlsManager, group_key: &str) -> bool {
+        let needle = serde_json::to_vec(&GroupId::from_slice(group_key.as_bytes())).unwrap();
+        mgr.provider.storage().values.read().unwrap().keys().any(|k| k.windows(needle.len()).any(|w| w == needle.as_slice()))
+    }
+
+    /// C-MLS-06: a restore forgets every stored group nothing loaded (a meeting's, a
+    /// subgroup whose channel lost its restriction) and keeps the loaded ones working, and
+    /// those of a server whose state could not be read. A dropped group leaves no entry.
+    #[test]
+    fn a_restore_forgets_the_groups_nothing_loads() {
+        let (mut owner, _) = bound(1, 2);
+        let (mut member, _) = bound(3, 4);
+        let (_, welcome) = {
+            owner.create_group("srv").unwrap();
+            let done = owner.add_member("srv", &member.generate_key_package().unwrap()).unwrap();
+            owner.merge_pending_commit("srv").unwrap();
+            done
+        };
+        member.join_from_welcome("srv", &welcome).unwrap();
+        for group in ["srv#chan", "srv#gone", "conf:meeting", "unread", "unread#chan"] {
+            owner.create_group(group).unwrap();
+        }
+        owner.remove_group("srv#gone");
+        assert!(!stored_mentions(&owner, "srv#gone"), "a removed group leaves no entry");
+        owner.create_group("srv#gone").unwrap();
+
+        let loaded = ["srv".to_string(), "srv#chan".to_string()];
+        let restore = |blob: &[u8], groups: &[String]| {
+            let mut mgr = MlsManager::from_persisted(
+                &owner.signer_bytes().unwrap(), &owner.credential_bytes().unwrap(), Some(blob), groups,
+            ).unwrap();
+            mgr.adopt_device_identity(&keypair(2), &keypair(1));
+            mgr
+        };
+        let mut restored = restore(&owner.serialize_storage().unwrap(), &loaded);
+        let mut forgotten = restored.forget_unloaded_groups(&["unread".to_string()]);
+        forgotten.sort();
+        assert_eq!(forgotten, vec!["conf:meeting".to_string(), "srv#gone".to_string()]);
+        for gone in ["conf:meeting", "srv#gone"] {
+            assert!(!stored_mentions(&restored, gone), "{gone} left an entry");
+        }
+
+        let everything: Vec<String> = ["srv", "srv#chan", "srv#gone", "conf:meeting", "unread", "unread#chan"]
+            .iter().map(|g| g.to_string()).collect();
+        let again = restore(&restored.serialize_storage().unwrap(), &everything);
+        for kept in ["srv", "srv#chan", "unread", "unread#chan"] {
+            assert!(again.has_group(kept), "{kept} was lost");
+        }
+        assert!(!again.has_group("conf:meeting") && !again.has_group("srv#gone"));
+        let ct = restored.encrypt("srv", b"still here").unwrap();
+        assert_eq!(member.decrypt("srv", &ct).unwrap().0, b"still here".to_vec());
+    }
+
     /// A held commit merges on a retry once the rules allow it, and goes with its group.
     #[test]
     fn a_held_commit_merges_on_retry_and_dies_with_its_group() {
@@ -2045,6 +2495,103 @@ mod tests {
             owner.export_secret("s", "sframe", b"", 32).unwrap(),
             "no fork"
         );
+    }
+
+    /// A member's commit that holds never pushes out another member's held commit,
+    /// whose bytes could never be processed again.
+    #[test]
+    fn a_held_commit_survives_another_committers_held_commit() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut a, _) = bound(3, 4);
+        let (mut b, _) = bound(5, 6);
+        let (_, w, _) = owner.add_members_batch("s", &[
+            (keypair(4).peer_id(), a.generate_key_package().unwrap()),
+            (keypair(6).peer_id(), b.generate_key_package().unwrap()),
+        ]).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        a.join_from_welcome("s", &w).unwrap();
+        b.join_from_welcome("s", &w).unwrap();
+
+        let (x, _) = bound(7, 8);
+        let (genuine, _) = owner.add_member("s", &x.generate_key_package().unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        let (y, _) = bound(9, 10);
+        let (rogue, _) = b.add_member("s", &y.generate_key_package().unwrap()).unwrap();
+        b.merge_pending_commit("s").unwrap();
+        let lag = |_: &CommitFacts| Verdict::Hold("lag".into());
+        assert_eq!(a.process_commit_judged("s", &genuine, lag).unwrap(), Verdict::Hold("lag".into()));
+        assert_eq!(a.process_commit_judged("s", &rogue, lag).unwrap(), Verdict::Hold("lag".into()));
+
+        let owner_master = keypair(1).peer_id();
+        let only_the_owner = |f: &CommitFacts| match f.committer.as_ref().and_then(LeafView::bound) {
+            Some(c) if c.master == owner_master => Verdict::Accept,
+            _ => Verdict::Hold("lag".into()),
+        };
+        assert_eq!(a.retry_held_commit("s", only_the_owner).unwrap().unwrap(), Verdict::Accept);
+        assert!(a.retry_held_commit("s", |_| Verdict::Accept).is_none(), "the overtaken commit goes");
+        let ct = owner.encrypt("s", b"one group").unwrap();
+        assert_eq!(a.decrypt("s", &ct).unwrap().0, b"one group".to_vec());
+    }
+
+    /// A commit that evicts us says whether the Welcome after it can be opened: only
+    /// when it re-adds this device with a KeyPackage we still hold.
+    #[test]
+    fn an_eviction_says_whether_its_welcome_can_be_opened() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (mut member, member_dev) = bound(3, 4);
+        let (_, w) = owner.add_member("s", &member.generate_key_package_for("s", false).unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        member.join_from_welcome("s", &w).unwrap();
+
+        let held = member.generate_key_package_for("s", false).unwrap();
+        let repair = owner.commit_membership("s", std::slice::from_ref(&member_dev), &[(member_dev.clone(), held)]).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        member.process_commit("s", &repair.commit).unwrap();
+        assert!(member.take_eviction_welcome("s"), "a repair with our KeyPackage brings a Welcome we can open");
+        member.remove_group("s");
+        member.join_from_welcome("s", &repair.welcome.unwrap()).unwrap();
+
+        let spent = member.generate_key_package_for("s", false).unwrap();
+        member.discard_key_package(&spent).unwrap();
+        let replay = owner.commit_membership("s", std::slice::from_ref(&member_dev), &[(member_dev.clone(), spent)]).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        member.process_commit("s", &replay.commit).unwrap();
+        assert!(!member.take_eviction_welcome("s"), "a re-add with a KeyPackage we no longer hold brings nothing to open");
+    }
+
+    /// C-MLS-08: a KeyPackage no Welcome used is dropped once a newer one for its group
+    /// has been out a while, or once its ask has long timed out; a parked join's stays.
+    #[test]
+    fn unused_key_packages_are_dropped_when_stale() {
+        let (mgr, _) = bound(1, 2);
+        let asked = mgr.generate_key_package_for("s", false).unwrap();
+        let parked = mgr.generate_key_package_for("s", true).unwrap();
+        assert!(mgr.holds_key_package_for_test(&asked) && mgr.holds_key_package_for_test(&parked));
+        assert_eq!(mgr.discard_stale_key_packages(std::time::Duration::from_secs(600)), 0, "nothing is stale yet");
+        assert_eq!(mgr.discard_stale_key_packages(std::time::Duration::ZERO), 1);
+        assert!(!mgr.holds_key_package_for_test(&asked), "the unused KeyPackage's private half is gone");
+        assert!(mgr.holds_key_package_for_test(&parked), "a parked join's KeyPackage waits for its Welcome");
+    }
+
+    /// R-MLS-21: seats are judged by the roster and the CRDT, never by a leaf's age, so
+    /// a member whose leaf outlived its KeyPackage's lifetime keeps the group joinable.
+    #[test]
+    fn a_welcome_still_installs_after_an_old_members_leaf_lifetime_ends() {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group("s").unwrap();
+        let (old, _) = bound(3, 4);
+        owner.add_member("s", &old.key_package_expiring_in(3)).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3200));
+
+        let (mut late, _) = bound(5, 6);
+        let (_, welcome) = owner.add_member("s", &late.generate_key_package().unwrap()).unwrap();
+        owner.merge_pending_commit("s").unwrap();
+        late.join_from_welcome("s", &welcome).expect("a Welcome must install beside an expired leaf");
+        let ct = owner.encrypt("s", b"still joinable").unwrap();
+        assert_eq!(late.decrypt("s", &ct).unwrap().0, b"still joinable".to_vec());
     }
 
     /// Two members that merged different commits at one epoch hold forks: their epoch

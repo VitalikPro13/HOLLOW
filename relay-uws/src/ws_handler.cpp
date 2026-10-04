@@ -1,5 +1,6 @@
 #include "ws_handler.h"
 #include "auth_frame.h"
+#include "client_json.h"
 #include "ring_evict.h"
 #include "ring_auth.h"
 #include "crypto.h"
@@ -697,7 +698,8 @@ static bool inbox_owner_by_roster(PerSocketData* data, const std::string& room,
                                   const json& roster_json, RelayState& state) {
     if (data->is_guest || !is_inbox_room(room)) return false;
     std::optional<roster::Roster> shown = roster::from_json(roster_json);
-    if (!shown || roster_json.dump().size() > roster::MAX_ROSTER_BYTES) return false;
+    // Measured as the relay would hold it, never by walking the client's own JSON again.
+    if (!shown || roster::to_json(*shown).dump().size() > roster::MAX_ROSTER_BYTES) return false;
     const std::string master = room.substr(sizeof(INBOX_ROOM_PREFIX) - 1);
     RosterBook::Shown r = state.roster_book.show(master, *shown, data->peer_id, socket_share(state, data),
                                                  wall_now_ms(), relay_roster_crypto());
@@ -1389,7 +1391,7 @@ static KillProof judge_kill_blob(const std::string& blob, int64_t issued_at_ms, 
     KillProof p;
     std::string text;
     if (!base64_decode(blob, text)) return p;
-    p.order = kill_order::from_json(json::parse(text, nullptr, false));
+    p.order = kill_order::parse(text);
     if (!p.order) return p;
     const auto* held = state.roster_book.get(p.order->master_peer_id);
     if (!held || held->roster.r_pub.empty()) return p;
@@ -2678,12 +2680,8 @@ void sweep_link_guesses(RelayState& state) {
 static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                  std::string_view message, RelayState& state,
                                  const Config& config) {
-    json j;
-    try {
-        j = json::parse(message);
-    } catch (...) {
-        return;
-    }
+    json j = client_json::parse(message);
+    if (j.is_discarded()) return;
 
     std::string type = j.value("type", "");
 

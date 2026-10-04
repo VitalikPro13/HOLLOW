@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
+import 'package:hollow/src/core/services/secret_clipboard.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -254,7 +254,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
     final hasCode = _code.text.trim().isNotEmpty;
     final copyCode = HollowButton.ghost(
       onPressed: () async {
-        await Clipboard.setData(ClipboardData(text: _code.text.trim()));
+        await SecretClipboard.copy(_code.text.trim());
         if (!context.mounted) return;
         HollowToast.show(context, 'Code copied',
             type: HollowToastType.success);

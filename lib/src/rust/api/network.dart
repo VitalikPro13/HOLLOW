@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
@@ -463,8 +463,9 @@ Future<bool?> pushSenderKnown({required String peerId, String? serverId}) =>
 /// The FCM background isolate shares its process with the still-running full node,
 /// so `start_fetch_node` refuses to start; the live node can collect the buffered
 /// ciphertext instead, and a queued JoinRoom rides the reconnect if the WS is a
-/// doze-killed zombie. Returns Ok(false) when no node is running, in which case the
-/// caller should use the fetch node.
+/// doze-killed zombie. Returns Ok(false) when no node is running, or when the wake
+/// names nobody we share a DM room with, in which case the caller should use the
+/// fetch node (which refuses that wake the same way).
 Future<bool> nudgeLiveDmFetch({required String senderPeerId}) => RustLib
     .instance
     .api

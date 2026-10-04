@@ -26,6 +26,7 @@ import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/core/crash_log.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/single_instance_lock.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
@@ -55,43 +56,22 @@ bool _acquireSingleInstanceLock() {
   return SingleInstanceLock.acquire(lockDir);
 }
 
-/// Crash log file for Flutter errors.
-IOSink? _crashLogSink;
-
 /// Captures Flutter framework and platform/async errors into
 /// hollow_crash.log, alongside hollow_debug.log.
 Future<void> _initCrashLogging() async {
   try {
-    final dataDir = hollowDataDir;
-    final dir = Directory(dataDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-
-    final logFile = File('$dataDir${Platform.pathSeparator}hollow_crash.log');
-
-    if (logFile.existsSync() && logFile.lengthSync() > 5 * 1024 * 1024) {
-      final backup = File('${logFile.path}.old');
-      if (backup.existsSync()) backup.deleteSync();
-      logFile.renameSync(backup.path);
-    }
-
-    _crashLogSink = logFile.openWrite(mode: FileMode.append);
-    _crashLogSink!.writeln('\n=== Hollow started at ${DateTime.now().toIso8601String()} ===');
+    CrashLog.init(hollowDataDir);
 
     FlutterError.onError = (details) {
       FlutterError.presentError(details); // still print to console
-      _crashLogSink?.writeln(
-        '[${DateTime.now().toIso8601String()}] [FLUTTER-ERROR] ${details.exceptionAsString()}\n${details.stack}',
-      );
-      _crashLogSink?.flush();
+      CrashLog.record(
+          'FLUTTER-ERROR', details.exceptionAsString(), details.stack);
     };
 
     // Async and platform errors the Flutter framework does not catch.
     PlatformDispatcher.instance.onError = (error, stack) {
       debugPrint('[HOLLOW-CRASH] $error\n$stack');
-      _crashLogSink?.writeln(
-        '[${DateTime.now().toIso8601String()}] [PLATFORM-ERROR] $error\n$stack',
-      );
-      _crashLogSink?.flush();
+      CrashLog.record('PLATFORM-ERROR', error, stack);
       return true; // handled
     };
   } catch (e) {

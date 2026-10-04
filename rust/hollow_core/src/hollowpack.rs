@@ -1530,8 +1530,8 @@ mod tests {
 
     /// Write bytes to a throwaway file. The returned dir owns it, so dropping
     /// the dir deletes the pack.
-    fn temp_pack(bytes: &[u8]) -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn temp_pack(bytes: &[u8]) -> (crate::test_tmp::TestDir, String) {
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         let path = dir.path().join("item.hollowpack");
         std::fs::write(&path, bytes).expect("write pack");
         let as_str = path.to_string_lossy().to_string();

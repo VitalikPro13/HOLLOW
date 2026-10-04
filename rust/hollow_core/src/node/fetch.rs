@@ -239,6 +239,16 @@ where
     }
 }
 
+/// What the fetch node tells the relay once an order has wiped this install: every
+/// order parked for it is done, and its push token is dead, so a phone whose app
+/// may never open again stops being woken for an identity that is gone.
+fn after_wipe_frames() -> [serde_json::Value; 2] {
+    [
+        crate::node::ws_client::kill_ack_frame(None),
+        serde_json::json!({ "type": "unregister_push_token" }),
+    ]
+}
+
 /// Handle a relay text frame: room control messages plus the legacy
 /// text-direct DM path.
 #[allow(clippy::too_many_arguments)]
@@ -263,7 +273,6 @@ async fn handle_kill_frame(
     // A bare ack clears every order parked for this device, so it follows only a
     // wipe; turning one away names that one by issuer and stamp, or a junk deposit
     // takes a genuine order sharing its stamp down with it.
-    let ack = crate::node::ws_client::kill_ack_frame(None).to_string();
     let ack_this = match value.get("issued_at_ms").and_then(|v| v.as_i64()) {
         Some(issued_at_ms) => {
             let issuer = value.get("issuer").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -283,11 +292,12 @@ async fn handle_kill_frame(
         &order, local_master, device_peer_id, db_path, db_passphrase,
     ) {
         crate::node::destroy::Verdict::Apply => {
-            hollow_log!("[HOLLOW-DESTROY] Kill signal accepted in the fetch node");
             if let Ok(root) = crate::identity::data_dir() {
                 let _ = crate::api::wipe::destroy_data_root(&root);
             }
-            let _ = write.send(Message::Text(ack.into())).await;
+            for frame in after_wipe_frames() {
+                let _ = write.send(Message::Text(frame.to_string().into())).await;
+            }
             true
         }
         crate::node::destroy::Verdict::RejectPermanent(reason) => {
@@ -1528,6 +1538,15 @@ mod tests {
         NativeKeypair::from_secret_bytes(&[seed; 32])
     }
 
+    /// After a wipe the relay hears both: the bare ack and the push token's end.
+    #[test]
+    fn a_wipe_in_the_fetch_node_drops_the_push_token() {
+        let frames = after_wipe_frames();
+        assert!(frames.iter().any(|f| f["type"] == "unregister_push_token"));
+        let ack = frames.iter().find(|f| f["type"] == "kill_ack").expect("the ack");
+        assert!(ack.get("issuer").is_none(), "only a wipe sends the bare ack");
+    }
+
     #[tokio::test]
     async fn a_junk_kill_deposit_is_acked_alone() {
         let mut sink: Vec<Message> = Vec::new();
@@ -1563,7 +1582,7 @@ mod tests {
     #[test]
     fn authz_push_dm_change_touches_only_the_senders_own_rows() {
         let _g = crate::node::resolver::test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("push.db").to_string_lossy().into_owned();
         let pass = "ab".repeat(32);
         let open = || crate::storage::MessageStore::open(&path, &pass).unwrap();
@@ -1622,8 +1641,8 @@ mod tests {
         assert_eq!(text("f1"), "the photo");
     }
 
-    fn temp_store() -> (tempfile::TempDir, String, String) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn temp_store() -> (crate::test_tmp::TestDir, String, String) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("push.db").to_string_lossy().into_owned();
         let pass = "ab".repeat(32);
         crate::storage::MessageStore::open(&path, &pass).unwrap();
@@ -1986,7 +2005,7 @@ mod tests {
     #[test]
     fn push_dm_is_stored_whole_or_dropped_never_clipped() {
         let _g = crate::node::resolver::test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("push.db").to_string_lossy().into_owned();
         let pass = "ab".repeat(32);
         let (alice, bob) = (kp(164), kp(165));

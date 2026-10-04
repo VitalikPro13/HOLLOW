@@ -17,6 +17,11 @@ import 'package:hollow/src/ui/settings/settings_shared.dart';
 /// Kept for the legacy settings dialog, which still names it.
 typedef BackupCategoryView = BackupFileRow;
 
+/// The shortest export passphrase; Rust's `export_backup` holds the same floor.
+/// The file carries the master key and the whole history, open to an offline
+/// search, and a few words clear twelve characters easily.
+const int kMinBackupPassphraseChars = 12;
+
 /// The "Backup file" row: exports the identity, friends, servers and messages
 /// to one encrypted file.
 class BackupFileRow extends StatefulWidget {
@@ -152,6 +157,7 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
   final _repeat = TextEditingController();
   bool _includeFiles = false;
   bool _includeVault = false;
+  String? _passError;
   String? _error;
 
   @override
@@ -167,6 +173,11 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
   void _submit() {
     if (!_filled) return;
     final pass = _passphrase.text.trim();
+    if (pass.runes.length < kMinBackupPassphraseChars) {
+      setState(() => _passError =
+          'Use at least $kMinBackupPassphraseChars characters. A few words work well.');
+      return;
+    }
     if (pass != _repeat.text.trim()) {
       setState(() => _error = "The passphrases don't match.");
       return;
@@ -174,7 +185,10 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
     Navigator.of(context).pop(_BackupOptions(pass, _includeFiles, _includeVault));
   }
 
-  void _changed() => setState(() => _error = null);
+  void _changed() => setState(() {
+        _passError = null;
+        _error = null;
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -186,8 +200,9 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const HollowDialogText(
-            'The file is encrypted with a passphrase you choose. You need it '
-            'to restore the backup.',
+            'The file is encrypted with a passphrase you choose, at least '
+            '$kMinBackupPassphraseChars characters. You need it to restore '
+            'the backup.',
           ),
           const SizedBox(height: HollowSpacing.lg),
           const SettingsFieldLabel(label: 'Passphrase'),
@@ -196,6 +211,7 @@ class _ExportBackupDialogState extends State<_ExportBackupDialog> {
             controller: _passphrase,
             obscureText: true,
             autofocus: true,
+            errorText: _passError,
             onChanged: (_) => _changed(),
             onSubmitted: (_) => FocusScope.of(context).nextFocus(),
           ),

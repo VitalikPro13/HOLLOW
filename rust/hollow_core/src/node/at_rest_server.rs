@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn at_rest_server_range_semantics() {
         let _g = crate::node::resolver::test_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", dir.path()) };
         at_rest::reset_for_test();
         let db = dir.path().join("messages.db").to_string_lossy().to_string();

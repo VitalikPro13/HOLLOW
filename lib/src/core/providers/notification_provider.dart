@@ -147,38 +147,13 @@ class NotificationSettingsNotifier
   /// the node caches the prefs and the next loadAll() retries.
   void _syncPushPrefsToRelay() {
     if (kIsWeb || (!Platform.isAndroid && !Platform.isIOS)) return;
-    final prefs = <String, Map<String, dynamic>>{};
-    for (final entry in state.serverLevels.entries) {
-      prefs[entry.key] = {
-        'level': entry.value.name,
-        'channels': <String, String>{},
-      };
-    }
-    for (final entry in state.channelOverrides.entries) {
-      if (entry.value == ChannelNotificationLevel.inherit) continue;
-      final sep = entry.key.indexOf(':');
-      if (sep <= 0) continue;
-      final sid = entry.key.substring(0, sep);
-      final cid = entry.key.substring(sep + 1);
-      final server = prefs.putIfAbsent(
-          sid, () => {'level': 'all', 'channels': <String, String>{}});
-      (server['channels'] as Map<String, String>)[cid] = entry.value.name;
-    }
-    // Muted DMs ride the reserved `~dm` entry in the same server-pref shape,
-    // keyed by the sender's DEVICE ids because the relay never learns
-    // device→master; a wake carries the socket's device id.
-    final muted = {..._mutedDmDeviceIds(), ..._ownSiblingDeviceIds()};
-    if (muted.isNotEmpty) {
-      prefs[dmMutePrefKey] = {
-        'level': 'all',
-        'channels': <String, String>{for (final id in muted) id: 'nothing'},
-      };
-    }
-    try {
-      network_api.setPushPrefs(prefsJson: jsonEncode(prefs));
-    } catch (_) {
-      // Node not running yet — prefs re-sync on the next loadAll/change.
-    }
+    final prefs = pushPrefsForRelay(
+      serverLevels: state.serverLevels,
+      channelOverrides: state.channelOverrides,
+      mutedDmDevices: {..._mutedDmDeviceIds(), ..._ownSiblingDeviceIds()},
+    );
+    // Node not running yet: prefs re-sync on the next loadAll or change.
+    network_api.setPushPrefs(prefsJson: jsonEncode(prefs)).catchError((_) {});
   }
 
   /// Get the effective notification level for a server.
@@ -293,6 +268,46 @@ class NotificationSettingsNotifier
       ChannelNotificationLevel.inherit => NotificationLevel.all,
     };
   }
+}
+
+/// The push filters the relay keeps for this phone: only what differs from its
+/// default of "all", so it never holds the list of servers or the channels
+/// left alone (C-RP-06). A channel set to its server's level is no override.
+/// Muted DM senders ride the reserved `~dm` entry, keyed by DEVICE id because
+/// a wake carries the socket's device id and the relay never learns
+/// device to master.
+Map<String, Map<String, dynamic>> pushPrefsForRelay({
+  required Map<String, NotificationLevel> serverLevels,
+  required Map<String, ChannelNotificationLevel> channelOverrides,
+  required Set<String> mutedDmDevices,
+}) {
+  final channels = <String, Map<String, String>>{};
+  for (final entry in channelOverrides.entries) {
+    if (entry.value == ChannelNotificationLevel.inherit) continue;
+    final sep = entry.key.indexOf(':');
+    if (sep <= 0) continue;
+    final sid = entry.key.substring(0, sep);
+    final serverLevel = serverLevels[sid] ?? NotificationLevel.all;
+    if (entry.value.name == serverLevel.name) continue;
+    (channels[sid] ??= <String, String>{})[entry.key.substring(sep + 1)] =
+        entry.value.name;
+  }
+  final prefs = <String, Map<String, dynamic>>{};
+  for (final sid in {...serverLevels.keys, ...channels.keys}) {
+    final level = serverLevels[sid] ?? NotificationLevel.all;
+    final overrides = channels[sid] ?? <String, String>{};
+    if (level == NotificationLevel.all && overrides.isEmpty) continue;
+    prefs[sid] = {'level': level.name, 'channels': overrides};
+  }
+  if (mutedDmDevices.isNotEmpty) {
+    prefs[NotificationSettingsNotifier.dmMutePrefKey] = {
+      'level': 'all',
+      'channels': <String, String>{
+        for (final id in mutedDmDevices) id: 'nothing',
+      },
+    };
+  }
+  return prefs;
 }
 
 /// Immutable state for notification settings.

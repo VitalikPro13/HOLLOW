@@ -137,9 +137,10 @@ impl NativeKeypair {
     /// public key (the 36-byte `[0x08,0x01,0x12,0x20,...pubkey]` format).
     ///
     /// Mirrors `compute_peer_id` from a PUBLIC key alone, to bind a signature's pubkey
-    /// to a claimed peer_id. `None` if the protobuf header is malformed.
+    /// to a claimed peer_id. `None` if the protobuf header is malformed, or the
+    /// encoding is longer than the key: trailing bytes would derive an alias id.
     pub fn peer_id_from_pubkey_protobuf(pubkey_protobuf: &[u8]) -> Option<String> {
-        if pubkey_protobuf.len() < 36
+        if pubkey_protobuf.len() != 36
             || pubkey_protobuf[0] != 0x08
             || pubkey_protobuf[1] != 0x01
             || pubkey_protobuf[2] != 0x12
@@ -166,8 +167,8 @@ impl NativeKeypair {
         signature: &[u8],
         payload: &[u8],
     ) -> Result<bool, String> {
-        if pubkey_protobuf.len() < 36 {
-            return Err("Public key protobuf too short".into());
+        if pubkey_protobuf.len() != 36 {
+            return Err("Public key protobuf must be 36 bytes".into());
         }
         if pubkey_protobuf[0] != 0x08
             || pubkey_protobuf[1] != 0x01
@@ -292,5 +293,18 @@ mod tests {
         assert_eq!(proto.len(), 36);
         assert_eq!(&proto[..4], &[0x08, 0x01, 0x12, 0x20]);
         assert_eq!(&proto[4..], native.public_key_bytes());
+    }
+
+    /// C-OLM-06: one key has one id, so an encoding longer than the key is no key
+    /// at all, as the relay already rules.
+    #[test]
+    fn a_public_key_encoding_with_trailing_bytes_is_refused() {
+        let kp = NativeKeypair::from_secret_bytes(&[1u8; 32]);
+        let sig = kp.sign(b"payload");
+        let mut long = kp.public_key_protobuf();
+        long.push(0);
+        assert_eq!(NativeKeypair::peer_id_from_pubkey_protobuf(&long), None, "an alias id");
+        assert!(!NativeKeypair::verify_peer_signature(&long, &sig, b"payload").unwrap_or(false), "an alias key");
+        assert_eq!(NativeKeypair::peer_id_from_pubkey_protobuf(&kp.public_key_protobuf()), Some(kp.peer_id()));
     }
 }

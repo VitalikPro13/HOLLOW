@@ -278,7 +278,7 @@ impl ReplayGuard {
                 return false;
             }
         }
-        seen.insert(nonce, ts_ms + LIVE_SKEW_MS).is_none()
+        seen.insert(nonce, ts_ms.saturating_add(LIVE_SKEW_MS)).is_none()
     }
 
     /// Forget nonces whose frames would now be refused as stale anyway.
@@ -290,9 +290,10 @@ impl ReplayGuard {
     }
 }
 
-/// Whether a live-only frame stamped `ts_ms` is too old to act on.
+/// Whether a live-only frame stamped `ts_ms` is too old to act on. The sealer picks
+/// the stamp, so the arithmetic saturates.
 pub(crate) fn is_stale(ts_ms: i64, now_ms: i64) -> bool {
-    now_ms - ts_ms > LIVE_SKEW_MS
+    now_ms.saturating_sub(ts_ms) > LIVE_SKEW_MS
 }
 
 /// The latest stamp an honest sender can have put on a row it sent at `sent_ms`: a
@@ -401,6 +402,18 @@ mod tests {
         assert!(is_stale(NOW, NOW + LIVE_SKEW_MS + 1));
         guard.prune(NOW + LIVE_SKEW_MS + 1);
         assert!(guard.seen.is_empty());
+    }
+
+    /// C-OLM-04: the sealer picks its own stamp, so the extremes are judged rather
+    /// than overflowing the clock arithmetic.
+    #[test]
+    fn a_frame_stamped_at_the_i64_extremes_is_judged_without_overflow() {
+        assert!(is_stale(i64::MIN, NOW));
+        assert!(is_stale(i64::MIN + 1, NOW));
+        assert!(!is_stale(i64::MAX, NOW));
+        let mut guard = ReplayGuard::default();
+        assert!(guard.first_sight("alice", [3; NONCE_LEN], i64::MAX, NOW));
+        assert!(!guard.first_sight("alice", [3; NONCE_LEN], i64::MAX, NOW));
     }
 
     #[test]

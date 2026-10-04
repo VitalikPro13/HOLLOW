@@ -731,6 +731,23 @@ fn queue_pending_envelope(
         .push(envelope_json.to_string());
 }
 
+/// What waits in the resend queue for `device`, taken out of it. A blocked identity's
+/// copies are dropped instead: nothing written before a block reaches it after, even
+/// when its device shows up before the node hears of the block.
+pub(crate) fn take_queued(pending_messages: &mut HashMap<String, Vec<String>>, device: &str) -> Option<Vec<String>> {
+    let queued = pending_messages.remove(device)?;
+    if super::blocklist::is_blocked(device) {
+        hollow_log!("[HOLLOW-FRIENDS] Dropped {} queued message(s) for blocked {device}", queued.len());
+        return None;
+    }
+    Some(queued)
+}
+
+/// Drop every resend queue a blocked identity's device holds.
+pub(crate) fn drop_blocked_queues(pending_messages: &mut HashMap<String, Vec<String>>) {
+    pending_messages.retain(|device, _| !super::blocklist::is_blocked(device));
+}
+
 /// No Olm session with this device — queue the signed envelope (drained on
 /// PeerJoined/RoomMembers/KeyBundle) and fire a throttled KeyRequest.
 #[allow(clippy::too_many_arguments)]
@@ -908,7 +925,7 @@ pub(crate) async fn handle_send_channel_message(
                 reply_to_sender: reply_author.clone(),
             };
             if let Err(e) = super::crypto_handler::send_mls_broadcast_in(
-                mls.as_mut().unwrap(), ws_cmd_tx, &server_id, group, &envelope, crypto_store,
+                mls.as_mut().unwrap(), ws_cmd_tx, &server_id, group, &envelope, crypto_store, Some(server),
             ) {
                 hollow_log!("[HOLLOW-MLS] Channel hint broadcast failed: {e}");
             }
@@ -1140,7 +1157,7 @@ async fn broadcast_channel_envelope(
     let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
     if use_mls {
         let ring = super::ring_auth::topic(server, channel_id);
-        match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, server_id, channel_id, &ring, use_subgroup, envelope, crypto_store) {
+        match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, server_id, channel_id, &ring, use_subgroup, envelope, crypto_store, Some(server)) {
             Ok(wire_bytes) => return Some(wire_bytes),
             Err(e) => {
                 hollow_log!("[HOLLOW-MLS] {mls_fail_log}: {e}");
@@ -3934,6 +3951,40 @@ mod tests {
         assert_eq!(store.get_channel_message_sig_row(mid).unwrap().text, "meet at one");
     }
 
+    /// C-OLM-01: a member serving another member's message cannot move a colon-led
+    /// chunk of its text into the preview slot, not onto a row we hold, not as a
+    /// fresh row, and not to a guest; the genuine copy still lands.
+    #[test]
+    fn authz_a_synced_item_cannot_move_text_into_another_slot() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let (bob, alice) = (kp(131), kp(132));
+        let (sid, cid, mid) = ("srv-c1", "chan-c1", "0123456789abcdef0123456789abcdef");
+        let text = "Do not click this: https://x.example";
+        let ingest = |item: &crate::node::types::SyncMessageItem| {
+            crate::node::sync_handler::ingest_synced_channel_item(
+                &store, sid, cid, item, &alice.peer_id(), &mut PkCache::new(),
+            )
+        };
+        let genuine = own_channel_item(&bob, sid, cid, mid, text, 1_000, None, None, None);
+        let mut resplit = genuine.clone();
+        resplit.t = " https://x.example".to_string();
+        resplit.lp_digest = Some(":Do not click this".to_string());
+
+        let mut cache = PkCache::new();
+        assert!(guest_item_accepted(&genuine, sid, cid, &mut cache), "control: the guest takes the genuine item");
+        assert!(!guest_item_accepted(&resplit, sid, cid, &mut cache), "a guest must not take the re-split");
+
+        assert_eq!(ingest(&resplit).0, 0, "a fresh row must not land from the re-split");
+        assert!(store.get_channel_message_sig_row(mid).is_none());
+        assert_eq!(ingest(&genuine).0, 1, "the genuine copy still lands");
+
+        let mut as_edit = resplit.clone();
+        as_edit.edited_at = Some(1_000);
+        ingest(&as_edit);
+        assert_eq!(store.get_channel_message_sig_row(mid).unwrap().text, text, "the held row keeps its text");
+    }
+
     /// The wedged-row heal still converges: a row stored under an unresolvable
     /// device id keeps its author's key, and the author's verified copy repairs it.
     #[test]
@@ -3974,8 +4025,8 @@ mod tests {
     //
     // The live handlers open the DB by path, so these run on a temp file.
 
-    fn file_db() -> (tempfile::TempDir, String, String) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn file_db() -> (crate::test_tmp::TestDir, String, String) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("live.db").to_string_lossy().into_owned();
         (tmp, path, "ab".repeat(32))
     }

@@ -4,6 +4,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 
+/// The shortest PIN Hollow sets; Rust holds new secrets to the same floor. An
+/// older, shorter PIN keeps unlocking.
+const int kMinPinDigits = 6;
+
+final _onlyDigits = RegExp(r'^\p{N}+$', unicode: true);
+
+/// A secret made only of digits and shorter than [kMinPinDigits].
+bool isShortPin(String secret) =>
+    _onlyDigits.hasMatch(secret) && secret.length < kMinPinDigits;
+
 /// App Lock helper: stores the lock-type marker and, optionally, the secret
 /// released by a successful biometric prompt.
 ///
@@ -24,11 +34,74 @@ class AppLockService {
   // and the app lock is the only prompt. Absent when the person chose to be
   // asked before Hollow starts.
   static const _kLaunchSecret = 'hollow_app_lock_launch_secret';
+  // Set once the person has been asked to trade a short PIN for a longer one.
+  static const _kLongerPinAsked = 'hollow_app_lock_longer_pin_asked';
+
+  // This-device-only: the items never travel in a backup or to a new phone,
+  // so a copied identity file stays useless without this device (C-06).
+  static const _iOptions =
+      IOSOptions(accessibility: KeychainAccessibility.unlocked_this_device);
+  static const _mOptions =
+      MacOsOptions(accessibility: KeychainAccessibility.unlocked_this_device);
 
   final _storage = const FlutterSecureStorage(
     aOptions: AndroidOptions(),
+    iOptions: _iOptions,
+    mOptions: _mOptions,
   );
   final _localAuth = LocalAuthentication();
+
+  /// Items written before the class changed carry the migrating
+  /// `unlocked` class, which the new query no longer matches.
+  Future<void>? _migration;
+
+  Future<void> _migrated() => _migration ??= _migrateAccessibility();
+
+  /// Re-saves every item under the this-device class. Deleting first is what
+  /// lets the add through: the accessibility class is not part of an item's
+  /// identity, so the old one would block it.
+  Future<void> _migrateAccessibility() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS &&
+        defaultTargetPlatform != TargetPlatform.macOS) {
+      return;
+    }
+    const legacyI = IOSOptions();
+    const legacyM = MacOsOptions();
+    for (final key in [
+      _kLockType,
+      _kBiometricSecret,
+      _kLaunchSecret,
+      _kLongerPinAsked,
+    ]) {
+      String? old;
+      try {
+        old =
+            await _storage.read(key: key, iOptions: legacyI, mOptions: legacyM);
+        if (old == null) continue;
+        await _storage.delete(key: key);
+        await _storage.write(key: key, value: old);
+      } catch (e) {
+        debugPrint('[HOLLOW-APPLOCK] keychain class migration skipped: $e');
+        // A failed re-save must not cost the person their stored secret.
+        if (old != null) {
+          try {
+            await _storage.write(
+                key: key, value: old, iOptions: legacyI, mOptions: legacyM);
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  Future<String?> _read(String key) async {
+    await _migrated();
+    return _storage.read(key: key);
+  }
+
+  Future<void> _write(String key, String value) async {
+    await _migrated();
+    await _storage.write(key: key, value: value);
+  }
 
   /// The secret the user typed when enabling/unlocking App Lock this session.
   /// Lets the biometric toggle store it without re-prompting.
@@ -40,7 +113,7 @@ class AppLockService {
   /// password-style entry for locks created before this marker existed).
   Future<String?> getLockType() async {
     try {
-      return await _storage.read(key: _kLockType);
+      return await _read(_kLockType);
     } catch (_) {
       return null;
     }
@@ -51,7 +124,7 @@ class AppLockService {
       if (type == null) {
         await _storage.delete(key: _kLockType);
       } else {
-        await _storage.write(key: _kLockType, value: type);
+        await _write(_kLockType, type);
       }
     } catch (e) {
       debugPrint('[HOLLOW-APPLOCK] setLockType failed: $e');
@@ -73,7 +146,7 @@ class AppLockService {
   /// Whether a biometric-released secret is stored.
   Future<bool> isBiometricEnabled() async {
     try {
-      final v = await _storage.read(key: _kBiometricSecret);
+      final v = await _read(_kBiometricSecret);
       return v != null && v.isNotEmpty;
     } catch (_) {
       return false;
@@ -81,7 +154,7 @@ class AppLockService {
   }
 
   Future<void> enableBiometric(String secret) async {
-    await _storage.write(key: _kBiometricSecret, value: secret);
+    await _write(_kBiometricSecret, secret);
   }
 
   Future<void> disableBiometric() async {
@@ -92,7 +165,7 @@ class AppLockService {
 
   Future<String?> readLaunchSecret() async {
     try {
-      final v = await _storage.read(key: _kLaunchSecret);
+      final v = await _read(_kLaunchSecret);
       return (v == null || v.isEmpty) ? null : v;
     } catch (_) {
       return null;
@@ -103,7 +176,7 @@ class AppLockService {
 
   Future<void> storeLaunchSecret(String secret) async {
     try {
-      await _storage.write(key: _kLaunchSecret, value: secret);
+      await _write(_kLaunchSecret, secret);
     } catch (e) {
       debugPrint('[HOLLOW-APPLOCK] storeLaunchSecret failed: $e');
     }
@@ -115,12 +188,32 @@ class AppLockService {
     } catch (_) {}
   }
 
+  Future<bool> longerPinAsked() async {
+    try {
+      return await _read(_kLongerPinAsked) != null;
+    } catch (_) {
+      // Unreadable: better never to ask than to ask at every unlock.
+      return true;
+    }
+  }
+
+  Future<void> markLongerPinAsked() async {
+    try {
+      await _write(_kLongerPinAsked, '1');
+    } catch (e) {
+      debugPrint('[HOLLOW-APPLOCK] markLongerPinAsked failed: $e');
+    }
+  }
+
   /// Clear everything (called when App Lock is removed).
   Future<void> clearAll() async {
     sessionSecret = null;
     await setLockType(null);
     await disableBiometric();
     await clearLaunchSecret();
+    try {
+      await _storage.delete(key: _kLongerPinAsked);
+    } catch (_) {}
   }
 
   /// Shows the OS biometric prompt with no secret involved, to verify the
@@ -147,7 +240,7 @@ class AppLockService {
     try {
       if (!await isBiometricEnabled()) return null;
       if (!await promptBiometric(reason: 'Unlock Hollow')) return null;
-      return await _storage.read(key: _kBiometricSecret);
+      return await _read(_kBiometricSecret);
     } catch (e) {
       debugPrint('[HOLLOW-APPLOCK] biometric auth failed: $e');
       return null;

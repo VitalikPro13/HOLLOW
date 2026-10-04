@@ -137,7 +137,7 @@ mod tests {
     /// transport id never collides with a sibling's `local_peer_str`.
     #[test]
     fn fresh_and_distinct_from_master_when_absent() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("identity.device");
         let master = master_kp();
 
@@ -152,7 +152,7 @@ mod tests {
     /// Stable across reloads and distinct from the master.
     #[test]
     fn fresh_random_stable_across_reloads() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("identity.device");
 
         let device = load_or_create_device_keypair_at(&path, None).unwrap();
@@ -165,8 +165,8 @@ mod tests {
     /// devices of one identity coexist on the relay.
     #[test]
     fn two_fresh_devices_are_distinct() {
-        let tmp_a = tempfile::tempdir().unwrap();
-        let tmp_b = tempfile::tempdir().unwrap();
+        let tmp_a = crate::test_tmp::tempdir().unwrap();
+        let tmp_b = crate::test_tmp::tempdir().unwrap();
         let a = load_or_create_device_keypair_at(&tmp_a.path().join("d"), None).unwrap();
         let b = load_or_create_device_keypair_at(&tmp_b.path().join("d"), None).unwrap();
         assert_ne!(a.peer_id(), b.peer_id());
@@ -176,7 +176,7 @@ mod tests {
     /// the next load, and is then stable.
     #[test]
     fn legacy_keystone_file_is_rotated() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("identity.device");
         let master = master_kp();
 

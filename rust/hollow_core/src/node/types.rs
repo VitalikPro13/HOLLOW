@@ -1045,6 +1045,8 @@ pub(crate) enum NodeCommand {
     /// File a report against a peer with the relay (deduped relay-side, one per
     /// reporter per target per category). Blocking itself is FFI-direct and local.
     ReportUser { target: String, category: String },
+    /// The FFI just stored a block (or its removal) of `master`; the node acts on it.
+    BlockChanged { master: String, blocked: bool },
     // -- Temporary nicknames --
     ClaimNickname { nickname: String },
     ReleaseNickname,
@@ -1424,6 +1426,7 @@ impl NodeCommand {
             Self::RejectFriendRequest { .. } => "RejectFriendRequest",
             Self::RemoveFriend { .. } => "RemoveFriend",
             Self::ReportUser { .. } => "ReportUser",
+            Self::BlockChanged { .. } => "BlockChanged",
             Self::ClaimNickname { .. } => "ClaimNickname",
             Self::ReleaseNickname => "ReleaseNickname",
             Self::ClaimLinkCode { .. } => "ClaimLinkCode",
@@ -1891,10 +1894,11 @@ pub(crate) enum HavenMessage {
         welcome: String, // base64 serialized Welcome
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
-        /// A meeting host's founding nonce: with the sender leaf's master it must hash
-        /// to the meeting id (`conference::hosts_meeting`).
+        /// A meeting host's proof: the Welcome is staged only from the device it binds
+        /// (`conference::welcome_host`), and the sender leaf's master must hash with its
+        /// nonce to the meeting id (`conference::hosts_meeting`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        conf_nonce: Option<String>,
+        conf_host: Option<ConfHost>,
     },
 
     /// Commit message (membership change) from the server owner.
@@ -2131,6 +2135,16 @@ pub(crate) enum HavenMessage {
         /// incoming request shows who is asking, and the relay carrying it cannot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_card: Option<SealedCard>,
+    },
+
+    /// The target's card sealed back to a requester, left in the requester's mailbox
+    /// (A28): the requester sees whom it asked while the two share no room, which
+    /// would show it the target's devices (C-OLM-02).
+    #[serde(rename = "friend_card")]
+    FriendCard {
+        /// The request it answers; only that pending row of the requester takes it.
+        requested_at: i64,
+        sealed_card: SealedCard,
     },
 
     #[serde(rename = "friend_accept")]
@@ -4034,6 +4048,7 @@ impl HavenMessage {
             | Self::MlsCommit { .. }
             | Self::MlsCommitCatchup { .. }
             | Self::FriendRequest { .. }
+            | Self::FriendCard { .. }
             | Self::FriendAccept { .. }
             | Self::FriendReject { .. }
             | Self::FriendRemove
@@ -4241,6 +4256,7 @@ impl HavenMessage {
             | Self::MlsCommit { .. }
             | Self::MlsCommitCatchup { .. }
             | Self::FriendRequest { .. }
+            | Self::FriendCard { .. }
             | Self::FriendAccept { .. }
             | Self::FriendReject { .. }
             | Self::FriendRemove
@@ -4531,6 +4547,8 @@ pub(crate) struct PendingShardStream {
     /// The device whose stream completes it: the one that sent the store, the holder we
     /// asked, or the source a recovery plan names.
     pub sender: String,
+    /// The id its bytes stream under (`vault_ops::shard_stream_id` from `sender` to us).
+    pub stream_id: String,
     /// Our storage pledge for the server when it was registered, judged again at completion.
     pub pledge: u64,
     /// It answers a shard pull of ours, so wrong bytes refute the holder that sent them.

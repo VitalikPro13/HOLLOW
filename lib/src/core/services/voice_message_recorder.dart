@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 
 import 'package:record/record.dart' as rec;
@@ -347,10 +348,8 @@ class VoiceMessageRecorder {
     return '${dir.path}${sep}voice_${stamp}_$rand.ogg';
   }
 
-  static void _log(String msg) {
-    // ignore: avoid_print
-    print(msg);
-  }
+  // debugPrint is silent in release: stdout lands in a desktop session's journal.
+  static void _log(String msg) => debugPrint(msg);
 }
 
 class RecorderPermissionException implements Exception {

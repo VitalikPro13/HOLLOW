@@ -70,12 +70,11 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
   /// Pre-play duration in milliseconds, null until a probe succeeds.
   int? _probedDurationMs;
 
-  /// A probe was actually handed to ffmpeg. Only this suppresses the deferred
-  /// probe on the play tap.
+  /// A probe was actually handed to ffmpeg, which only the play tap does.
   bool _probeStarted = false;
 
-  /// The eager path has decided for this file, a refusal included, so the sniff
-  /// is not re-run every rebuild and no probe is claimed to have happened.
+  /// The page read has decided for this file, a refusal included, so it is
+  /// not re-run every rebuild.
   bool _eagerProbeSettled = false;
 
   String get _playKey => widget.attachment.fileId;
@@ -113,13 +112,12 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
         sizeBytes: widget.attachment.sizeBytes,
       );
 
-  /// The zero-tap probe.
+  /// The zero-tap duration badge.
   ///
-  /// Probing runs the bundled ffmpeg over bytes a stranger sent, and an
-  /// auto-downloaded file arrives with no interaction at all, so the eager path
-  /// is kept to the one case that earns it: a small, genuine voice note that
-  /// really does open with an Ogg header on disk. Everything else waits for the
-  /// play tap, which is the user asking for the decode.
+  /// A voice note lands with no interaction at all (it skips the auto-download
+  /// gate), and every field that marks it as one is the sender's choice, so no
+  /// decoder sees it before the play tap. The badge comes from the Ogg page
+  /// headers, read in Dart.
   Future<void> _maybeProbe() async {
     if (_probeStarted || _eagerProbeSettled) return;
     if (!_looksLikeAVoiceNote()) return;
@@ -140,22 +138,10 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     // One decision per file, a refusal included: the bytes will not change
     // under us. The play tap can still probe afterwards.
     _eagerProbeSettled = true;
-    if (!await AudioProbeService.looksLikeOgg(path)) return;
-    _probeStarted = true;
-    await _runProbe(path);
-  }
-
-  /// Probes for the duration badge, then prewarms the transcode cache.
-  Future<void> _runProbe(String path) async {
-    final ms = await AudioProbeService.probeDurationMs(path);
+    final ms = await AudioProbeService.oggDurationMs(path);
     if (ms != null && mounted) {
       setState(() => _probedDurationMs = ms);
     }
-    // Prewarms the Windows Opus to WAV transcode cache, so the first play tap
-    // is instant.
-    unawaited(
-      AudioTranscodeService.ensurePlayable(path).catchError((_) => null),
-    );
   }
 
   /// The on-disk path for this attachment, preferring the persisted one and
@@ -185,7 +171,7 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     // in front of a user who asked for it.
     setState(() => _preparing = true);
 
-    if (!_probeStarted) {
+    if (!_probeStarted && _probedDurationMs == null) {
       _probeStarted = true;
       final ms = await AudioProbeService.probeDurationMs(path);
       if (!mounted) return;

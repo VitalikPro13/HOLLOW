@@ -7,7 +7,8 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `scrubbed_db_copy`, `snapshot_has_identity`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `call_record_from_row`, `check_snapshot`, `decrypt_backup_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `land_snapshot`, `pending_link_blob_path`, `pending_link_code_path`, `pending_link_device_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `scrubbed_db_copy`, `snapshot_landing`, `snapshot_leaf`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`, `transfer_temp`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CheckedSnapshot`
 
 /// Open the encrypted message database, once at app start after the identity loads.
 Future<void> openMessageStore() =>
@@ -424,7 +425,8 @@ Future<bool> hasPendingWipe() =>
 
 /// (At launch, BEFORE start_node) Delete every file and directory in the data dir so
 /// the next Welcome starts from a clean slate, keeping only the wipe marker (removed
-/// last) and any single-instance lock. Idempotent.
+/// last), any single-instance lock and the profile registry, and what Hollow wrote
+/// beside the dir. The same sweep as the wipe itself. Idempotent.
 Future<void> performPendingWipe() =>
     RustLib.instance.api.crateApiStoragePerformPendingWipe();
 

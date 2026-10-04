@@ -68,6 +68,30 @@ class _VerifyProofDialogState extends State<_VerifyProofDialog> {
   }
 }
 
+final _signedIdShape = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
+final _previewDigestShape = RegExp(r'^[0-9a-f]{64}$');
+final _albumIdShape = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
+
+/// Whether every field a signed payload carries before the text has its shape,
+/// as Rust's `SignedExtras::well_formed` requires: a colon in one would let a
+/// proof move text across a field boundary and still verify. Empty = absent.
+@visibleForTesting
+bool proofFieldsWellFormed({
+  required String messageId,
+  required String replyTo,
+  required String fileId,
+  required String lpDigest,
+  required String album,
+}) {
+  bool fits(String v, RegExp shape) => v.isEmpty || shape.hasMatch(v);
+  return fits(messageId, _signedIdShape) &&
+      fits(replyTo, _signedIdShape) &&
+      fits(fileId, _signedIdShape) &&
+      fits(lpDigest, _previewDigestShape) &&
+      fits(album, _albumIdShape);
+}
+
 /// Verify a proof: paste or import a proof JSON and check it with the same
 /// Ed25519 verification as the Message Proof dialog. One implementation shared
 /// by the desktop Security page and the mobile Settings tab.
@@ -201,11 +225,14 @@ class VerifyProofSectionState extends State<VerifyProofSection> {
       final fileId = message['file_id'] as String? ?? '';
       final orderUs = message['order_us']?.toString() ?? '';
       final lpDigest = message['link_preview_digest'] as String? ?? '';
-      // An album id is signed in its own slot (v3); a colon in it would let
-      // the text boundary move, so anything but a UUID is refused.
       final album = message['album'] as String? ?? '';
-      if (album.isNotEmpty && !_albumIdShape.hasMatch(album)) {
-        fail('Invalid album id in the proof.');
+      if (!proofFieldsWellFormed(
+          messageId: messageId ?? '',
+          replyTo: replyTo,
+          fileId: fileId,
+          lpDigest: lpDigest,
+          album: album)) {
+        fail('Invalid message fields in the proof.');
         return;
       }
       final fields = '${_canonicalMsgType(contextType)}:$contextId:$peerId:'
@@ -254,9 +281,6 @@ class VerifyProofSectionState extends State<VerifyProofSection> {
 
   /// Returns the error to show for an invalid proof envelope, or null when its
   /// fields all hold their expected values.
-  static final _albumIdShape = RegExp(
-      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
-
   static String? _envelopeError(
     Map<String, dynamic> map,
     Map<String, dynamic>? message,

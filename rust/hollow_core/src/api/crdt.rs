@@ -1768,7 +1768,9 @@ pub fn vault_upload_file(
     file_path: String,
     message_id: String,
 ) -> Result<String, String> {
-    let file_data = crate::node::at_rest::read_all(std::path::Path::new(&file_path))?;
+    // The vault keeps the ORIGINAL photo, not the converted one, so it is
+    // cleaned of its metadata here (C-FILES-03).
+    let file_data = crate::node::media_strip::read_for_send(std::path::Path::new(&file_path))?;
     let original_size = file_data.len() as u64;
 
     let path = std::path::Path::new(&file_path);

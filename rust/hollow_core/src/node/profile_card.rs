@@ -236,7 +236,7 @@ mod tests {
     /// the identity that signed it.
     #[test]
     fn a_member_hands_a_guest_only_signed_cards() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("m.db").to_string_lossy().into_owned();
         let key = "ab".repeat(32);
         let (a, b, c) = (keypair(53), keypair(54), keypair(55));

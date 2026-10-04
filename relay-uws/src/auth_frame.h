@@ -1,4 +1,5 @@
 #pragma once
+#include "client_json.h"
 #include "json.hpp"
 
 #include <cstddef>
@@ -52,7 +53,7 @@ inline bool frame_of_type(const nlohmann::json& j, const char* want) {
 
 inline nlohmann::json parse_small(std::string_view message) {
     if (message.size() > MAX_AUTH_FRAME_BYTES) return nlohmann::json();
-    return nlohmann::json::parse(message, nullptr, /*allow_exceptions=*/false);
+    return client_json::parse(message);
 }
 
 }  // namespace auth_detail

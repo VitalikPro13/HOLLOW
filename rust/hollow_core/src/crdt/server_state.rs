@@ -3331,6 +3331,45 @@ mod tests {
         assert!(refusal(None, "vipper", "vc").is_some());
     }
 
+    /// C-MEDIA-01: the seats a sweep takes back from a server's voice call: a member who
+    /// lost sight of the channel, a non-member, a device its roster dropped while its link
+    /// still resolves; never a seat that qualifies, ours, or a meeting's.
+    #[test]
+    fn authz_a_voice_seat_is_judged_again_after_it_was_granted() {
+        let _g = crate::node::resolver::test_lock();
+        let mut s = label_gate_fixture();
+        for payload in [
+            CrdtPayload::ChannelAdded { channel_id: "vc".into(), name: "vc".into(), category: None, channel_type: "voice".into() },
+            CrdtPayload::ChannelVisibilityLabelsChanged { channel_id: "vc".into(), labels: vec!["vip".into()] },
+        ] {
+            let op = s.create_op(payload);
+            s.apply_op(&op).unwrap();
+        }
+        let seated = |devices: &[&str]| devices.iter().map(|d| d.to_string()).collect::<std::collections::HashSet<_>>();
+        let participants = std::collections::HashMap::from([
+            ("s1:vc".to_string(), seated(&["vipper", "member", "stranger", "vipper-phone", "owner"])),
+            ("conf:abc:main".to_string(), seated(&["stranger"])),
+        ]);
+        let states = std::collections::HashMap::from([("s1".to_string(), s)]);
+        let phone = ["vipper-phone".to_string()];
+        crate::node::resolver::update("vipper-phone", "vipper");
+        crate::node::resolver::mark_revoked(&phone);
+        let mut gone: Vec<(String, String, String, &str)> =
+            crate::node::voice_handler::unqualified_seats(&states, &participants, "owner", "owner");
+        crate::node::resolver::unmark_revoked(&phone);
+        crate::node::resolver::forget("vipper-phone");
+        gone.sort();
+        let seat = |device: &str, reason| ("s1".to_string(), "vc".to_string(), device.to_string(), reason);
+        assert_eq!(
+            gone,
+            vec![
+                seat("member", "cannot see the channel"),
+                seat("stranger", "not a member"),
+                seat("vipper-phone", "a device its roster does not count"),
+            ],
+        );
+    }
+
     #[test]
     fn label_gate_replaces_visibility_tier() {
         let mut s = label_gate_fixture();

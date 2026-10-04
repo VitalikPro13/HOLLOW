@@ -248,8 +248,8 @@ mod tests {
     }
 
     /// A committed card as the receiver stores it, in a fresh store.
-    fn card_store(bytes: &[u8], vthumb: Option<&VideoThumbRef>) -> (tempfile::TempDir, crate::storage::MessageStore, String) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn card_store(bytes: &[u8], vthumb: Option<&VideoThumbRef>) -> (crate::test_tmp::TestDir, crate::storage::MessageStore, String) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("c.db").to_string_lossy().into_owned();
         let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
         let sha = sha256_hex(bytes);
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn a_share_download_is_hashed_in_slices() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("big.bin");
         let bytes: Vec<u8> = (0..4 * 1024 * 1024 + 7).map(|i| (i % 251) as u8).collect();
         std::fs::write(&path, &bytes).unwrap();

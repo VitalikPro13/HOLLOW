@@ -125,6 +125,12 @@ fn cases() -> Vec<Case> {
     let mut added = named.clone();
     added.targets.push(d[3].peer_id());
     out.push(case("target-added-after-signing", h, &none, &d[3], &added, AT));
+    let mut x = named.clone();
+    x.targets = vec![format!("{},{}", x.targets[0], x.targets[1])];
+    out.push(case("targets-re-split-after-signing", h, &none, &d[2], &x, AT));
+    let mut x = every.clone();
+    x.targets = vec![String::new()];
+    out.push(case("every-device-signed-as-a-blank-target", h, &none, &d[1], &x, AT));
     let mut x = every.clone();
     x.sig_r = flip(&x.sig_r);
     out.push(case("tampered-phrase-signature", h, &none, &d[1], &x, AT));

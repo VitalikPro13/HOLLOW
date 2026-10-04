@@ -8,7 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/log_redaction.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
+import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -195,7 +197,8 @@ class _ExportDiagnosticsRowState extends State<_ExportDiagnosticsRow> {
   Future<void> _export() async {
     setState(() => _busy = true);
     try {
-      final bytes = Uint8List.fromList(utf8.encode(_collectDiagnostics()));
+      final bytes =
+          Uint8List.fromList(utf8.encode(await _collectDiagnostics()));
       final saved = await FilePicker.platform.saveFile(
         dialogTitle: 'Export debug logs',
         fileName: 'hollow_diagnostics.txt',
@@ -233,7 +236,8 @@ class _ExportDiagnosticsRowState extends State<_ExportDiagnosticsRow> {
 }
 
 /// The push diagnostics and the tails of the debug and crash logs, as text.
-String _collectDiagnostics() {
+/// The file leaves the device, so every id and path in it is redacted.
+Future<String> _collectDiagnostics() async {
   final buf = StringBuffer();
   buf.writeln('=== Hollow Diagnostics ===');
   buf.writeln('Exported: ${DateTime.now().toIso8601String()}');
@@ -270,12 +274,12 @@ String _collectDiagnostics() {
 
   appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
   appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
-  appendFile('Dart push log', '$hollowDataDir/push_debug.log');
+  appendFile('Dart push log', await pushDebugLogPath());
   appendFile('Hollow debug log', '$hollowDataDir/hollow_debug.log',
       tailBytes: 2 * 1024 * 1024);
   appendFile('Hollow crash log', '$hollowDataDir/hollow_crash.log',
       tailBytes: 512 * 1024);
-  return buf.toString();
+  return LogRedactor().redact(buf.toString());
 }
 
 /// Where AnonListen posts and takes support, in the order the row names them.

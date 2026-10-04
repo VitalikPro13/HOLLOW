@@ -146,7 +146,7 @@ fn broadcast_op_mls_first(
     let Ok(op_json) = serde_json::to_string(op) else { return };
     if mls.as_ref().is_some_and(|m| m.has_group(server_id)) {
         let envelope = MessageEnvelope::CrdtOp { sid: server_id.to_string(), op_json: op_json.clone() };
-        if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, &envelope, crypto_store) {
+        if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, &envelope, crypto_store, Some(state)) {
             hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, the Olm twin still goes: {e}");
         }
     }
@@ -707,7 +707,7 @@ pub(crate) async fn handle_create_server(
         name.clone(), local_peer_str.to_string(), bundle_keypair.clone(), pk_b64,
     );
     let server_id = state.server_id.clone();
-    hollow_log!("[HOLLOW-CRDT] Creating server '{name}' id={server_id}");
+    hollow_log!("[HOLLOW-CRDT] Creating server {server_id}");
     crdt_store.insert_op(founding);
     crdt_store.save_state_snapshot(server_id.clone(), &state);
 
@@ -936,7 +936,7 @@ pub(crate) async fn handle_create_channel(
         // The id came in with the command: the caller already handed it to the
         // UI (see `api::crdt::create_channel`), so minting another one here
         // would leave the layout pointing at a channel that never exists.
-        hollow_log!("[HOLLOW-CRDT] Creating channel '{name}' id={channel_id} in server {server_id}");
+        hollow_log!("[HOLLOW-CRDT] Creating channel {channel_id} in server {server_id}");
 
         let Some(op) = author_op(state, crdt_store, &server_id, CrdtPayload::ChannelAdded {
             channel_id: channel_id.clone(),
@@ -1180,6 +1180,16 @@ pub(crate) async fn handle_delete_server(
         .cloned()
         .collect();
     let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
+    let op_json = serde_json::to_string(&op).ok();
+    // The MLS copy goes out before the tombstone drains the members it may reach.
+    if let Some(op_json) = &op_json
+        && mls.as_ref().is_some_and(|m| m.has_group(&server_id))
+    {
+        let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+        if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store, Some(&*state)) {
+            hollow_log!("[HOLLOW-MLS] ServerDeleted MLS broadcast failed: {e}");
+        }
+    }
     let _ = state.apply_op(&op); // marks shell `deleted`, drains membership, keeps op_log
 
     // Persist the tombstone shell + the op (op_log is skip_serializing → the op MUST be
@@ -1196,13 +1206,7 @@ pub(crate) async fn handle_delete_server(
     // yet or sitting at a skewed epoch, and neither is visible from here
     // (`feedback_owner_coordinator_mls_recovery`). Duplication is free, because
     // `ServerDeleted` ingest is owner-author validated and `apply_op` is idempotent.
-    if let Ok(op_json) = serde_json::to_string(&op) {
-        if mls.as_ref().is_some_and(|m| m.has_group(&server_id)) {
-            let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
-            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
-                hollow_log!("[HOLLOW-MLS] ServerDeleted MLS broadcast failed: {e}");
-            }
-        }
+    if let Some(op_json) = op_json {
         let msg = HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json };
         if let Some(json) = super::olm_lane::carried_json(&msg) {
             super::olm_lane::carry_to_identities(
@@ -1491,7 +1495,7 @@ pub(crate) async fn handle_join_server(
             .and_then(|p| p.key_package.clone())
     }).or_else(|| {
         let mls = mls.as_ref()?;
-        match super::crypto_handler::mint_key_package(mls, crypto_store) {
+        match super::crypto_handler::mint_group_key_package(mls, crypto_store, &server_id, true) {
             Ok(kp) => Some(base64::engine::general_purpose::STANDARD.encode(kp)),
             Err(e) => {
                 hollow_log!("[HOLLOW-MLS] Join KeyPackage mint failed for {server_id}: {e}");

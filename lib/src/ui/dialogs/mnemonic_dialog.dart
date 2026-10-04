@@ -1,11 +1,12 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
+import 'package:hollow/src/core/services/privacy_screen.dart';
+import 'package:hollow/src/core/services/secret_clipboard.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -131,7 +132,9 @@ class _PhraseRevealDialogState extends State<_PhraseRevealDialog> with HollowDia
 
   @override
   Widget build(BuildContext context) {
-    return _checking ? _askBack(context) : _reveal(context);
+    return SecretScreen(
+      child: _checking ? _askBack(context) : _reveal(context),
+    );
   }
 
   Widget _reveal(BuildContext context) {
@@ -149,8 +152,9 @@ class _PhraseRevealDialogState extends State<_PhraseRevealDialog> with HollowDia
       leadingActions: [
         HollowButton.ghost(
           onPressed: () {
-            Clipboard.setData(ClipboardData(text: widget.mnemonic));
-            HollowToast.show(context, 'Copied', type: HollowToastType.success);
+            SecretClipboard.copy(widget.mnemonic);
+            HollowToast.show(context, 'Copied. Hollow clears it in a minute.',
+                type: HollowToastType.success);
           },
           icon: const Icon(LucideIcons.copy, size: 16),
           child: const Text('Copy'),

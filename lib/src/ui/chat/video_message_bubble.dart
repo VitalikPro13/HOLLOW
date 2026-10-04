@@ -40,8 +40,9 @@ import 'package:hollow/src/ui/components/hollow_slider.dart';
 ///
 /// Two sources, told apart by `attachment.videoThumb`: a VAULT video whose
 /// `diskPath` is the `.webp` poster and whose bytes are reconstructed on first
-/// play, or a DIRECT P2P video whose `diskPath` is the video itself, with a
-/// thumbnail extracted next to it so the bubble has something to show.
+/// play, or a DIRECT P2P video whose `diskPath` is the video itself. A direct
+/// video shows the poster its sender shipped in the file card; a thumbnail is
+/// cut from the bytes only for our own videos, or once the user opens one.
 ///
 /// One video plays at a time, enforced through [currentlyPlayingVideoProvider].
 class VideoMessageBubble extends ConsumerStatefulWidget {
@@ -99,6 +100,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   /// completes, and for a vault thumbnail, which is already an image on disk.
   String? _localThumbPath;
   bool _thumbExtractStarted = false;
+
+  /// The user opened this video. Until then a video someone else sent is
+  /// never handed to ffmpeg: it arrives with no interaction, and cutting a
+  /// frame demuxes and decodes a stranger's container (C-FILES-02).
+  bool _opened = false;
 
   /// Envelope-borne poster frame (FileHeader `thumb`, issue #41), so the bubble
   /// shows a real preview before any video bytes are local. The locally
@@ -189,14 +195,17 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     final videoPath = _resolveVideoPath();
     if (videoPath == null) return;
 
-    _thumbExtractStarted = true;
-
     final cached = VideoThumbnailService.cachedThumbFor(videoPath);
     if (cached != null) {
+      _thumbExtractStarted = true;
       if (mounted) setState(() => _localThumbPath = cached);
       return;
     }
+    // The sender's poster rides the file card; a received video waits for the
+    // tap, which calls back here.
+    if (!widget.isMine && !_opened) return;
 
+    _thumbExtractStarted = true;
     final extracted = await VideoThumbnailService.ensureCachedThumb(videoPath);
     if (extracted != null && mounted) {
       setState(() => _localThumbPath = extracted);
@@ -230,8 +239,16 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return _resolveVideoPath() != null;
   }
 
+  /// The user asked for this video, so its bytes may now be decoded.
+  void _markOpened() {
+    if (_opened) return;
+    _opened = true;
+    unawaited(_maybeExtractLocalThumb());
+  }
+
   Future<void> _onPlayTapped({bool fullscreen = false}) async {
     if (!_canPlay()) return;
+    _markOpened();
     ref.read(currentlyPlayingVideoProvider.notifier).state = _playKey;
 
     final vthumb = _vthumb;
@@ -684,6 +701,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   /// Opens the viewer on this video without an inline session: an album
   /// cell is too small to play in, and the viewer opens its own.
   void _openInViewer() {
+    _markOpened();
     final path = _resolveVideoPath();
     final item = MediaItem(
       attachment: widget.attachment,

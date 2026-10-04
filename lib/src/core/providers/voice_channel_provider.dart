@@ -2480,12 +2480,19 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// host with IPv6-first DNS and no routable IPv6 path produced ZERO candidates.
   Map<String, dynamic> _forwarderLegIceConfig() => const {'iceServers': []};
 
+  /// Whether a share may leave for a forwarder, or a forwarder's copy be shown:
+  /// the forwarder ends DTLS, so only an SFrame layer keeps the share from it.
+  static bool forwarderMayCarry(FrameCryptorService? sframe) =>
+      sframe?.isEnabled ?? false;
+
   /// The viewer's `route` hint for screen_watch: one immediate stats pass.
   /// ADVISORY - a wrong hint is corrected by the ladder; "" keeps direct.
   Future<String> _routeHintTo(String peerId) async {
     // Already served through the forwarder: a re-watch (Source toggle) must not
     // bounce us to direct mid-stream. _fallbackToDirect bypasses this.
     if (_screenAssignments.containsKey(peerId)) return 'relay';
+    // Keyless, a forwarder's copy would arrive in clear: ask for a direct leg.
+    if (!forwarderMayCarry(_service?.frameCryptor)) return '';
     // Lab escape hatch: report "relay" WITHOUT the Always-relay privacy
     // semantics, which a LAN rig cannot otherwise simulate. Unset = inert.
     if (Platform.environment['HOLLOW_FORCE_RELAY_ROUTE'] == '1') {
@@ -2517,6 +2524,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Forwarders that already failed for this viewer are skipped, and after two
   /// failed rungs the viewer always goes direct.
   String? _pickForwarderFor(String viewer) {
+    if (!forwarderMayCarry(_service?.frameCryptor)) return null;
     // No chains: a branch HEAD never rides ANOTHER forwarder.
     if (_fwdBranches.containsKey(viewer)) return null;
     final failed = _viewerFwdFailures[viewer] ?? const <String>{};
@@ -2557,6 +2565,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// - The VPS rung only applies to a branch ALREADY serving. A fresh VPS
   ///   branch would trade zero relay bytes for `B + B.k` and save nothing.
   String? _pickSpreadTargetFor(String viewer) {
+    if (!forwarderMayCarry(_service?.frameCryptor)) return null;
     final failed = _viewerFwdFailures[viewer] ?? const <String>{};
     if (failed.length >= 2) return null;
     final privacyBound = _watcherRoutes[viewer]?.relayPrivate ?? false;
@@ -2603,6 +2612,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// infrastructure, failed-forwarder memory is respected, the branch caps.
   Future<bool> _maybeRebalanceOntoCandidate(String candidate) async {
     if (!state.isScreenSharing || _screenCaptureStream == null) return false;
+    if (!forwarderMayCarry(_service?.frameCryptor)) return false;
     final r = _watcherRoutes[candidate];
     if (r == null || !r.fwdCapable || r.route != 'direct' || r.relayPrivate) {
       return false;
@@ -2952,6 +2962,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> _ensureIngestLeg(_FwdBranch branch) async {
     if (branch.ingest != null) return;
     if (_screenCaptureStream == null) return;
+    if (!forwarderMayCarry(_service?.frameCryptor)) {
+      _vcLog('[HOLLOW-VC] No ingest leg to ${branch.forwarderId}: '
+          'the share has no SFrame key yet');
+      return;
+    }
     final origin = _myShareOrigin();
     if (origin == null) return;
     // Offer a 2-layer simulcast ingest only when the far engine can select
@@ -3280,6 +3295,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _armWatchNoShowTimer(originPeer);
       return;
     }
+    if (!forwarderMayCarry(_service?.frameCryptor)) {
+      _vcLog('[HOLLOW-VC] screen_assign names a forwarder while we hold no '
+          'SFrame key — refusing, walking the ladder');
+      _fallbackToDirect(originPeer);
+      return;
+    }
     // Privacy hard gate: with "Always relay calls" on, a PEER forwarder leg
     // would expose our address to another member. Only the operator-run infra
     // forwarder is acceptable; this catches a buggy or malicious sharer.
@@ -3399,6 +3420,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final assignment = _screenAssignments[originPeer];
     if (assignment == null || assignment.forwarder != fromPeer) return;
     if (!state.watchingScreenShares.contains(originPeer)) return;
+    if (!forwarderMayCarry(_service?.frameCryptor)) {
+      _fallbackToDirect(originPeer);
+      return;
+    }
     final rawOrigin =
         origin is Map ? Map<String, dynamic>.from(origin) : null;
     final answer = await _attachIncomingShare(

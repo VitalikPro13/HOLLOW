@@ -98,8 +98,30 @@ pub struct LinkPreviewRef {
 // node type boxes them because that boxing is load-bearing for the swarm's stack
 // usage. These two impls are where the shapes meet.
 
+/// A stored or received card on its way to Dart. The sender chose every field,
+/// so the thumb is re-encoded (`peer_thumb_for_display`), the domain is read off
+/// the url, and a url that is not http(s) is blanked so no surface can open it.
+/// The stored row keeps the signed bytes; only Dart's copy changes.
 impl From<node::LinkPreviewRef> for LinkPreviewRef {
     fn from(v: node::LinkPreviewRef) -> Self {
+        let mut out = Self::flat(v);
+        (out.url, out.domain) = openable_card_url(&out.url);
+        let thumb = out
+            .thumb_webp_b64
+            .take()
+            .and_then(|b64| node::image_convert::peer_thumb_for_display(&b64));
+        (out.thumb_webp_b64, out.thumb_w, out.thumb_h) = match thumb {
+            Some((b64, w, h)) => (Some(b64), Some(w), Some(h)),
+            None => (None, None, None),
+        };
+        out
+    }
+}
+
+impl LinkPreviewRef {
+    /// The shapes meeting, nothing judged: only for a card our own fetcher just
+    /// built, whose thumb is already our encoder's output.
+    fn flat(v: node::LinkPreviewRef) -> Self {
         let rich = v.rich.map(|b| *b).unwrap_or_default();
         Self {
             url: v.url,
@@ -116,6 +138,17 @@ impl From<node::LinkPreviewRef> for LinkPreviewRef {
             video_w: rich.video_w,
             video_h: rich.video_h,
         }
+    }
+}
+
+/// `(url, host)` for an http(s) url with a host, else both empty.
+fn openable_card_url(url: &str) -> (String, String) {
+    match reqwest::Url::parse(url) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") => match u.host_str() {
+            Some(host) if !host.is_empty() => (url.to_string(), host.to_string()),
+            _ => Default::default(),
+        },
+        _ => Default::default(),
     }
 }
 
@@ -667,20 +700,20 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::MessageSendFailed { to_peer, error } => {
             hollow_log!("[HOLLOW] Message send failed to {to_peer}: {error}");
         }
-        node::NetworkEvent::ServerCreated { server_id, name } => {
-            hollow_log!("[HOLLOW] Server created: {name} ({server_id})");
+        node::NetworkEvent::ServerCreated { server_id, .. } => {
+            hollow_log!("[HOLLOW] Server created: {server_id}");
         }
         node::NetworkEvent::ServerUpdated { server_id } => {
             hollow_log!("[HOLLOW] Server updated: {server_id}");
         }
-        node::NetworkEvent::ChannelAdded { server_id, channel_id, name, .. } => {
-            hollow_log!("[HOLLOW] Channel added: {name} ({channel_id}) in {server_id}");
+        node::NetworkEvent::ChannelAdded { server_id, channel_id, .. } => {
+            hollow_log!("[HOLLOW] Channel added: {channel_id} in {server_id}");
         }
         node::NetworkEvent::ChannelRemoved { server_id, channel_id } => {
             hollow_log!("[HOLLOW] Channel removed: {channel_id} in {server_id}");
         }
-        node::NetworkEvent::ChannelRenamed { server_id, channel_id, new_name } => {
-            hollow_log!("[HOLLOW] Channel renamed: {channel_id} to '{new_name}' in {server_id}");
+        node::NetworkEvent::ChannelRenamed { server_id, channel_id, .. } => {
+            hollow_log!("[HOLLOW] Channel renamed: {channel_id} in {server_id}");
         }
         node::NetworkEvent::ServerDeleted { server_id } => {
             hollow_log!("[HOLLOW] Server deleted: {server_id}");
@@ -694,8 +727,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::SyncCompleted { server_id, ops_applied } => {
             hollow_log!("[HOLLOW] Sync completed for {server_id}: {ops_applied} ops applied");
         }
-        node::NetworkEvent::ServerJoined { server_id, name } => {
-            hollow_log!("[HOLLOW] Server joined: {name} ({server_id})");
+        node::NetworkEvent::ServerJoined { server_id, .. } => {
+            hollow_log!("[HOLLOW] Server joined: {server_id}");
         }
         node::NetworkEvent::ServerJoinFailed { server_id, reason } => {
             hollow_log!("[HOLLOW] Server join failed: {server_id} — {reason}");
@@ -771,8 +804,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::FriendRemoved { peer_id } => {
             hollow_log!("[HOLLOW] Friend removed: {peer_id}");
         }
-        node::NetworkEvent::NicknameClaimed { nickname } => {
-            hollow_log!("[HOLLOW] Temporary nickname claimed: {nickname}");
+        node::NetworkEvent::NicknameClaimed { .. } => {
+            hollow_log!("[HOLLOW] Temporary nickname claimed");
         }
         node::NetworkEvent::NicknameReleased => {
             hollow_log!("[HOLLOW] Temporary nickname released");
@@ -780,11 +813,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::NicknameClaimFailed { error } => {
             hollow_log!("[HOLLOW] Nickname claim failed: {error}");
         }
-        node::NetworkEvent::NicknameResolveFailed { nickname, error } => {
-            hollow_log!("[HOLLOW] Nickname resolve failed: {nickname} — {error}");
+        node::NetworkEvent::NicknameResolveFailed { error, .. } => {
+            hollow_log!("[HOLLOW] Nickname resolve failed: {error}");
         }
-        node::NetworkEvent::NicknameResolved { nickname, .. } => {
-            hollow_log!("[HOLLOW] Nickname resolved: {nickname}");
+        node::NetworkEvent::NicknameResolved { .. } => {
+            hollow_log!("[HOLLOW] Nickname resolved");
         }
         node::NetworkEvent::RelayDisconnected => {
             hollow_log!("[HOLLOW] Relay disconnected event emitted");
@@ -825,8 +858,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::CallSignal { peer_id, signal_type, .. } => {
             hollow_log!("[HOLLOW-CALL] Signal {signal_type} from {peer_id}");
         }
-        node::NetworkEvent::PublicChannelListReceived { server_id, server_name, .. } => {
-            hollow_log!("[HOLLOW] Public channel list received for {server_name} ({server_id})");
+        node::NetworkEvent::PublicChannelListReceived { server_id, .. } => {
+            hollow_log!("[HOLLOW] Public channel list received for {server_id}");
         }
         node::NetworkEvent::PublicChannelSyncReceived { server_id, channel_id, messages, .. } => {
             hollow_log!("[HOLLOW] Public channel sync received: {} messages for {channel_id} in {server_id}", messages.len());
@@ -1059,7 +1092,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
                 video_thumb: video_thumb.map(VideoThumbRef::from),
                 share_root_hash: share_ref.as_ref().map(|r| r.root_hash.clone()),
                 share_key_hex: share_ref.map(|r| r.key),
-                thumb_b64,
+                thumb_b64: thumb_b64
+                    .and_then(|t| node::image_convert::peer_thumb_for_display(&t))
+                    .map(|(b64, _, _)| b64),
             }
         }
         node::NetworkEvent::FileProgress { file_id, chunks_received, total_chunks } => {
@@ -1877,10 +1912,11 @@ pub fn verify_message_proof_v2(
     // as unverified, because the v1 grammar covered text only and accepting it here
     // would let a grafted file_id, reply_to or preview show as VERIFIED.
     let album = row.album_id.as_deref().filter(|a| !a.is_empty());
+    // The one verify point every receive path uses, so the proof holds the same rules.
     let valid = has_signature
-        && album.is_none_or(crate::node::crypto_handler::is_album_id_shape)
-        && crate::node::verify_message_signature(
-            &sender_peer_id, row.signature.as_deref(), row.public_key.as_deref(), &v2,
+        && crate::node::crypto_handler::verify_message_signature_v2(
+            &sender_peer_id, row.signature.as_deref(), row.public_key.as_deref(), &msg_type,
+            &context, ts, &extras, &row.text, &mut crate::node::crypto_handler::PkCache::new(),
         );
     let version = if album.is_some() { 3 } else { 2 };
     let (sig_version, canonical_payload) = (if valid { version } else { 0 }, v2);
@@ -1919,7 +1955,7 @@ pub fn fetch_link_preview(url: String) -> Result<LinkPreviewRef, String> {
         .block_on(async move {
             crate::node::link_preview::fetch_link_preview(&url).await
         })?;
-    Ok(internal.into())
+    Ok(LinkPreviewRef::flat(internal))
 }
 
 /// Refuses a message body every receiver would drop (`MAX_MESSAGE_BYTES`), so the
@@ -4235,4 +4271,93 @@ pub fn webrtc_broadcast_received(
     }))
     .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod link_preview_ffi_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn webp(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 3) as u8, (y * 5) as u8, 30, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        node::image_convert::convert_to_webp_preview(&png, 4096).unwrap().0
+    }
+
+    fn card(url: &str, thumb: Option<String>) -> node::LinkPreviewRef {
+        node::LinkPreviewRef {
+            url: url.into(),
+            title: "Your invoice".into(),
+            description: String::new(),
+            domain: "github.com".into(),
+            site_name: "GitHub".into(),
+            thumb_webp_b64: thumb,
+            thumb_w: Some(10),
+            thumb_h: Some(10),
+            rich: None,
+        }
+    }
+
+    /// C-FILES-04: a card's thumb reaches Dart re-encoded, or not at all.
+    #[test]
+    fn a_card_thumb_reaches_dart_only_reencoded() {
+        let junk = b64(b"RIFF\x10\x00\x00\x00WEBPjunkjunk");
+        assert!(LinkPreviewRef::from(card("https://example.com/", Some(junk))).thumb_webp_b64.is_none());
+
+        let theirs = b64(&webp(300, 150));
+        let out = LinkPreviewRef::from(card("https://example.com/", Some(theirs.clone())));
+        let ours = out.thumb_webp_b64.expect("a valid thumb survives");
+        assert_ne!(ours, theirs, "the sender's bytes were handed on as they came");
+        assert_eq!((out.thumb_w, out.thumb_h), (Some(300), Some(150)), "dims come from the decode");
+    }
+
+    /// C-DIST-01: the domain a card shows is its url's host, and a url no surface
+    /// may open is blanked.
+    #[test]
+    fn a_card_url_and_domain_are_judged_on_the_way_to_dart() {
+        let out = LinkPreviewRef::from(card("https://evil.example/login", None));
+        assert_eq!((out.url.as_str(), out.domain.as_str()), ("https://evil.example/login", "evil.example"));
+        for refused in ["file:///C:/Windows/System32/calc.exe", "javascript:alert(1)", "hollow://redeem/X", "https://", ""] {
+            let out = LinkPreviewRef::from(card(refused, None));
+            assert_eq!((out.url.as_str(), out.domain.as_str()), ("", ""), "{refused} reached Dart");
+        }
+    }
+
+    /// C-FILES-04: a file header's thumb crosses to Dart through the same gate.
+    #[test]
+    fn a_file_header_thumb_reaches_dart_only_reencoded() {
+        let event = |thumb: String| {
+            to_ffi_event(node::NetworkEvent::FileHeaderReceived {
+                file_id: "f".into(),
+                file_name: "a.png".into(),
+                size_bytes: 1,
+                is_image: true,
+                width: None,
+                height: None,
+                message_id: "m".into(),
+                sender_id: "s".into(),
+                server_id: String::new(),
+                channel_id: "c".into(),
+                video_thumb: None,
+                share_ref: None,
+                thumb_b64: Some(thumb),
+            })
+        };
+        let thumb_of = |e: NetworkEvent| match e {
+            NetworkEvent::FileHeaderReceived { thumb_b64, .. } => thumb_b64,
+            _ => unreachable!(),
+        };
+        let mut cut = webp(64, 64);
+        cut.truncate(40);
+        assert!(thumb_of(event(b64(&cut))).is_none());
+        let theirs = b64(&webp(32, 32));
+        assert!(thumb_of(event(theirs.clone())).is_some_and(|t| t != theirs));
+    }
 }

@@ -48,6 +48,12 @@ void InstallStderrLogSink() {
   libwebrtc::LibWebRTCLogging::setLogSink(
       severity, [](const libwebrtc::string& message) {
         const std::string text = message.std_string();
+        // The frame cryptor logs every key it derives at info level; so does
+        // the Dart sink (WebRtcNativeLog.carriesKey).
+        if (text.find("derived_key") != std::string::npos ||
+            text.find("raw_key") != std::string::npos) {
+          return;
+        }
         std::fprintf(stderr, "[WEBRTC-NATIVE] %s%s", text.c_str(),
                      (!text.empty() && text.back() == '\n') ? "" : "\n");
       });

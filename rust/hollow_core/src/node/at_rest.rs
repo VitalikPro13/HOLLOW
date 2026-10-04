@@ -601,15 +601,17 @@ pub fn rename(from: &Path, to: &Path) -> Result<(), String> {
 
 // ── boot: temp wipe and the plaintext sweep ─────────────────────────────────
 
-/// Empty `data_dir()/temp`, where the recorder and the mic test stage plaintext.
+/// Empty `data_dir()/temp`, where the recorder, the mic test, pasted images and
+/// video posters stage plaintext.
 pub fn wipe_temp_dir() {
     let Ok(dir) = crate::identity::data_dir() else { return };
     let temp = dir.join("temp");
     let Ok(entries) = std::fs::read_dir(&temp) else { return };
     for entry in entries.flatten() {
-        if entry.metadata().map(|m| m.is_file()).unwrap_or(false) {
-            let _ = std::fs::remove_file(entry.path());
-        }
+        let _ = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(entry.path()),
+            _ => std::fs::remove_file(entry.path()),
+        };
     }
 }
 
@@ -801,13 +803,13 @@ mod tests {
     }
 
     struct Fixture {
-        _dir: tempfile::TempDir,
+        _dir: crate::test_tmp::TestDir,
         root: PathBuf,
         db: String,
     }
 
     fn fixture() -> Fixture {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
         let db = root.join("messages.db").to_string_lossy().to_string();
         reset_for_test();
@@ -1079,7 +1081,7 @@ mod tests {
     #[test]
     fn at_rest_lookup_after_forget_stores_reloads_from_db() {
         let _g = guard();
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", dir.path()) };
         reset_for_test();
         // The ring has to find its own database again from the identity alone, which
@@ -1115,5 +1117,22 @@ mod tests {
         let n = export_to(&src, &dest).expect("export");
         assert_eq!(n, data.len() as u64);
         assert_eq!(std::fs::read(&dest).expect("read export"), data);
+    }
+
+    /// A send that died mid-way leaves its staging folder; the boot sweep takes it.
+    #[test]
+    fn the_boot_sweep_empties_temp_folders_too() {
+        let _g = guard();
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", dir.path()) };
+        let staged = dir.path().join("temp").join("vthumb_ab12");
+        std::fs::create_dir_all(&staged).expect("staging dir");
+        std::fs::write(staged.join("mid.webp"), b"plaintext poster").expect("poster");
+        std::fs::write(dir.path().join("temp").join("clipboard_1.png"), b"pasted").expect("paste");
+
+        wipe_temp_dir();
+
+        let left: Vec<_> = std::fs::read_dir(dir.path().join("temp")).expect("temp").flatten().collect();
+        assert!(left.is_empty(), "the boot sweep left {} entries", left.len());
     }
 }

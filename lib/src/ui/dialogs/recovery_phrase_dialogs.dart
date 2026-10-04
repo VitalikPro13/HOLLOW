@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/services/privacy_screen.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -30,16 +31,20 @@ class RecoveryPhraseField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return HollowTextField(
-      controller: controller,
-      hintText: 'The 12 or 24 words, in order',
-      minLines: 2,
-      maxLines: 4,
-      autofocus: autofocus,
-      errorText: errorText,
-      onChanged: onChanged,
-      keyboardType: TextInputType.visiblePassword,
-      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z\s]'))],
+    return SecretScreen(
+      child: HollowTextField(
+        controller: controller,
+        hintText: 'The 12 or 24 words, in order',
+        minLines: 2,
+        maxLines: 4,
+        autofocus: autofocus,
+        errorText: errorText,
+        onChanged: onChanged,
+        keyboardType: TextInputType.visiblePassword,
+        inputFormatters: [
+          FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z\s]')),
+        ],
+      ),
     );
   }
 }

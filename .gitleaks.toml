@@ -1,0 +1,201 @@
+# gitleaks configuration: the upstream default rules plus Hollow's own secrets.
+#
+# CI (.github/workflows/ci.yml, "Supply Chain") scans the WHOLE history on
+# every push, and `.pre-commit-config.yaml` scans staged changes before a
+# commit. Run from the repo root, gitleaks picks up this file and
+# .gitleaksignore by itself:
+#   gitleaks git --redact --log-opts=--all .
+# A finding is fixed by removing the secret AND rotating it; a reviewed false
+# positive goes into an allowlist below with its reason, or, for one
+# historical line, its fingerprint goes into .gitleaksignore (`gitleaks dir`
+# fingerprints differ, so a working-tree scan still lists those lines).
+
+title = "Hollow gitleaks config"
+minVersion = "v8.25.0"
+
+[extend]
+useDefault = true
+
+# --- Identity --------------------------------------------------------------
+
+# A BIP-39 recovery phrase is the root of a Hollow identity (it recovers the
+# master and can order a remote wipe), so twelve words of it in a file are a
+# full account takeover. The alternation is the 2048-word English list as a
+# trie (list SHA-256 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda),
+# so ordinary prose rarely matches. Words may be space separated or a quoted
+# list; one word per line is not caught.
+[[rules]]
+id = "hollow-bip39-mnemonic"
+description = "BIP-39 recovery phrase (12 or more words from the English list)"
+regex = '''\b(?:(?:a(?:b(?:andon|ility|le|o(?:ut|ve)|s(?:ent|orb|tract|urd)|use)|c(?:c(?:ess|ident|ount|use)|hieve|id|oustic|quire|ross|t(?:ion|or|ress|ual)?)|d(?:apt|d(?:ict|ress)?|just|mit|ult|v(?:ance|ice))|erobic|f(?:f(?:air|ord)|raid)|g(?:ain|e(?:nt)?|ree)|head|i(?:r(?:port)?|sle|m)|l(?:arm|bum|cohol|ert|ien|l(?:ey|ow)?|most|one|pha|ready|so|ter|ways)|m(?:a(?:teur|zing)|o(?:ng|unt)|used)|n(?:alyst|c(?:hor|ient)|g(?:er|le|ry)|imal|kle|n(?:ounce|ual)|other|swer|t(?:enna|ique)|xiety|y)|p(?:art|ology|p(?:ear|le|rove)|ril)|r(?:c(?:tic|h)|e(?:na|a)|gue|m(?:ed|or|y)?|ound|r(?:ange|est|ive|ow)|t(?:efact|ist|work)?)|s(?:pect|s(?:ault|et|ist|ume)|thma|k)|t(?:hlete|om|t(?:ack|end|itude|ract))|u(?:ction|dit|gust|nt|t(?:hor|umn|o))|v(?:erage|o(?:cado|id))|w(?:a(?:ke|re|y)|esome|ful|kward)|xis)|b(?:a(?:by|c(?:helor|on)|dge|l(?:ance|cony|l)|mboo|n(?:ana|ner)|r(?:ely|gain|rel)?|s(?:ic|ket|e)|ttle|g)|e(?:a(?:ch|uty|n)|c(?:ause|ome)|ef|fore|gin|h(?:ave|ind)|l(?:ieve|ow|t)|n(?:ch|efit)|st|t(?:ray|ter|ween)|yond)|i(?:cycle|ke|nd|ology|r(?:th|d)|tter|d)|l(?:a(?:ck|de|me|nket|st)|e(?:ak|ss)|ind|o(?:od|ssom|use)|u(?:sh|[er]))|o(?:a(?:rd|t)|dy|il|mb|n(?:us|e)|o(?:st|k)|r(?:der|ing|row)|ss|ttom|unce|[xy])|r(?:a(?:cket|in|nd|ss|ve)|e(?:ad|eze)|i(?:ck|dge|ef|ght|ng|sk)|o(?:ccoli|ken|nze|om|ther|wn)|ush)|u(?:bble|d(?:dy|get)|ffalo|ild|l(?:let|[bk])|n(?:dle|ker)|r(?:den|ger|st)|s(?:iness|y)?|tter|yer|zz))|c(?:a(?:b(?:bage|in|le)|ctus|ge|ke|l[lm]|m(?:era|p)|n(?:al|cel|dy|non|oe|vas|yon)?|p(?:able|ital|tain)|r(?:bon|go|pet|ry|[dt])?|s(?:ino|tle|ual|[eh])|t(?:alog|ch|egory|tle)?|u(?:ght|se|tion)|ve)|e(?:iling|lery|ment|n(?:sus|tury)|r(?:eal|tain))|h(?:a(?:ir|lk|mpion|nge|os|pter|rge|se|t)|e(?:ap|ck|ese|rry|st|f)|i(?:cken|ef|ld|mney)|o(?:ice|ose)|ronic|u(?:ckle|nk|rn))|i(?:gar|nnamon|rcle|t(?:izen|y)|vil)|l(?:a(?:im|rify|[pwy])|e(?:an|rk|ver)|i(?:ck|ent|ff|mb|nic|p)|o(?:ck|se|th|ud|wn|g)|u(?:mp|ster|tch|b))|o(?:a(?:ch|st)|conut|de|ffee|i[ln]|l(?:lect|or|umn)|m(?:bine|fort|ic|mon|pany|e)|n(?:cert|duct|firm|gress|nect|sider|trol|vince)|o[kl]|p(?:per|y)|r(?:al|rect|[en])|st|tton|u(?:ch|ntry|ple|rse|sin)|ver|yote)|r(?:a(?:ck|dle|ft|ne|sh|ter|wl|zy|m)|e(?:am|dit|ek|w)|i(?:cket|me|sp|tic)|o(?:ss|uch|wd|p)|u(?:cial|el|ise|mble|nch|sh)|y(?:stal)?)|u(?:be|lture|p(?:board)?|r(?:ious|rent|tain|ve)|s(?:hion|tom)|te)|ycle)|d(?:a(?:m(?:age|p)|n(?:ce|ger)|ring|sh|ughter|wn|[dy])|e(?:al|b(?:ate|ris)|c(?:ade|ember|ide|line|orate|rease)|er|f(?:ense|ine|y)|gree|l(?:ay|iver)|m(?:and|ise)|n(?:ial|tist|y)|p(?:art|end|osit|th|uty)|rive|s(?:cribe|ert|ign|pair|troy|k)|t(?:ail|ect)|v(?:elop|ice|ote))|i(?:a(?:gram|mond|ry|l)|ce|e(?:sel|t)|ffer|g(?:ital|nity)|lemma|n(?:ner|osaur)|r(?:ect|t)|s(?:agree|cover|ease|miss|order|play|tance|h)|v(?:ert|ide|orce)|zzy)|o(?:c(?:tor|ument)|l(?:phin|l)|main|n(?:ate|key|or)|or|se|uble|ve|g)|r(?:a(?:ft|gon|ma|stic|w)|e(?:am|ss)|i(?:ft|ll|nk|ve|p)|op|um|y)|u(?:ck|mb|ne|ring|st|t(?:ch|y))|warf|ynamic)|e(?:a(?:g(?:er|le)|r(?:ly|th|n)|s(?:ily|[ty]))|c(?:ho|o(?:logy|nomy))|d(?:ge|it|ucate)|ffort|gg|i(?:ght|ther)|l(?:bow|der|e(?:ctric|gant|ment|phant|vator)|ite|se)|m(?:b(?:ark|ody|race)|erge|otion|p(?:loy|ower|ty))|n(?:a(?:ble|ct)|d(?:less|orse)?|e(?:my|rgy)|force|g(?:age|ine)|hance|joy|list|ough|r(?:ich|oll)|sure|t(?:er|ire|ry)|velope)|pisode|qu(?:al|ip)|r(?:a(?:se)?|o(?:de|sion)|ror|upt)|s(?:cape|s(?:ay|ence)|tate)|t(?:ernal|hics)|v(?:i(?:dence|l)|o(?:ke|lve))|x(?:a(?:ct|mple)|c(?:ess|hange|ite|lude|use)|e(?:cute|rcise)|h(?:aust|ibit)|i(?:le|st|t)|otic|p(?:and|ect|ire|lain|ose|ress)|t(?:end|ra))|ye(?:brow)?)|f(?:a(?:bric|c(?:ulty|e)|de|i(?:nt|th)|l(?:se|l)|m(?:ily|ous|e)|n(?:cy|tasy)?|rm|shion|t(?:al|her|igue)?|ult|vorite)|e(?:ature|bruary|deral|e(?:[dl])?|male|nce|stival|tch|ver|w)|i(?:ber|ction|eld|gure|l(?:ter|[em])|n(?:al|ger|ish|[de])|r(?:st|[em])|s(?:cal|h)|t(?:ness)?|x)|l(?:a(?:me|sh|vor|[gt])|ee|i(?:ght|p)|o(?:at|ck|or|wer)|u(?:id|sh)|y)|o(?:am|cus|il|l(?:low|d)|o[dt]|r(?:ce|est|get|tune|um|ward|k)|s(?:sil|ter)|und|[gx])|r(?:a(?:gile|me)|e(?:quent|sh)|i(?:end|nge)|o(?:nt|st|wn|zen|g)|uit)|u(?:el|n(?:ny)?|r(?:nace|y)|ture))|g(?:a(?:dget|in|l(?:axy|lery)|me|r(?:age|bage|den|lic|ment)|s(?:p)?|t(?:her|e)|uge|ze|p)|e(?:n(?:eral|ius|re|tle|uine)|sture)|host|i(?:ant|ft|ggle|nger|r(?:affe|l)|ve)|l(?:a(?:nce|re|ss|d)|i(?:de|mpse)|o(?:be|om|ry|ve|w)|ue)|o(?:at|ddess|ld|o(?:se|d)|rilla|s(?:pel|sip)|vern|wn)|r(?:a(?:ce|in|nt|pe|ss|vity|b)|e(?:at|en)|i(?:ef|[dt])|o(?:cery|up|w)|unt)|u(?:ard|ess|i(?:de|lt|tar)|n)|ym)|h(?:a(?:bit|ir|lf|m(?:mer|ster)|nd|ppy|r(?:bor|sh|vest|d)|ve|wk|zard|t)|e(?:a(?:lth|rt|vy|d)|dgehog|ight|l(?:lo|met|p)|ro|n)|i(?:dden|gh|ll|nt|re|story|p)|o(?:bby|ckey|l(?:iday|low|[de])|me|ney|od|pe|r(?:ror|se|n)|s(?:pital|t)|tel|ur|ver)|u(?:ge|m(?:an|ble|or)|n(?:dred|gry|t)|r(?:dle|ry|t)|sband|b)|ybrid)|i(?:c(?:on|e)|d(?:e(?:ntify|a)|le)|gnore|ll(?:egal|ness)?|m(?:age|itate|m(?:ense|une)|p(?:act|ose|rove|ulse))|n(?:c(?:lude|ome|rease|h)|d(?:ex|icate|oor|ustry)|f(?:ant|lict|orm)|h(?:ale|erit)|itial|j(?:ect|ury)|mate|n(?:er|ocent)|put|quiry|s(?:ane|ect|ide|pire|tall)|t(?:act|erest|o)|v(?:est|ite|olve))|ron|s(?:land|olate|sue)|tem|vory)|j(?:a(?:cket|guar|zz|r)|e(?:a(?:lous|ns)|lly|wel)|o(?:in|ke|urney|[by])|u(?:dge|ice|mp|n(?:gle|ior|k)|st))|k(?:angaroo|e(?:e[np]|tchup|y)|i(?:ck|d(?:ney)?|n(?:gdom|d)|ss|t(?:chen|ten|e)?|wi)|n(?:ee|ife|o(?:ck|w)))|l(?:a(?:b(?:el|or)?|d(?:der|y)|ke|mp|nguage|ptop|rge|t(?:er|in)|u(?:gh|ndry)|va|w(?:suit|n)?|yer|zy)|e(?:a(?:der|rn|ve|f)|cture|ft|g(?:al|end)?|isure|mon|n(?:gth|[ds])|opard|sson|tter|vel)|i(?:ar|b(?:erty|rary)|cense|f[et]|ght|ke|m(?:it|b)|nk|on|quid|st|ttle|ve|zard)|o(?:a[dn]|bster|c(?:al|k)|gic|n(?:ely|g)|op|ttery|u(?:nge|d)|ve|yal)|u(?:cky|ggage|mber|n(?:ar|ch)|xury)|yrics)|m(?:a(?:chine|g(?:ic|net)|i[dln]|jor|ke|mmal|n(?:age|date|go|sion|ual)?|ple|r(?:ble|ch|gin|ine|ket|riage)|s(?:ter|[ks])|t(?:ch|erial|rix|ter|h)|ximum|ze|d)|e(?:a(?:dow|sure|[nt])|chanic|d(?:al|ia)|l(?:ody|t)|m(?:ber|ory)|n(?:tion|u)|r(?:cy|ge|it|ry)|s(?:sage|h)|t(?:al|hod))|i(?:d(?:dle|night)|l(?:lion|k)|mic|n(?:imum|or|ute|d)|r(?:acle|ror)|s(?:ery|take|s)|x(?:ed|ture)?)|o(?:bile|d(?:el|ify)|m(?:ent)?|n(?:itor|key|ster|th)|on|r(?:al|ning|e)|squito|t(?:her|ion|or)|u(?:ntain|se)|v(?:ie|e))|u(?:ch|ffin|l(?:tiply|e)|s(?:cle|eum|hroom|ic|t)|tual)|y(?:s(?:elf|tery)|th))|n(?:a(?:ive|me|pkin|rrow|sty|t(?:ion|ure))|e(?:ar|ck|ed|g(?:ative|lect)|ither|phew|rve|st|t(?:work)?|utral|ver|ws|xt)|i(?:ce|ght)|o(?:ble|ise|minee|odle|r(?:mal|th)|se|t(?:able|hing|ice|e)|vel|w)|u(?:clear|mber|rse|t))|o(?:ak|b(?:ey|ject|lige|s(?:cure|erve)|tain|vious)|c(?:cur|ean|tober)|dor|f(?:f(?:er|ice)?|ten)|il|kay|l(?:ive|ympic|d)|mit|n(?:ce|ion|l(?:ine|y)|e)|p(?:e(?:ra|n)|inion|pose|tion)|r(?:ange|bit|chard|d(?:er|inary)|gan|i(?:ent|ginal)|phan)|strich|ther|ut(?:door|er|put|side)|v(?:al|e[nr])|wn(?:er)?|xygen|yster|zone)|p(?:a(?:ct|ddle|ge|ir|l(?:ace|m)|n(?:da|el|ic|ther)|per|r(?:ade|ent|rot|ty|k)|ss|t(?:ch|ient|rol|tern|h)|use|ve|yment)|e(?:a(?:ce|nut|sant|r)|lican|n(?:alty|cil)?|ople|pper|r(?:fect|mit|son)|t)|h(?:o(?:ne|to)|rase|ysical)|i(?:ano|c(?:nic|ture)|ece|g(?:eon)?|l(?:ot|l)|nk|oneer|pe|stol|tch|zza)|l(?:a(?:ce|net|stic|te|y)|e(?:ase|dge)|u(?:ck|nge|g))|o(?:e[mt]|int|l(?:ar|ice|e)|n[dy]|ol|pular|rtion|s(?:ition|sible|t)|t(?:ato|tery)|verty|w(?:der|er))|r(?:a(?:ctice|ise)|e(?:dict|fer|pare|sent|tty|vent)|i(?:ce|de|mary|nt|ority|son|vate|ze)|o(?:blem|cess|duce|fit|gram|ject|mote|of|perty|sper|tect|ud|vide))|u(?:blic|dding|l(?:se|[lp])|mpkin|nch|p(?:il|py)|r(?:chase|ity|pose|se)|sh|zzle|t)|yramid)|qu(?:a(?:lity|ntum|rter)|estion|i(?:ck|[tz])|ote)|r(?:a(?:bbit|c(?:coon|[ek])|d(?:ar|io)|i(?:se|[ln])|lly|mp|n(?:ch|dom|ge)|pid|re|t(?:her|e)|ven|zor|w)|e(?:a(?:dy|son|l)|b(?:el|uild)|c(?:all|eive|ipe|ord|ycle)|duce|f(?:lect|orm|use)|g(?:ion|ret|ular)|ject|l(?:ax|ease|ief|y)|m(?:ain|ember|ind|ove)|n(?:der|ew|t)|open|p(?:air|eat|lace|ort)|quire|s(?:cue|emble|ist|ource|ponse|ult)|t(?:ire|reat|urn)|union|v(?:eal|iew)|ward)|hythm|i(?:b(?:bon)?|c[eh]|d(?:ge|e)|fle|g(?:ht|id)|ng|ot|pple|sk|tual|v(?:al|er))|o(?:a(?:st|d)|b(?:ot|ust)|cket|mance|o(?:kie|[fm])|se|tate|u(?:gh|nd|te)|yal)|u(?:bber|de|le|n(?:way)?|ral|g))|s(?:a(?:d(?:dle|ness)?|fe|il|l(?:ad|mon|on|ute|t)|m(?:ple|e)|nd|t(?:isfy|oshi)|u(?:ce|sage)|ve|y)|c(?:a(?:le|re|tter|n)|ene|h(?:eme|ool)|i(?:ence|ssors)|o(?:rpion|ut)|r(?:ap|een|ipt|ub))|e(?:a(?:rch|son|t)?|c(?:ond|ret|tion|urity)|e[dk]|gment|l(?:ect|l)|minar|n(?:ior|se|tence)|r(?:ies|vice)|ssion|t(?:tle|up)|ven)|h(?:a(?:dow|ft|llow|re)|e(?:ll|riff|d)|i(?:eld|ft|ne|ver|p)|o(?:ck|ot|rt|ulder|ve|[ep])|r(?:imp|ug)|uffle|y)|i(?:bling|ck|de|ege|g(?:ht|n)|l(?:ent|ly|ver|k)|m(?:ilar|ple)|n(?:ce|g)|ren|ster|tuate|ze|x)|k(?:ate|etch|i(?:ll|rt|n)?|ull)|l(?:a[bm]|e(?:ep|nder)|i(?:ce|de|ght|m)|o(?:gan|[tw])|ush)|m(?:a(?:ll|rt)|ile|o(?:ke|oth))|n(?:a(?:ck|ke|p)|iff|ow)|o(?:ap|c(?:cer|ial|k)|da|ft|l(?:ar|dier|id|ution|ve)|meone|ng|on|r(?:ry|t)|u(?:nd|rce|th|[lp]))|p(?:a(?:ce|re|tial|wn)|e(?:ak|cial|ed|ll|nd)|here|i(?:ce|der|ke|rit|n)|lit|o(?:il|nsor|on|rt|t)|r(?:ay|ead|ing)|y)|qu(?:are|eeze|irrel)|t(?:a(?:ble|dium|ff|ge|irs|mp|nd|rt|te|y)|e(?:ak|el|reo|[mp])|i(?:ck|ll|ng)|o(?:ck|mach|ne|ol|ry|ve)|r(?:ategy|eet|ike|ong|uggle)|u(?:dent|ff|mble)|yle)|u(?:b(?:ject|mit|way)|c(?:cess|h)|dden|ffer|g(?:ar|gest)|it|mmer|n(?:ny|set)?|p(?:er|ply|reme)|r(?:face|ge|prise|round|vey|e)|s(?:pect|tain))|w(?:a(?:llow|mp|rm|p)|e(?:ar|et)|i(?:ft|ng|tch|m)|ord)|y(?:m(?:bol|ptom)|rup|stem))|t(?:a(?:ble|ckle|il|l(?:ent|k)|nk|pe|rget|s(?:te|k)|ttoo|xi|g)|e(?:a(?:ch|m)|ll|n(?:ant|nis|t)?|rm|st|xt)|h(?:a(?:nk|t)|e(?:me|ory|re|[ny])|i(?:ng|s)|ought|r(?:ee|ive|ow)|u(?:mb|nder))|i(?:cket|de|ger|lt|m(?:ber|e)|ny|red|ssue|tle|p)|o(?:ast|bacco|d(?:ay|dler)|gether|ilet|ken|m(?:ato|orrow)|n(?:gue|ight|e)|o(?:th|l)|p(?:ic|ple)?|r(?:ch|nado|toise)|ss|tal|urist|w(?:ard|er|n)|[ey])|r(?:a(?:ck|de|ffic|gic|in|nsfer|sh|vel|[py])|e(?:at|nd|e)|i(?:al|be|ck|gger|[mp])|o(?:phy|uble)|u(?:ck|ly|mpet|st|th|e)|y)|u(?:be|ition|mble|n(?:nel|a)|r(?:key|tle|n))|w(?:e(?:lve|nty)|i(?:ce|st|n)|o)|yp(?:ical|e))|u(?:gly|mbrella|n(?:a(?:ble|ware)|c(?:le|over)|d(?:er|o)|f(?:air|old)|happy|i(?:form|que|verse|t)|known|lock|til|usual|veil)|p(?:date|grade|hold|on|per|set)|r(?:ban|ge)|s(?:age|e(?:ful|less|d)?|ual)|tility)|v(?:a(?:c(?:ant|uum)|gue|l(?:id|ley|ve)|n(?:ish)?|por|rious|st|ult)|e(?:hicle|lvet|n(?:dor|ture|ue)|r(?:ify|sion|[by])|ssel|teran)|i(?:able|brant|c(?:ious|tory)|deo|ew|llage|ntage|olin|r(?:tual|us)|s(?:it|ual|a)|tal|vid)|o(?:cal|i(?:ce|d)|l(?:cano|ume)|te|yage))|w(?:a(?:g(?:on|e)|it|l(?:nut|[kl])|nt|r(?:fare|rior|m)|s(?:te|[hp])|ter|ve|y)|e(?:a(?:lth|pon|sel|ther|r)|dding|ekend|ird|lcome|st|[bt])|h(?:a(?:le|t)|e(?:at|el|re|n)|i(?:sper|p))|i(?:d(?:th|e)|fe|l[dl]|n(?:dow|ner|ter|[egk])?|re|s(?:dom|[eh])|tness)|o(?:lf|man|nder|o[dl]|r(?:ld|ry|th|[dk]))|r(?:ap|e(?:ck|stle)|i(?:st|te)|ong))|y(?:ard|e(?:ar|llow)|ou(?:ng|th)?)|z(?:e(?:bra|ro)|o(?:ne|o))))(?:(?:[ \t]+|",[ \t]*"|',[ \t]*')(?:(?:a(?:b(?:andon|ility|le|o(?:ut|ve)|s(?:ent|orb|tract|urd)|use)|c(?:c(?:ess|ident|ount|use)|hieve|id|oustic|quire|ross|t(?:ion|or|ress|ual)?)|d(?:apt|d(?:ict|ress)?|just|mit|ult|v(?:ance|ice))|erobic|f(?:f(?:air|ord)|raid)|g(?:ain|e(?:nt)?|ree)|head|i(?:r(?:port)?|sle|m)|l(?:arm|bum|cohol|ert|ien|l(?:ey|ow)?|most|one|pha|ready|so|ter|ways)|m(?:a(?:teur|zing)|o(?:ng|unt)|used)|n(?:alyst|c(?:hor|ient)|g(?:er|le|ry)|imal|kle|n(?:ounce|ual)|other|swer|t(?:enna|ique)|xiety|y)|p(?:art|ology|p(?:ear|le|rove)|ril)|r(?:c(?:tic|h)|e(?:na|a)|gue|m(?:ed|or|y)?|ound|r(?:ange|est|ive|ow)|t(?:efact|ist|work)?)|s(?:pect|s(?:ault|et|ist|ume)|thma|k)|t(?:hlete|om|t(?:ack|end|itude|ract))|u(?:ction|dit|gust|nt|t(?:hor|umn|o))|v(?:erage|o(?:cado|id))|w(?:a(?:ke|re|y)|esome|ful|kward)|xis)|b(?:a(?:by|c(?:helor|on)|dge|l(?:ance|cony|l)|mboo|n(?:ana|ner)|r(?:ely|gain|rel)?|s(?:ic|ket|e)|ttle|g)|e(?:a(?:ch|uty|n)|c(?:ause|ome)|ef|fore|gin|h(?:ave|ind)|l(?:ieve|ow|t)|n(?:ch|efit)|st|t(?:ray|ter|ween)|yond)|i(?:cycle|ke|nd|ology|r(?:th|d)|tter|d)|l(?:a(?:ck|de|me|nket|st)|e(?:ak|ss)|ind|o(?:od|ssom|use)|u(?:sh|[er]))|o(?:a(?:rd|t)|dy|il|mb|n(?:us|e)|o(?:st|k)|r(?:der|ing|row)|ss|ttom|unce|[xy])|r(?:a(?:cket|in|nd|ss|ve)|e(?:ad|eze)|i(?:ck|dge|ef|ght|ng|sk)|o(?:ccoli|ken|nze|om|ther|wn)|ush)|u(?:bble|d(?:dy|get)|ffalo|ild|l(?:let|[bk])|n(?:dle|ker)|r(?:den|ger|st)|s(?:iness|y)?|tter|yer|zz))|c(?:a(?:b(?:bage|in|le)|ctus|ge|ke|l[lm]|m(?:era|p)|n(?:al|cel|dy|non|oe|vas|yon)?|p(?:able|ital|tain)|r(?:bon|go|pet|ry|[dt])?|s(?:ino|tle|ual|[eh])|t(?:alog|ch|egory|tle)?|u(?:ght|se|tion)|ve)|e(?:iling|lery|ment|n(?:sus|tury)|r(?:eal|tain))|h(?:a(?:ir|lk|mpion|nge|os|pter|rge|se|t)|e(?:ap|ck|ese|rry|st|f)|i(?:cken|ef|ld|mney)|o(?:ice|ose)|ronic|u(?:ckle|nk|rn))|i(?:gar|nnamon|rcle|t(?:izen|y)|vil)|l(?:a(?:im|rify|[pwy])|e(?:an|rk|ver)|i(?:ck|ent|ff|mb|nic|p)|o(?:ck|se|th|ud|wn|g)|u(?:mp|ster|tch|b))|o(?:a(?:ch|st)|conut|de|ffee|i[ln]|l(?:lect|or|umn)|m(?:bine|fort|ic|mon|pany|e)|n(?:cert|duct|firm|gress|nect|sider|trol|vince)|o[kl]|p(?:per|y)|r(?:al|rect|[en])|st|tton|u(?:ch|ntry|ple|rse|sin)|ver|yote)|r(?:a(?:ck|dle|ft|ne|sh|ter|wl|zy|m)|e(?:am|dit|ek|w)|i(?:cket|me|sp|tic)|o(?:ss|uch|wd|p)|u(?:cial|el|ise|mble|nch|sh)|y(?:stal)?)|u(?:be|lture|p(?:board)?|r(?:ious|rent|tain|ve)|s(?:hion|tom)|te)|ycle)|d(?:a(?:m(?:age|p)|n(?:ce|ger)|ring|sh|ughter|wn|[dy])|e(?:al|b(?:ate|ris)|c(?:ade|ember|ide|line|orate|rease)|er|f(?:ense|ine|y)|gree|l(?:ay|iver)|m(?:and|ise)|n(?:ial|tist|y)|p(?:art|end|osit|th|uty)|rive|s(?:cribe|ert|ign|pair|troy|k)|t(?:ail|ect)|v(?:elop|ice|ote))|i(?:a(?:gram|mond|ry|l)|ce|e(?:sel|t)|ffer|g(?:ital|nity)|lemma|n(?:ner|osaur)|r(?:ect|t)|s(?:agree|cover|ease|miss|order|play|tance|h)|v(?:ert|ide|orce)|zzy)|o(?:c(?:tor|ument)|l(?:phin|l)|main|n(?:ate|key|or)|or|se|uble|ve|g)|r(?:a(?:ft|gon|ma|stic|w)|e(?:am|ss)|i(?:ft|ll|nk|ve|p)|op|um|y)|u(?:ck|mb|ne|ring|st|t(?:ch|y))|warf|ynamic)|e(?:a(?:g(?:er|le)|r(?:ly|th|n)|s(?:ily|[ty]))|c(?:ho|o(?:logy|nomy))|d(?:ge|it|ucate)|ffort|gg|i(?:ght|ther)|l(?:bow|der|e(?:ctric|gant|ment|phant|vator)|ite|se)|m(?:b(?:ark|ody|race)|erge|otion|p(?:loy|ower|ty))|n(?:a(?:ble|ct)|d(?:less|orse)?|e(?:my|rgy)|force|g(?:age|ine)|hance|joy|list|ough|r(?:ich|oll)|sure|t(?:er|ire|ry)|velope)|pisode|qu(?:al|ip)|r(?:a(?:se)?|o(?:de|sion)|ror|upt)|s(?:cape|s(?:ay|ence)|tate)|t(?:ernal|hics)|v(?:i(?:dence|l)|o(?:ke|lve))|x(?:a(?:ct|mple)|c(?:ess|hange|ite|lude|use)|e(?:cute|rcise)|h(?:aust|ibit)|i(?:le|st|t)|otic|p(?:and|ect|ire|lain|ose|ress)|t(?:end|ra))|ye(?:brow)?)|f(?:a(?:bric|c(?:ulty|e)|de|i(?:nt|th)|l(?:se|l)|m(?:ily|ous|e)|n(?:cy|tasy)?|rm|shion|t(?:al|her|igue)?|ult|vorite)|e(?:ature|bruary|deral|e(?:[dl])?|male|nce|stival|tch|ver|w)|i(?:ber|ction|eld|gure|l(?:ter|[em])|n(?:al|ger|ish|[de])|r(?:st|[em])|s(?:cal|h)|t(?:ness)?|x)|l(?:a(?:me|sh|vor|[gt])|ee|i(?:ght|p)|o(?:at|ck|or|wer)|u(?:id|sh)|y)|o(?:am|cus|il|l(?:low|d)|o[dt]|r(?:ce|est|get|tune|um|ward|k)|s(?:sil|ter)|und|[gx])|r(?:a(?:gile|me)|e(?:quent|sh)|i(?:end|nge)|o(?:nt|st|wn|zen|g)|uit)|u(?:el|n(?:ny)?|r(?:nace|y)|ture))|g(?:a(?:dget|in|l(?:axy|lery)|me|r(?:age|bage|den|lic|ment)|s(?:p)?|t(?:her|e)|uge|ze|p)|e(?:n(?:eral|ius|re|tle|uine)|sture)|host|i(?:ant|ft|ggle|nger|r(?:affe|l)|ve)|l(?:a(?:nce|re|ss|d)|i(?:de|mpse)|o(?:be|om|ry|ve|w)|ue)|o(?:at|ddess|ld|o(?:se|d)|rilla|s(?:pel|sip)|vern|wn)|r(?:a(?:ce|in|nt|pe|ss|vity|b)|e(?:at|en)|i(?:ef|[dt])|o(?:cery|up|w)|unt)|u(?:ard|ess|i(?:de|lt|tar)|n)|ym)|h(?:a(?:bit|ir|lf|m(?:mer|ster)|nd|ppy|r(?:bor|sh|vest|d)|ve|wk|zard|t)|e(?:a(?:lth|rt|vy|d)|dgehog|ight|l(?:lo|met|p)|ro|n)|i(?:dden|gh|ll|nt|re|story|p)|o(?:bby|ckey|l(?:iday|low|[de])|me|ney|od|pe|r(?:ror|se|n)|s(?:pital|t)|tel|ur|ver)|u(?:ge|m(?:an|ble|or)|n(?:dred|gry|t)|r(?:dle|ry|t)|sband|b)|ybrid)|i(?:c(?:on|e)|d(?:e(?:ntify|a)|le)|gnore|ll(?:egal|ness)?|m(?:age|itate|m(?:ense|une)|p(?:act|ose|rove|ulse))|n(?:c(?:lude|ome|rease|h)|d(?:ex|icate|oor|ustry)|f(?:ant|lict|orm)|h(?:ale|erit)|itial|j(?:ect|ury)|mate|n(?:er|ocent)|put|quiry|s(?:ane|ect|ide|pire|tall)|t(?:act|erest|o)|v(?:est|ite|olve))|ron|s(?:land|olate|sue)|tem|vory)|j(?:a(?:cket|guar|zz|r)|e(?:a(?:lous|ns)|lly|wel)|o(?:in|ke|urney|[by])|u(?:dge|ice|mp|n(?:gle|ior|k)|st))|k(?:angaroo|e(?:e[np]|tchup|y)|i(?:ck|d(?:ney)?|n(?:gdom|d)|ss|t(?:chen|ten|e)?|wi)|n(?:ee|ife|o(?:ck|w)))|l(?:a(?:b(?:el|or)?|d(?:der|y)|ke|mp|nguage|ptop|rge|t(?:er|in)|u(?:gh|ndry)|va|w(?:suit|n)?|yer|zy)|e(?:a(?:der|rn|ve|f)|cture|ft|g(?:al|end)?|isure|mon|n(?:gth|[ds])|opard|sson|tter|vel)|i(?:ar|b(?:erty|rary)|cense|f[et]|ght|ke|m(?:it|b)|nk|on|quid|st|ttle|ve|zard)|o(?:a[dn]|bster|c(?:al|k)|gic|n(?:ely|g)|op|ttery|u(?:nge|d)|ve|yal)|u(?:cky|ggage|mber|n(?:ar|ch)|xury)|yrics)|m(?:a(?:chine|g(?:ic|net)|i[dln]|jor|ke|mmal|n(?:age|date|go|sion|ual)?|ple|r(?:ble|ch|gin|ine|ket|riage)|s(?:ter|[ks])|t(?:ch|erial|rix|ter|h)|ximum|ze|d)|e(?:a(?:dow|sure|[nt])|chanic|d(?:al|ia)|l(?:ody|t)|m(?:ber|ory)|n(?:tion|u)|r(?:cy|ge|it|ry)|s(?:sage|h)|t(?:al|hod))|i(?:d(?:dle|night)|l(?:lion|k)|mic|n(?:imum|or|ute|d)|r(?:acle|ror)|s(?:ery|take|s)|x(?:ed|ture)?)|o(?:bile|d(?:el|ify)|m(?:ent)?|n(?:itor|key|ster|th)|on|r(?:al|ning|e)|squito|t(?:her|ion|or)|u(?:ntain|se)|v(?:ie|e))|u(?:ch|ffin|l(?:tiply|e)|s(?:cle|eum|hroom|ic|t)|tual)|y(?:s(?:elf|tery)|th))|n(?:a(?:ive|me|pkin|rrow|sty|t(?:ion|ure))|e(?:ar|ck|ed|g(?:ative|lect)|ither|phew|rve|st|t(?:work)?|utral|ver|ws|xt)|i(?:ce|ght)|o(?:ble|ise|minee|odle|r(?:mal|th)|se|t(?:able|hing|ice|e)|vel|w)|u(?:clear|mber|rse|t))|o(?:ak|b(?:ey|ject|lige|s(?:cure|erve)|tain|vious)|c(?:cur|ean|tober)|dor|f(?:f(?:er|ice)?|ten)|il|kay|l(?:ive|ympic|d)|mit|n(?:ce|ion|l(?:ine|y)|e)|p(?:e(?:ra|n)|inion|pose|tion)|r(?:ange|bit|chard|d(?:er|inary)|gan|i(?:ent|ginal)|phan)|strich|ther|ut(?:door|er|put|side)|v(?:al|e[nr])|wn(?:er)?|xygen|yster|zone)|p(?:a(?:ct|ddle|ge|ir|l(?:ace|m)|n(?:da|el|ic|ther)|per|r(?:ade|ent|rot|ty|k)|ss|t(?:ch|ient|rol|tern|h)|use|ve|yment)|e(?:a(?:ce|nut|sant|r)|lican|n(?:alty|cil)?|ople|pper|r(?:fect|mit|son)|t)|h(?:o(?:ne|to)|rase|ysical)|i(?:ano|c(?:nic|ture)|ece|g(?:eon)?|l(?:ot|l)|nk|oneer|pe|stol|tch|zza)|l(?:a(?:ce|net|stic|te|y)|e(?:ase|dge)|u(?:ck|nge|g))|o(?:e[mt]|int|l(?:ar|ice|e)|n[dy]|ol|pular|rtion|s(?:ition|sible|t)|t(?:ato|tery)|verty|w(?:der|er))|r(?:a(?:ctice|ise)|e(?:dict|fer|pare|sent|tty|vent)|i(?:ce|de|mary|nt|ority|son|vate|ze)|o(?:blem|cess|duce|fit|gram|ject|mote|of|perty|sper|tect|ud|vide))|u(?:blic|dding|l(?:se|[lp])|mpkin|nch|p(?:il|py)|r(?:chase|ity|pose|se)|sh|zzle|t)|yramid)|qu(?:a(?:lity|ntum|rter)|estion|i(?:ck|[tz])|ote)|r(?:a(?:bbit|c(?:coon|[ek])|d(?:ar|io)|i(?:se|[ln])|lly|mp|n(?:ch|dom|ge)|pid|re|t(?:her|e)|ven|zor|w)|e(?:a(?:dy|son|l)|b(?:el|uild)|c(?:all|eive|ipe|ord|ycle)|duce|f(?:lect|orm|use)|g(?:ion|ret|ular)|ject|l(?:ax|ease|ief|y)|m(?:ain|ember|ind|ove)|n(?:der|ew|t)|open|p(?:air|eat|lace|ort)|quire|s(?:cue|emble|ist|ource|ponse|ult)|t(?:ire|reat|urn)|union|v(?:eal|iew)|ward)|hythm|i(?:b(?:bon)?|c[eh]|d(?:ge|e)|fle|g(?:ht|id)|ng|ot|pple|sk|tual|v(?:al|er))|o(?:a(?:st|d)|b(?:ot|ust)|cket|mance|o(?:kie|[fm])|se|tate|u(?:gh|nd|te)|yal)|u(?:bber|de|le|n(?:way)?|ral|g))|s(?:a(?:d(?:dle|ness)?|fe|il|l(?:ad|mon|on|ute|t)|m(?:ple|e)|nd|t(?:isfy|oshi)|u(?:ce|sage)|ve|y)|c(?:a(?:le|re|tter|n)|ene|h(?:eme|ool)|i(?:ence|ssors)|o(?:rpion|ut)|r(?:ap|een|ipt|ub))|e(?:a(?:rch|son|t)?|c(?:ond|ret|tion|urity)|e[dk]|gment|l(?:ect|l)|minar|n(?:ior|se|tence)|r(?:ies|vice)|ssion|t(?:tle|up)|ven)|h(?:a(?:dow|ft|llow|re)|e(?:ll|riff|d)|i(?:eld|ft|ne|ver|p)|o(?:ck|ot|rt|ulder|ve|[ep])|r(?:imp|ug)|uffle|y)|i(?:bling|ck|de|ege|g(?:ht|n)|l(?:ent|ly|ver|k)|m(?:ilar|ple)|n(?:ce|g)|ren|ster|tuate|ze|x)|k(?:ate|etch|i(?:ll|rt|n)?|ull)|l(?:a[bm]|e(?:ep|nder)|i(?:ce|de|ght|m)|o(?:gan|[tw])|ush)|m(?:a(?:ll|rt)|ile|o(?:ke|oth))|n(?:a(?:ck|ke|p)|iff|ow)|o(?:ap|c(?:cer|ial|k)|da|ft|l(?:ar|dier|id|ution|ve)|meone|ng|on|r(?:ry|t)|u(?:nd|rce|th|[lp]))|p(?:a(?:ce|re|tial|wn)|e(?:ak|cial|ed|ll|nd)|here|i(?:ce|der|ke|rit|n)|lit|o(?:il|nsor|on|rt|t)|r(?:ay|ead|ing)|y)|qu(?:are|eeze|irrel)|t(?:a(?:ble|dium|ff|ge|irs|mp|nd|rt|te|y)|e(?:ak|el|reo|[mp])|i(?:ck|ll|ng)|o(?:ck|mach|ne|ol|ry|ve)|r(?:ategy|eet|ike|ong|uggle)|u(?:dent|ff|mble)|yle)|u(?:b(?:ject|mit|way)|c(?:cess|h)|dden|ffer|g(?:ar|gest)|it|mmer|n(?:ny|set)?|p(?:er|ply|reme)|r(?:face|ge|prise|round|vey|e)|s(?:pect|tain))|w(?:a(?:llow|mp|rm|p)|e(?:ar|et)|i(?:ft|ng|tch|m)|ord)|y(?:m(?:bol|ptom)|rup|stem))|t(?:a(?:ble|ckle|il|l(?:ent|k)|nk|pe|rget|s(?:te|k)|ttoo|xi|g)|e(?:a(?:ch|m)|ll|n(?:ant|nis|t)?|rm|st|xt)|h(?:a(?:nk|t)|e(?:me|ory|re|[ny])|i(?:ng|s)|ought|r(?:ee|ive|ow)|u(?:mb|nder))|i(?:cket|de|ger|lt|m(?:ber|e)|ny|red|ssue|tle|p)|o(?:ast|bacco|d(?:ay|dler)|gether|ilet|ken|m(?:ato|orrow)|n(?:gue|ight|e)|o(?:th|l)|p(?:ic|ple)?|r(?:ch|nado|toise)|ss|tal|urist|w(?:ard|er|n)|[ey])|r(?:a(?:ck|de|ffic|gic|in|nsfer|sh|vel|[py])|e(?:at|nd|e)|i(?:al|be|ck|gger|[mp])|o(?:phy|uble)|u(?:ck|ly|mpet|st|th|e)|y)|u(?:be|ition|mble|n(?:nel|a)|r(?:key|tle|n))|w(?:e(?:lve|nty)|i(?:ce|st|n)|o)|yp(?:ical|e))|u(?:gly|mbrella|n(?:a(?:ble|ware)|c(?:le|over)|d(?:er|o)|f(?:air|old)|happy|i(?:form|que|verse|t)|known|lock|til|usual|veil)|p(?:date|grade|hold|on|per|set)|r(?:ban|ge)|s(?:age|e(?:ful|less|d)?|ual)|tility)|v(?:a(?:c(?:ant|uum)|gue|l(?:id|ley|ve)|n(?:ish)?|por|rious|st|ult)|e(?:hicle|lvet|n(?:dor|ture|ue)|r(?:ify|sion|[by])|ssel|teran)|i(?:able|brant|c(?:ious|tory)|deo|ew|llage|ntage|olin|r(?:tual|us)|s(?:it|ual|a)|tal|vid)|o(?:cal|i(?:ce|d)|l(?:cano|ume)|te|yage))|w(?:a(?:g(?:on|e)|it|l(?:nut|[kl])|nt|r(?:fare|rior|m)|s(?:te|[hp])|ter|ve|y)|e(?:a(?:lth|pon|sel|ther|r)|dding|ekend|ird|lcome|st|[bt])|h(?:a(?:le|t)|e(?:at|el|re|n)|i(?:sper|p))|i(?:d(?:th|e)|fe|l[dl]|n(?:dow|ner|ter|[egk])?|re|s(?:dom|[eh])|tness)|o(?:lf|man|nder|o[dl]|r(?:ld|ry|th|[dk]))|r(?:ap|e(?:ck|stle)|i(?:st|te)|ong))|y(?:ard|e(?:ar|llow)|ou(?:ng|th)?)|z(?:e(?:bra|ro)|o(?:ne|o))))){11}\b'''
+[[rules.allowlists]]
+description = "The public BIP-39 test vectors (all-zero, all-one, 0x7f and 0x80 entropy) used by our tests"
+regexTarget = "match"
+regexes = [
+  '''^abandon(?:\W+abandon)*(?:\W+(?:about|agent|art))?$''',
+  '''^zoo(?:\W+zoo)*(?:\W+(?:wrong|when|vote))?$''',
+  '''^legal\W+winner\W+thank\W+year\W+wave\W+sausage\W+worth\W+useful\W+legal\W+winner\W+thank\W+(?:yellow|year)$''',
+  '''^letter\W+advice\W+cage\W+absurd\W+amount\W+doctor\W+acoustic\W+avoid\W+letter\W+advice\W+cage\W+(?:above|absurd)$''',
+]
+
+# A `.hollow` backup holds the identity and its databases under a passphrase;
+# the passphrase next to the file (or in a script) undoes that protection.
+[[rules]]
+id = "hollow-backup-passphrase"
+description = "Passphrase of a .hollow backup or device-link snapshot"
+regex = '''(?i)(?:backup|restore|export|import|hollow|link|snapshot|duress|unlock)[\w.-]{0,25}?pass(?:phrase|word)["']?[ \t]*(?::|=|=>|,)[ \t]*["']([^"'\s]{8,128})["']'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["passphrase", "password"]
+
+[[rules]]
+id = "hollow-backup-file"
+description = "A .hollow backup or identity file committed to the repo"
+path = '''(?i)(?:\.hollow|(?:^|/)identity\.(?:key|duress)|(?:^|/)pending_link\.[\w.]+)$'''
+
+# Raw 32-byte Ed25519/X25519 seeds: the update-manifest signing key, the shop's
+# support-credential root, a device or master seed.
+[[rules]]
+id = "hollow-hex-seed"
+description = "64-hex private seed assigned to a key-like name"
+regex = '''(?i)(?:seed|secret[_-]?key|private[_-]?key|signing[_-]?key|root[_-]?key|issuer[_-]?key)["']?[ \t]*(?::|=|=>)[ \t]*["']?([0-9a-f]{64})\b'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["seed", "secret", "private", "signing", "root", "issuer"]
+
+[[rules]]
+id = "hollow-key-file"
+description = "A private key or seed file committed to the repo"
+path = '''(?i)(?:^|/)[\w.-]+\.(?:key|seed)$'''
+
+# --- Relay and server-side services ----------------------------------------
+
+# Self-hosted relay access keys: four groups of four [A-Z0-9].
+[[rules]]
+id = "hollow-relay-license-key"
+description = "Relay access key from keys.json"
+regex = '''(?i)(?:"keys"[ \t]*:[ \t]*\[[^\]]{0,1000}?|license[_-]?key["']?[ \t]*(?::|=|=>|,|\()[ \t]*)["']((?-i:[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}))["']'''
+secretGroup = 1
+keywords = ["\"keys\"", "license"]
+[[rules.allowlists]]
+description = "The made-up examples in relay-uws/README.md and SELF_HOSTING.md"
+regexTarget = "secret"
+regexes = ['''^(?:AB12-CD32-BA30-LJ50|QQ44-RT19-ZZ08-MN71)$''']
+
+[[rules]]
+id = "hollow-relay-keys-file"
+description = "A relay keys.json committed to the repo (gitignored on purpose)"
+path = '''(?:^|/)keys\.json$'''
+
+# coturn's static-auth-secret signs every TURN credential the relay hands out.
+[[rules]]
+id = "hollow-turn-static-secret"
+description = "TURN REST static secret (coturn static-auth-secret / TURN_SECRET)"
+regex = '''(?i)(?:static[-_]auth[-_]secret|turn[-_]?(?:static[-_]?|shared[-_]?)?secret)["']?[ \t]*(?::|=|=>|,|[ \t])[ \t]*["']?([A-Za-z0-9+/=_.\-]{16,256})'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["static-auth-secret", "static_auth_secret", "turn_secret", "turn-secret", "turnsecret", "turn_static", "turn_shared"]
+
+# The push sidecar's Firebase service account can push to every Hollow phone.
+[[rules]]
+id = "hollow-gcp-service-account"
+description = "Google/Firebase service account JSON (private_key_id)"
+regex = '''"private_key_id"[ \t]*:[ \t]*"([0-9a-f]{40})"'''
+secretGroup = 1
+keywords = ["private_key_id"]
+
+[[rules]]
+id = "hollow-gcp-service-account-file"
+description = "A Firebase/GCP service account file committed to the repo"
+path = '''(?i)(?:^|/)[\w.-]*(?:service[-_]?account|firebase-adminsdk)[\w.-]*\.json$'''
+
+[[rules]]
+id = "hollow-fcm-server-key"
+description = "Legacy FCM server key"
+regex = '''\b(AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140})\b'''
+secretGroup = 1
+keywords = ["aaaa"]
+
+# The shop's Ko-fi webhook trusts a request by its verification token alone.
+[[rules]]
+id = "hollow-kofi-verification-token"
+description = "Ko-fi webhook verification token"
+regex = '''(?i)(?:ko-?fi|verification)[\w.-]{0,30}?(?:token|secret)["']?[ \t]*(?::|=|=>|,)[ \t]*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'''
+secretGroup = 1
+keywords = ["kofi", "ko-fi", "verification"]
+
+[[rules]]
+id = "hollow-webhook-secret"
+description = "Webhook signing secret or token"
+regex = '''(?i)webhook[\w.-]{0,30}?(?:secret|token|key|signature)["']?[ \t]*(?::|=|=>|,)[ \t]*["']?([A-Za-z0-9_\-+/=.]{16,256})'''
+secretGroup = 1
+entropy = 3.3
+keywords = ["webhook"]
+
+[[rules]]
+id = "hollow-discord-webhook-url"
+description = "Discord webhook URL"
+regex = '''https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d+/([\w-]{60,})'''
+secretGroup = 1
+keywords = ["discord"]
+
+[[rules]]
+id = "hollow-local-env-file"
+description = "A machine-local secrets file committed to the repo (gitignored on purpose)"
+path = '''(?:^|/)(?:release\.local\.env|\.env(?:\.local|\.production)?|config\.php|LocalSigning\.xcconfig)$'''
+
+# --- Release signing -------------------------------------------------------
+
+# Certum code signing (Windows), Apple Developer ID and notarisation, Android
+# upload keys and the flatpak repo's GPG key.
+[[rules]]
+id = "hollow-codesign-file"
+description = "Code-signing key material committed to the repo"
+path = '''(?i)\.(?:pfx|p12|pvk|spc|snk|jks|keystore|p8|mobileprovision|provisionprofile)$|(?:^|/)(?:secring\.gpg|[\w.-]*(?:secret|private)[\w.-]*\.(?:gpg|asc|kbx))$'''
+
+[[rules]]
+id = "hollow-signing-password"
+description = "Password or PIN of a signing key"
+regex = '''(?i)(?:store|key|keystore|cert(?:ificate)?|pfx|p12|signing|certum|codesign|signtool|notary|notarization|gpg|simplysign)[_-]?(?:pass(?:word|phrase)?|pin|pwd)["']?[ \t]*(?::|=|=>)[ \t]*["']?([^\s"'$%{}()<>]{4,128})'''
+secretGroup = 1
+entropy = 2.0
+keywords = ["pass", "pin", "pwd"]
+[[rules.allowlists]]
+description = "Placeholders and the Android SDK's public debug keystore password"
+regexTarget = "secret"
+regexes = ['''^(?i:android|changeit|password|xxxx+|\*+|none|null|true|false|example\w*|placeholder\w*|your\w*)$''']
+
+[[rules]]
+id = "hollow-signtool-password"
+description = "Password passed to signtool on the command line"
+regex = '''(?i)signtool(?:\.exe)?\b[^\n]{0,300}?[ \t]/p[ \t]+["']?([^\s"']{4,128})'''
+secretGroup = 1
+keywords = ["signtool"]
+
+[[rules]]
+id = "hollow-apple-app-password"
+description = "Apple app-specific password (notarytool / altool)"
+regex = '''(?i)(?:--password|app[-_]?specific[-_]?password|notary[\w-]*pass\w*|apple[-_]?(?:id[-_]?)?pass\w*)[^\n]{0,40}?\b((?-i:[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}))\b'''
+secretGroup = 1
+keywords = ["password", "pass"]
+
+# --- Reviewed false positives ----------------------------------------------
+
+[[allowlists]]
+description = "Generated or vendored text: third-party license texts, lockfile checksums, OpenSSL headers"
+paths = [
+  '''(?:^|/)assets/rust_licenses\.txt$''',
+  '''(?:^|/)(?:Cargo|pubspec|Podfile)\.lock$''',
+  '''^rust/hollow_core/\.cargo/android-openssl-headers/''',
+]
+
+[[allowlists]]
+description = "Placeholders in examples and docs (change-me, your-turn-secret-here, ...)"
+targetRules = ["hollow-turn-static-secret", "hollow-webhook-secret", "hollow-backup-passphrase", "hollow-signing-password", "generic-api-key"]
+regexTarget = "secret"
+regexes = ['''(?i)^[a-z0-9_.\-]*(?:change[-_]?me|your[-_]|paste[-_]|example|placeholder|replace[-_]?(?:me|with)|[-_]here$|xxxx)[a-z0-9_.\-]*$''']
+
+[[allowlists]]
+description = "Widget keys (peer, server and message ids) in the UI navigation map, not credentials"
+targetRules = ["generic-api-key"]
+paths = ['''(?:^|/)UI_NAVIGATION_MAP\.md$''']

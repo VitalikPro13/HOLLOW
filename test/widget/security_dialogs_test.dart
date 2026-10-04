@@ -117,25 +117,71 @@ void main() {
       expect(tester.widget<TextField>(fields.at(1)).controller!.text, 'newer1');
     });
 
-    testWidgets('a short PIN is refused on its field', (tester) async {
+    // C-LOCAL-04: a copied data folder lets a short PIN fall to an offline
+    // search, so a new one has at least six digits.
+    for (final short in ['12', '1234', '12345']) {
+      testWidgets('a $short-digit PIN is refused on its field', (tester) async {
+        await pumpHost(tester);
+        var calls = 0;
+        askSecretDialog(hostContext,
+            title: 'Set a PIN',
+            ask: SecretAsk.create,
+            isPin: true,
+            confirmLabel: 'Turn on',
+            onSubmit: (_, _) async => calls++);
+        await tester.pumpAndSettle();
+
+        final fields = find.byType(TextField);
+        await tester.enterText(fields.at(0), short);
+        await tester.enterText(fields.at(1), short);
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pumpAndSettle();
+
+        expect(calls, 0);
+        expect(find.text('A PIN needs at least 6 digits.'), findsOneWidget);
+      });
+    }
+
+    testWidgets('a six-digit PIN is set', (tester) async {
       await pumpHost(tester);
-      var calls = 0;
+      String? got;
       askSecretDialog(hostContext,
           title: 'Set a PIN',
           ask: SecretAsk.create,
           isPin: true,
           confirmLabel: 'Turn on',
+          onSubmit: (_, next) async => got = next);
+      await tester.pumpAndSettle();
+
+      final fields = find.byType(TextField);
+      await tester.enterText(fields.at(0), '246810');
+      await tester.enterText(fields.at(1), '246810');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(got, '246810');
+    });
+
+    testWidgets('a password of four digits is a PIN by another name',
+        (tester) async {
+      await pumpHost(tester);
+      var calls = 0;
+      askSecretDialog(hostContext,
+          title: 'Set app password',
+          ask: SecretAsk.create,
+          confirmLabel: 'Set password',
           onSubmit: (_, _) async => calls++);
       await tester.pumpAndSettle();
 
       final fields = find.byType(TextField);
-      await tester.enterText(fields.at(0), '12');
-      await tester.enterText(fields.at(1), '12');
+      await tester.enterText(fields.at(0), '1234');
+      await tester.enterText(fields.at(1), '1234');
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pumpAndSettle();
 
       expect(calls, 0);
-      expect(find.text('A PIN needs at least 4 digits.'), findsOneWidget);
+      expect(find.text('A password of only digits needs at least 6 of them.'),
+          findsOneWidget);
     });
   });
 

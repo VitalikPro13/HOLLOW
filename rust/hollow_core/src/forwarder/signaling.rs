@@ -1,6 +1,11 @@
 //! The forwarder's relay control plane: one authenticated WS in the dedicated
-//! `fwd:{peer_id}` room, an Olm KEY-EXCHANGE RESPONDER (the forwarder never
-//! initiates), and the fwd_* envelope dispatch into the engine.
+//! `fwd:{peer_id}` room, an Olm KEY-EXCHANGE RESPONDER, and the fwd_* envelope
+//! dispatch into the engine.
+//!
+//! Olm sessions live in RAM only, so the relay box's disk never lists who used the
+//! forwarder (C-RP-07); only the account, whose identity key clients pin, is saved.
+//! A client still writing on a session a restart forgot is asked to re-key, the one
+//! time the forwarder initiates.
 //!
 //! Deliberately NOT `spawn_node` / `spawn_ws_client`: no CRDT, MLS, sync, gossip or
 //! room-state machinery. The manual loop keeps the keepalive and liveness
@@ -13,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -23,8 +28,8 @@ use crate::crypto::{CryptoStore, OlmManager};
 use crate::hollow_log;
 use crate::identity::native_identity::NativeKeypair;
 use crate::node::crypto_handler::{
-    key_request_signing_payload, persist_crypto_state, persist_olm_session, signed_key_bundle,
-    verify_key_exchange, KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
+    encrypted_frame, key_bundle_signing_payload, key_request_signing_payload, signed_key_bundle,
+    signed_key_request, verify_key_exchange, KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
 };
 use crate::node::frame_auth::ReplayGuard;
 use crate::node::types::{HavenMessage, MessageEnvelope};
@@ -37,6 +42,13 @@ use super::ForwarderConfig;
 /// freeze the loop.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
+/// A peer's session is torn down or re-asked for at most this often (re-key storms).
+const REKEY_COOLDOWN: Duration = Duration::from_secs(5);
+/// How long a peer's KeyBundle answers our request to re-key.
+const ASK_WINDOW: Duration = Duration::from_secs(30);
+/// The node's OLM_KEY_REQUEST_TIMEOUT: a KeyRequest crossing our PreKey this fresh is
+/// answered on the same session, never with a second one.
+const PREKEY_RESEND_WINDOW: Duration = Duration::from_secs(10);
 
 type WsSink = futures_util::stream::SplitSink<ws_client::WsStream, Message>;
 
@@ -53,13 +65,12 @@ async fn bounded_send(write: &mut WsSink, msg: Message) -> Result<(), String> {
 pub(crate) async fn run(
     cfg: Arc<ForwarderConfig>,
     keypair: NativeKeypair,
-    mut olm: OlmManager,
-    crypto_store: CryptoStore,
+    olm: OlmManager,
+    account_store: CryptoStore,
     engine_tx: mpsc::UnboundedSender<EngineCmd>,
     mut out_rx: mpsc::UnboundedReceiver<OutSignal>,
 ) -> Result<(), String> {
     let peer_id = keypair.peer_id();
-    crate::node::crypto_handler::bind_olm_identity(&mut olm, &keypair);
     let proto = keypair.to_protobuf_encoding()?;
     let pub_b64 = {
         use base64::Engine;
@@ -68,9 +79,7 @@ pub(crate) async fn run(
     let url = format!("wss://{}/ws", cfg.relay_domain);
     let room = format!("fwd:{peer_id}");
 
-    // Peers we hold a session-teardown cooldown for (KeyRequest re-key storms).
-    let mut rekey_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
-    let mut sealing = Sealing::new(keypair.clone());
+    let mut control = Control::new(keypair, olm, account_store, engine_tx);
     let mut backoff: u64 = 1;
 
     loop {
@@ -113,7 +122,7 @@ pub(crate) async fn run(
                         hollow_log!("[HOLLOW-FWD] no relay traffic for {}s — reconnecting", last_recv.elapsed().as_secs());
                         break 'session;
                     }
-                    sealing.replays.prune(crate::node::frame_auth::now_ms());
+                    control.prune(Instant::now());
                     if bounded_send(&mut write, Message::Ping(vec![0x01].into())).await.is_err() {
                         break 'session;
                     }
@@ -126,7 +135,8 @@ pub(crate) async fn run(
                 }
                 out = out_rx.recv() => {
                     let Some(sig) = out else { return Ok(()) }; // engine gone
-                    send_encrypted(&mut olm, &crypto_store, &mut write, &room, &sealing, sig).await;
+                    let outbox = control.reply(sig);
+                    send_all(&mut write, &room, &control, outbox).await;
                 }
                 frame = read.next() => {
                     let Some(Ok(msg)) = frame else {
@@ -136,13 +146,11 @@ pub(crate) async fn run(
                     last_recv = tokio::time::Instant::now();
                     match msg {
                         Message::Text(text) => {
-                            handle_text_frame(&text, &room, &mut room_peers, &engine_tx);
+                            handle_text_frame(&text, &room, &mut room_peers, &control.engine_tx);
                         }
                         Message::Binary(data) => {
-                            handle_binary_frame(
-                                &data, &peer_id, &keypair, &mut olm, &crypto_store,
-                                &mut rekey_cooldown, &mut write, &room, &engine_tx, &mut sealing,
-                            ).await;
+                            let outbox = control.on_binary(&data);
+                            send_all(&mut write, &room, &control, outbox).await;
                         }
                         Message::Ping(p) => {
                             if bounded_send(&mut write, Message::Pong(p)).await.is_err() {
@@ -283,158 +291,303 @@ fn fwd_env_label(env: &MessageEnvelope) -> &'static str {
     }
 }
 
-/// Inbound relay binary frame: only 0x06 (direct) matters — the whole fwd
-/// control plane is Olm-direct.
-///
-/// NO rate limiting here: the per-peer token bucket this once carried was the only
-/// spot in the fwd pipeline that ate a frame with ZERO trace, the silent-drop class
-/// the relay refuses (`feedback_relay_rules`). The DoS surface stays bounded
-/// without it: garbage fails the cheap HavenMessage/Olm parse, the expensive
-/// KeyRequest re-bundle is behind a 5 s per-peer cooldown, and admission caps refuse
-/// with explicit FwdError codes.
-#[allow(clippy::too_many_arguments)]
-async fn handle_binary_frame(
-    data: &[u8],
-    local_peer_id: &str,
-    keypair: &NativeKeypair,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    rekey_cooldown: &mut HashMap<String, std::time::Instant>,
-    write: &mut WsSink,
-    room: &str,
-    engine_tx: &mpsc::UnboundedSender<EngineCmd>,
-    sealing: &mut Sealing,
-) {
-    if data.len() <= 3 || data[0] != 0x06 {
-        return;
-    }
-    let frame_len = data.len();
-    let Some((frame_room, sender, frame)) = parse_direct_frame(&data[1..]) else {
-        hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: malformed direct frame — dropped");
-        return;
-    };
-    let Some((haven, frame_ts_ms)) =
-        sealing.admit(&frame_room, &sender, local_peer_id, frame, crate::node::frame_auth::now_ms())
-    else {
-        return;
-    };
+/// What one inbound frame or engine reply makes the forwarder send: (target, message).
+pub(crate) type Outbox = Vec<(String, HavenMessage)>;
 
-    match haven {
-        HavenMessage::KeyRequest { to, ts, sig, pk } => {
-            hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: KeyRequest");
-            handle_key_request(
-                &sender, to, ts, sig, pk, local_peer_id, keypair, olm, crypto_store,
-                rekey_cooldown, write, room, sealing,
-            )
-            .await;
+/// Why an inbound Olm body did not open.
+#[derive(Debug, PartialEq, Eq)]
+enum Unopened {
+    /// A PreKey without its sender's proof of the identity key: no session was tried.
+    Unproven,
+    /// No session of ours reads it.
+    Unread,
+}
+
+/// The control plane's state between frames.
+pub(crate) struct Control {
+    keypair: NativeKeypair,
+    local: String,
+    olm: OlmManager,
+    account_store: CryptoStore,
+    engine_tx: mpsc::UnboundedSender<EngineCmd>,
+    sealing: Sealing,
+    /// When each peer last made us drop its session.
+    rekey_cooldown: HashMap<String, Instant>,
+    /// Peers we asked to re-key, and when: only their bundle builds us a session.
+    asked: HashMap<String, Instant>,
+}
+
+impl Control {
+    pub(crate) fn new(
+        keypair: NativeKeypair,
+        mut olm: OlmManager,
+        account_store: CryptoStore,
+        engine_tx: mpsc::UnboundedSender<EngineCmd>,
+    ) -> Self {
+        crate::node::crypto_handler::bind_olm_identity(&mut olm, &keypair);
+        Self {
+            local: keypair.peer_id(),
+            sealing: Sealing::new(keypair.clone()),
+            keypair,
+            olm,
+            account_store,
+            engine_tx,
+            rekey_cooldown: HashMap::new(),
+            asked: HashMap::new(),
         }
-        HavenMessage::Encrypted { message_type, body, identity_key, identity_sig, identity_pk } => {
-            let Ok(ciphertext) = OlmManager::decode_base64(&body) else {
-                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: bad base64 body — dropped");
-                return;
-            };
-            let Some(plaintext) = olm_decrypt(
-                &sender, message_type, identity_key.as_deref(),
-                identity_sig.as_deref(), identity_pk.as_deref(),
-                &ciphertext, olm, crypto_store, local_peer_id,
-            ) else {
-                hollow_log!(
-                    "[HOLLOW-FWD] inbound {frame_len} B: Olm decrypt failed (msg_type {message_type}) — dropped"
+    }
+
+    /// `msg` as it goes on the wire to `target`: sealed by us for this room and route.
+    pub(crate) fn wire(&self, room: &str, target: &str, msg: &HavenMessage) -> Option<Vec<u8>> {
+        let json = serde_json::to_vec(msg).ok()?;
+        Some(self.sealing.payload_for(room, target, &json))
+    }
+
+    /// Whether our session with `peer` has read a message from it.
+    #[cfg(test)]
+    pub(crate) fn confirmed_with(&self, peer: &str) -> bool {
+        self.olm.has_confirmed_session(peer)
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.sealing.replays.prune(crate::node::frame_auth::now_ms());
+        self.rekey_cooldown.retain(|_, at| now.duration_since(*at) < REKEY_COOLDOWN);
+        self.asked.retain(|_, at| now.duration_since(*at) < ASK_WINDOW);
+    }
+
+    /// The account changed (a key minted or spent): save it, without who holds which key.
+    fn keep_account(&self) {
+        match self.olm.identity_pickle_json() {
+            Ok(pickle) => self.account_store.save_account(pickle),
+            Err(e) => hollow_log!("[HOLLOW-FWD] Olm account not saved: {e}"),
+        }
+    }
+
+    /// Inbound relay binary frame: only 0x06 (direct) matters — the whole fwd
+    /// control plane is Olm-direct.
+    ///
+    /// NO rate limiting here: the per-peer token bucket this once carried was the only
+    /// spot in the fwd pipeline that ate a frame with ZERO trace, the silent-drop class
+    /// the relay refuses (`feedback_relay_rules`). The DoS surface stays bounded
+    /// without it: garbage fails the cheap HavenMessage/Olm parse, the expensive
+    /// KeyRequest re-bundle and our own re-key request sit behind 5 s per-peer
+    /// cooldowns, and admission caps refuse with explicit FwdError codes.
+    fn on_binary(&mut self, data: &[u8]) -> Outbox {
+        if data.len() <= 3 || data[0] != 0x06 {
+            return Vec::new();
+        }
+        let Some((room, sender, frame)) = parse_direct_frame(&data[1..]) else {
+            hollow_log!("[HOLLOW-FWD] inbound {} B: malformed direct frame — dropped", data.len());
+            return Vec::new();
+        };
+        self.on_direct(&room, &sender, frame)
+    }
+
+    /// One relay direct from `sender` in `room`.
+    pub(crate) fn on_direct(&mut self, room: &str, sender: &str, frame: &[u8]) -> Outbox {
+        let frame_len = frame.len();
+        let Some((haven, frame_ts_ms)) =
+            self.sealing.admit(room, sender, &self.local, frame, crate::node::frame_auth::now_ms())
+        else {
+            return Vec::new();
+        };
+        match haven {
+            HavenMessage::KeyRequest { to, ts, sig, pk } => {
+                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: KeyRequest");
+                self.answer_key_request(sender, to, ts, sig, pk)
+            }
+            HavenMessage::KeyBundle { identity_key, one_time_key, to, ts, sig, pk } => {
+                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: KeyBundle");
+                self.take_key_bundle(sender, &identity_key, &one_time_key, to, ts, sig, pk)
+            }
+            HavenMessage::Encrypted { message_type, body, identity_key, identity_sig, identity_pk } => {
+                let Ok(ciphertext) = OlmManager::decode_base64(&body) else {
+                    hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: bad base64 body — dropped");
+                    return Vec::new();
+                };
+                let opened = olm_decrypt(
+                    sender, message_type, identity_key.as_deref(), identity_sig.as_deref(),
+                    identity_pk.as_deref(), &ciphertext, &mut self.olm, &self.local,
                 );
-                return;
-            };
-            persist_olm_session(olm, crypto_store, &sender);
-            let Some(env) = open_envelope(&plaintext, frame_ts_ms, crate::node::frame_auth::now_ms()) else {
-                return;
-            };
-            match env {
-                env @ (MessageEnvelope::FwdStreamRegister { .. }
-                | MessageEnvelope::FwdStreamAuth { .. }
-                | MessageEnvelope::FwdStreamUnregister { .. }
-                | MessageEnvelope::FwdIngestOffer { .. }
-                | MessageEnvelope::FwdAttach { .. }
-                | MessageEnvelope::FwdDetach { .. }
-                | MessageEnvelope::FwdEgressAnswer { .. }) => {
-                    hollow_log!(
-                        "[HOLLOW-FWD] inbound {frame_len} B: {} → engine",
-                        fwd_env_label(&env)
-                    );
-                    let _ = engine_tx.send(EngineCmd::Signal { sender, envelope: env });
-                }
-                // SessionAck confirms the peer's ratchet; anything else a client broadcasts at
-                // room peers is irrelevant to a forwarder.
-                _ => {
-                    hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd envelope — ignored");
+                match opened {
+                    Ok((plaintext, spent_key)) => {
+                        if spent_key {
+                            self.keep_account();
+                        }
+                        self.dispatch(sender, &plaintext, frame_ts_ms, frame_len);
+                        Vec::new()
+                    }
+                    // A restart forgot the session this sender still writes on.
+                    Err(Unopened::Unread) if !self.olm.has_session(sender) => {
+                        hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: no session reads it — asking for a re-key");
+                        self.ask_to_rekey(sender)
+                    }
+                    Err(_) => {
+                        hollow_log!(
+                            "[HOLLOW-FWD] inbound {frame_len} B: Olm decrypt failed (msg_type {message_type}) — dropped"
+                        );
+                        Vec::new()
+                    }
                 }
             }
+            _ => {
+                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd HavenMessage — ignored");
+                Vec::new()
+            }
         }
-        // The forwarder never sends KeyRequest, so a KeyBundle should never arrive.
-        _ => {
-            hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd HavenMessage — ignored");
+    }
+
+    /// A decrypted body: fwd envelopes go to the engine.
+    fn dispatch(&self, sender: &str, plaintext: &[u8], frame_ts_ms: i64, frame_len: usize) {
+        let Some(env) = open_envelope(plaintext, frame_ts_ms, crate::node::frame_auth::now_ms()) else {
+            return;
+        };
+        match env {
+            env @ (MessageEnvelope::FwdStreamRegister { .. }
+            | MessageEnvelope::FwdStreamAuth { .. }
+            | MessageEnvelope::FwdStreamUnregister { .. }
+            | MessageEnvelope::FwdIngestOffer { .. }
+            | MessageEnvelope::FwdAttach { .. }
+            | MessageEnvelope::FwdDetach { .. }
+            | MessageEnvelope::FwdEgressAnswer { .. }) => {
+                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: {} → engine", fwd_env_label(&env));
+                let _ = self.engine_tx.send(EngineCmd::Signal { sender: sender.to_string(), envelope: env });
+            }
+            // SessionAck confirms the peer's ratchet; anything else a client broadcasts at
+            // room peers is irrelevant to a forwarder.
+            _ => {
+                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd envelope — ignored");
+            }
+        }
+    }
+
+    /// The Olm key-exchange RESPONDER: re-key storms bounded by a 5 s cooldown, our
+    /// bundle signed by the forwarder's own keypair (master == device here).
+    fn answer_key_request(
+        &mut self,
+        sender: &str,
+        to: Option<String>,
+        ts: Option<i64>,
+        sig: Option<String>,
+        pk: Option<String>,
+    ) -> Outbox {
+        let payload = key_request_signing_payload(sender, &self.local, ts.unwrap_or(0));
+        let auth = verify_key_exchange(sender, &self.local, to.as_deref(), ts, sig.as_deref(), pk.as_deref(), &payload);
+        if !key_exchange_accepted(auth, "KeyRequest") {
+            return Vec::new();
+        }
+        // No `key_exchange_device_unauthorized` check: the forwarder holds no device-list
+        // state, so every device is first-contact, and authorization is enforced where it
+        // matters, at the per-stream allowlist.
+
+        let now = Instant::now();
+        let cooldown_ok = self
+            .rekey_cooldown
+            .get(sender)
+            .is_none_or(|last| now.duration_since(*last) >= REKEY_COOLDOWN);
+        if self.olm.has_confirmed_session(sender) && !cooldown_ok {
+            return Vec::new();
+        }
+        if self.olm.claim_prekey_resend(sender, PREKEY_RESEND_WINDOW) {
+            // It crossed the PreKey we built from its bundle: a second session would collide.
+            return self.encrypt_for(sender, &MessageEnvelope::SessionAck);
+        }
+        if self.olm.has_session(sender) {
+            // Peer lost their half: the session it builds from the new bundle is the one
+            // used, and ours still reads what it already sent.
+            self.olm.retire_session(sender);
+            self.rekey_cooldown.insert(sender.to_string(), now);
+        }
+        // One key per requesting device, as the node hands out (A-DM-01).
+        let (otk, minted) = self.olm.key_for_requester(sender);
+        if minted {
+            self.keep_account();
+        }
+        let identity_key = self.olm.identity_key_base64();
+        vec![(sender.to_string(), signed_key_bundle(&self.keypair, &self.local, sender, identity_key, otk))]
+    }
+
+    /// Ask a sender we hold no session for to re-key, as a node asks a peer whose
+    /// message it cannot read.
+    fn ask_to_rekey(&mut self, sender: &str) -> Outbox {
+        let now = Instant::now();
+        if self.asked.get(sender).is_some_and(|at| now.duration_since(*at) < REKEY_COOLDOWN) {
+            return Vec::new();
+        }
+        self.asked.insert(sender.to_string(), now);
+        vec![(sender.to_string(), signed_key_request(&self.keypair, &self.local, sender))]
+    }
+
+    /// The bundle that answers our request to re-key: we build the session and send the
+    /// first message on it, from which the sender builds its half.
+    #[allow(clippy::too_many_arguments)]
+    fn take_key_bundle(
+        &mut self,
+        sender: &str,
+        identity_key: &str,
+        one_time_key: &str,
+        to: Option<String>,
+        ts: Option<i64>,
+        sig: Option<String>,
+        pk: Option<String>,
+    ) -> Outbox {
+        if self.asked.get(sender).is_none_or(|at| at.elapsed() >= ASK_WINDOW) {
+            hollow_log!("[HOLLOW-FWD] a KeyBundle we did not ask for — ignored");
+            return Vec::new();
+        }
+        let payload = key_bundle_signing_payload(sender, &self.local, identity_key, one_time_key, ts.unwrap_or(0));
+        let auth = verify_key_exchange(sender, &self.local, to.as_deref(), ts, sig.as_deref(), pk.as_deref(), &payload);
+        if !key_exchange_accepted(auth, "KeyBundle") || self.olm.has_confirmed_session(sender) {
+            return Vec::new();
+        }
+        if let Err(e) = self.olm.create_outbound_session(sender, identity_key, one_time_key) {
+            hollow_log!("[HOLLOW-FWD] no session from a KeyBundle: {e}");
+            return Vec::new();
+        }
+        self.asked.remove(sender);
+        self.encrypt_for(sender, &MessageEnvelope::SessionAck)
+    }
+
+    /// An engine reply, Olm-encrypted to its target.
+    pub(crate) fn reply(&mut self, sig: OutSignal) -> Outbox {
+        if !self.olm.has_session(&sig.to_peer) {
+            // Cannot happen for replies (every request arrived through a session); if it
+            // does, the client's 20 s watch timeout walks the fallback ladder.
+            hollow_log!("[HOLLOW-FWD] no Olm session for reply target — dropped");
+            return Vec::new();
+        }
+        self.encrypt_for(&sig.to_peer, &sig.envelope)
+    }
+
+    fn encrypt_for(&mut self, to: &str, envelope: &MessageEnvelope) -> Outbox {
+        let Ok(json) = serde_json::to_string(envelope) else {
+            return Vec::new();
+        };
+        match self.olm.encrypt(to, json.as_bytes()) {
+            Ok((msg_type, ciphertext)) => vec![(to.to_string(), encrypted_frame(&self.olm, msg_type, &ciphertext))],
+            Err(e) => {
+                hollow_log!("[HOLLOW-FWD] encrypt failed: {e}");
+                Vec::new()
+            }
         }
     }
 }
 
-/// The Olm key-exchange RESPONDER: signature REQUIRED
-/// (`REQUIRE_SIGNED_KEY_EXCHANGE`), re-key storms bounded by a 5 s cooldown, our
-/// bundle signed by the forwarder's own keypair (master == device here).
-#[allow(clippy::too_many_arguments)]
-async fn handle_key_request(
-    sender: &str,
-    to: Option<String>,
-    ts: Option<i64>,
-    sig: Option<String>,
-    pk: Option<String>,
-    local_peer_id: &str,
-    keypair: &NativeKeypair,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    rekey_cooldown: &mut HashMap<String, std::time::Instant>,
-    write: &mut WsSink,
-    room: &str,
-    sealing: &Sealing,
-) {
-    let payload = key_request_signing_payload(sender, local_peer_id, ts.unwrap_or(0));
-    match verify_key_exchange(
-        sender, local_peer_id, to.as_deref(), ts, sig.as_deref(), pk.as_deref(), &payload,
-    ) {
-        KeyExchangeAuth::Verified => {}
+/// Whether a key-exchange frame's authentication lets it act: a signature is REQUIRED
+/// (`REQUIRE_SIGNED_KEY_EXCHANGE`).
+fn key_exchange_accepted(auth: KeyExchangeAuth, what: &str) -> bool {
+    match auth {
+        KeyExchangeAuth::Verified => true,
+        KeyExchangeAuth::Unsigned if !REQUIRE_SIGNED_KEY_EXCHANGE => true,
         KeyExchangeAuth::Unsigned => {
-            if REQUIRE_SIGNED_KEY_EXCHANGE {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED unsigned KeyRequest at forwarder");
-                return;
-            }
+            hollow_log!("[HOLLOW-SECURITY] REJECTED unsigned {what} at forwarder");
+            false
         }
         KeyExchangeAuth::Invalid => {
-            hollow_log!("[HOLLOW-SECURITY] REJECTED KeyRequest at forwarder — authentication FAILED");
-            return;
+            hollow_log!("[HOLLOW-SECURITY] REJECTED {what} at forwarder — authentication FAILED");
+            false
         }
     }
-    // No `key_exchange_device_unauthorized` check: the forwarder holds no device-list
-    // state, so every device is first-contact, and authorization is enforced where it
-    // matters, at the per-stream allowlist.
-
-    let now = std::time::Instant::now();
-    let cooldown_ok = rekey_cooldown
-        .get(sender)
-        .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(5));
-    if olm.has_confirmed_session(sender) && !cooldown_ok {
-        return;
-    }
-    if olm.has_session(sender) {
-        // Peer lost their half: the session it builds from the new bundle is the one
-        // used, and ours still reads what it already sent.
-        olm.retire_session(sender);
-        rekey_cooldown.insert(sender.to_string(), now);
-    }
-    // One key per requesting device, as the node hands out (A-DM-01).
-    let (otk, minted) = olm.key_for_requester(sender);
-    let identity_key = olm.identity_key_base64();
-    if minted {
-        persist_crypto_state(olm, crypto_store, sender);
-    }
-    let bundle = signed_key_bundle(keypair, local_peer_id, sender, identity_key, otk);
-    send_haven_direct(write, room, sender, &bundle, sealing).await;
 }
 
 /// The envelope in a decrypted body, unless it is live-only and its frame is stale:
@@ -452,7 +605,7 @@ fn open_envelope(plaintext: &[u8], frame_ts_ms: i64, now_ms: i64) -> Option<Mess
 }
 
 /// Olm decrypt for an inbound Encrypted body: prekey messages try the existing
-/// session first, then recreate inbound.
+/// session first, then recreate inbound. The flag says a PreKey spent one of our keys.
 #[allow(clippy::too_many_arguments)]
 fn olm_decrypt(
     from: &str,
@@ -462,79 +615,48 @@ fn olm_decrypt(
     identity_pk: Option<&str>,
     ciphertext: &[u8],
     olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
     local_peer_id: &str,
-) -> Option<Vec<u8>> {
+) -> Result<(Vec<u8>, bool), Unopened> {
     if message_type == 0 {
-        let their_identity = identity_key?;
+        let Some(their_identity) = identity_key else {
+            return Err(Unopened::Unproven);
+        };
         if !crate::node::crypto_handler::verify_olm_identity(from, their_identity, identity_sig, identity_pk) {
             hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {from}: identity key not signed by that device");
-            return None;
+            return Err(Unopened::Unproven);
         }
         match olm.open_prekey(from, their_identity, ciphertext, local_peer_id) {
-            Ok(opened) => {
-                if opened.created || opened.switched {
-                    persist_crypto_state(olm, crypto_store, from);
-                }
-                Some(opened.plaintext)
-            }
+            Ok(opened) => Ok((opened.plaintext, opened.created)),
             Err(e) => {
                 hollow_log!("[HOLLOW-FWD] PreKey undecryptable: {e}");
-                None
+                Err(Unopened::Unread)
             }
         }
     } else {
         match olm.decrypt(from, message_type, ciphertext) {
-            Ok(opened) => Some(opened.plaintext),
+            Ok(opened) => Ok((opened.plaintext, false)),
             Err(e) => {
                 hollow_log!("[HOLLOW-FWD] Olm decrypt failed: {e}");
-                None
+                Err(Unopened::Unread)
             }
         }
     }
 }
 
-/// Olm-encrypt an engine reply and send it as a 0x04 direct frame
-/// (`[0x04][room\0][target\0][HavenMessage JSON]` — the SendDirect layout).
-async fn send_encrypted(
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    write: &mut WsSink,
-    room: &str,
-    sealing: &Sealing,
-    sig: OutSignal,
-) {
-    let env_json = match serde_json::to_string(&sig.envelope) {
-        Ok(j) => j,
-        Err(_) => return,
-    };
-    if !olm.has_session(&sig.to_peer) {
-        // Cannot happen for replies (every request arrived through a session); if it
-        // does, the client's 20 s watch timeout walks the fallback ladder.
-        hollow_log!("[HOLLOW-FWD] no Olm session for reply target — dropped");
-        return;
-    }
-    match olm.encrypt(&sig.to_peer, env_json.as_bytes()) {
-        Ok((msg_type, ciphertext)) => {
-            persist_olm_session(olm, crypto_store, &sig.to_peer);
-            let haven = crate::node::crypto_handler::encrypted_frame(olm, msg_type, &ciphertext);
-            send_haven_direct(write, room, &sig.to_peer, &haven, sealing).await;
-        }
-        Err(e) => {
-            hollow_log!("[HOLLOW-FWD] encrypt for reply failed: {e}");
+/// Send what one frame or reply produced, each as a relay 0x04 direct in our room.
+async fn send_all(write: &mut WsSink, room: &str, control: &Control, outbox: Outbox) {
+    for (target, msg) in outbox {
+        if let Some(payload) = control.wire(room, &target, &msg) {
+            send_direct(write, room, &target, &payload).await;
         }
     }
 }
 
-/// Frame + send one HavenMessage as a relay 0x04 direct.
-async fn send_haven_direct(write: &mut WsSink, room: &str, target: &str, msg: &HavenMessage, sealing: &Sealing) {
-    let Ok(json) = serde_json::to_string(msg) else {
-        return;
-    };
+/// Frame + send one sealed payload as `[0x04][room\0][target\0][payload]`, the
+/// SendDirect layout.
+async fn send_direct(write: &mut WsSink, room: &str, target: &str, payload: &[u8]) {
     let room_b = room.as_bytes();
     let target_b = target.as_bytes();
-    let payload = sealing.payload_for(room, target, json.as_bytes());
-    let payload = payload.as_slice();
     let mut frame = Vec::with_capacity(1 + room_b.len() + 1 + target_b.len() + 1 + payload.len());
     frame.push(0x04);
     frame.extend_from_slice(room_b);
@@ -630,17 +752,12 @@ mod tests {
 
     /// Media S-11: a PreKey whose identity key its sending device did not sign builds
     /// no session at the forwarder, which would otherwise answer an impostor.
-    #[tokio::test]
-    async fn fwd_opens_a_prekey_only_with_its_senders_own_proof() {
+    #[test]
+    fn fwd_opens_a_prekey_only_with_its_senders_own_proof() {
         use base64::Engine;
         let _g = crate::node::resolver::test_lock();
         let (fwd, alice, carol) = (keypair(1), keypair(2), keypair(3));
         let (local, from) = (fwd.peer_id(), alice.peer_id());
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("fwd.db").to_string_lossy().into_owned();
-        let pass = "ab".repeat(32);
-        crate::storage::MessageStore::open(&path, &pass).unwrap();
-        let crypto_store = CryptoStore::open(path, pass).unwrap();
         let mut fwd_olm = OlmManager::new();
         let otk = fwd_olm.generate_one_time_key();
         let mut alice_olm = OlmManager::new();
@@ -654,11 +771,199 @@ mod tests {
             crate::node::crypto_handler::sign_message(k, &pk, &payload)
         };
         let mut open_with = |(sig, pk): (Option<String>, Option<String>)| {
-            olm_decrypt(&from, message_type, Some(&key), sig.as_deref(), pk.as_deref(), &ciphertext, &mut fwd_olm, &crypto_store, &local)
+            olm_decrypt(&from, message_type, Some(&key), sig.as_deref(), pk.as_deref(), &ciphertext, &mut fwd_olm, &local)
         };
         for (proof, what) in [((None, None), "no proof"), (by(&carol), "another device's proof")] {
-            assert!(open_with(proof).is_none(), "the forwarder opened a PreKey with {what}");
+            assert_eq!(open_with(proof).err(), Some(Unopened::Unproven), "the forwarder opened a PreKey with {what}");
         }
-        assert_eq!(open_with(by(&alice)).as_deref(), Some(&b"{}"[..]), "the sender's own proof opens it");
+        let opened = open_with(by(&alice)).expect("the sender's own proof opens it");
+        assert_eq!((opened.0.as_slice(), opened.1), (&b"{}"[..], true), "and spends one of our keys");
+    }
+
+    /// A forwarder's control plane on its own database, and the engine's inbox.
+    fn control(fwd: &NativeKeypair, path: &str, pass: &str) -> (Control, mpsc::UnboundedReceiver<EngineCmd>) {
+        let olm = super::super::load_olm(path, pass).unwrap();
+        let store = CryptoStore::open(path.to_string(), pass.to_string()).unwrap();
+        let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+        (Control::new(fwd.clone(), olm, store, engine_tx), engine_rx)
+    }
+
+    /// `msg` as `from` puts it on the wire to `to` now.
+    fn sealed(from: &NativeKeypair, to: &str, msg: &HavenMessage) -> Vec<u8> {
+        crate::node::frame_auth::seal(from, ROOM, to, &serde_json::to_vec(msg).unwrap())
+    }
+
+    /// A client's Olm account, its identity key proven as a node proves it.
+    fn client_olm(kp: &NativeKeypair) -> OlmManager {
+        let mut olm = OlmManager::new();
+        crate::node::crypto_handler::bind_olm_identity(&mut olm, kp);
+        olm
+    }
+
+    fn attach() -> Vec<u8> {
+        serde_json::to_vec(&MessageEnvelope::FwdAttach { origin: Box::default() }).unwrap()
+    }
+
+    /// An Olm message no session of ours reads.
+    fn unreadable() -> HavenMessage {
+        HavenMessage::Encrypted {
+            message_type: 1,
+            body: OlmManager::encode_base64(b"no session reads this"),
+            identity_key: None,
+            identity_sig: None,
+            identity_pk: None,
+        }
+    }
+
+    /// C-RP-07: a client that keys, talks and is answered, or is only handed a key,
+    /// leaves no trace of its id in the forwarder's database, and a restart keeps the
+    /// identity key clients pin.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes the resolver's tests
+    async fn fwd_keeps_no_client_device_id_on_disk() {
+        let _g = crate::node::resolver::test_lock();
+        let (fwd, alice) = (keypair(1), keypair(2));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("fwd.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let (mut ctl, mut engine_rx) = control(&fwd, &path, &pass);
+        let mut alice_olm = client_olm(&alice);
+        let out = ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &signed_key_request(&alice, &from, &local)));
+        let [(to, HavenMessage::KeyBundle { identity_key, one_time_key, .. })] = &out[..] else {
+            panic!("no bundle for the requester");
+        };
+        assert_eq!(to, &from);
+        alice_olm.create_outbound_session(&local, identity_key, one_time_key).unwrap();
+        let (mt, ct) = alice_olm.encrypt(&local, &attach()).unwrap();
+        ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &encrypted_frame(&alice_olm, mt, &ct)));
+        assert!(matches!(engine_rx.try_recv(), Ok(EngineCmd::Signal { sender, .. }) if sender == from));
+        assert_eq!(ctl.reply(OutSignal { to_peer: from.clone(), envelope: MessageEnvelope::SessionAck }).len(), 1);
+        let bob = keypair(4);
+        let bob_id = bob.peer_id();
+        let asked = sealed(&bob, &local, &signed_key_request(&bob, &bob_id, &local));
+        assert_eq!(ctl.on_direct(ROOM, &bob_id, &asked).len(), 1, "bob is handed a key");
+
+        // The store applies commands in order: once this lands, everything before has.
+        ctl.account_store.save_read_mark("sentinel".into(), 1);
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        for _ in 0..100 {
+            if store.load_olm_read_marks().unwrap().iter().any(|(p, _)| p == "sentinel") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let sessions = store.load_all_olm_sessions().unwrap();
+        assert!(sessions.is_empty(), "the forwarder wrote a session for {:?}", sessions.iter().map(|s| &s.0).collect::<Vec<_>>());
+        let account = store.load_olm_account().unwrap().unwrap_or_default();
+        for id in [&from, &bob_id] {
+            assert!(!account.contains(id.as_str()), "the forwarder's account row names {id}");
+        }
+        drop(store);
+
+        let identity = ctl.olm.identity_key_base64();
+        drop(ctl);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let again = super::super::load_olm(&path, &pass).unwrap();
+        assert_eq!(again.identity_key_base64(), identity, "a restart changed the identity key clients pin");
+    }
+
+    /// A message no session reads, from a sender we hold none for (a restart forgot it),
+    /// gets one signed request to re-key per cooldown; from a sender we hold one for, none.
+    #[tokio::test]
+    async fn fwd_asks_a_sender_it_holds_no_session_for_to_rekey_once() {
+        let _g = crate::node::resolver::test_lock();
+        let (fwd, alice, bob) = (keypair(1), keypair(2), keypair(4));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("fwd.db").to_string_lossy().into_owned();
+        let (mut ctl, _engine_rx) = control(&fwd, &path, &"ab".repeat(32));
+
+        let out = ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &unreadable()));
+        let [(target, HavenMessage::KeyRequest { to, ts, sig, pk })] = &out[..] else {
+            panic!("no request to re-key: {}", out.len());
+        };
+        assert_eq!(target, &from);
+        let payload = key_request_signing_payload(&local, &from, ts.unwrap_or(0));
+        assert_eq!(
+            verify_key_exchange(&local, &from, to.as_deref(), *ts, sig.as_deref(), pk.as_deref(), &payload),
+            KeyExchangeAuth::Verified,
+            "the request is the forwarder's own, addressed to the sender",
+        );
+        assert!(
+            ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &unreadable())).is_empty(),
+            "asked again inside the cooldown"
+        );
+
+        let bob_id = bob.peer_id();
+        let mut bob_olm = client_olm(&bob);
+        let out = ctl.on_direct(ROOM, &bob_id, &sealed(&bob, &local, &signed_key_request(&bob, &bob_id, &local)));
+        let [(_, HavenMessage::KeyBundle { identity_key, one_time_key, .. })] = &out[..] else { panic!("no bundle") };
+        bob_olm.create_outbound_session(&local, identity_key, one_time_key).unwrap();
+        let (mt, ct) = bob_olm.encrypt(&local, &attach()).unwrap();
+        ctl.on_direct(ROOM, &bob_id, &sealed(&bob, &local, &encrypted_frame(&bob_olm, mt, &ct)));
+        assert!(
+            ctl.on_direct(ROOM, &bob_id, &sealed(&bob, &local, &unreadable())).is_empty(),
+            "a sender we hold a session for was asked to re-key over one bad message"
+        );
+    }
+
+    /// A bundle builds a session only when it answers our own request to re-key, and the
+    /// message we send on it is the PreKey its sender builds its half from.
+    #[tokio::test]
+    async fn fwd_takes_a_key_bundle_only_when_it_asked() {
+        let _g = crate::node::resolver::test_lock();
+        let (fwd, alice) = (keypair(1), keypair(2));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("fwd.db").to_string_lossy().into_owned();
+        let (mut ctl, mut engine_rx) = control(&fwd, &path, &"ab".repeat(32));
+        let mut alice_olm = client_olm(&alice);
+        let (otk, _) = alice_olm.key_for_requester(&local);
+        let bundle = |olm: &OlmManager| {
+            sealed(&alice, &local, &signed_key_bundle(&alice, &from, &local, olm.identity_key_base64(), otk.clone()))
+        };
+        assert!(ctl.on_direct(ROOM, &from, &bundle(&alice_olm)).is_empty(), "an unasked bundle built a session");
+
+        assert_eq!(ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &unreadable())).len(), 1);
+        let out = ctl.on_direct(ROOM, &from, &bundle(&alice_olm));
+        let [(to, HavenMessage::Encrypted { message_type: 0, body, identity_key: Some(key), identity_sig, identity_pk })] =
+            &out[..]
+        else {
+            panic!("the asked-for bundle was not answered with a PreKey");
+        };
+        assert_eq!(to, &from);
+        assert!(crate::node::crypto_handler::verify_olm_identity(&local, key, identity_sig.as_deref(), identity_pk.as_deref()));
+        let opened = alice_olm.open_prekey(&local, key, &OlmManager::decode_base64(body).unwrap(), &from).unwrap();
+        assert!(matches!(serde_json::from_slice(&opened.plaintext), Ok(MessageEnvelope::SessionAck)));
+
+        let (mt, ct) = alice_olm.encrypt(&local, &attach()).unwrap();
+        assert_eq!(mt, 1, "the client writes on the session the PreKey built");
+        ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &encrypted_frame(&alice_olm, mt, &ct)));
+        assert!(matches!(engine_rx.try_recv(), Ok(EngineCmd::Signal { sender, .. }) if sender == from));
+    }
+
+    /// The client's own KeyRequest crossing the PreKey we built from its bundle is
+    /// answered on that same session, never with a bundle for a second one.
+    #[tokio::test]
+    async fn fwd_answers_a_request_crossing_its_prekey_on_the_same_session() {
+        let _g = crate::node::resolver::test_lock();
+        let (fwd, alice) = (keypair(1), keypair(2));
+        let (local, from) = (fwd.peer_id(), alice.peer_id());
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("fwd.db").to_string_lossy().into_owned();
+        let (mut ctl, _engine_rx) = control(&fwd, &path, &"ab".repeat(32));
+        let mut alice_olm = client_olm(&alice);
+        let (otk, _) = alice_olm.key_for_requester(&local);
+        ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &unreadable()));
+        let bundle = signed_key_bundle(&alice, &from, &local, alice_olm.identity_key_base64(), otk);
+        assert_eq!(ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &bundle)).len(), 1);
+        let first = ctl.olm.session_id(&from);
+        let out = ctl.on_direct(ROOM, &from, &sealed(&alice, &local, &signed_key_request(&alice, &from, &local)));
+        assert!(
+            matches!(&out[..], [(_, HavenMessage::Encrypted { message_type: 0, .. })]),
+            "a crossing request was answered with a new bundle"
+        );
+        assert_eq!(ctl.olm.session_id(&from), first, "the crossing request replaced the session");
     }
 }

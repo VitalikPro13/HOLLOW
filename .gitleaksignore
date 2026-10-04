@@ -1,0 +1,32 @@
+# Reviewed gitleaks findings in history (commit:file:rule:line). Each one was
+# looked at on 2026-10-04; none is a live credential. A new line here needs the
+# same: say what the value is and why it is not a secret, or that it is dead.
+
+# TURN static secret of the first relay deployment. Public since the repo
+# opened (2026-05-10), replaced by a placeholder in e79b39ac, and both the
+# relay unit and coturn have used a different secret since (checked 2026-09-02).
+25b6ba52de696f2887dd94c1e2a734504690d8ca:relay-uws/deploy/hollow-relay.service:hollow-turn-static-secret:16
+
+# Random BIP-39 words with an invalid checksum, so no identity can come from
+# them; the test now uses the public all-zero vector.
+3fee2a6caf9a20bb312fb6398bd81c8bf72d381e:test/widget/recovery_phrase_dialogs_test.dart:hollow-bip39-mnemonic:10
+3fee2a6caf9a20bb312fb6398bd81c8bf72d381e:test/widget/recovery_phrase_dialogs_test.dart:hollow-bip39-mnemonic:11
+
+# Public values: a peer id, a pinned public key, the public key of a fixed test
+# seed, the Sonar project key.
+e601e9a354f0a46d67a8245425f7a2bbdfb098bf:relay-uws/test/test_verify_device_list.cpp:generic-api-key:165
+f9cf8ce983aa0cf3c1cccb54747d4cf610017065:reports/REDEEM_PHASE2.md:generic-api-key:31
+3cf1a3a4a55fe6b6e62c1ff2fea2012ea1d7f1bd:rust/hollow_core/src/node/ws_client.rs:generic-api-key:1749
+d2795551d1943946e0d821d5a1f0f6b1922c9a90:sonar-project.properties:generic-api-key:3
+
+# Test fixtures: a throwaway MLS group's exported secret, a patterned SFrame key
+# in a report's example frame, a mock recovery link in a screenshot test.
+18706d4d07e09c1747af4b2dbc97e93c480a8fe2:rust/hollow_core/src/crypto/fixtures/mls_persisted_0_8_1/meta.json:generic-api-key:7
+18706d4d07e09c1747af4b2dbc97e93c480a8fe2:reports/SECURITY_AUDIT_2026_09.md:generic-api-key:201
+18706d4d07e09c1747af4b2dbc97e93c480a8fe2:reports/SECURITY_AUDIT_2026_09.md:generic-api-key:596
+f3ae76de2cca7bd10eb1d746dabc1da3e678f459:test/screenshots/dialogs_after_1_screenshot_test.dart:generic-api-key:79
+
+# Prose: an HMAC domain label and a sentence about handlers.
+bb5f57b0d279319f362f53bec4c8d71f32e88e53:reports/planned/security/audit/design_A_frame_authority.md:generic-api-key:452
+bb5f57b0d279319f362f53bec4c8d71f32e88e53:tools/hollow-memory/wiki/conferences.md:generic-api-key:17
+4c14451641b66e6f51e30ea523906fca0a5b916a:reports/MEDIA_FORWARDING_PLAN.md:generic-api-key:240

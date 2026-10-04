@@ -3,9 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import 'package:hollow/src/core/providers/status_provider.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -34,6 +34,14 @@ import 'package:hollow/src/ui/components/hollow_text_link.dart';
     case StatusLevel.critical:
       return (color: hollow.error, icon: LucideIcons.octagonAlert);
   }
+}
+
+/// The feed is unsigned, so its link shows only when it is one the untrusted
+/// link helper would actually open.
+bool _hasOpenableLink(SystemStatus status) => canOpenUntrustedUrl(status.link);
+
+void _openStatusLink(String url) {
+  openUntrustedUrl(url).catchError((_) => false);
 }
 
 /// A live, self-ticking countdown to an absolute UTC instant.
@@ -172,13 +180,6 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
   bool _expanded = false;
   String _lastId = '';
 
-  void _openLink(String url) {
-    final uri = Uri.tryParse(url);
-    if (uri != null) {
-      launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final st = ref.watch(statusProvider);
@@ -220,10 +221,10 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
           )
         : null;
 
-    final detailsLink = status.link.isNotEmpty
+    final detailsLink = _hasOpenableLink(status)
         ? HollowTextLink(
             status.linkLabel.isNotEmpty ? status.linkLabel : 'Details',
-            onTap: () => _openLink(status.link),
+            onTap: () => _openStatusLink(status.link),
           )
         : null;
 
@@ -394,13 +395,6 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
   bool _expanded = false;
   String _lastId = '';
 
-  void _openLink(String url) {
-    final uri = Uri.tryParse(url);
-    if (uri != null) {
-      launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -428,8 +422,9 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
     }
 
     // Only worth a tap when the collapsed card actually hides something.
+    final bool hasLink = _hasOpenableLink(status);
     final bool hasDetail =
-        !operational && (status.message.isNotEmpty || status.link.isNotEmpty);
+        !operational && (status.message.isNotEmpty || hasLink);
     final bool showFull = _expanded && hasDetail;
 
     final card = Container(
@@ -492,17 +487,17 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                 ],
                 // Expand-only: an underlined link in a glanceable summary would
                 // compete with the tap-to-expand affordance.
-                if (showFull && status.link.isNotEmpty) ...[
+                if (showFull && hasLink) ...[
                   const SizedBox(height: HollowSpacing.xs),
                   HollowFocusRing(
                     enabled: true,
-                    onActivate: () => _openLink(status.link),
+                    onActivate: () => _openStatusLink(status.link),
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     child: GestureDetector(
                       // Absorbed so following the link does not also collapse
                       // the card out from under the user.
                       behavior: HitTestBehavior.opaque,
-                      onTap: () => _openLink(status.link),
+                      onTap: () => _openStatusLink(status.link),
                       child: MouseRegion(
                         cursor: SystemMouseCursors.click,
                         child: Semantics(

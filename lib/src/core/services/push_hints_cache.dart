@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -14,8 +15,9 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 ///
 /// `{ peerId: {name, avatar} }` in `push_hints/hints.json`, plus one
 /// `push_hints/<peerId>.img` per friend with an avatar. Plaintext the user
-/// already displays, contained to the app-private group container, never
-/// iCloud-synced. iOS-only, a no-op everywhere else. Tier B, decrypted message
+/// already displays, contained to the app-private group container and kept out
+/// of device backups (AppDelegate.swift). With App Lock on it holds only the
+/// locked marker. iOS-only, a no-op everywhere else. Tier B, decrypted message
 /// text or images in the banner, is deliberately NOT here.
 class PushHintsCache {
   PushHintsCache._();
@@ -58,8 +60,29 @@ class PushHintsCache {
   /// Rewrite from the last friend list, after a block or unblock.
   static void rewriteLast() => scheduleWrite(_lastIds);
 
+  /// Set by [forget]: a pending debounced write must not bring the names back.
+  static bool _forgotten = false;
+
+  /// The wipe's step: the hints and the extension's own log go, and with
+  /// [stopWriting] nothing is written again this launch. Both sit in the App
+  /// Group container, outside the data root, so the extension can read them.
+  static Future<void> forget({bool stopWriting = true}) async {
+    if (stopWriting) _forgotten = true;
+    _debounce?.cancel();
+    _lastIds = const [];
+    final dir = await _appGroupDir();
+    if (dir == null) return;
+    for (final name in ['push_hints', 'push_diag']) {
+      try {
+        final d = Directory('$dir/$name');
+        if (d.existsSync()) d.deleteSync(recursive: true);
+      } catch (_) {}
+    }
+  }
+
   /// Rewrite the shared push-hints cache immediately. iOS-only.
   static Future<void> writeNow(List<String> friendPeerIds) async {
+    if (_forgotten) return;
     _lastIds = friendPeerIds;
     final dir = await _appGroupDir();
     if (dir == null) return;
@@ -74,7 +97,16 @@ class PushHintsCache {
     }
 
     final base = Directory('$dir/push_hints');
+    if (_forgotten) return;
     if (!base.existsSync()) base.createSync(recursive: true);
+
+    // App Lock on: no name or avatar waits in the clear for the extension, and
+    // the marker tells it to leave every banner generic (C-35).
+    if (await _appLockOn()) {
+      await _swapIn(base, {lockedMarkerKey: true});
+      _prune(base, const {});
+      return;
+    }
 
     // The friend ids are MASTER ids, but a push `sender` is the relay-attested
     // DEVICE id of the sending device. The NSE does a raw `map[sender]` lookup
@@ -95,6 +127,7 @@ class PushHintsCache {
     final keep = <String>{}; // avatar files to retain this pass
 
     for (final peerId in friendPeerIds) {
+      if (_forgotten) return;
       if (blocked.contains(peerId)) continue;
       try {
         final profile = await storage_api.getProfileLight(peerId: peerId);
@@ -130,7 +163,26 @@ class PushHintsCache {
       }
     }
 
-    // Atomic swap so the extension never reads a half-written file.
+    await _swapIn(base, map);
+    _prune(base, keep);
+    debugPrint('[HOLLOW-PUSHHINTS] wrote ${map.length} hint(s)');
+  }
+
+  /// The key `NotificationService.swift` reads: present, it shows only the
+  /// generic banner and fetches nothing.
+  static const lockedMarkerKey = '~locked';
+
+  static Future<bool> _appLockOn() async {
+    try {
+      return (await identity_api.getIdentityProtectionStatus()).hasPassword;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Atomic swap so the extension never reads a half-written file.
+  static Future<void> _swapIn(Directory base, Map<String, dynamic> map) async {
+    if (_forgotten) return;
     try {
       final tmp = File('${base.path}/hints.json.tmp');
       await tmp.writeAsString(jsonEncode(map), flush: true);
@@ -138,8 +190,10 @@ class PushHintsCache {
     } catch (e) {
       debugPrint('[HOLLOW-PUSHHINTS] hints.json write failed: $e');
     }
+  }
 
-    // Prune avatar files for peers no longer in the list.
+  /// Drops avatar files for peers no longer in the list.
+  static void _prune(Directory base, Set<String> keep) {
     try {
       for (final entity in base.listSync()) {
         if (entity is File && entity.path.endsWith('.img')) {
@@ -150,7 +204,5 @@ class PushHintsCache {
         }
       }
     } catch (_) {}
-
-    debugPrint('[HOLLOW-PUSHHINTS] wrote ${map.length} hint(s)');
   }
 }

@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `duress_available`, `keychain_key_that_decrypts_opts`, `keychain_key_that_decrypts`, `owner_gate`, `protection_status_of`, `save_duress_settings`
+// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `duress_available`, `forget_duress_code`, `is_running_root`, `keychain_key_that_decrypts_opts`, `keychain_key_that_decrypts`, `open_typed_secret`, `owner_gate`, `protection_status_of`, `refuse_short_pin`, `save_duress_settings`
 
 /// Set the data directory path (Android/iOS: pass app documents dir).
 /// Must be called before load_or_create_identity() or start_node().
@@ -136,7 +136,8 @@ Future<ProtectionStatus> identityProtectionStatusAt({
 /// A GATE, not an unlock: it never touches the session key and never heals the keystore
 /// slots, so asking about another profile cannot disturb the running one. A plaintext
 /// identity answers true, a wrong password is `Ok(false)`, and only a missing or
-/// malformed file errors.
+/// malformed file errors, or the running profile's duress code, which wipes as at
+/// every prompt.
 Future<bool> verifyIdentityPasswordAt({
   required String dataDir,
   String? password,

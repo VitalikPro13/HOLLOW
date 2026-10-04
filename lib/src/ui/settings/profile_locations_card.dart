@@ -527,10 +527,11 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
       _error = null;
     });
     try {
-      final ok = await identity_api.verifyIdentityPasswordAt(
-        dataDir: widget.path,
-        password: typed,
-      );
+      // The running profile's own password prompt takes a duress code too.
+      final ok = await withTypedSecret(() => identity_api.verifyIdentityPasswordAt(
+            dataDir: widget.path,
+            password: typed,
+          ));
       if (!mounted) return;
       if (!ok) {
         setState(() {

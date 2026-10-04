@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -17,7 +18,6 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 import 'package:hollow/src/ui/shop/shop_art.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 /// One listing, shown on your own profile: who made it, what it costs, and
 /// either Buy (the artist's Ko-fi, in the browser) or Wear it. A dialog on
@@ -85,10 +85,8 @@ class _ShopItemViewState extends ConsumerState<_ShopItemView> {
     // Straight to the artist's Ko-fi item: the shop's own page would only
     // show the same piece again and send the buyer on.
     final url = _sellsOnKofi ? widget.listing.buyUrl : widget.listing.itemUrl;
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
     try {
-      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      if (!await openUntrustedUrl(url)) {
         throw const FormatException('No browser took the link');
       }
       if (!mounted) return;
@@ -131,11 +129,7 @@ class _ShopItemViewState extends ConsumerState<_ShopItemView> {
     }
   }
 
-  Future<void> _openArtist() async {
-    final uri = Uri.tryParse(widget.listing.artist.url);
-    if (uri == null) return;
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-  }
+  Future<void> _openArtist() => openUntrustedUrl(widget.listing.artist.url);
 
   void _redeem() {
     Navigator.of(context).pop();

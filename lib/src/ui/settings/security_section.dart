@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
+import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
@@ -33,6 +34,20 @@ import 'package:hollow/src/ui/settings/pages/security_page.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// Turning the lock off takes the duress code with it, and the dialog says so
+/// when one is set: a code shown as set must always work.
+const _kDuressGoesWithTheLock =
+    ' Your duress code is removed as well, since there is no lock left to '
+    'type it into.';
+
+Future<bool> _duressCodeSet() async {
+  try {
+    return (await identity_api.duressStatus()).enabled;
+  } catch (_) {
+    return false;
+  }
+}
 
 /// Which secrets a prompt asks for.
 enum SecretAsk {
@@ -124,8 +139,10 @@ class _SecretDialogState extends State<_SecretDialog> with HollowDialogAction {
     if (actionRunning || !_filled) return;
     final current = _asksCurrent ? _current.text : '';
     final next = _asksNext ? _next.text : '';
-    if (_asksNext && widget.isPin && next.length < 4) {
-      setState(() => _nextError = 'A PIN needs at least 4 digits.');
+    if (_asksNext && isShortPin(next)) {
+      setState(() => _nextError = widget.isPin
+          ? 'A PIN needs at least $kMinPinDigits digits.'
+          : 'A password of only digits needs at least $kMinPinDigits of them.');
       return;
     }
     if (_asksNext && next != _repeat.text) {
@@ -252,6 +269,24 @@ class _SecretDialogState extends State<_SecretDialog> with HollowDialogAction {
   }
 }
 
+/// Changes the app password or PIN, and every stored copy of it with it.
+Future<void> changeAppLockSecret({
+  required String current,
+  required String next,
+}) async {
+  await withTypedSecret(() =>
+      identity_api.changePassword(oldPassword: current, newPassword: next));
+  final appLock = AppLockService();
+  appLock.sessionSecret = next;
+  if (await appLock.hasLaunchSecret()) {
+    await appLock.storeLaunchSecret(next);
+  }
+  // The biometric releases the secret it holds, so it follows the change.
+  if (await appLock.isBiometricEnabled()) {
+    await appLock.enableBiometric(next);
+  }
+}
+
 String get _biometricName =>
     Platform.isIOS ? 'Face ID or Touch ID' : 'Fingerprint or face unlock';
 
@@ -275,7 +310,7 @@ Future<String?> _chooseLockType(BuildContext context) {
           HollowListRow(
             touch: true,
             title: 'PIN',
-            subtitle: '4 to 8 digits, quick to type',
+            subtitle: '$kMinPinDigits to 8 digits, quick to type',
             trailing: Icon(LucideIcons.chevronRight,
                 size: 16, color: hollow.textSecondary),
             onTap: () => Navigator.pop(ctx, 'pin'),
@@ -314,9 +349,11 @@ class AlwaysRelayCallsToggle extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsSwitchRow(
       title: 'Always relay calls',
-      subtitle: 'Calls, video, screen shares and file transfers go through '
-          'the relay, so nobody sees your IP address. Quality may drop a '
-          'little. Applies after a restart.',
+      subtitle: 'Calls, video, screen shares and files up to 34 MB go through '
+          "the relay, so the people you talk to don't see your IP address. "
+          'Bigger files go straight to the person you send them to, who can '
+          'see your IP address. Quality may drop a little. Applies after a '
+          'restart.',
       value: ref.watch(alwaysRelayCallsProvider),
       onChanged: (val) async {
         final notifier = ref.read(alwaysRelayCallsProvider.notifier);
@@ -522,7 +559,8 @@ class _SecurityAppLockSectionState
             isPin: _phone && _isPin,
             confirmLabel: 'Continue',
             onSubmit: (current, _) async {
-              await identity_api.unlockIdentity(password: current);
+              await withTypedSecret(
+                  () => identity_api.unlockIdentity(password: current));
               appLock.sessionSecret = current;
             },
           );
@@ -547,15 +585,8 @@ class _SecurityAppLockSectionState
       title: 'Change password',
       ask: SecretAsk.change,
       confirmLabel: 'Change password',
-      onSubmit: (current, next) async {
-        await identity_api.changePassword(
-            oldPassword: current, newPassword: next);
-        final appLock = AppLockService();
-        appLock.sessionSecret = next;
-        if (await appLock.hasLaunchSecret()) {
-          await appLock.storeLaunchSecret(next);
-        }
-      },
+      onSubmit: (current, next) =>
+          changeAppLockSecret(current: current, next: next),
     );
     if (newPass == null || !mounted) return;
     HollowToast.show(context, 'Password changed',
@@ -563,15 +594,19 @@ class _SecurityAppLockSectionState
   }
 
   Future<void> _removePassword() async {
+    final duressSet = await _duressCodeSet();
+    if (!mounted) return;
     final pass = await askSecretDialog(
       context,
       title: 'Turn off the password',
       ask: SecretAsk.current,
       confirmLabel: 'Turn off',
       message: 'Your identity file stays on this computer unencrypted, so '
-          'anyone using it can copy your identity.',
+          'anyone using it can copy your identity.'
+          '${duressSet ? _kDuressGoesWithTheLock : ''}',
       onSubmit: (current, _) async {
-        await identity_api.removePasswordProtection(password: current);
+        await withTypedSecret(() =>
+            identity_api.removePasswordProtection(password: current));
         await AppLockService().clearAll();
       },
     );
@@ -625,19 +660,8 @@ class _SecurityAppLockSectionState
       ask: SecretAsk.change,
       isPin: isPin,
       confirmLabel: 'Change',
-      onSubmit: (current, next) async {
-        await identity_api.changePassword(
-            oldPassword: current, newPassword: next);
-        final appLock = AppLockService();
-        appLock.sessionSecret = next;
-        if (await appLock.hasLaunchSecret()) {
-          await appLock.storeLaunchSecret(next);
-        }
-        // The biometric releases the secret it holds, so it follows the change.
-        if (await appLock.isBiometricEnabled()) {
-          await appLock.enableBiometric(next);
-        }
-      },
+      onSubmit: (current, next) =>
+          changeAppLockSecret(current: current, next: next),
     );
     if (newSecret == null || !mounted) return;
     HollowToast.show(context, isPin ? 'PIN changed' : 'Password changed',
@@ -645,14 +669,18 @@ class _SecurityAppLockSectionState
   }
 
   Future<void> _removePhoneLock() async {
+    final duressSet = await _duressCodeSet();
+    if (!mounted) return;
     final secret = await askSecretDialog(
       context,
       title: 'Turn off the app lock',
       ask: SecretAsk.current,
       isPin: _isPin,
       confirmLabel: 'Turn off',
+      message: duressSet ? _kDuressGoesWithTheLock.trim() : null,
       onSubmit: (current, _) async {
-        await identity_api.removePasswordProtection(password: current);
+        await withTypedSecret(() =>
+            identity_api.removePasswordProtection(password: current));
         await AppLockService().clearAll();
       },
     );
@@ -681,8 +709,8 @@ class _SecurityAppLockSectionState
         ask: SecretAsk.current,
         isPin: _isPin,
         confirmLabel: 'Continue',
-        onSubmit: (current, _) =>
-            identity_api.unlockIdentity(password: current),
+        onSubmit: (current, _) => withTypedSecret(
+            () => identity_api.unlockIdentity(password: current)),
       );
     }
     if (secret == null || secret.isEmpty) return;

@@ -289,7 +289,7 @@ mod tests {
     fn a_roster_read_never_mints_an_identity() {
         let _g = crate::node::resolver::test_lock();
         let _s = crate::api::storage::store_test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         // SAFETY: serialized by the locks above.
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
         crate::identity::encryption::clear_session_key();

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/room_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -40,13 +41,14 @@ class DeepLinkService {
 
   ProviderContainer? _container;
   StreamSubscription<Uri>? _sub;
+  ProviderSubscription<bool>? _lockSub;
   final List<Uri> _pending = [];
   bool _shellReady = false;
 
   /// Called once from main() right after the ProviderContainer exists, before
   /// runApp so the cold-start initial link is captured.
   Future<void> init(ProviderContainer container) async {
-    _container = container;
+    attachContainer(container);
 
     // Self-heal the hollow:// registration on Windows every launch: covers
     // portable-zip users with no installer to write the keys, and moved
@@ -66,15 +68,33 @@ class DeepLinkService {
     }
   }
 
+  /// The container half of [init], without the OS hooks, so a test can drive
+  /// the routing on its own.
+  @visibleForTesting
+  void attachContainer(ProviderContainer container) {
+    _container = container;
+    _lockSub?.close();
+    _lockSub = container.listen<bool>(appLockedProvider, (_, locked) {
+      if (!locked) _flushPending();
+    });
+  }
+
   void dispose() {
     _sub?.cancel();
     _sub = null;
+    _lockSub?.close();
+    _lockSub = null;
   }
 
-  /// HollowShell pings this post-frame from initState — from here on links
-  /// are handled live; anything buffered during startup flushes now.
+  /// HollowShell calls this once the launch unlock and the app lock are both
+  /// settled: from here on links are handled live, and anything buffered
+  /// during startup flushes now.
   void notifyShellReady() {
     _shellReady = true;
+    _flushPending();
+  }
+
+  void _flushPending() {
     if (_pending.isEmpty) return;
     final queued = List.of(_pending);
     _pending.clear();
@@ -82,6 +102,10 @@ class DeepLinkService {
       _onUri(uri);
     }
   }
+
+  /// Nothing routes above the app lock: a link that lands while it is up waits
+  /// for the unlock, as a notification tap does.
+  bool get _locked => _container?.read(appLockedProvider) ?? false;
 
   /// Feeds a link in as if the OS had just delivered it. The relay hand-off
   /// replays the invite it parked here after the restart.
@@ -110,7 +134,7 @@ class DeepLinkService {
     }
 
     final context = hollowNavigatorKey.currentContext;
-    if (context == null || !context.mounted) {
+    if (context == null || !context.mounted || _locked) {
       _pending.add(uri);
       return;
     }

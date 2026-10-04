@@ -87,8 +87,7 @@ class AudioTranscodeService {
     }
 
     if (exitCode != 0 || wav.isEmpty) {
-      // ignore: avoid_print
-      print('[AudioTranscode] ffmpeg exit=$exitCode stderr=$stderrText');
+      debugPrint('[AudioTranscode] ffmpeg exit=$exitCode stderr=$stderrText');
       return null;
     }
 

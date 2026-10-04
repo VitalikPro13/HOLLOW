@@ -8,6 +8,11 @@ use crate::archive::types::*;
 
 type ZipReader<'a> = zip::ZipArchive<std::io::Cursor<&'a [u8]>>;
 
+// What an archive may unpack to in memory: its messages are JSON, which compresses a few
+// times over, and its attachments barely compress. Archives come from other people.
+const ARCHIVE_MIN_UNPACKED: u64 = 256 << 20;
+const ARCHIVE_UNPACK_RATIO: u64 = 16;
+
 /// Load and verify a `.hollow-archive` zip from bytes.
 ///
 /// Returns the full archive data with per-message and archive-level
@@ -18,7 +23,12 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| format!("Invalid archive: failed to open zip: {e}"))?;
 
-    let manifest = read_manifest(&mut archive)?;
+    let budget = (zip_bytes.len() as u64)
+        .saturating_mul(ARCHIVE_UNPACK_RATIO)
+        .max(ARCHIVE_MIN_UNPACKED);
+    let entries = collect_entry_bytes(&mut archive, budget)?;
+
+    let manifest = parse_manifest(entries.manifest_bytes.as_deref())?;
 
     if manifest.format_version != ARCHIVE_FORMAT_VERSION {
         return Err(format!(
@@ -27,9 +37,7 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
         ));
     }
 
-    let pubkeys = read_pubkeys(&mut archive)?;
-
-    let entries = collect_entry_bytes(&mut archive)?;
+    let pubkeys = parse_pubkeys(entries.pubkeys_bytes.as_deref())?;
 
     let messages = parse_messages(&entries.message_entries);
 
@@ -40,7 +48,7 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
     let reaction_removals: Vec<ArchiveReactionRemoval> =
         parse_entry_lists(&entries.removal_entries, "reaction removals");
 
-    let file_metadata = parse_file_metadata(&entries.file_meta_entries);
+    let mut file_metadata = parse_file_metadata(&entries.file_meta_entries);
 
     let files_dir = extract_files_to_temp(&entries.file_data_entries);
 
@@ -63,6 +71,12 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
 
     let archive_signature_valid = verify_archive_level_signature(&entries, &file_metadata);
 
+    // The viewer opens `{files_dir}/{file_id}.{file_ext}`: only a file that landed there
+    // under exactly that name is included.
+    for fm in &mut file_metadata {
+        fm.included = fm.included && entries.file_data_entries.contains_key(&format!("{}.{}", fm.file_id, fm.file_ext));
+    }
+
     Ok(LoadedArchive {
         manifest,
         messages,
@@ -77,29 +91,19 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
     })
 }
 
-/// Read and parse `manifest.json` from the zip.
-fn read_manifest(archive: &mut ZipReader<'_>) -> Result<ArchiveManifest, String> {
-    let mut entry = archive
-        .by_name("manifest.json")
-        .map_err(|_| "Invalid archive: missing manifest.json")?;
-    let mut buf = Vec::new();
-    entry.read_to_end(&mut buf)
-        .map_err(|e| format!("Failed to read manifest.json: {e}"))?;
-    serde_json::from_slice(&buf)
+/// Parse `manifest.json`.
+fn parse_manifest(bytes: Option<&[u8]>) -> Result<ArchiveManifest, String> {
+    let bytes = bytes.ok_or("Invalid archive: missing manifest.json")?;
+    serde_json::from_slice(bytes)
         .map_err(|e| format!("Invalid archive: malformed manifest.json: {e}"))
 }
 
-/// Read and parse `pubkeys.json` from the zip (missing = empty list).
-fn read_pubkeys(archive: &mut ZipReader<'_>) -> Result<Vec<ArchivePubKey>, String> {
-    match archive.by_name("pubkeys.json") {
-        Ok(mut entry) => {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)
-                .map_err(|e| format!("Failed to read pubkeys.json: {e}"))?;
-            serde_json::from_slice(&buf)
-                .map_err(|e| format!("Invalid archive: malformed pubkeys.json: {e}"))
-        }
-        Err(_) => Ok(Vec::new()),
+/// Parse `pubkeys.json` (missing = empty list).
+fn parse_pubkeys(bytes: Option<&[u8]>) -> Result<Vec<ArchivePubKey>, String> {
+    match bytes {
+        Some(bytes) => serde_json::from_slice(bytes)
+            .map_err(|e| format!("Invalid archive: malformed pubkeys.json: {e}")),
+        None => Ok(Vec::new()),
     }
 }
 
@@ -107,45 +111,68 @@ fn read_pubkeys(archive: &mut ZipReader<'_>) -> Result<Vec<ArchivePubKey>, Strin
 #[derive(Default)]
 struct ArchiveEntries {
     manifest_bytes: Option<Vec<u8>>,
+    pubkeys_bytes: Option<Vec<u8>>,
     message_entries: BTreeMap<String, Vec<u8>>,
     edit_entries: BTreeMap<String, Vec<u8>>,
     deletion_entries: BTreeMap<String, Vec<u8>>,
     removal_entries: BTreeMap<String, Vec<u8>>,
     file_meta_entries: BTreeMap<String, Vec<u8>>,
+    /// Attachment bytes by the name they land under (`file_id.ext`).
     file_data_entries: BTreeMap<String, Vec<u8>>,
     archive_sig_bytes: Option<Vec<u8>>,
 }
 
-/// Read the raw bytes of every zip entry, grouped by kind.
+/// Read the raw bytes of every zip entry, grouped by kind, all of them together within
+/// `budget` bytes.
 ///
 /// We need the raw bytes of each entry to recompute the archive hash,
 /// so read everything in one pass and parse afterwards.
-fn collect_entry_bytes(archive: &mut ZipReader<'_>) -> Result<ArchiveEntries, String> {
+fn collect_entry_bytes(archive: &mut ZipReader<'_>, budget: u64) -> Result<ArchiveEntries, String> {
     let mut entries = ArchiveEntries::default();
+    let mut left = budget;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)
             .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
         let name = entry.name().to_string();
+        let landing = attachment_landing(&entry);
 
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)
+        (&mut entry).take(left.saturating_add(1)).read_to_end(&mut buf)
             .map_err(|e| format!("Failed to read zip entry '{name}': {e}"))?;
+        left = left
+            .checked_sub(buf.len() as u64)
+            .ok_or("This archive unpacks to far more than its size, so it was not opened.")?;
 
-        classify_entry(&mut entries, &name, buf);
+        classify_entry(&mut entries, &name, landing, buf);
     }
 
     Ok(entries)
 }
 
+/// The name an attachment lands under in the viewer's folder: one inert component under
+/// `files/`, read only through `enclosed_name`. Any other entry is never written.
+fn attachment_landing(entry: &zip::read::ZipFile<'_>) -> Option<String> {
+    use std::path::Component;
+    let path = entry.enclosed_name()?;
+    let mut parts = path.components();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Component::Normal(dir)), Some(Component::Normal(leaf)), None) if dir == "files" => leaf
+            .to_str()
+            .filter(|leaf| crate::node::share_handler::is_inert_file_name(leaf))
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 /// Route one zip entry's bytes into the right bucket by path.
-fn classify_entry(entries: &mut ArchiveEntries, name: &str, buf: Vec<u8>) {
+fn classify_entry(entries: &mut ArchiveEntries, name: &str, landing: Option<String>, buf: Vec<u8>) {
     if name == "manifest.json" {
         entries.manifest_bytes = Some(buf);
     } else if name == "archive_signature.json" {
         entries.archive_sig_bytes = Some(buf);
     } else if name == "pubkeys.json" {
-        // Already parsed above, skip.
+        entries.pubkeys_bytes = Some(buf);
     } else if let Some(mid) = strip_json_entry(name, "messages/") {
         entries.message_entries.insert(mid.to_string(), buf);
     } else if let Some(mid) = strip_json_entry(name, "edits/") {
@@ -158,9 +185,10 @@ fn classify_entry(entries: &mut ArchiveEntries, name: &str, buf: Vec<u8>) {
         if rest.ends_with(".meta.json") {
             let fid = rest.strip_suffix(".meta.json").unwrap_or(rest).to_string();
             entries.file_meta_entries.insert(fid, buf);
+        } else if let Some(landing) = landing {
+            entries.file_data_entries.insert(landing, buf);
         } else {
-            // Actual file bytes: key is "file_id.ext"
-            entries.file_data_entries.insert(rest.to_string(), buf);
+            crate::hollow_log!("[archive] Skipped an attachment named outside the archive's files");
         }
     }
 }
@@ -475,22 +503,9 @@ fn verify_archive_signature(
         return false;
     };
 
-    // Verify PeerId matches the public key.
-    if pk_bytes.len() >= 36 && pk_bytes[0] == 0x08 && pk_bytes[1] == 0x01 {
-        let mut multihash = Vec::with_capacity(2 + pk_bytes.len());
-        multihash.push(0x00);
-        multihash.push(pk_bytes.len() as u8);
-        multihash.extend_from_slice(&pk_bytes);
-        let derived_pid = bs58::encode(&multihash)
-            .with_alphabet(bs58::Alphabet::BITCOIN)
-            .into_string();
-        if derived_pid != exporter_peer_id {
-            return false;
-        }
-    } else {
+    if NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes).as_deref() != Some(exporter_peer_id) {
         return false;
     }
-
     NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, content_hash).unwrap_or(false)
 }
 
@@ -501,4 +516,134 @@ fn export_timestamp_slug() -> String {
         .unwrap_or_default()
         .as_millis()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn archive_of(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let manifest = serde_json::json!({
+            "format_version": ARCHIVE_FORMAT_VERSION,
+            "archive_type": "dm",
+            "exporter_peer_id": "",
+            "export_timestamp": 0,
+            "message_count": 0,
+            "file_mode": "full",
+            "participants": [],
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut z = zip::ZipWriter::new(&mut out);
+        let manifest = ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap());
+        for (name, bytes) in std::iter::once(&manifest).chain(entries) {
+            z.start_file(name.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+        z.finish().unwrap();
+        out.into_inner()
+    }
+
+    fn meta(file_id: &str, ext: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "file_id": file_id, "file_name": "x", "file_ext": ext, "mime_type": "image/png",
+            "size_bytes": 5, "is_image": true, "included": true,
+        }))
+        .unwrap()
+    }
+
+    /// C-LOCAL-01 (the archive twin of C-IDENTITY-01). An archive someone sends lands
+    /// its attachments only in the viewer's own folder, under names an export makes,
+    /// and the viewer is pointed only at what landed there.
+    #[test]
+    fn an_archive_lands_attachments_only_in_its_own_folder() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let escaped_name = format!("hollow-archive-escape-{}.bin", std::process::id());
+        let escaped = std::env::temp_dir().join(&escaped_name);
+        let _ = std::fs::remove_file(&escaped);
+        let loaded = load_archive(&archive_of(&[
+            (format!("files/../{escaped_name}"), b"planted".to_vec()),
+            ("files/ab12.png".to_string(), b"image".to_vec()),
+            ("files/ab12.meta.json".to_string(), meta("ab12", "png")),
+            ("files/evil.meta.json".to_string(), meta("../../evil", "png")),
+        ]));
+        let escaped_landed = escaped.exists();
+        let _ = std::fs::remove_file(&escaped);
+        assert!(!escaped_landed, "a relative name wrote out of the viewer's folder");
+        let loaded = loaded.expect("an archive with one bad name still opens");
+        let dir = std::path::PathBuf::from(loaded.files_dir.clone().expect("the genuine file landed"));
+        let landed = std::fs::read(dir.join("ab12.png"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(landed.unwrap(), b"image");
+        let included: BTreeMap<&str, bool> =
+            loaded.file_metadata.iter().map(|f| (f.file_id.as_str(), f.included)).collect();
+        assert_eq!(included.get("ab12"), Some(&true));
+        assert_eq!(included.get("../../evil"), Some(&false), "the viewer was pointed out of its folder");
+
+        let absolute = tmp.path().join("absolute.bin");
+        let loaded = load_archive(&archive_of(&[(format!("files/{}", absolute.display()), b"planted".to_vec())]));
+        if let Ok(LoadedArchive { files_dir: Some(dir), .. }) = &loaded {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        assert!(!absolute.exists(), "an absolute name wrote where it pointed");
+
+        // `D:name` is relative to drive D's current folder: a join drops the base for it.
+        #[cfg(windows)]
+        {
+            let cwd = std::env::current_dir().unwrap();
+            let drive = &cwd.to_str().unwrap()[..2];
+            let leaf = format!("hollow-drive-escape-{}.bin", std::process::id());
+            let loaded = load_archive(&archive_of(&[(format!("files/{drive}{leaf}"), b"planted".to_vec())]));
+            if let Ok(LoadedArchive { files_dir: Some(dir), .. }) = &loaded {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            let escaped = cwd.join(&leaf).exists();
+            let _ = std::fs::remove_file(cwd.join(&leaf));
+            assert!(!escaped, "a drive-relative name wrote into the current folder");
+        }
+    }
+
+    /// An archive unpacks to no more than a real one could from its size, so a small
+    /// file never fills the viewer's memory.
+    #[test]
+    fn an_archive_that_unpacks_past_its_size_is_refused() {
+        let zeros = {
+            let mut one = std::io::Cursor::new(Vec::new());
+            let mut z = zip::ZipWriter::new(&mut one);
+            z.start_file("z", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&vec![0u8; 8 << 20]).unwrap();
+            z.finish().unwrap();
+            one.into_inner()
+        };
+        let mut src = zip::ZipArchive::new(std::io::Cursor::new(zeros)).unwrap();
+        let mut bomb = std::io::Cursor::new(archive_of(&[]));
+        {
+            let mut z = zip::ZipWriter::new_append(&mut bomb).unwrap();
+            for i in 0..40 {
+                z.raw_copy_file_rename(src.by_index(0).unwrap(), format!("messages/m{i}.json")).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        let bomb = bomb.into_inner();
+        assert!(bomb.len() < 1 << 20, "the test bomb is {} bytes", bomb.len());
+        assert!(load_archive(&bomb).is_err(), "320 MiB unpacked from a small archive");
+    }
+
+    /// C-OLM-06: an exporter key with bytes after the key names an alias id the
+    /// exporter never had, so the archive must not verify under it.
+    #[test]
+    fn an_archive_signed_under_a_padded_key_never_verifies() {
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[5u8; 32]);
+        let hash = [9u8; 32];
+        let sig = base64::engine::general_purpose::STANDARD.encode(kp.sign(&hash));
+        let pk = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert!(verify_archive_signature(&kp.peer_id(), &sig, &pk(&kp.public_key_protobuf()), &hash), "control");
+
+        let mut long = kp.public_key_protobuf();
+        long.push(0);
+        let mut multihash = vec![0x00, long.len() as u8];
+        multihash.extend_from_slice(&long);
+        let alias = bs58::encode(&multihash).with_alphabet(bs58::Alphabet::BITCOIN).into_string();
+        assert!(!verify_archive_signature(&alias, &sig, &pk(&long), &hash));
+    }
 }

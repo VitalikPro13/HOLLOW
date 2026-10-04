@@ -332,6 +332,21 @@ pub(crate) fn sign_removal(
 
 // -- The roster --
 
+/// `seed` and every device a member of the result vouched for, removals ignored.
+fn vouch_closure(mut seed: BTreeSet<String>, vouches: &[&Vouch]) -> BTreeSet<String> {
+    loop {
+        let before = seed.len();
+        for v in vouches {
+            if seed.contains(&v.by) {
+                seed.insert(v.device.clone());
+            }
+        }
+        if seed.len() == before {
+            return seed;
+        }
+    }
+}
+
 fn push_unique<T: Ord + Clone>(into: &mut Vec<T>, from: &[T]) {
     into.extend_from_slice(from);
     into.sort();
@@ -382,14 +397,25 @@ impl Roster {
         <[u8; 32]>::try_from(bytes.as_slice()).ok()
     }
 
-    /// Only the statements that verify for this master. Phrase statements verify
-    /// against `r_pub`, which is cleared when none does; anything dated more than
-    /// the skew past `now_ms` is dropped.
+    /// Only the statements that verify for this master, as they arrive. Phrase
+    /// statements verify against `r_pub`, which is cleared when none does; anything
+    /// dated more than the skew past `now_ms` is dropped.
     pub(crate) fn verified(&self, now_ms: i64) -> Roster {
+        self.checked(Some(now_ms))
+    }
+
+    /// A roster this node already holds, checked again. Its times were judged when
+    /// each statement arrived, so a clock that has stepped back since drops nothing,
+    /// and its pinned recovery key stays.
+    pub(crate) fn reverified(&self) -> Roster {
+        self.checked(None)
+    }
+
+    fn checked(&self, now_ms: Option<i64>) -> Roster {
         let Some(mk) = self.master_key() else { return Roster::default() };
         let m = self.master.as_str();
         let mut out = Roster::new(m);
-        let fresh = |at: i64| at <= now_ms.saturating_add(MAX_FUTURE_SKEW_MS);
+        let fresh = |at: i64| now_ms.is_none_or(|now| at <= now.saturating_add(MAX_FUTURE_SKEW_MS));
         let id_ok = |d: &str| key_of(d).is_some();
 
         if let Some(rk) = self.r_key() {
@@ -425,6 +451,9 @@ impl Roster {
             if !out.recoveries.is_empty() || !out.phrase_admits.is_empty() {
                 out.r_pub = self.r_pub.clone();
             }
+        }
+        if now_ms.is_none() {
+            out.r_pub = self.r_pub.clone();
         }
         out.consents = self
             .consents
@@ -698,10 +727,20 @@ impl Roster {
             .iter()
             .filter(|p| p.base == base && consented.contains(p.device.as_str()))
             .collect();
+        // A join refused by a device that belongs without anyone waiting never matures:
+        // waiting must not hand its removals to whoever holds the master key.
+        let founded = vouch_closure(roots.clone(), &vouches);
+        let refused: BTreeSet<&str> = self
+            .removals
+            .iter()
+            .filter(|r| r.base == base && founded.contains(&r.by))
+            .map(|r| r.device.as_str())
+            .collect();
         let matured: BTreeSet<String> = pendings
             .iter()
             .filter(|p| {
                 !no_wait
+                    && !refused.contains(p.device.as_str())
                     && first_seen(&p.device)
                         .is_some_and(|seen| seen.saturating_add(PENDING_MATURITY_MS) <= now_ms)
             })
@@ -709,18 +748,7 @@ impl Roster {
             .collect();
 
         // Everyone with any admission path, removals ignored: who may sign a removal.
-        let mut rooted: BTreeSet<String> = roots.union(&matured).cloned().collect();
-        loop {
-            let before = rooted.len();
-            for v in &vouches {
-                if rooted.contains(&v.by) {
-                    rooted.insert(v.device.clone());
-                }
-            }
-            if rooted.len() == before {
-                break;
-            }
-        }
+        let rooted = vouch_closure(roots.union(&matured).cloned().collect(), &vouches);
 
         // A removed device keeps only the vouchees EVERY removal of it keeps: a device
         // it vouched cannot keep itself by removing it too.
@@ -931,6 +959,35 @@ mod tests {
         let refused = r.verified(NOW).fold(|_| Some(seen), NOW);
         assert!(!refused.is_member(&b.peer_id()));
         assert_eq!(refused.removed.get(&b.peer_id()), Some(&d1.peer_id()));
+    }
+
+    /// C-IDENTITY-04. A pending join a device of the phrase refused never matures, so
+    /// whoever holds the master key gains no removals by waiting: the owner stays, the
+    /// refused device and what it vouched stay out, and neither removes anyone.
+    #[test]
+    fn authz_a_refused_join_never_gains_removals_by_waiting() {
+        let id = Id::new();
+        let (owner, laptop, b, c) = (kp(10), kp(11), kp(12), kp(13));
+        let mut r = Roster::genesis(&id.m, &id.r, &owner, NOW - 10);
+        let base = r.base();
+        for d in [&laptop, &b, &c] {
+            with_consent(&mut r, d);
+        }
+        r.add_vouch(sign_vouch(&owner, &id.master(), &base, &laptop.peer_id()));
+        r.add_pending(sign_pending(&id.m, &base, &b.peer_id()));
+        r.add_vouch(sign_vouch(&b, &id.master(), &base, &c.peer_id()));
+        for target in [&owner, &laptop] {
+            r.add_removal(sign_removal(&b, &id.master(), &base, &target.peer_id(), &[]));
+            r.add_removal(sign_removal(&c, &id.master(), &base, &target.peer_id(), &[]));
+        }
+        r.add_removal(sign_removal(&laptop, &id.master(), &base, &b.peer_id(), &[]));
+        let waited = r.verified(NOW).fold(|_| Some(NOW - PENDING_MATURITY_MS), NOW);
+        assert_eq!(
+            waited.members,
+            BTreeSet::from([owner.peer_id(), laptop.peer_id()]),
+            "a refused join gained removals by waiting: {waited:?}",
+        );
+        assert_eq!(waited.removed.get(&b.peer_id()), Some(&laptop.peer_id()));
     }
 
     /// Only a device with an admission path signs a removal that counts: a stranger,
@@ -1381,5 +1438,23 @@ mod tests {
         let d = kp(10);
         let r = Roster::genesis(&id.m, &id.r, &d, NOW + MAX_FUTURE_SKEW_MS + 1);
         assert!(r.verified(NOW).recoveries.is_empty());
+    }
+
+    /// C-IDENTITY-02. A roster this node holds was judged for its times when each
+    /// statement arrived: checked again, it keeps every phrase statement whatever the
+    /// clock reads now, and its pinned recovery key outlives even its statements.
+    #[test]
+    fn a_held_roster_is_never_judged_by_the_clock_again() {
+        let id = Id::new();
+        let d = kp(10);
+        let ahead = Roster::genesis(&id.m, &id.r, &d, NOW + MAX_FUTURE_SKEW_MS + 1);
+        let held = ahead.reverified();
+        assert_eq!(held.recoveries.len(), 1, "a held recovery was judged by the clock");
+        assert_eq!(held.r_pub, r_pub_of(&id.r));
+        assert!(held.fold(|_| None, NOW).protected);
+        let mut bare = held.clone();
+        bare.recoveries.clear();
+        assert_eq!(bare.reverified().r_pub, r_pub_of(&id.r), "a held pin was cleared");
+        assert!(bare.verified(NOW).r_pub.is_empty(), "an arriving key with nothing behind it is no pin");
     }
 }

@@ -430,6 +430,48 @@ fn crop_resize_frames(
 mod tests {
     use super::*;
 
+    fn webp_still(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7) as u8, (y * 5) as u8, 120, 255]));
+        encode_lossy_webp_still(img.as_raw(), w, h, 50.0).unwrap()
+    }
+
+    /// C-FILES-04: a peer thumb reaches Dart only as OUR encoder's output.
+    #[test]
+    fn a_peer_thumb_is_reencoded_or_dropped() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        let theirs = webp_still(320, 180);
+        let (ours, w, h) = peer_thumb_for_display(&engine.encode(&theirs)).expect("a valid thumb survives");
+        let ours = engine.decode(ours).unwrap();
+        assert_ne!(ours, theirs, "the peer's bytes were handed on as they came");
+        assert_eq!((w, h), (320, 180));
+        let decoded = load_bounded(&ours).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (320, 180));
+
+        // A real VP8 header over a body cut short.
+        let broken = theirs[..48].to_vec();
+        let mut huge = b"RIFF\x40\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00".to_vec();
+        huge.extend_from_slice(&[0, 0, 0, 0, 0xFF, 0x07, 0, 0xFF, 0x07, 0]);
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgba8(8, 8)
+            .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let mut padded = theirs.clone();
+        padded.resize(PEER_THUMB_MAX_B64_LEN, 0);
+        for (what, refused) in [
+            ("over the base64 ceiling", engine.encode(&padded)),
+            ("undecodable body", engine.encode(&broken)),
+            ("over the side ceiling", engine.encode(webp_still(PEER_THUMB_MAX_DIM + 1, 8))),
+            ("a 2048 canvas header", engine.encode(&huge)),
+            ("not a WebP", engine.encode(&png)),
+            ("not base64", "%%%".to_string()),
+            ("empty", String::new()),
+        ] {
+            assert!(peer_thumb_for_display(&refused).is_none(), "{what} reached Dart");
+        }
+    }
+
     /// PNG's chunk CRC (IEEE, reflected), so a hand-built header is a header
     /// a real decoder accepts rather than one it rejects for the wrong reason.
     fn png_crc32(bytes: &[u8]) -> u32 {
@@ -1892,6 +1934,76 @@ fn within_decode_dim(w: u32, h: u32) -> Result<(u32, u32), String> {
         return Err(format!("declares a {w}x{h} canvas, over the {MAX_DECODE_DIM} ceiling"));
     }
     Ok((w, h))
+}
+
+/// Decodes a PEER's small WebP thumbnail in pure Rust and re-encodes it with our
+/// own encoder, so the Flutter/Skia codec only ever paints bytes we produced.
+///
+/// SECURITY (C-FILES-04): blur placeholders, video posters and link-card thumbs
+/// render with no tap, so a hostile file must die here (`image-webp` forbids
+/// `unsafe`) rather than in the native decoder. `None` when the bytes are not a
+/// WebP within `max_dim` per side or do not decode.
+pub(crate) fn reencode_peer_thumb(webp: &[u8], max_dim: u32, quality: f32) -> Option<(Vec<u8>, u32, u32)> {
+    let (w, h) = webp_header_dimensions(webp)?;
+    if w == 0 || h == 0 || w > max_dim || h > max_dim {
+        return None;
+    }
+    let mut reader = image::ImageReader::with_format(Cursor::new(webp), ImageFormat::WebP);
+    reader.limits(decode_limits());
+    let rgba = reader.decode().ok()?.to_rgba8();
+    let (dw, dh) = rgba.dimensions();
+    let bytes = encode_lossy_webp_still(rgba.as_raw(), dw, dh, quality).ok()?;
+    Some((bytes, dw, dh))
+}
+
+/// Longest side a peer thumbnail may declare on its way to Dart: link cards
+/// encode at most 800 px, file posters 400.
+pub(crate) const PEER_THUMB_MAX_DIM: u32 = 1024;
+/// Base64 ceiling before any work: card thumbs ride a 64 KiB message and file
+/// thumbs a 48 KiB field.
+const PEER_THUMB_MAX_B64_LEN: usize = 192 * 1024;
+/// Display-only re-encode, never sent on, so it can afford more than the Q50 the
+/// wire uses.
+const PEER_THUMB_DISPLAY_QUALITY: f32 = 75.0;
+/// Session memo size: a chat page asks for the same thumbs on every load.
+const PEER_THUMB_CACHE_MAX: usize = 128;
+
+/// A peer's base64 WebP thumb as Dart may render it: re-encoded by
+/// [`reencode_peer_thumb`] with its real `(width, height)`, or `None`.
+///
+/// THE gate for every thumb crossing the FFI (file blur placeholders, video
+/// posters, link-card thumbs). It sits at the crossing rather than at ingest
+/// because a card's thumb is inside its author's signature, and a re-served row
+/// must carry the signed bytes.
+pub(crate) fn peer_thumb_for_display(b64: &str) -> Option<(String, u32, u32)> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Memo = Mutex<HashMap<[u8; 32], Option<(String, u32, u32)>>>;
+    static MEMO: OnceLock<Memo> = OnceLock::new();
+
+    if b64.is_empty() || b64.len() > PEER_THUMB_MAX_B64_LEN {
+        return None;
+    }
+    let key: [u8; 32] = Sha256::digest(b64.as_bytes()).into();
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return hit;
+    }
+    let engine = base64::engine::general_purpose::STANDARD;
+    let out = engine
+        .decode(b64)
+        .ok()
+        .and_then(|raw| reencode_peer_thumb(&raw, PEER_THUMB_MAX_DIM, PEER_THUMB_DISPLAY_QUALITY))
+        .map(|(webp, w, h)| (engine.encode(webp), w, h));
+    if let Ok(mut m) = memo.lock() {
+        if m.len() >= PEER_THUMB_CACHE_MAX {
+            m.clear();
+        }
+        m.insert(key, out.clone());
+    }
+    out
 }
 
 /// Header-only validation for image bytes that came from a PEER.

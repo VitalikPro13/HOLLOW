@@ -2,7 +2,8 @@
 # See rust/hollow_core/src/forwarder/mod.rs (ForwarderConfig) for all fields.
 
 relay_domain = "relay.anonlisten.com"
-data_dir = "/home/ubuntu/forwarder/data"
+# The unit's StateDirectory: its sandbox cannot reach /home.
+data_dir = "/var/lib/hollow-forwarder"
 # The public IP advertised in ICE host candidates (sockets bind 0.0.0.0).
 public_ip = "141.227.186.209"
 

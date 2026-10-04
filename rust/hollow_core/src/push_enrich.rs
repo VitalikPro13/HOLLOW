@@ -93,9 +93,19 @@ fn fetch_and_decrypt(
 ) -> Result<String, String> {
     use base64::Engine;
 
-    crate::log::init();
-    // Route data-dir-dependent paths (identity file, log) at the App Group copy.
+    // Route data-dir-dependent paths (identity file, log) at the App Group copy
+    // BEFORE the log opens, or it lands in the extension's own container, where no
+    // wipe can reach it. A wiped install writes nothing at all.
+    if cfg!(target_os = "ios")
+        && let Some(base) = dirs::data_dir()
+    {
+        let _ = std::fs::remove_file(base.join("hollow").join("hollow_debug.log"));
+    }
     crate::identity::set_data_dir(data_dir.to_string())?;
+    if !crate::log::holds_identity(std::path::Path::new(data_dir)) {
+        return Ok("[]".to_string());
+    }
+    crate::log::init();
 
     // Existing identity only — NEVER generate in the NSE (wrong peer_id + wrong
     // DB passphrase would yield an empty DB / undecryptable session).

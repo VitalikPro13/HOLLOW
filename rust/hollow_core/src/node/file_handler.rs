@@ -338,24 +338,6 @@ pub(crate) async fn handle_send_file(
 ) {
     hollow_log!("[HOLLOW-FILE] SendFile: {file_path} mid={message_id}");
 
-    let read_src = file_path.clone();
-    let mut file_data = match tokio::task::spawn_blocking(move || {
-        crate::node::at_rest::read_all(std::path::Path::new(&read_src))
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("read task failed: {e}")))
-    {
-        Ok(d) => d,
-        Err(e) => {
-            hollow_log!("[HOLLOW-FILE] Failed to read file: {e}");
-            let _ = event_tx.send(NetworkEvent::FileFailed {
-                file_id: message_id.clone(),
-                error: format!("Failed to read file: {e}"),
-            }).await;
-            return;
-        }
-    };
-
     let path = std::path::Path::new(&file_path);
     let original_name = path.file_name()
         .unwrap_or_default()
@@ -365,6 +347,34 @@ pub(crate) async fn handle_send_file(
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
+
+    // Photos the image path converts lose their metadata there; a video or a
+    // HEIF photo is cleaned here, before anything (the poster, the file id,
+    // the share) sees its bytes.
+    let strip = !file_transfer::is_image_mime(&file_transfer::mime_from_ext(&original_ext))
+        && super::media_strip::strips_on_send(&original_ext);
+    let read_src = file_path.clone();
+    let mut file_data = match tokio::task::spawn_blocking(move || {
+        let path = std::path::Path::new(&read_src);
+        if strip {
+            super::media_strip::read_for_send(path)
+        } else {
+            crate::node::at_rest::read_all(path).map_err(|e| format!("Failed to read file: {e}"))
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Failed to read file: {e}")))
+    {
+        Ok(d) => d,
+        Err(e) => {
+            hollow_log!("[HOLLOW-FILE] SendFile refused: {e}");
+            let _ = event_tx.send(NetworkEvent::FileFailed {
+                file_id: message_id.clone(),
+                error: e,
+            }).await;
+            return;
+        }
+    };
 
     // 2b. Channel moderation gates. Posting permission was historically enforced
     // only on the text path, so file sends bypassed it; this closes that gap.
@@ -422,7 +432,7 @@ pub(crate) async fn handle_send_file(
             peer_id, server_id, channel_id, message_id, message_text,
             vthumb, share_ref, original_name, is_image, voice, album, order_us,
             file_data, original_ext, override_width, override_height,
-            cmd_tx.clone(), db_path, db_passphrase,
+            cmd_tx.clone(), event_tx.clone(), db_path, db_passphrase,
         );
         return;
     }
@@ -523,16 +533,33 @@ const VIDEO_POSTER_MAX_BYTES: usize = 24 * 1024;
 /// 32 KB base64). Anything larger is a malformed/hostile header.
 pub(crate) const FILE_THUMB_MAX_B64_LEN: usize = 48 * 1024;
 
+/// Longest side a header thumb may declare: blur placeholders are 32 px, video
+/// posters at most 400.
+const FILE_THUMB_RECV_MAX_DIM: u32 = 512;
+
 /// Receive-side acceptance filter for the envelope-borne `thumb`: images get the
-/// tiny blur placeholder, videos the poster frame, and anything else or anything
-/// oversized is dropped before it reaches the DB or UI. ONE helper, so every
-/// ingest path stays in lockstep.
+/// tiny blur placeholder, videos the poster frame, and anything else, anything
+/// oversized or anything that is not a placeholder-sized WebP is dropped before it
+/// reaches the DB or UI. ONE helper, so every ingest path stays in lockstep. The
+/// pixels are judged where they cross to Dart (`peer_thumb_for_display`), off the
+/// event loop.
 pub(crate) fn accept_header_thumb(thumb: Option<String>, img: bool, mime: &str) -> Option<String> {
     thumb.filter(|t| {
         (img || mime.starts_with("video/"))
             && !t.is_empty()
             && t.len() <= FILE_THUMB_MAX_B64_LEN
+            && header_thumb_is_small_webp(t)
     })
+}
+
+fn header_thumb_is_small_webp(b64: &str) -> bool {
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .ok()
+        .and_then(|raw| image_convert::webp_header_dimensions(&raw))
+        .is_some_and(|(w, h)| {
+            (1..=FILE_THUMB_RECV_MAX_DIM).contains(&w) && (1..=FILE_THUMB_RECV_MAX_DIM).contains(&h)
+        })
 }
 
 /// Encode a video poster frame into the bounded lossy WebP that rides the
@@ -565,76 +592,86 @@ fn generate_file_thumb(original_data: &[u8]) -> Option<String> {
     Some(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
+/// A photo ready to send: its bytes, extension, width and height.
+type ConvertedImage = (Vec<u8>, String, Option<u32>, Option<u32>);
+
 /// The moved step-4 conversion block: runs on the blocking pool, never the
-/// event loop. Fallbacks mirror the original inline behavior exactly.
+/// event loop. Returns the photo and its blur thumb; an Err is the reason the
+/// photo was not sent.
 fn convert_image_for_send(
     file_data: Vec<u8>,
     original_ext: &str,
     webp_quality: image_convert::WebpQuality,
     override_width: Option<u32>,
     override_height: Option<u32>,
-) -> (Vec<u8>, String, Option<u32>, Option<u32>, Option<String>) {
+) -> Result<(ConvertedImage, Option<String>), String> {
     // Placeholder thumb first, from the ORIGINAL bytes (issue #41 carry-over).
     let thumb = generate_file_thumb(&file_data);
-    let (data, ext, w, h) = convert_image_data(file_data, original_ext, webp_quality, override_width, override_height);
-    (data, ext, w, h, thumb)
+    let converted = convert_image_data(file_data, original_ext, webp_quality, override_width, override_height)
+        .map_err(|e| {
+            hollow_log!("[HOLLOW-FILE] metadata strip refused a photo: {e}");
+            super::media_strip::REFUSED.to_string()
+        })?;
+    Ok((converted, thumb))
 }
 
+/// Every arm drops the photo's metadata: a re-encode leaves it behind, and
+/// the arms that send the original strip its container instead (C-FILES-03).
 fn convert_image_data(
-    mut file_data: Vec<u8>,
+    file_data: Vec<u8>,
     original_ext: &str,
     webp_quality: image_convert::WebpQuality,
     override_width: Option<u32>,
     override_height: Option<u32>,
-) -> (Vec<u8>, String, Option<u32>, Option<u32>) {
+) -> Result<ConvertedImage, String> {
+    let original = |data: Vec<u8>| -> Result<_, String> {
+        let out = super::media_strip::strip_image(data)?;
+        let dims = image_convert::get_image_dimensions(&out).ok();
+        Ok((out, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1)))
+    };
     // ANIMATED sources first, decided from the BYTES. Branching on the extension is
-    // what froze an APNG and flattened an animated WebP to frame 0. Re-encoding
-    // through the animation encoder drops metadata too, which is the whole reason
-    // the still paths re-encode.
+    // what froze an APNG and flattened an animated WebP to frame 0.
     if image_convert::is_animated_image(&file_data) {
-        match image_convert::convert_animation_to_webp(&file_data, webp_quality) {
+        return match image_convert::convert_animation_to_webp(&file_data, webp_quality) {
             Ok((webp_data, w, h)) => {
                 hollow_log!(
                     "[HOLLOW-FILE] Converted animation to animated WebP ({:?}): {}KB -> {}KB ({}x{})",
                     webp_quality, file_data.len() / 1024, webp_data.len() / 1024, w, h
                 );
-                return (webp_data, "webp".to_string(), Some(w), Some(h));
+                Ok((webp_data, "webp".to_string(), Some(w), Some(h)))
             }
             Err(e) => {
-                // Send the original rather than a frozen frame: a GIF gets its
-                // metadata stripped in place, anything else rides as-is.
-                hollow_log!("[HOLLOW-FILE] Animation conversion failed, sending original: {e}");
-                let out = if original_ext == "gif" {
-                    image_convert::strip_gif_metadata(&file_data)
-                } else {
-                    std::mem::take(&mut file_data)
-                };
-                let dims = image_convert::get_image_dimensions(&out).ok();
-                return (out, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1));
+                // The original rather than a frozen frame.
+                hollow_log!("[HOLLOW-FILE] Animation conversion failed, sending the original: {e}");
+                original(file_data)
             }
-        }
+        };
     }
     if image_convert::should_convert_to_webp(original_ext) {
         match image_convert::convert_to_webp_with_quality(&file_data, webp_quality) {
             Ok((webp_data, w, h)) => {
                 hollow_log!("[HOLLOW-FILE] Converted to WebP ({:?}): {}KB -> {}KB ({}x{})",
                     webp_quality, file_data.len() / 1024, webp_data.len() / 1024, w, h);
-                (webp_data, "webp".to_string(), Some(w), Some(h))
+                Ok((webp_data, "webp".to_string(), Some(w), Some(h)))
             }
             Err(e) => {
-                hollow_log!("[HOLLOW-FILE] WebP conversion failed, sending original: {e}");
-                let dims = image_convert::get_image_dimensions(&file_data).ok();
-                (file_data, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
+                hollow_log!("[HOLLOW-FILE] WebP conversion failed, sending the original: {e}");
+                original(file_data)
             }
         }
     } else if original_ext == "webp" {
-        // WebP passthrough — strip metadata by decode+re-encode.
-        let stripped = image_convert::strip_webp_metadata(&file_data)
-            .unwrap_or_else(|_| std::mem::take(&mut file_data));
-        let dims = image_convert::get_image_dimensions(&stripped).ok();
-        (stripped, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
+        match image_convert::strip_webp_metadata(&file_data) {
+            Ok(stripped) => {
+                let dims = image_convert::get_image_dimensions(&stripped).ok();
+                Ok((stripped, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1)))
+            }
+            Err(_) => original(file_data),
+        }
     } else {
-        (file_data, original_ext.to_string(), override_width, override_height)
+        // A `.gif` that is no GIF (every real one took the encoder above): its
+        // bytes decide how it is cleaned.
+        let out = super::media_strip::strip_image(file_data)?;
+        Ok((out, original_ext.to_string(), override_width, override_height))
     }
 }
 
@@ -723,6 +760,7 @@ fn spawn_image_conversion(
     override_width: Option<u32>,
     override_height: Option<u32>,
     cmd_tx: mpsc::Sender<super::types::NodeCommand>,
+    event_tx: mpsc::Sender<NetworkEvent>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -739,7 +777,11 @@ fn spawn_image_conversion(
         })
         .await;
         let (final_data, final_ext, width, height, thumb) = match converted {
-            Ok(t) => t,
+            Ok(Ok(((data, ext, w, h), thumb))) => (data, ext, w, h, thumb),
+            Ok(Err(refused)) => {
+                let _ = event_tx.send(NetworkEvent::FileFailed { file_id: message_id, error: refused }).await;
+                return;
+            }
             Err(e) => {
                 // spawn_blocking join failure (panic in codec) — surface as a
                 // failed send via the resume handler's empty-data guard.
@@ -846,7 +888,7 @@ pub(crate) async fn finish_send_file(
     // Store full file locally for DMs, <6 servers, or images (need local preview).
     let store_full_file = server_id.is_none() || member_count < 6 || is_image;
 
-    hollow_log!("[HOLLOW-FILE] File {file_id}: {original_name} -> {file_size} bytes (streamed={store_full_file})");
+    hollow_log!("[HOLLOW-FILE] File {file_id}: {file_size} bytes (streamed={store_full_file})");
 
     // 6. Store file locally (skip for non-image vault files — shards handle storage).
     let final_path = file_transfer::final_file_path(&file_id, &final_ext);
@@ -1810,7 +1852,7 @@ fn broadcast_channel_caption_mls(
             sid.to_string()
         };
         if mls_mgr.has_group(&group_key) {
-            if let Err(e) = send_mls_broadcast_topic(mls_mgr, ws_cmd_tx, sid, cid, &ring, use_subgroup, envelope, crypto_store) {
+            if let Err(e) = send_mls_broadcast_topic(mls_mgr, ws_cmd_tx, sid, cid, &ring, use_subgroup, envelope, crypto_store, server) {
                 hollow_log!("[HOLLOW-MLS] Channel file message broadcast failed: {e}");
             }
         }
@@ -1885,7 +1927,7 @@ async fn broadcast_channel_file_header(
     let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
     if mls_ok
         && let Err(e) = send_mls_broadcast_topic(
-            mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, &super::ring_auth::topic(state, cid), use_subgroup, header, crypto_store,
+            mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, &super::ring_auth::topic(state, cid), use_subgroup, header, crypto_store, Some(state),
         )
     {
         hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
@@ -2186,6 +2228,11 @@ pub(crate) async fn handle_webrtc_transfer_complete(
     ).await
 }
 
+/// Whether `path` is a shard send's temp, which one transfer alone streams from.
+fn is_shard_send_temp(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".stream_shard_"))
+}
+
 /// Handle NodeCommand::WebRtcSendComplete — completed send.
 pub(crate) fn handle_webrtc_send_complete(
     transfer_id: String,
@@ -2193,7 +2240,7 @@ pub(crate) fn handle_webrtc_send_complete(
 ) {
     hollow_log!("[HOLLOW-WEBRTC] Send complete: {transfer_id}");
     if let Some((_, _, _, path, _)) = pending_webrtc_sends.remove(&transfer_id) {
-        if path.file_name().map(|n| n.to_string_lossy().starts_with(".stream_send_")).unwrap_or(false) {
+        if is_shard_send_temp(&path) || path.file_name().map(|n| n.to_string_lossy().starts_with(".stream_send_")).unwrap_or(false) {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -2233,6 +2280,9 @@ pub(crate) async fn handle_webrtc_transfer_failed(
             &webrtc_peers, pending_webrtc_sends, &event_tx,
             &peer_id, &kind, &id, &source_path, total_size,
         ).await;
+        if is_shard_send_temp(&source_path) && !pending_webrtc_sends.contains_key(&id) {
+            let _ = tokio::fs::remove_file(&source_path).await;
+        }
     }
     // Receiver-side retry: if we have a pending file stream for this transfer,
     // send a FileRequest to get it via WSS. Also remove early arrival if present.
@@ -2457,9 +2507,9 @@ async fn completed_stream_inner(
             ).await;
             None
         }
-        StreamKind::Shard { shard_index } => {
+        StreamKind::Shard { .. } => {
             handle_shard_stream_complete(
-                &request, shard_index, sender_peer, pending_shard_streams,
+                &request, sender_peer, pending_shard_streams,
                 pending_vault_downloads, event_tx, db_path, db_passphrase,
             ).await
         }
@@ -2725,7 +2775,6 @@ fn hold_early_arrival_and_retry(
 #[allow(clippy::too_many_arguments)]
 async fn handle_shard_stream_complete(
     request: &ws_stream_transfer::StreamRequest,
-    shard_index: u16,
     sender_peer: &str,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
@@ -2733,21 +2782,29 @@ async fn handle_shard_stream_complete(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<super::vault_ops::VaultRepull> {
-    let content_id = request.id.clone();
-    let key = format!("{content_id}:{shard_index}");
-    hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
-
-    // Kept for the device it was registered for, whose own stream may still come.
-    if pending_shard_streams.get(&key).is_some_and(|p| p.sender != sender_peer) {
-        hollow_log!("[HOLLOW-SECURITY] DROPPED shard stream {key} from {sender_peer}: registered for another device");
-        let _ = tokio::fs::remove_file(&request.temp_path).await;
-        return None;
-    }
-    let Some(pss) = pending_shard_streams.remove(&key) else {
-        hollow_log!("[HOLLOW-STREAM] No pending ShardStore for stream {key} — ignoring");
+    // The stream id names one registered transfer: its shard, its sender and us.
+    let found = pending_shard_streams
+        .iter()
+        .find(|(_, p)| p.stream_id == request.id)
+        .map(|(key, p)| (key.clone(), p.sender == sender_peer));
+    let pss = match found {
+        Some((key, true)) => pending_shard_streams.remove(&key),
+        // Kept for the device it was registered for, whose own stream may still come.
+        Some((key, false)) => {
+            hollow_log!("[HOLLOW-SECURITY] DROPPED shard stream {key} from {sender_peer}: registered for another device");
+            None
+        }
+        None => {
+            hollow_log!("[HOLLOW-STREAM] No pending shard transfer for stream {} from {sender_peer} — ignoring", request.id);
+            None
+        }
+    };
+    let Some(pss) = pss else {
         let _ = tokio::fs::remove_file(&request.temp_path).await;
         return None;
     };
+    let (content_id, shard_index) = (pss.content_id.clone(), pss.shard_index);
+    hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
     let mut repull = None;
     if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
         // SECURITY (FILE-3): `store_shard` hashes the bytes it is handed against
@@ -2978,8 +3035,9 @@ pub(crate) async fn stream_to_peer(
     }
 }
 
-/// Stream data from an in-memory buffer to a peer. Prefers WebRTC (writes temp file for Dart),
-/// falls back to WS binary frames via relay (streams from memory, no disk).
+/// Stream shard bytes held in memory to a peer under the transfer's stream id. Prefers
+/// WebRTC (writes a temp file for Dart), falls back to WS binary frames via relay
+/// (streams from memory, no disk).
 pub(crate) async fn stream_to_peer_bytes(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -2991,11 +3049,13 @@ pub(crate) async fn stream_to_peer_bytes(
     id: &str,
     data: &[u8],
 ) {
-    if webrtc_peers.contains(peer_str) {
+    // A data-channel send owns its temp until it ends, so a repeat of a transfer still
+    // running there rides the relay.
+    if webrtc_peers.contains(peer_str) && !pending_webrtc_sends.contains_key(id) {
         // WebRTC: Dart reads from file path — must write temp file.
         // Vault shard bytes are already AES ciphertext and the WS fallback streams
         // this file raw, so it is staged as-is.
-        let temp_path = file_transfer::files_dir().join(format!(".stream_shard_{id}.tmp"));
+        let temp_path = super::vault_ops::shard_send_temp(&file_transfer::files_dir(), id);
         let _ = tokio::fs::write(&temp_path, data).await;
         let total_size = data.len() as u64;
         let kind_str = match kind {
@@ -3075,7 +3135,7 @@ pub(crate) async fn handle_envelope_file_header(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    hollow_log!("[HOLLOW-FILE] MLS FileHeader: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
+    hollow_log!("[HOLLOW-FILE] MLS FileHeader: {fid} ({size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
     let judged_sid = if from_guest_pull { None } else { sid.as_deref() };
@@ -3534,7 +3594,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
     async fn authz_file_header_delivers_only_for_its_owner() {
         let _g = super::super::resolver::test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("hdr.db").to_string_lossy().into_owned();
         let pass = "ab".repeat(32);
         let (mut state, _owner) = crate::crdt::testkeys::owned_state("srv", "S", 1);
@@ -3584,7 +3644,7 @@ mod tests {
     #[test]
     fn authz_a_synced_card_cannot_relabel_a_committed_file() {
         let _g = super::super::resolver::test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let store = crate::storage::MessageStore::open(
             &tmp.path().join("s.db").to_string_lossy(), &"ab".repeat(32),
         ).unwrap();
@@ -3609,6 +3669,37 @@ mod tests {
         assert!(!lands(&bare, "m1", "bob"), "a card without its hash");
         assert!(!lands(&card, "m1", "mallory"), "another author's item");
         assert!(!lands(&card, "m2", "bob"), "another message");
+    }
+
+    /// C-FILES-03: when the encoder cannot read a photo, the original goes out,
+    /// and it used to go out with its Exif GPS. Every arm now strips it, and a
+    /// photo nothing can clean is refused.
+    #[test]
+    fn a_photo_the_encoder_cannot_read_still_leaves_without_its_gps() {
+        use super::super::media_strip::fixtures::{jpeg_with_gps, LOCATION};
+        let mut jpeg = jpeg_with_gps(6);
+        // SOF3, lossless coding: valid markers the encoder refuses to decode.
+        let sof = jpeg.windows(4).position(|w| w == [0xFF, 0xC0, 0x00, 0x11]).expect("baseline frame header");
+        jpeg[sof + 1] = 0xC3;
+        assert!(image_convert::convert_to_webp_with_quality(&jpeg, image_convert::WebpQuality::Balanced).is_err());
+
+        let (out, ext, ..) = convert_image_data(jpeg, "jpg", image_convert::WebpQuality::Balanced, None, None)
+            .expect("the original is cleaned and sent");
+        assert_eq!(ext, "jpg");
+        assert!(!out.windows(LOCATION.len()).any(|w| w == LOCATION), "no GPS leaves with the original");
+
+        // Every GIF takes the animation encoder, so the last arm only ever meets
+        // a `.gif` holding something else.
+        let (misnamed, ext, ..) =
+            convert_image_data(jpeg_with_gps(1), "gif", image_convert::WebpQuality::Balanced, None, None).unwrap();
+        assert_eq!(ext, "gif");
+        assert!(!misnamed.windows(LOCATION.len()).any(|w| w == LOCATION), "a photo named .gif is cleaned too");
+
+        assert_eq!(
+            convert_image_for_send(b"not a picture".to_vec(), "png", image_convert::WebpQuality::Balanced, None, None).err(),
+            Some(super::super::media_strip::REFUSED.to_string()),
+            "a photo nothing can clean is refused, not sent as it is",
+        );
     }
 
     /// FILE-2 regression. The auto-download exemption is the one way a pushed
@@ -3701,7 +3792,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_rebuild_hands_back_a_fresh_pull() {
         use crate::vault::content_store::{ContentStore, StorageTier, content_id, shard_key};
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("vault.db").to_string_lossy().into_owned();
         let pass = "ab".repeat(32);
         let vault = tmp.path().join("vault");
@@ -3764,5 +3855,40 @@ mod tests {
         }
         assert!(rebuild(&vouched).await.is_none(), "a rebuild that failed on vouched copies was pulled again");
         assert!((0..3u16).all(|si| cs.has_shard(&shard_key(&vouched, si)).unwrap()), "a vouched copy was deleted");
+    }
+
+    /// C-FILES-04: only a placeholder-sized WebP reaches the store; its pixels are
+    /// judged again where they cross to Dart (`peer_thumb_for_display`).
+    #[test]
+    fn a_header_thumb_must_be_a_placeholder_sized_webp() {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let still = |w: u32, h: u32| {
+            let img = image::RgbaImage::from_pixel(w, h, image::Rgba([40, 90, 160, 255]));
+            let mut png = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+            image_convert::convert_to_webp_preview(&png, 4096).unwrap().0
+        };
+
+        let blur = b64(&still(32, 24));
+        assert_eq!(accept_header_thumb(Some(blur.clone()), true, "image/png"), Some(blur));
+        let poster = b64(&still(400, 225));
+        assert!(accept_header_thumb(Some(poster), false, "video/mp4").is_some());
+
+        let png = {
+            let mut out = Vec::new();
+            image::DynamicImage::new_rgba8(8, 8)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap();
+            out
+        };
+        // VP8X header declaring a 4000x4000 canvas over a few bytes.
+        let mut huge = b"RIFF\x40\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00".to_vec();
+        huge.extend_from_slice(&[0, 0, 0, 0, 0x9F, 0x0F, 0, 0x9F, 0x0F, 0]);
+        for refused in [b64(&png), b64(&still(600, 300)), b64(&huge), "not base64!".to_string()] {
+            assert!(accept_header_thumb(Some(refused.clone()), true, "image/png").is_none(), "{refused:.40}");
+        }
+        assert!(accept_header_thumb(Some(b64(&still(32, 24))), false, "application/pdf").is_none());
     }
 }

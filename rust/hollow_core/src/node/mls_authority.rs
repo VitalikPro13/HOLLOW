@@ -42,13 +42,22 @@ pub(crate) fn refused(leaf: &LeafIdentity) -> bool {
 }
 
 /// A commit may remove a leaf of the committer's own identity, an unbound leaf, a
-/// non-member's, a revoked device's, or one whose device the same commit re-adds.
-fn removable(leaf: &LeafView, committer: &LeafIdentity, adds: &[LeafView], rules: &GroupRules) -> bool {
+/// non-member's, a revoked device's, or one the same commit repairs.
+fn removable(leaf: &LeafView, committer: &LeafIdentity, facts: &CommitFacts, rules: &GroupRules) -> bool {
     let Some(target) = leaf.bound() else { return true };
     target.master == committer.master
         || refused(target)
         || rules.membership(&target.master, "") != Verdict::Accept
-        || adds.iter().any(|a| a.bound().is_some_and(|b| b.device == target.device))
+        || repairs(&target.device, facts)
+}
+
+/// Every member has seen each KeyPackage that seated a leaf, so a re-add of `device`
+/// repairs it only with a KeyPackage minted for this group after the one it replaces.
+fn repairs(device: &str, facts: &CommitFacts) -> bool {
+    facts
+        .add_minted
+        .get(device)
+        .is_some_and(|added| facts.remove_minted.get(device).is_none_or(|removed| added > removed))
 }
 
 /// The ruling on a received commit, before it is merged.
@@ -112,7 +121,7 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
             return hold;
         }
     }
-    if let Some(leaf) = facts.removes.iter().find(|l| !removable(l, committer, &facts.adds, rules)) {
+    if let Some(leaf) = facts.removes.iter().find(|l| !removable(l, committer, facts, rules)) {
         return Verdict::Hold(format!("removes {} while still a member", leaf.id()));
     }
     Verdict::Accept
@@ -143,30 +152,56 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
         GroupRules::Meeting { .. } if !asked => Verdict::Refuse("no knock of ours is pending".into()),
         GroupRules::Meeting { host: Some(host) } if sender.master == *host => Verdict::Accept,
         GroupRules::Meeting { .. } => Verdict::Refuse("not sent by the meeting's host".into()),
-        GroupRules::Server { state, .. } => {
+        GroupRules::Server { .. } => {
             if let hold @ Verdict::Hold(_) = rules.membership(&sender.master, "sender") {
                 return hold;
             }
-            match facts.leaves.iter().filter_map(LeafView::bound).find(|l| state.is_banned(&l.master)) {
-                Some(leaf) => Verdict::Hold(format!("holds a leaf of banned {}", leaf.master)),
-                None => Verdict::Accept,
+            // Every leaf, not only the sender's: whoever it seats reads what we post there.
+            // Our view may lag a member newer than it, so this holds and is judged again.
+            for leaf in facts.leaves.iter().filter_map(LeafView::bound) {
+                if let hold @ Verdict::Hold(_) = rules.membership(&leaf.master, "leaf") {
+                    return hold;
+                }
             }
+            Verdict::Accept
         }
     }
 }
 
+/// Why a Welcome from the device that sealed its frame is turned away before it is
+/// staged: staging spends the KeyPackage it names, so whoever saw that KeyPackage must
+/// not get that far. A meeting's counts only from the host device its proof binds while
+/// we knock; a server's never from a device the roster refuses (a joiner cannot place
+/// co-members' devices yet, so membership is judged once the Welcome names its sender).
+pub(crate) fn welcome_sender_refusal(
+    server_id: &str,
+    conf_host: Option<&super::types::ConfHost>,
+    sender: &str,
+) -> Option<String> {
+    if let Some(conf_id) = super::conference::conf_id_from_sid(server_id) {
+        return super::conference::welcome_host(conf_id, sender, conf_host)
+            .is_none()
+            .then(|| "not the meeting's host, or no knock of ours is pending".to_string());
+    }
+    let device = LeafIdentity { device: sender.to_string(), master: super::resolver::resolve(sender) };
+    refused(&device).then(|| "a revoked or disowned device".to_string())
+}
+
 /// The committer's side: which queued removals and adds go into one commit. An add
 /// needs a bound KeyPackage for the device it was queued under, from a current
-/// member; a current member's leaf is removed only alongside a re-add of its device.
+/// member; a current member's leaf is removed only alongside a re-add of its device
+/// with a KeyPackage `minted_for_group` dates after `leaf_minted`'s.
 pub(crate) fn plan_membership(
     leaves: &[LeafView],
+    leaf_minted: &std::collections::HashMap<String, u64>,
     queued_removals: &[String],
     queued_adds: Vec<(String, Vec<u8>)>,
+    minted_for_group: impl Fn(&[u8]) -> Option<u64>,
     ourselves: &LeafIdentity,
     rules: &GroupRules,
 ) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
     let mut adds = Vec::new();
-    let mut add_views = Vec::new();
+    let mut planned = CommitFacts { remove_minted: leaf_minted.clone(), ..Default::default() };
     for (device, kp) in queued_adds {
         let Ok(view) = MlsManager::key_package_identity(&kp) else { continue };
         let Some(identity) = view.bound() else { continue };
@@ -176,7 +211,10 @@ pub(crate) fn plan_membership(
         {
             continue;
         }
-        add_views.push(view.clone());
+        if let Some(minted) = minted_for_group(&kp) {
+            planned.add_minted.insert(device.clone(), minted);
+        }
+        planned.adds.push(view.clone());
         adds.push((device, kp));
     }
     let removals = queued_removals
@@ -185,7 +223,7 @@ pub(crate) fn plan_membership(
             leaves
                 .iter()
                 .find(|l| l.id() == id.as_str())
-                .is_some_and(|l| removable(l, ourselves, &add_views, rules))
+                .is_some_and(|l| removable(l, ourselves, &planned, rules))
         })
         .cloned()
         .collect();
@@ -305,14 +343,15 @@ pub(crate) fn stale_leaves(leaves: &[LeafView], ourselves: &str, rules: &GroupRu
     leaves
         .iter()
         .filter(|leaf| leaf.id() != ourselves)
-        .filter(|leaf| match leaf.bound() {
-            None => true,
-            Some(identity) => {
-                refused(identity) || rules.membership(&identity.master, "") != Verdict::Accept
-            }
-        })
+        .filter(|leaf| leaf.bound().is_none_or(|identity| unseated(identity, rules)))
         .map(|leaf| leaf.id().to_string())
         .collect()
+}
+
+/// A bound leaf our view no longer seats: a revoked or disowned device, or a master
+/// who is not a current, unbanned member able to see a subgroup's channel.
+pub(crate) fn unseated(leaf: &LeafIdentity, rules: &GroupRules) -> bool {
+    refused(leaf) || rules.membership(&leaf.master, "") != Verdict::Accept
 }
 
 #[cfg(test)]
@@ -405,9 +444,38 @@ mod tests {
         assert!(accepted(CommitFacts {
             removes: vec![alice.clone()],
             adds: vec![alice.clone()],
+            add_minted: [("alice-d".to_string(), 2)].into(),
+            remove_minted: [("alice-d".to_string(), 1)].into(),
             ..facts(owner.clone())
-        }), "a repair re-adds the device it removes");
+        }), "a repair re-adds the device it removes with a KeyPackage minted after its leaf's");
+        assert!(accepted(CommitFacts {
+            removes: vec![alice.clone()],
+            adds: vec![alice.clone()],
+            add_minted: [("alice-d".to_string(), 2)].into(),
+            ..facts(owner.clone())
+        }), "a leaf that never said when it was minted is repaired by any KeyPackage minted for the group");
         assert!(accepted(CommitFacts { adds: vec![alice.clone()], ..facts(owner.clone()) }));
+    }
+
+    /// R-MLS-09: every member sees the KeyPackage that seats a leaf, so replaying it,
+    /// an older one, or one minted for another group never counts as a repair.
+    #[test]
+    fn a_spent_or_foreign_key_package_repairs_nothing() {
+        let state = server(&["owner", "alice", "eve"]);
+        let rules = GroupRules::Server { state: &state, channel: None };
+        let alice = leaf("alice-d", "alice");
+        let readd = |added: Option<u64>| CommitFacts {
+            removes: vec![alice.clone()],
+            adds: vec![alice.clone()],
+            add_minted: added.map(|ms| ("alice-d".to_string(), ms)).into_iter().collect(),
+            remove_minted: [("alice-d".to_string(), 5)].into(),
+            ..facts(leaf("eve-d", "eve"))
+        };
+        let held = |f: &CommitFacts| matches!(commit_verdict(f, &rules), Verdict::Hold(_));
+        assert!(held(&readd(Some(5))), "the KeyPackage that seats the leaf, replayed");
+        assert!(held(&readd(Some(4))), "an older KeyPackage");
+        assert!(held(&readd(None)), "a KeyPackage minted for another group or none");
+        assert_eq!(commit_verdict(&readd(Some(6)), &rules), Verdict::Accept, "a fresh one repairs");
     }
 
     #[test]
@@ -564,6 +632,19 @@ mod tests {
             welcome_verdict(&welcome(leaf("eve-d", "eve"), vec![leaf("eve-d", "eve"), us.clone()], false), &rules, true),
             Verdict::Hold(_)
         ), "a sender we do not know as a member");
+        assert!(matches!(
+            welcome_verdict(&welcome(owner.clone(), vec![owner.clone(), us.clone(), leaf("eve-d", "eve")], false), &rules, true),
+            Verdict::Hold(_)
+        ), "C-MLS-03: a leaf we do not know as a member");
+
+        let mut restricted = server(&["owner", "alice"]);
+        let cid = restricted.channels.keys().next().unwrap().clone();
+        restricted.channels.get_mut(&cid).unwrap().visibility = crate::crdt::server_state::ChannelVisibility::AdminPlus;
+        let subgroup = GroupRules::Server { state: &restricted, channel: Some(&cid) };
+        let owner_alone = welcome(owner.clone(), vec![owner.clone()], false);
+        assert_eq!(welcome_verdict(&owner_alone, &subgroup, true), Verdict::Accept);
+        assert!(matches!(welcome_verdict(&good, &subgroup, true), Verdict::Hold(_)),
+            "C-MLS-03: a subgroup leaf that cannot see its channel");
 
         let meeting = GroupRules::Meeting { host: Some("owner") };
         assert_eq!(welcome_verdict(&good, &meeting, true), Verdict::Accept);
@@ -608,8 +689,10 @@ mod tests {
         // Bob's KeyPackage is missing from the queue, so his removal cannot ride along.
         let (removals, adds) = plan_membership(
             &leaves,
+            &std::collections::HashMap::new(),
             &["alice-d".into(), "bob-d".into(), "gone-d".into(), "legacy".into()],
             vec![("alice-d".into(), b"not a key package".to_vec())],
+            |_| None,
             &ourselves,
             &rules,
         );
@@ -629,7 +712,7 @@ mod tests {
             vec![
                 H::MlsChannelMessage { server_id: server_id.clone(), body: s.clone(), channel_id: channel_id.clone() },
                 H::MlsKeyPackage { server_id: server_id.clone(), key_package: s.clone(), channel_id: channel_id.clone() },
-                H::MlsWelcome { server_id: server_id.clone(), welcome: s.clone(), channel_id: channel_id.clone(), conf_nonce: None },
+                H::MlsWelcome { server_id: server_id.clone(), welcome: s.clone(), channel_id: channel_id.clone(), conf_host: None },
                 H::MlsCommit { server_id: server_id.clone(), commit: s, channel_id: channel_id.clone(), epoch: None },
                 H::MlsKeyPackageRequest { server_id: server_id.clone(), channel_id: channel_id.clone() },
                 H::MlsEpochProbe { server_id: server_id.clone(), channel_id: channel_id.clone(), epoch: 1, epoch_auth: None },
@@ -659,6 +742,36 @@ mod tests {
             }
         }
         assert!(frame_names_a_group(&H::TypingIndicator { server_id: "s1".into(), channel_id: "a#b".into() }, "peer"), "not an MLS frame");
+    }
+
+    /// C-MLS-05: a server Welcome from a device the roster refuses is turned away before
+    /// staging could spend our KeyPackage; one from a device we cannot place yet is not.
+    #[test]
+    fn a_welcome_from_a_refused_device_is_never_staged() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update_many("alice", ["alice-d"]);
+        crate::node::resolver::note_roster("alice");
+        crate::node::resolver::mark_revoked(&["alice-gone".into()]);
+        let sid = crate::crdt::anchor::derive_server_id("owner", "n1");
+        assert_eq!(welcome_sender_refusal(&sid, None, "alice-d"), None);
+        assert_eq!(welcome_sender_refusal(&sid, None, "stranger-d"), None, "a co-member we cannot place yet");
+        assert!(welcome_sender_refusal(&sid, None, "alice-gone").is_some(), "a removed device");
+        assert!(welcome_sender_refusal(&sid, None, "alice").is_some(), "the bare master id");
+        let meeting = super::super::conference::conf_server_id(&super::super::conference::derive_conf_id("host", "n9"));
+        assert!(welcome_sender_refusal(&meeting, None, "alice-d").is_some(), "a meeting Welcome we did not knock for");
+        crate::node::resolver::clear_all();
+    }
+
+    /// The sender check runs in the Welcome arm before anything is staged.
+    #[test]
+    fn welcome_senders_are_judged_before_staging() {
+        let node = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("node");
+        let swarm = std::fs::read_to_string(node.join("swarm.rs")).expect("read swarm.rs").replace("\r\n", "\n");
+        let at = swarm.find("HavenMessage::MlsWelcome { server_id, welcome, channel_id: wl_channel_id, conf_host } => {")
+            .expect("Welcome arm");
+        let arm = &swarm[at..at + swarm[at..].find(".join_from_welcome_judged(").expect("staging")];
+        assert!(arm.contains("mls_authority::welcome_sender_refusal("), "swarm.rs: a Welcome is staged before its sender is judged");
     }
 
     /// The shape check runs where the event loop dispatches relay, meeting-lane and

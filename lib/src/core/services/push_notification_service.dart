@@ -2,10 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
@@ -35,9 +37,94 @@ bool _isAlreadyInitializedError(Object e) {
 const int _maxCachedLines = 6;
 const int _lineCacheTtlMs = 60 * 60 * 1000; // 1 hour
 
-Future<File> _lineCacheFile() async {
+/// Where the push path keeps its log and line cache: the `hollow/` folder of
+/// the app documents dir, which on iOS is the private sandbox rather than the
+/// App Group data root.
+@visibleForTesting
+String? pushDirOverride;
+
+Future<String> _pushDir() async {
+  final override = pushDirOverride;
+  if (override != null) return override;
   final dir = await getApplicationDocumentsDirectory();
-  return File('${dir.path}/hollow/push_lines.json');
+  return '${dir.path}/hollow';
+}
+
+/// The push diagnostics log, for the debug-log export.
+Future<String> pushDebugLogPath() async => '${await _pushDir()}/push_debug.log';
+
+Future<File> _lineCacheFile() async =>
+    File('${await _pushDir()}/push_lines.json');
+
+/// Set once this install's identity is gone: the push path logs, caches and
+/// shows nothing more in this isolate.
+bool _pushQuiet = false;
+
+/// Firebase's token delete, still in flight when a new identity asks for one.
+Future<void>? _pendingTokenDelete;
+
+/// Whether an identity lives on this install and no wipe waits on it. A wake
+/// for a wiped install must leave no banner and no line on disk.
+Future<bool> _identityPresent() async {
+  if (_pushQuiet) return false;
+  try {
+    return await storage_api.hasIdentity() &&
+        !await storage_api.hasPendingWipe();
+  } catch (_) {
+    final root = hollowDataDir;
+    return File('$root/identity.key').existsSync() &&
+        !File('$root/pending_wipe.marker').existsSync();
+  }
+}
+
+/// What [forgetPushRegistration] fires, one entry per provider.
+@visibleForTesting
+List<Future<void> Function()> pushForgetSteps = [
+  _deleteFirebaseToken,
+  _unregisterUnifiedPush,
+  _unregisterApns,
+  () => FlutterLocalNotificationsPlugin().cancelAll(),
+];
+
+Future<void> _deleteFirebaseToken() async {
+  if (!Platform.isAndroid && !Platform.isIOS) return;
+  final delete = FirebaseMessaging.instance.deleteToken();
+  _pendingTokenDelete = delete.catchError((_) {});
+  await delete;
+}
+
+Future<void> _unregisterUnifiedPush() async {
+  if (!UnifiedPushController.supported) return;
+  await UnifiedPushController.instance.forget();
+}
+
+/// APNs stops delivering to this install until it registers again, which
+/// Firebase does at the next launch.
+Future<void> _unregisterApns() async {
+  if (!Platform.isIOS) return;
+  await const MethodChannel('hollow/app_group')
+      .invokeMethod<void>('unregisterForRemoteNotifications');
+}
+
+/// Unregisters this install from every push provider and deletes what the push
+/// path keeps on disk, waiting on no network: a wiped phone would otherwise
+/// keep being woken for an identity that is gone, under a token that ties it to
+/// the next one. [quiet] also stops this isolate from logging, caching or
+/// showing anything more; a launch that lands on Welcome passes false.
+Future<void> forgetPushRegistration({bool quiet = true}) async {
+  if (quiet) _pushQuiet = true;
+  for (final step in pushForgetSteps) {
+    try {
+      step().catchError((_) {});
+    } catch (_) {}
+  }
+  try {
+    final dir = await _pushDir();
+    for (final name in ['push_debug.log', 'push_lines.json']) {
+      final f = File('$dir/$name');
+      if (f.existsSync()) f.deleteSync();
+    }
+  } catch (_) {}
 }
 
 /// Merges [newItems] (message_id to text) for [sender] into the cached list
@@ -46,6 +133,8 @@ Future<File> _lineCacheFile() async {
 /// place rather than stacking a second entry.
 Future<List<String>> _accumulateLines(
     String sender, List<MapEntry<String, String>> newItems) async {
+  // Nothing a hidden banner would show is written to disk either.
+  if (await _bannersHidden()) return [for (final it in newItems) it.value];
   Map<String, dynamic> data = {};
   try {
     final f = await _lineCacheFile();
@@ -84,10 +173,12 @@ Future<List<String>> _accumulateLines(
       : items;
 
   data[sender] = {'ts': nowMs, 'items': windowed};
-  try {
-    final f = await _lineCacheFile();
-    await f.writeAsString(jsonEncode(data));
-  } catch (_) {}
+  if (await _identityPresent()) {
+    try {
+      final f = await _lineCacheFile();
+      await f.writeAsString(jsonEncode(data));
+    } catch (_) {}
+  }
   return windowed.map((m) => m['text'] ?? '').toList();
 }
 
@@ -259,10 +350,12 @@ Future<bool?> requestMobileNotificationPermission() async {
   return null;
 }
 
+/// Event kinds and counts only: no name, id or text, because the file sits
+/// outside the encrypted store and goes out with the debug-log export.
 Future<void> _pushLog(String msg) async {
+  if (!await _identityPresent()) return;
   try {
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/hollow/push_debug.log');
+    final file = File(await pushDebugLogPath());
   // Cap the log at 1MB, keeping the last ~256KB, so it cannot grow unbounded
   // across many pushes.
     const maxBytes = 1024 * 1024;
@@ -294,16 +387,22 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
 /// decrypted UnifiedPush message, both the sidecar's
 /// `{type, sender, server, channel, mention}`.
 Future<void> handlePushWake(Map<String, dynamic> data) async {
-  // PRIVACY: log only whitelisted routing keys, never the whole payload map —
-  // if the sidecar ever adds a content/preview field it must not hit the log.
-  await _pushLog(
-      'Handler started, type=${data['type']} sender=${data['sender']} '
-      'server=${data['server']} channel=${data['channel']}');
+  final bool rustReady = await _initRustForBackground();
+  // A wake for a wiped or never-used install shows nothing and writes nothing,
+  // and the registration that let it through is dropped.
+  if (!await _identityPresent()) {
+    await forgetPushRegistration();
+    return;
+  }
+  // PRIVACY: the kind only, never the payload: its ids map who writes to whom.
+  await _pushLog('Handler started, type=${data['type']}');
+  if (!rustReady) await _pushLog('Rust init FAILED: $_rustInitError');
 
   // Channel pushes carry type=channel_wake plus server and channel ids, and
   // go down a separate pipeline.
   if (data['type'] == 'channel_wake') {
-    await _handleChannelWake(data);
+    await _handleChannelWake(data, rustReady);
+    await _forgetIfWiped();
     return;
   }
 
@@ -313,8 +412,6 @@ Future<void> handlePushWake(Map<String, dynamic> data) async {
     await _showGenericNotification();
     return;
   }
-
-  final bool rustReady = await _initRustForBackground();
 
   // Resolve the cached profile but DO NOT post yet: on the happy path we wait
   // for the fetched content and post ONE already-populated notification, with
@@ -335,7 +432,7 @@ Future<void> handlePushWake(Map<String, dynamic> data) async {
     // The relay filter keys on device ids it knew at the last pref sync; a
     // device linked since still wakes us, so the mute is re-checked here.
     if (await _dmPushMuted(personKey)) {
-      await _pushLog('DM muted for $personKey, no banner');
+      await _pushLog('DM muted, no banner');
       return;
     }
   }
@@ -362,6 +459,12 @@ Future<void> handlePushWake(Map<String, dynamic> data) async {
       contentShown, sender, personKey, displayName, avatarBytes);
 
   await _pushLog('Handler complete');
+  await _forgetIfWiped();
+}
+
+/// A destruction order the fetch node carried wipes the install mid-wake.
+Future<void> _forgetIfWiped() async {
+  if (!await _identityPresent()) await forgetPushRegistration();
 }
 
 /// The same `notif:dm:` setting the live path consults, read straight from
@@ -385,7 +488,8 @@ Future<(String, Uint8List?, String)> _resolveDmPushProfile(
   String personKey = sender;
   try {
     final profile = await network_api.getPushProfile(peerId: sender);
-    await _pushLog('getPushProfile: name=${profile?.displayName}, hasAvatar=${profile?.avatarBytes != null}');
+    await _pushLog('getPushProfile: found=${profile != null}, '
+        'hasAvatar=${profile?.avatarBytes != null}');
     if (profile != null && profile.displayName.isNotEmpty) {
       displayName = profile.displayName;
     }
@@ -465,7 +569,7 @@ Future<void> _cancelIosDmApnsBanner(String sender, String personKey) async {
   try {
     await FlutterLocalNotificationsPlugin()
         .cancel(_iosCollapseId(sender));
-    await _pushLog('iOS: cancelled APNs banner id=${_iosCollapseId(sender)} (person=$personKey)');
+    await _pushLog('iOS: cancelled the APNs banner');
   } catch (e) {
     await _pushLog('iOS: cancel APNs banner failed: $e');
   }
@@ -476,7 +580,7 @@ Future<void> _cancelIosDmApnsBanner(String sender, String personKey) async {
 Future<bool> _fetchAndShowDmContent(String sender, String personKey,
     String displayName, Uint8List? avatarBytes) async {
   try {
-    await _pushLog('Starting fetch for $sender...');
+    await _pushLog('Starting fetch');
     // The relay replays buffered offline messages immediately on join, so the
     // fetch node collects them within a second or so; the timeout only bounds
     // the empty case, and stays well inside Android's background window.
@@ -550,7 +654,7 @@ Future<void> _showDmFallbackIfNeeded(bool contentShown, String sender,
       body: 'Sent you a message',
       avatarBytes: avatarBytes,
     );
-    await _pushLog('Fallback notification shown: $displayName');
+    await _pushLog('Fallback notification shown');
   } else {
     await _pushLog('iOS: no content — leaving NSE banner as-is (no double post)');
   }
@@ -569,6 +673,9 @@ Future<bool?> _pushSenderKnown(String sender, String? server) async {
   }
 }
 
+/// Logged only once the wake is known to be for a live identity.
+Object? _rustInitError;
+
 /// Initializes Rust FFI in the background isolate. CRITICAL: Android reuses
 /// the isolate across FCM messages and `RustLib.init()` is NOT idempotent,
 /// throwing "Should not initialize flutter_rust_bridge twice" the second time.
@@ -577,21 +684,16 @@ Future<bool?> _pushSenderKnown(String sender, String? server) async {
 Future<bool> _initRustForBackground() async {
   try {
     await initHollowDataDir();
-    await _pushLog('Data dir initialized: $hollowDataDir');
 
-    if (_rustInitializedInIsolate) {
-      await _pushLog('RustLib already initialized in this isolate — reusing');
-    } else {
+    if (!_rustInitializedInIsolate) {
       try {
         await RustLib.init();
         _rustInitializedInIsolate = true;
-        await _pushLog('RustLib.init() OK');
       } catch (e) {
         // A second init in a reused isolate throws but Rust is in fact
         // ready. Any other init error is a real failure.
         if (_isAlreadyInitializedError(e)) {
           _rustInitializedInIsolate = true;
-          await _pushLog('RustLib.init() reported already-initialized — treating as ready');
         } else {
           rethrow;
         }
@@ -601,11 +703,10 @@ Future<bool> _initRustForBackground() async {
     if (Platform.isAndroid || Platform.isIOS) {
       // set_data_dir uses a OnceLock on the Rust side — safe to call repeatedly.
       await identity_api.setDataDir(path: hollowDataDir);
-      await _pushLog('setDataDir OK');
     }
     return true;
   } catch (e) {
-    await _pushLog('Rust init FAILED: $e');
+    _rustInitError = e;
     return false;
   }
 }
@@ -699,7 +800,8 @@ Future<bool> _waitForLiveChannelArrival(String serverId, String channelId) async
 // LOCAL effective level is re-checked because relay prefs can be stale, then
 // the buffered channel ciphertext is fetched and decrypted via the server
 // room.
-Future<void> _handleChannelWake(Map<String, dynamic> data) async {
+Future<void> _handleChannelWake(
+    Map<String, dynamic> data, bool rustReady) async {
   final sender = data['sender'] as String? ?? '';
   final server = data['server'] as String? ?? '';
   final channel = data['channel'] as String? ?? '';
@@ -708,8 +810,6 @@ Future<void> _handleChannelWake(Map<String, dynamic> data) async {
     await _pushLog('channel_wake: no server in payload — ignored');
     return;
   }
-
-  final rustReady = await _initRustForBackground();
 
   String serverName = '';
   String channelName = '';
@@ -1026,13 +1126,29 @@ const int _channelGroupSummaryId = 0x40000002;
 // never replace a real message card.
 const int _testNotifId = 0x40000003;
 
+/// The banner App Lock allows (C-35), posted in place of every content banner
+/// while it is on: one card for everything, no name, no text, no avatar.
+Future<void> showHiddenNotification() => _showGenericNotification();
+
+/// App Lock is on (a PIN or password guards the identity), so no banner names
+/// a sender or quotes a message, and no preview text is kept on disk. Asked of
+/// the identity file itself, which every isolate can read. Unknown counts as on.
+Future<bool> _bannersHidden() async {
+  try {
+    return (await identity_api.getIdentityProtectionStatus()).hasPassword;
+  } catch (_) {
+    return true;
+  }
+}
+
 Future<void> _showGenericNotification() async {
+  if (!await _identityPresent()) return;
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
   await plugin.show(
     0,
-    'Hollow',
-    'You have a new message',
+    kHiddenNotificationTitle,
+    kHiddenNotificationBody,
     const NotificationDetails(
       android: AndroidNotificationDetails(
         'hollow_messages',
@@ -1059,6 +1175,11 @@ Future<void> _showNotification({
   Uint8List? avatarBytes,
   bool silent = false,
 }) async {
+  if (!await _identityPresent()) return;
+  if (await _bannersHidden()) {
+    await _showGenericNotification();
+    return;
+  }
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
 
@@ -1171,6 +1292,11 @@ Future<void> _showChannelNotification({
   List<String>? lines,
   bool silent = false,
 }) async {
+  if (!await _identityPresent()) return;
+  if (await _bannersHidden()) {
+    await _showGenericNotification();
+    return;
+  }
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
 
@@ -1394,6 +1520,8 @@ class PushNotificationService {
   Future<void> initialize() async {
     if (_initialized) return;
     if (!Platform.isAndroid && !Platform.isIOS) return;
+    // Runs once an identity is up, so a Welcome-time forget no longer applies.
+    _pushQuiet = false;
 
     debugPrint('████ [HOLLOW-PUSH] Initializing push notifications...');
     _initialized = true;
@@ -1453,6 +1581,9 @@ class PushNotificationService {
         if (Platform.isIOS) {
           await _waitForApnsToken();
         }
+        // A delete still in flight would otherwise take the fresh token with it.
+        await _pendingTokenDelete?.timeout(const Duration(seconds: 10),
+            onTimeout: () {});
         _currentToken = await _messaging.getToken();
         debugPrint('████ [HOLLOW-PUSH] FCM token: ${_currentToken != null ? "${_currentToken!.substring(0, 20)}..." : "NULL"}');
         if (_currentToken != null) {

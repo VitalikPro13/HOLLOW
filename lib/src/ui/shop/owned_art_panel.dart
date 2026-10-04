@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
@@ -11,6 +10,8 @@ import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/services/secret_clipboard.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -32,7 +33,6 @@ import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 /// The same slot as Settings > Profile's Avatar and Banner rows, so a piece of
 /// art looks here exactly as it does there.
@@ -230,11 +230,7 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
         type: HollowToastType.success);
   }
 
-  Future<void> _openArtist() async {
-    final uri = Uri.tryParse(widget.item.artistUrl);
-    if (uri == null) return;
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-  }
+  Future<void> _openArtist() => openUntrustedUrl(widget.item.artistUrl);
 
   /// Whether the profile is already wearing this kind of this item.
   bool _isWorn(Set<String> worn) {
@@ -446,7 +442,7 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
   String get _masked => code.replaceAll(RegExp(r'[^-]'), '•');
 
   Future<void> _copy(BuildContext context) async {
-    await Clipboard.setData(ClipboardData(text: code));
+    await SecretClipboard.copy(code);
     if (!context.mounted) return;
     HollowToast.show(context, 'Code copied', type: HollowToastType.success);
   }

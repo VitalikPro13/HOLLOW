@@ -14,7 +14,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 
 /// event_provider routes results here rather than opening a second dialog.
 void Function(bool success, String? error)? _activeTwitchJoinCallback;
@@ -460,10 +460,8 @@ class _TwitchJoinDialogState extends ConsumerState<_TwitchJoinDialog>
         return [
           if (_verificationUri != null)
             HollowButton.filled(
-              onPressed: () {
-                final uri = Uri.tryParse(_verificationUri!);
-                if (uri != null) launchUrl(uri).catchError((_) => false);
-              },
+              onPressed: () => openUntrustedUrl(_verificationUri!)
+                  .catchError((_) => false),
               icon: const Icon(BrandIcons.twitch),
               child: const Text('Open Twitch'),
             ),

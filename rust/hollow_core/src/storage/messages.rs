@@ -1769,6 +1769,22 @@ impl MessageStore {
         collect_rows(rows, "olm_read_marks")
     }
 
+    /// Leave `account_pickle` as the only Olm state in this database, erased pages
+    /// zeroed and the file rebuilt: for a host that keeps no record of its peers.
+    pub fn keep_only_olm_account(&self, account_pickle: &str) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "PRAGMA secure_delete = ON;
+                 DELETE FROM olm_sessions;
+                 DELETE FROM olm_read_marks;",
+            )
+            .map_err(|e| format!("Failed to erase Olm peers: {e}"))?;
+        self.save_olm_account(account_pickle)?;
+        self.conn
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| format!("Failed to rebuild the database: {e}"))
+    }
+
     /// Load recent messages for a peer, oldest-first, excluding hidden ones.
     pub fn load_for_peer(
         &self,
@@ -3022,15 +3038,29 @@ impl MessageStore {
             .and_then(|v| serde_json::from_value(v).ok()))
     }
 
-    /// The roster stored for a master, unverified. `None` for no row or a 0.11 row.
+    /// The roster stored for a master, unverified. `None` for no row or a 0.11 row; a
+    /// row that does not read is an error, never "no roster".
     pub fn load_roster(
         &self,
         master_peer_id: &str,
     ) -> Result<Option<crate::identity::roster::Roster>, String> {
-        Ok(self
-            .device_list_json(master_peer_id)?
-            .filter(|v| v.get("master").is_some())
-            .and_then(|v| serde_json::from_value(v).ok()))
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM device_lists WHERE master_peer_id = ?1", [master_peer_id], |row| row.get(0))
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(format!("Failed to read the roster of {master_peer_id}: {e}")),
+            })?;
+        let Some(json) = json else { return Ok(None) };
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| format!("The roster of {master_peer_id} does not read: {e}"))?;
+        if value.get("master").is_none() {
+            return Ok(None);
+        }
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|e| format!("The roster of {master_peer_id} does not read: {e}"))
     }
 
     /// Record when this node first saw `device`'s pending join in `base`; the first
@@ -3644,14 +3674,16 @@ impl MessageStore {
             return Ok(false);
         }
 
-        self.conn.execute_batch("BEGIN").map_err(|e| format!("BEGIN: {e}"))?;
+        // A savepoint, since sync applies an edit inside its own batch transaction.
+        self.conn.execute_batch("SAVEPOINT edit_message").map_err(|e| format!("SAVEPOINT: {e}"))?;
+        let undo = || self.conn.execute_batch("ROLLBACK TO edit_message; RELEASE edit_message");
 
         if let Err(e) = self.conn.execute(
             "INSERT INTO message_edits (message_id, old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![message_id, old_text, new_text, edited_at, signature, public_key, prev_sig, prev_pk, prev_ts],
         ) {
-            let _ = self.conn.execute_batch("ROLLBACK");
+            let _ = undo();
             return Err(format!("Failed to insert edit history: {e}"));
         }
 
@@ -3662,11 +3694,11 @@ impl MessageStore {
 
         match result {
             Ok(rows) => {
-                let _ = self.conn.execute_batch("COMMIT");
+                let _ = self.conn.execute_batch("RELEASE edit_message");
                 Ok(rows > 0)
             }
             Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
+                let _ = undo();
                 Err(format!("Failed to update {table} row: {e}"))
             }
         }
@@ -6892,6 +6924,22 @@ mod tests {
         );
         assert_eq!(store.get_dm_message_sig_row("m1").unwrap().text, "v3");
         assert!(store.edit_dm_message("m1", "v4", 4_000, None, None).unwrap());
+    }
+
+    /// Sync applies a batch inside one transaction, so an edit riding it must not
+    /// open a second: SQLite refuses a nested BEGIN, and the edit was dropped.
+    #[test]
+    fn an_edit_inside_an_open_batch_applies() {
+        let store = mem_store();
+        store.insert("peer", "v1", false, 1_000, None, None, Some("m1"), None, None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer", "c1", false, 1_000, None, None, Some("m2"), None, None, None, None).unwrap();
+        store.begin_transaction().unwrap();
+        assert!(store.edit_dm_message("m1", "v2", 2_000, None, None).unwrap(), "a DM edit inside a batch");
+        assert!(store.edit_channel_message("m2", "c2", 2_000, None, None).unwrap(), "a channel edit inside a batch");
+        store.commit_transaction().unwrap();
+        assert_eq!(store.get_dm_message_sig_row("m1").unwrap().text, "v2");
+        assert_eq!(store.get_channel_message_sig_row("m2").unwrap().text, "c2");
+        assert!(store.edit_dm_message("m1", "v3", 3_000, None, None).unwrap(), "and still on its own");
     }
 
     /// HOL-SEC-039 (B11). A reaction removal left nothing an add was checked

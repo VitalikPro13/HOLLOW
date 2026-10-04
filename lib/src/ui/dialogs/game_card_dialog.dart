@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -19,7 +20,6 @@ import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/platform_icons.dart';
 import 'package:hollow/src/ui/components/showcase_image_stats.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 /// Which showcase block a card was opened from, so it can say why you are
 /// looking at this game.
@@ -182,11 +182,9 @@ const _storeOrder = [
   ('nintendo', 'Nintendo eShop'),
 ];
 
-Future<void> _open(String url) async {
-  final uri = Uri.tryParse(url);
-  if (uri == null) return;
-  await launchUrl(uri, mode: LaunchMode.externalApplication);
-}
+/// Store and company links ride the pinner's replicated card, so they are a
+/// peer's strings; http stays allowed for older official sites.
+Future<void> _open(String url) => openUntrustedUrl(url, allowHttp: true);
 
 // ------------------------------------------------------------------ desktop
 

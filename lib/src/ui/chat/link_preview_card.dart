@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/audio_playback_provider.dart';
 import 'package:hollow/src/core/providers/video_playback_provider.dart';
+import 'package:hollow/src/core/services/untrusted_link.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -13,7 +14,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
@@ -36,6 +36,13 @@ bool isDirectPlayableVideo(String? url) {
   }
   final path = uri.path.toLowerCase();
   return _kPlayableVideoExtensions.any(path.endsWith);
+}
+
+/// The domain a card shows: the host of its own url, never the sender's
+/// `domain` field, and empty for a url the card will not open.
+String linkPreviewDomain(String url) {
+  final decision = classifyUntrustedUrl(url, allowHttp: true);
+  return decision.route == UntrustedLinkRoute.browser ? decision.uri!.host : '';
 }
 
 /// Rendered link preview card inside a chat bubble.
@@ -82,6 +89,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
   bool _isVisible = true;
 
   network_api.LinkPreviewRef get preview => widget.preview;
+  String get _domain => linkPreviewDomain(preview.url);
+  bool get _canOpen => _domain.isNotEmpty;
   bool get _isLarge => preview.kind == 'large';
   bool get _canPlayInline =>
       _isLarge && isDirectPlayableVideo(preview.videoUrl);
@@ -171,7 +180,9 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
       child: HollowPressable(
         // While the video is up, taps belong to the player's play/pause, not to
         // the card's open-in-browser.
-        onTap: _videoState == _CardVideoState.poster ? _handleTap : null,
+        onTap: _videoState == _CardVideoState.poster && _canOpen
+            ? _handleTap
+            : null,
         borderRadius: BorderRadius.circular(hollow.radiusLg),
         padding: EdgeInsets.zero,
         child: ClipRRect(
@@ -378,12 +389,12 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     return Semantics(
       button: true,
       label: inline
-          ? 'Play video from ${preview.domain}'
-          : 'Open video on ${preview.domain}',
+          ? 'Play video from $_domain'
+          : 'Open video on $_domain',
       child: GestureDetector(
         // Opaque, so the tap never reaches the card's open-in-browser handler.
         behavior: HitTestBehavior.opaque,
-        onTap: inline ? _startPlayback : _handleTap,
+        onTap: inline ? _startPlayback : (_canOpen ? _handleTap : null),
         child: Stack(
           fit: StackFit.expand,
           children: [
@@ -478,21 +489,16 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
   /// Header line: "Site Name · domain", or just the domain. The domain always
   /// shows, on both layouts, so the card says where tapping it goes.
   String _headerLine() {
-    if (preview.siteName.isNotEmpty && preview.siteName != preview.domain) {
-      return preview.domain.isNotEmpty
-          ? '${preview.siteName} · ${preview.domain}'
+    final domain = _domain;
+    if (preview.siteName.isNotEmpty && preview.siteName != domain) {
+      return domain.isNotEmpty
+          ? '${preview.siteName} · $domain'
           : preview.siteName;
     }
-    return preview.domain;
+    return domain;
   }
 
   Future<void> _handleTap() async {
-    final uri = Uri.tryParse(preview.url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (_) {
-      // Swallowed: the URL is still there to copy by hand.
-    }
+    await openUntrustedUrl(preview.url, allowHttp: true);
   }
 }

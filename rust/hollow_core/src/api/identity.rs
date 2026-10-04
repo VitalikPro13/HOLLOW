@@ -111,6 +111,26 @@ fn keychain_key_that_decrypts_opts(bytes: &[u8], heal: bool) -> Option<[u8; 32]>
     None
 }
 
+/// The one gate for a secret typed on this machine, at the launch prompt, the app
+/// lock or any Settings confirmation. A TYPED secret always runs BOTH slots: two
+/// derivations, two opens, and only then a decision, so a stopwatch cannot tell a
+/// wrong password from a duress code. A duress code returns only AFTER the data is
+/// gone; the caller shows nothing and ends the session.
+fn open_typed_secret(secret: &str, bytes: &[u8], salt: &[u8; 16]) -> Result<[u8; 32], String> {
+    use crate::identity::encryption;
+    let identity_key = encryption::derive_wrapping_key_from_password(secret, salt)?;
+    let identity_opens = encryption::decrypt_identity(bytes, &identity_key).is_ok();
+    let duress = crate::identity::duress::probe(secret);
+    match (identity_opens, duress) {
+        (true, _) => Ok(identity_key),
+        (false, Some(cfg)) => {
+            crate::api::wipe::run_duress(&cfg);
+            Err("duress".into())
+        }
+        (false, None) => Err("Wrong password or corrupted identity file".into()),
+    }
+}
+
 /// Unlock the identity file for this session, before `open_message_store()` or
 /// `start_node()`. A plaintext identity loads directly and ignores `password`; an
 /// encrypted one decrypts with the password and/or the OS keychain.
@@ -135,25 +155,7 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
         }
         encryption::IdentityFormat::Encrypted { flags, salt, .. } => {
             let wrapping_key = if encryption::flags_has_password(flags) && password.is_some() {
-                // A TYPED secret always runs BOTH slots: two derivations, two opens,
-                // and only then a decision. Branching on the identity slot alone
-                // would let a stopwatch tell a wrong password from a duress code.
-                let pw = password.as_deref().unwrap_or_default();
-                let identity_key = encryption::derive_wrapping_key_from_password(pw, &salt)?;
-                let identity_opens = encryption::decrypt_identity(&bytes, &identity_key).is_ok();
-                let duress = crate::identity::duress::probe(pw);
-                match (identity_opens, duress) {
-                    (true, _) => identity_key,
-                    (false, Some(cfg)) => {
-                        // Returns only AFTER the data is gone. The caller shows
-                        // nothing and waits for the relaunch.
-                        crate::api::wipe::run_duress(&cfg);
-                        return Err("duress".into());
-                    }
-                    (false, None) => {
-                        return Err("Wrong password or corrupted identity file".into());
-                    }
-                }
+                open_typed_secret(password.as_deref().unwrap_or_default(), &bytes, &salt)?
             } else if encryption::flags_has_password(flags)
                 && encryption::flags_has_os_keychain(flags)
             {
@@ -205,6 +207,18 @@ pub fn lock_identity() -> Result<(), String> {
     Ok(())
 }
 
+/// The shortest PIN a new app-lock secret may be. A copied data folder lets a short
+/// PIN fall to an offline search; a PIN set before this floor keeps unlocking.
+const MIN_PIN_DIGITS: usize = 6;
+
+/// A new secret made only of digits is a PIN, and is held to [`MIN_PIN_DIGITS`].
+fn refuse_short_pin(secret: &str) -> Result<(), String> {
+    if secret.chars().all(char::is_numeric) && secret.chars().count() < MIN_PIN_DIGITS {
+        return Err(format!("A PIN needs at least {MIN_PIN_DIGITS} digits."));
+    }
+    Ok(())
+}
+
 /// Enable password protection. With `require_on_launch` the password is needed every
 /// launch; without it the password-derived key is also stored in the OS keychain, so
 /// the identity is encrypted but the app opens normally on this device.
@@ -215,6 +229,8 @@ pub fn enable_password_protection(
 ) -> Result<(), String> {
     use crate::identity::encryption;
     use crate::identity::platform_keystore;
+
+    refuse_short_pin(&password)?;
 
     let data = identity::load_or_create_identity()?;
     let plaintext = data
@@ -251,7 +267,7 @@ pub fn enable_password_protection(
 
     // A duress slot exists for the life of password protection, so its presence
     // never reveals whether a duress code is set.
-    let _ = crate::identity::duress::set_dummy();
+    let _ = forget_duress_code(true);
 
     // Mirror the new protection onto the per-device key file (hazard R2).
     identity::device_key::rewrite_device_key_protection(
@@ -270,6 +286,8 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
     use crate::identity::encryption;
     use crate::identity::platform_keystore;
 
+    refuse_short_pin(&new_password)?;
+
     let dir = crate::identity::data_dir()?;
     let path = dir.join("identity.key");
     let bytes = std::fs::read(&path)
@@ -285,7 +303,7 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
         _ => return Err("Identity is not password-protected".into()),
     };
 
-    let old_key = encryption::derive_wrapping_key_from_password(&old_password, &old_salt)?;
+    let old_key = open_typed_secret(&old_password, &bytes, &old_salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &old_key)?;
 
     // A new password that also opens the duress slot would DISARM the duress code
@@ -346,7 +364,7 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
         _ => return Err("Identity is not encrypted".into()),
     };
 
-    let key = encryption::derive_wrapping_key_from_password(&password, &salt)?;
+    let key = open_typed_secret(&password, &bytes, &salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &key)?;
 
     // Write plaintext. OS keychain is a separate opt-in from Settings.
@@ -358,7 +376,7 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
     identity::device_key::rewrite_device_key_protection(&device, None, false, false)?;
 
     // No prompt left to type a duress code into.
-    let _ = crate::identity::duress::remove();
+    let _ = forget_duress_code(false);
     let _ = platform_keystore::delete_key();
     encryption::clear_session_key();
 
@@ -397,8 +415,7 @@ fn owner_gate(password: &str) -> Result<(), String> {
         }
         _ => return Err("Identity is not password-protected".into()),
     };
-    let key = encryption::derive_wrapping_key_from_password(password, &salt)?;
-    encryption::decrypt_identity(&bytes, &key).map(|_| ())
+    open_typed_secret(password, &bytes, &salt).map(|_| ())
 }
 
 /// True when `code` also unwraps the identity: it would unlock instead of
@@ -414,6 +431,18 @@ fn code_is_the_password(code: &str) -> bool {
     encryption::derive_wrapping_key_from_password(code, &salt)
         .map(|k| encryption::decrypt_identity(&bytes, &k).is_ok())
         .unwrap_or(false)
+}
+
+/// Every path that replaces the duress slot with a dummy, or drops it, clears
+/// what Settings shows with it, so a code shown as set always opens its slot.
+fn forget_duress_code(keep_dummy_slot: bool) -> Result<(), String> {
+    if keep_dummy_slot {
+        crate::identity::duress::set_dummy()?;
+    } else {
+        crate::identity::duress::remove()?;
+    }
+    save_duress_settings("", false);
+    Ok(())
 }
 
 fn save_duress_settings(scope: &str, notify_friends: bool) {
@@ -468,15 +497,7 @@ pub fn set_duress_code(
 #[frb]
 pub fn clear_duress_code(password: String) -> Result<(), String> {
     owner_gate(&password)?;
-    crate::identity::duress::set_dummy()?;
-    let store = crate::api::storage::get_store();
-    if let Ok(guard) = store.lock() {
-        if let Some(ms) = guard.as_ref() {
-            let _ = ms.save_setting("duress_scope", "");
-            let _ = ms.save_setting("duress_notify_friends", "0");
-        }
-    }
-    Ok(())
+    forget_duress_code(true)
 }
 
 #[frb]
@@ -492,11 +513,13 @@ pub fn duress_status() -> DuressStatus {
         },
         Err(_) => (String::new(), false),
     };
+    let available = duress_available();
     DuressStatus {
-        enabled: !scope.is_empty(),
+        // No password, no prompt to type a code into, whatever an older version left set.
+        enabled: available && !scope.is_empty(),
         scope,
         notify_friends,
-        available: duress_available(),
+        available,
     }
 }
 
@@ -665,13 +688,20 @@ pub fn identity_protection_status_at(data_dir: String) -> Result<ProtectionStatu
     protection_status_of(&std::path::Path::new(&data_dir).join("identity.key"))
 }
 
+fn is_running_root(dir: &str) -> bool {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    let Ok(running) = crate::identity::data_dir() else { return false };
+    canon(std::path::Path::new(dir)).is_some_and(|d| Some(d) == canon(&running))
+}
+
 /// Verify that `password` (or, when it is None, a key this machine's keystore
 /// already holds) really unwraps the identity file in `data_dir`.
 ///
 /// A GATE, not an unlock: it never touches the session key and never heals the keystore
 /// slots, so asking about another profile cannot disturb the running one. A plaintext
 /// identity answers true, a wrong password is `Ok(false)`, and only a missing or
-/// malformed file errors.
+/// malformed file errors, or the running profile's duress code, which wipes as at
+/// every prompt.
 #[frb]
 pub fn verify_identity_password_at(
     data_dir: String,
@@ -692,6 +722,15 @@ pub fn verify_identity_password_at(
             if let Some(pw) = password.as_deref() {
                 if !encryption::flags_has_password(flags) {
                     return Ok(false);
+                }
+                // Erasing the running profile asks its own password, which is a
+                // prompt a duress code may be typed into.
+                if is_running_root(&data_dir) {
+                    return match open_typed_secret(pw, &bytes, &salt) {
+                        Ok(_) => Ok(true),
+                        Err(e) if e == "duress" => Err(e),
+                        Err(_) => Ok(false),
+                    };
                 }
                 let key = encryption::derive_wrapping_key_from_password(pw, &salt)?;
                 return Ok(encryption::decrypt_identity(&bytes, &key).is_ok());
@@ -764,7 +803,7 @@ mod profile_erase_gate_tests {
 
     #[test]
     fn status_reads_a_foreign_profile() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         write_password_protected(tmp.path(), "correct horse");
 
         let status =
@@ -776,7 +815,7 @@ mod profile_erase_gate_tests {
 
     #[test]
     fn status_of_a_profile_with_no_identity_is_unprotected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let status =
             identity_protection_status_at(tmp.path().to_string_lossy().to_string()).unwrap();
         assert!(!status.is_encrypted);
@@ -785,7 +824,7 @@ mod profile_erase_gate_tests {
 
     #[test]
     fn verify_accepts_the_right_password_and_rejects_the_wrong_one() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         write_password_protected(tmp.path(), "correct horse");
         let dir = tmp.path().to_string_lossy().to_string();
 
@@ -799,7 +838,7 @@ mod profile_erase_gate_tests {
 
     #[test]
     fn verify_passes_a_plaintext_identity_and_errors_on_a_missing_one() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let dir = tmp.path().to_string_lossy().to_string();
         assert!(verify_identity_password_at(dir.clone(), None).is_err());
 
@@ -812,7 +851,7 @@ mod profile_erase_gate_tests {
     /// profile must not set, clear or otherwise disturb it.
     #[test]
     fn verify_leaves_the_session_key_alone() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         write_password_protected(tmp.path(), "correct horse");
         let dir = tmp.path().to_string_lossy().to_string();
 
@@ -834,13 +873,13 @@ mod duress_tests {
 
     /// `HOLLOW_DATA_DIR`, the session key and the derive counter are all
     /// process-global, so these share the crate-wide test lock.
-    fn temp_identity() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+    fn temp_identity() -> (std::sync::MutexGuard<'static, ()>, crate::test_tmp::TestDir) {
         temp_identity_of(NativeKeypair::from_secret_bytes(&[0x5a; 32]))
     }
 
-    fn temp_identity_of(master: NativeKeypair) -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+    fn temp_identity_of(master: NativeKeypair) -> (std::sync::MutexGuard<'static, ()>, crate::test_tmp::TestDir) {
         let g = crate::node::resolver::test_lock();
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tmp::tempdir().expect("tempdir");
         // SAFETY: serialized by the lock above.
         unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
         encryption::clear_session_key();
@@ -1029,6 +1068,146 @@ mod duress_tests {
         set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), false, Some(PHRASE.into()))
             .expect("with the phrase it is accepted");
         assert!(duress::probe(CODE).and_then(|c| c.permission).is_some());
+        encryption::clear_session_key();
+    }
+
+    /// Every Settings prompt that takes the password treats a duress code the way
+    /// the launch prompt does: both slots cost the same, the data goes, and the
+    /// caller hears only "duress".
+    #[test]
+    fn a_duress_code_at_any_settings_prompt_wipes_like_the_launch_prompt() {
+        type Prompt = fn(&str) -> Result<(), String>;
+        let prompts: [(&str, Prompt); 5] = [
+            ("change the password", |pw| change_password(pw.into(), "a new password".into())),
+            ("turn the password off", |pw| remove_password_protection(pw.into())),
+            ("set a duress code", |pw| {
+                set_duress_code(pw.into(), "another code".into(), duress::SCOPE_DEVICE.into(), false, None)
+            }),
+            ("remove the duress code", |pw| clear_duress_code(pw.into())),
+            ("erase this profile", |pw| {
+                let root = crate::identity::data_dir()?.to_string_lossy().to_string();
+                verify_identity_password_at(root, Some(pw.into())).map(|_| ())
+            }),
+        ];
+        for (label, prompt) in prompts {
+            let (_g, tmp) = temp_identity();
+            let _slots = crate::identity::platform_keystore::SlotGuard::capture();
+            unlock();
+            duress::set_code(CODE, duress::SCOPE_DEVICE, false, None).expect("set code");
+
+            let _ = encryption::take_derive_count();
+            let _ = prompt("not the password");
+            assert_eq!(encryption::take_derive_count(), 2, "{label}: a wrong password costs both slots");
+            assert!(tmp.path().join("identity.key").exists(), "{label}: a wrong password erases nothing");
+
+            let _ = encryption::take_derive_count();
+            let err = prompt(CODE).expect_err("the duress code never passes a prompt");
+            assert_eq!(err, "duress", "{label}");
+            assert_eq!(encryption::take_derive_count(), 2, "{label}: the duress code costs the same");
+            assert!(!tmp.path().join("identity.key").exists(), "{label}: the duress code wipes");
+            assert!(!tmp.path().join("identity.duress").exists(), "{label}: the slot goes too");
+            encryption::clear_session_key();
+        }
+    }
+
+    /// Settings shows a duress code only while its slot still opens: turning the
+    /// password off and on replaces the slot, so the code is gone and says so.
+    #[test]
+    fn turning_the_password_off_and_on_never_reports_a_dead_duress_code() {
+        let (_g, _tmp) = temp_identity();
+        let _s = crate::api::storage::store_test_lock();
+        let _slots = crate::identity::platform_keystore::SlotGuard::capture();
+        crate::api::storage::set_test_store(
+            crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).expect("store"),
+        );
+        unlock();
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_DEVICE.into(), false, None)
+            .expect("set code");
+        assert!(duress_status().enabled);
+
+        remove_password_protection(PASSWORD.into()).expect("password off");
+        assert!(!duress_status().enabled, "with no password there is no prompt to type it into");
+        // An older version left the setting behind: still no prompt, still no code.
+        save_duress_settings(duress::SCOPE_DEVICE, false);
+        assert!(!duress_status().enabled, "a stale setting must not show a code");
+
+        enable_password_protection(PASSWORD.into(), true).expect("password on");
+        assert!(duress::probe(CODE).is_none(), "the slot was replaced");
+        assert!(!duress_status().enabled, "Settings shows a duress code that no longer opens");
+
+        if let Ok(mut store) = crate::api::storage::get_store().lock() {
+            *store = None;
+        }
+        encryption::clear_session_key();
+    }
+}
+
+#[cfg(test)]
+mod pin_floor_tests {
+    use super::*;
+    use crate::identity::encryption;
+    use crate::identity::native_identity::NativeKeypair;
+
+    const SALT: [u8; 16] = [0x31; 16];
+
+    /// An identity whose master and device files are wrapped under `secret`, the
+    /// way an install from before the PIN floor holds them.
+    fn identity_under(secret: &str) -> (std::sync::MutexGuard<'static, ()>, crate::test_tmp::TestDir) {
+        let g = crate::node::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().expect("tempdir");
+        // SAFETY: serialized by the lock above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        encryption::clear_session_key();
+        let key = encryption::derive_wrapping_key_from_password(secret, &SALT).expect("derive");
+        for (name, seed) in [("identity.key", 0x6a), ("identity.device", 0x6b)] {
+            let plaintext = NativeKeypair::from_secret_bytes(&[seed; 32])
+                .to_protobuf_encoding()
+                .expect("encode");
+            let blob = encryption::encrypt_identity(&plaintext, &key, &SALT, true, false)
+                .expect("encrypt");
+            std::fs::write(tmp.path().join(name), blob).expect("write key file");
+        }
+        crate::identity::duress::set_dummy().expect("dummy slot");
+        (g, tmp)
+    }
+
+    /// A copied data folder lets a short PIN fall to an offline search, so no new
+    /// app-lock secret made only of digits is shorter than six.
+    #[test]
+    fn a_new_pin_needs_six_digits() {
+        let (_g, _tmp) = identity_under("correct horse");
+
+        // Locked, so a refusal is the only thing that can answer here: nothing
+        // reaches the keystore whatever the outcome.
+        for short in ["1234", "12345", ""] {
+            let err = enable_password_protection(short.into(), true)
+                .expect_err("a short PIN is refused");
+            assert!(err.contains("6 digits"), "unexpected message: {err}");
+        }
+
+        unlock_identity(Some("correct horse".into())).expect("unlock");
+        for short in ["1234", "12345", ""] {
+            let err = change_password("correct horse".into(), short.into())
+                .expect_err("a short PIN is refused as the new secret");
+            assert!(err.contains("6 digits"), "unexpected message: {err}");
+        }
+        change_password("correct horse".into(), "123456".into()).expect("six digits is enough");
+        encryption::clear_session_key();
+        unlock_identity(Some("123456".into())).expect("the new PIN opens the identity");
+        // A short secret with a letter in it is a password, not a PIN.
+        change_password("123456".into(), "pa55".into()).expect("a password has no digit floor");
+        encryption::clear_session_key();
+    }
+
+    /// The floor applies to a secret being SET: a PIN chosen before it keeps
+    /// opening the identity, and can be traded for a longer one.
+    #[test]
+    fn an_old_four_digit_pin_still_unlocks() {
+        let (_g, _tmp) = identity_under("1234");
+        unlock_identity(Some("1234".into())).expect("an existing short PIN keeps unlocking");
+        change_password("1234".into(), "246810".into()).expect("the short PIN can be replaced");
+        encryption::clear_session_key();
+        unlock_identity(Some("246810".into())).expect("the longer PIN opens it");
         encryption::clear_session_key();
     }
 }

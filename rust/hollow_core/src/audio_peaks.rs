@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn wav_gives_real_duration_and_shape() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         let p = dir.path().join("tone.wav");
         write_wav(&p, 8000, 1, &quiet_silent_loud(8000), None);
         let peaks = decode_peaks(&p, 30).unwrap();
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn stereo_frames_fold_to_one_envelope() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         let p = dir.path().join("stereo.wav");
         // Left loud, right silent: the envelope must not average the left away.
         let mono = quiet_silent_loud(8000);
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_file_without_a_length_still_gets_its_real_duration() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         let p = dir.path().join("streamed.wav");
         write_wav(&p, 8000, 1, &quiet_silent_loud(8000), Some(u32::MAX));
         let peaks = decode_peaks(&p, 64).unwrap();
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn short_files_return_fewer_buckets_than_asked() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         let p = dir.path().join("short.wav");
         write_wav(&p, 8000, 1, &vec![1000i16; 1000], None);
         let peaks = decode_peaks(&p, 2048).unwrap();
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn silence_is_not_normalised_into_noise() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         let p = dir.path().join("silent.wav");
         write_wav(&p, 8000, 1, &vec![0i16; 8000], None);
         let peaks = decode_peaks(&p, 16).unwrap();
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn missing_and_garbage_files_error() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         assert!(decode_peaks(&dir.path().join("nope.mp3"), 16).is_err());
         let g = dir.path().join("garbage.mp3");
         std::fs::write(&g, b"not audio at all, just some bytes").unwrap();

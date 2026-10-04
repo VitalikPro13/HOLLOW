@@ -215,8 +215,8 @@ mod tests {
     use super::*;
     use crate::storage::MessageStore;
 
-    fn temp_db() -> (tempfile::TempDir, String, String) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn temp_db() -> (crate::test_tmp::TestDir, String, String) {
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         let path = dir.path().join("alerts.db").to_string_lossy().to_string();
         let pass = "0123456789abcdef0123456789abcdef".to_string();
         // Force schema creation.

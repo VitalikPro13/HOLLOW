@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_update_impl`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `fetch_bytes`, `install_kind_impl`, `launch_update_script_impl`, `normalise_expected_sha256`, `relaunch_snippet`, `signature_url`, `spawn_waiter`, `verify_manifest_signature_with`, `verify_manifest_signature`
+// These functions are ignored because they are not marked as `pub`: `apply_update_at`, `apply_update_impl`, `bat_quoted_path`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `fetch_bytes`, `install_kind_impl`, `is_release_version`, `launch_update_script_impl`, `manifest_versions_well_formed`, `normalise_expected_sha256`, `relaunch_snippet`, `signature_url`, `spawn_waiter`, `verify_manifest_signature_with`, `verify_manifest_signature`
 
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();

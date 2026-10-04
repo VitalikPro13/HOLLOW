@@ -34,6 +34,7 @@ run() {
 }
 LIBS="-lsodium -lcrypto"
 run test_auth_frame
+run test_client_json
 run test_derive_peer_id ../src/crypto.cpp $LIBS
 run test_door_room ../src/crypto.cpp $LIBS
 run test_fair_share

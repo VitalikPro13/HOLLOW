@@ -5,9 +5,14 @@
 # Dependabot reads the `# v4` comment beside each SHA, so its PRs move the SHA
 # and the comment together.
 #
-# github-actions only. Cargo and pub are deliberately absent: the Rust lockfile
-# is bumped deliberately (an openmls or rusqlite jump is a persistence-format
-# question, not a patch), and cargo audit in CI is what watches it meanwhile.
+# Cargo and pub get one grouped minor/patch PR per lockfile a week, never a
+# semver-major. Some crates are bumped only by hand, because a bump there is a
+# format or protocol decision rather than a patch (listed under `ignore` with
+# the reason). The CI "Supply Chain" job (cargo-deny + osv-scanner) is what
+# flags an advisory in the meantime.
+#
+# cooldown: a release must be a week old before we are offered it, so a
+# hijacked publish has time to be noticed and yanked first.
 version: 2
 
 updates:
@@ -15,6 +20,72 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
     commit-message:
       prefix: "ci"
+
+  - package-ecosystem: cargo
+    directories:
+      - "/rust/hollow_core"
+      - "/rust/hollow_dfn"
+      - "/rust/hollow_art"
+      - "/rust/hollow_manifest"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 4
+    groups:
+      rust-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Persisted state: MLS groups, Olm pickles, the SQLCipher schema.
+      - dependency-name: "openmls*"
+      - dependency-name: "vodozemac"
+      - dependency-name: "rusqlite"
+      - dependency-name: "libsqlite3-sys"
+      # Pinned exactly: the Dart side is generated against 2.11.1, and the shop
+      # signs with the same blind-rsa-signatures the app verifies with.
+      - dependency-name: "flutter_rust_bridge"
+      - dependency-name: "blind-rsa-signatures"
+      # Encoder output is content identity (the hash of the processed bytes),
+      # and hollow_art's lock is seeded from hollow_core's for these.
+      - dependency-name: "image"
+      - dependency-name: "image-webp"
+      - dependency-name: "webp-animation"
+      - dependency-name: "libwebp-sys2"
+      - dependency-name: "zip"
+    commit-message:
+      prefix: "deps(rust)"
+
+  - package-ecosystem: pub
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      dart-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Must match the Rust crate's exact pin (generated bindings).
+      - dependency-name: "flutter_rust_bridge"
+      # pubspec.yaml says why: 1.6+ needs win32 ^6, which file_picker cannot
+      # take; unifiedpush is pinned exactly.
+      - dependency-name: "wakelock_plus"
+        versions: [">=1.6.0"]
+      - dependency-name: "unifiedpush"
+    commit-message:
+      prefix: "deps(dart)"

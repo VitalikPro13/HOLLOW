@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException, PanicException;
 import 'package:flutter/services.dart' show PlatformException;
+import 'package:hollow/src/core/duress_result.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// An error whose message is already written for a person: [friendlyError]
@@ -58,6 +59,8 @@ String _rawMessage(Object error) {
 final _logged = <String>{};
 
 void _log(Object error, String raw) {
+  // A duress code at any prompt leaves no line saying it was typed.
+  if (isDuressResult(error)) return;
   if (!_logged.add(raw)) return;
   if (_logged.length > 256) _logged.remove(_logged.first);
   try {

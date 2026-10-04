@@ -18,7 +18,7 @@ void main() {
       const hex32 = '0123456789abcdef0123456789abcdef';
       for (final id in [
         hex32,
-        '$hex32:7', // share chunk / shard suffix
+        '$hex32:7', // share chunk
         'link_ABC123',
         'a-b_c',
         'a' * 64,

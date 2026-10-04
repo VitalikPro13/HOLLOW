@@ -545,22 +545,32 @@ struct Roster {
         for (const auto& p : pendings) {
             if (p.base == s.base && cons.count(p.device)) ps.push_back(&p);
         }
+        auto vouch_closure = [&](std::set<std::string> seed) {
+            for (;;) {
+                size_t before = seed.size();
+                for (const auto* v : vs) {
+                    if (seed.count(v->by)) seed.insert(v->device);
+                }
+                if (seed.size() == before) return seed;
+            }
+        };
+        // A join refused by a device that belongs without anyone waiting never matures:
+        // waiting must not hand its removals to whoever holds the master key.
+        const std::set<std::string> founded = vouch_closure(roots);
+        std::set<std::string> refused;
+        for (const auto& x : removals) {
+            if (x.base == s.base && founded.count(x.by)) refused.insert(x.device);
+        }
         std::set<std::string> matured;
         for (const auto* p : ps) {
-            if (s.no_wait) continue;
+            if (s.no_wait || refused.count(p->device)) continue;
             auto seen = first_seen(p->device);
             if (seen && *seen <= now_ms - PENDING_MATURITY_MS) matured.insert(p->device);
         }
 
-        std::set<std::string> rooted = roots;
-        rooted.insert(matured.begin(), matured.end());
-        for (;;) {
-            size_t before = rooted.size();
-            for (const auto* v : vs) {
-                if (rooted.count(v->by)) rooted.insert(v->device);
-            }
-            if (rooted.size() == before) break;
-        }
+        std::set<std::string> with_matured = roots;
+        with_matured.insert(matured.begin(), matured.end());
+        const std::set<std::string> rooted = vouch_closure(std::move(with_matured));
 
         std::set<std::string> asked;
         for (const auto* p : ps) asked.insert(p->device);

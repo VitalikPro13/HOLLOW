@@ -1,6 +1,7 @@
 const dns = require('dns');
 const https = require('https');
 const net = require('net');
+const os = require('os');
 const webpush = require('web-push');
 
 // The relay forwards whatever endpoint a client registered, so without these
@@ -33,6 +34,21 @@ for (const [addr, prefix] of [
   ['::', 128], ['::1', 128], ['64:ff9b::', 96], ['100::', 64], ['2001:db8::', 32],
   ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
 ]) blocked.addSubnet(addr, prefix, 'ipv6');
+
+// This machine's own public addresses reach its listeners from inside the firewall.
+// Read once at start; without the list the ranges above still hold.
+function blockOwnAddresses(interfaces) {
+  try {
+    for (const list of Object.values(interfaces || os.networkInterfaces())) {
+      for (const a of list || []) {
+        blocked.addAddress(a.address, a.family === 6 || a.family === 'IPv6' ? 'ipv6' : 'ipv4');
+      }
+    }
+  } catch (err) {
+    console.error(`[push-sidecar] own addresses not read: ${err.code || err.message}`);
+  }
+}
+blockOwnAddresses();
 
 function isPublicAddress(address, family) {
   if (family === 6 || family === 'IPv6') {
@@ -127,4 +143,4 @@ async function sendUnifiedPush(token, data) {
   }
 }
 
-module.exports = { sendUnifiedPush, parseToken, isPublicAddress };
+module.exports = { sendUnifiedPush, parseToken, isPublicAddress, blockOwnAddresses };

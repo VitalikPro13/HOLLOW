@@ -7,8 +7,10 @@ import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
 
 import '../helpers/test_app.dart';
 
-const _right = 'idea limb danger apple parent caught cage rather fun chest fork above';
-const _wrong = 'idea limb danger apple parent caught cage rather fun chest fork zoo';
+const _right =
+    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+const _wrong =
+    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon';
 
 /// Rust as the phrase dialogs see it: one phrase is this identity's.
 class _PhraseApi implements RustLibApi {

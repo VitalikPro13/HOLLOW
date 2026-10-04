@@ -369,6 +369,12 @@ impl OlmManager {
             return Ok(Opened { plaintext, created: false, switched });
         }
 
+        // A key handed to one requester opens only that requester's session, so whoever
+        // else read the bundle (the relay) cannot spend it under a device of its own.
+        let spends = message.one_time_key().to_base64();
+        if self.key_slots.iter().any(|s| s.key == spends && s.requester != peer_id) {
+            return Err(OlmFail::Unreadable("PreKey spends a one-time key handed to another device".to_string()));
+        }
         let their_identity_key = Curve25519PublicKey::from_base64(their_identity_key_b64)
             .map_err(|e| OlmFail::Unreadable(format!("Invalid identity key: {e}")))?;
         let InboundCreationResult { session, plaintext } = self
@@ -378,7 +384,7 @@ impl OlmManager {
                 let stale = matches!(e, SessionCreationError::MissingOneTimeKey(_));
                 fail(stale, format!("Failed to create inbound session: {e}"))
             })?;
-        self.release_key_slots(peer_id, &message.one_time_key().to_base64());
+        self.release_key_slots(peer_id, &spends);
 
         if self.has_unconfirmed_session(peer_id) && local_device < peer_id {
             self.push_retired(peer_id, session);
@@ -551,13 +557,23 @@ impl OlmManager {
 
     /// Serialize the Account, with who holds which requested key, for DB storage.
     pub fn account_pickle_json(&self) -> Result<String, String> {
+        self.stored_account_json(self.key_slots.clone())
+    }
+
+    /// The account without who holds which requested key, for a host that keeps no
+    /// record of its peers (the media forwarder). A restart then forgets the slots,
+    /// which orphans only keys vodozemac drops in time.
+    pub(crate) fn identity_pickle_json(&self) -> Result<String, String> {
+        self.stored_account_json(VecDeque::new())
+    }
+
+    fn stored_account_json(&self, key_slots: VecDeque<KeySlot>) -> Result<String, String> {
         let account = match serde_json::to_value(self.account.pickle()) {
             Ok(serde_json::Value::Object(map)) => map,
             Ok(_) => return Err("Failed to serialize account pickle: not a map".to_string()),
             Err(e) => return Err(format!("Failed to serialize account pickle: {e}")),
         };
-        let stored = StoredAccount { account, key_slots: self.key_slots.clone() };
-        serde_json::to_string(&stored)
+        serde_json::to_string(&StoredAccount { account, key_slots })
             .map_err(|e| format!("Failed to serialize account pickle: {e}"))
     }
 
@@ -1019,7 +1035,7 @@ mod tests {
 
     #[test]
     fn read_marks_survive_a_restart_and_never_move_back() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let path = tmp.path().join("olm.db").to_string_lossy().into_owned();
         let pass = "ab".repeat(32);
         let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
@@ -1088,6 +1104,22 @@ mod tests {
         let (next, minted) = bob.key_for_requester(ALICE);
         assert!(minted && next != first, "a spent key frees its requester's slot");
         assert_eq!(bob.stored_one_time_key_count(), 1);
+    }
+
+    /// C-OLM-03: a key handed to one requester opens only that requester's session, so
+    /// whoever else read the bundle (the relay) cannot spend it from a device of its own.
+    #[test]
+    fn a_requesters_key_opens_only_that_requesters_session() {
+        let mut bob = OlmManager::new();
+        let (key, _) = bob.key_for_requester(ALICE);
+        let mut relay = OlmManager::new();
+        relay.create_outbound_session(BOB, &bob.identity_key_base64(), &key).unwrap();
+        let forged = relay.encrypt(BOB, b"hello").unwrap();
+        assert!(
+            bob.open_prekey("relay-device", &relay.identity_key_base64(), &forged.1, BOB).is_err(),
+            "another device spent the key handed to Alice",
+        );
+        opens_on(&mut bob, &key).expect("Alice's own PreKey still opens on her key");
     }
 
     #[test]

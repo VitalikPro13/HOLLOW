@@ -31,3 +31,14 @@ has the whole pipeline.
   UnifiedPush endpoint REPLACES the FCM one and FCM re-registration no-ops while it is
   active; the sidecar = Web Push to PUBLIC https only; a killed app = `main()`
   `--unifiedpush-bg`. `project_unifiedpush_android`.
+- App Lock on: every notification (desktop toast, phone banner live or push, iOS NSE) is
+  ONE neutral "Hollow / New message" with no avatar and no reply action; replies are
+  refused while locked, earlier toasts withdrawn when the lock rises; the iOS hints hold
+  only the `~locked` marker. Protection state unknown counts as on. HOL-SEC-155.
+- A `hollow://` link arriving while locked is buffered and replayed after unlock.
+- A wipe deletes the push token LOCALLY (FCM `deleteToken`, APNs unregister, UnifiedPush
+  unregister) and at the relay, fire-and-forget; with no identity the wake handlers and the
+  NSE show and write nothing. HOL-SEC-156.
+- iOS: the App Group data, push hints and caches are excluded from device backups at every
+  start; keychain items use this-device-only classes. HOL-SEC-158.
+- Push prefs to the relay carry only non-default entries (`pushPrefsForRelay`). HOL-SEC-160.

@@ -27,14 +27,19 @@ pub(crate) fn now_ms() -> i64 {
     super::types::now_ms()
 }
 
-/// The stored roster for `master`, verified. `None` for no row, or a 0.11 row.
+/// The stored roster for `master`, checked again but never against the clock: its
+/// times were judged on arrival. `None` for no row, a 0.11 row, or one that does not read.
 pub(crate) fn load(store: &MessageStore, master: &str) -> Option<Roster> {
-    store
-        .load_roster(master)
-        .ok()
-        .flatten()
-        .map(|r| r.verified(now_ms()))
-        .filter(|r| r.master == master)
+    load_strict(store, master).ok().flatten()
+}
+
+/// [`load`], telling a roster that does not read apart from no roster.
+pub(crate) fn load_strict(store: &MessageStore, master: &str) -> Result<Option<Roster>, String> {
+    let Some(roster) = store.load_roster(master)?.map(|r| r.reverified()) else { return Ok(None) };
+    if roster.master != master {
+        return Err(format!("The roster stored for {master} names another identity"));
+    }
+    Ok(Some(roster))
 }
 
 /// Fold `roster` on this node's own first-sight clock.
@@ -174,6 +179,9 @@ pub(crate) fn ensure_own(
         let _ = std::fs::remove_file(&path);
     }
 
+    // A key taken before this device knew better goes the way one arriving now would.
+    let roster = roster.map(|r| heard_for_own(store, &own, &r));
+
     let mut roster = match roster {
         Some(r) => r,
         None => {
@@ -202,7 +210,7 @@ pub(crate) fn ensure_own(
         state = fold(store, &roster);
         hollow_log!("[HOLLOW-ROSTER] This device is not one of the identity's: asking to join");
     }
-    let roster = roster.verified(now_ms());
+    let roster = roster.reverified();
     let _ = save(store, &roster, &state, &own, &me);
     // The phrase has been typed on 0.12 somewhere, so no copy of it stays here.
     if !roster.r_pub.is_empty() {
@@ -213,6 +221,28 @@ pub(crate) fn ensure_own(
 
 /// Where 0.11 kept the recovery phrase, read once for the upgrade and then erased.
 pub(crate) const STORED_PHRASE: &str = "recovery_mnemonic";
+
+/// The recovery key the phrase kept by an identity from before 0.12 derives, when that
+/// phrase is still stored here and belongs to `master`.
+fn stored_phrase_key(store: &MessageStore, master: &str) -> Option<String> {
+    let phrase = zeroize::Zeroizing::new(store.load_setting(STORED_PHRASE).ok().flatten()?);
+    let (_, recovery) = crate::identity::recovery::recovery_key_for(master, &phrase).ok()?;
+    Some(roster::r_pub_of(&recovery))
+}
+
+/// What a roster for our own master may teach us. While the phrase an identity from
+/// before 0.12 kept is stored here, a recovery key it does not derive is a master-key
+/// holder's, so its statements are dropped and the real phrase is never locked out.
+fn heard_for_own(store: &MessageStore, master: &str, incoming: &Roster) -> Roster {
+    let mut heard = incoming.clone();
+    if !heard.r_pub.is_empty() && stored_phrase_key(store, master).is_some_and(|key| key != heard.r_pub) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a recovery key our own stored phrase does not derive");
+        heard.r_pub.clear();
+        heard.recoveries.clear();
+        heard.phrase_admits.clear();
+    }
+    heard
+}
 
 /// Our own roster and its fold, as stored.
 pub(crate) fn own(master: &str, db_path: &str, db_passphrase: &str) -> Option<(Roster, RosterState)> {
@@ -249,7 +279,7 @@ fn change_own(
     let mut roster = load(&store, &own).unwrap_or_else(|| Roster::new(&own));
     let before = fold(&store, &roster);
     change(&mut roster, &before)?;
-    let roster = roster.verified(now_ms());
+    let roster = roster.reverified();
     let state = fold(&store, &roster);
     save(&store, &roster, &state, &own, &device.peer_id())?;
     Ok((roster, state))
@@ -338,7 +368,20 @@ pub(crate) fn remove_self(
     let me = device.peer_id();
     let keep = roster.vouched_members_of(&me, &state);
     roster.add_removal(roster::sign_removal(device, &own, &state.base, &me, &keep));
-    Some(roster.verified(now_ms()))
+    Some(roster.reverified())
+}
+
+/// When a phrase statement signed now is dated: our clock, or just past the newest
+/// phrase statement we hold when the clock reads earlier, so the phrase keeps the last
+/// word on a device whose clock stepped back.
+fn phrase_time(r: &Roster) -> i64 {
+    let newest = r
+        .recoveries
+        .iter()
+        .map(|x| x.at_ms)
+        .chain(r.phrase_admits.iter().map(|p| p.at_ms))
+        .max();
+    newest.map_or_else(now_ms, |at| now_ms().max(at.saturating_add(1)))
 }
 
 /// The phrase starts a new base keeping `keep` and this device. `no_wait` decides
@@ -363,7 +406,7 @@ pub(crate) fn recover(
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let rec = roster::sign_recovery(master, recovery, now_ms(), &keep, no_wait);
+        let rec = roster::sign_recovery(master, recovery, phrase_time(r), &keep, no_wait);
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
     })
 }
@@ -380,7 +423,7 @@ pub(crate) fn admit_by_phrase(
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let pa = roster::sign_phrase_admit(master, recovery, now_ms(), &device.peer_id());
+        let pa = roster::sign_phrase_admit(master, recovery, phrase_time(r), &device.peer_id());
         r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa))
     })
 }
@@ -528,7 +571,8 @@ fn fan_out<'a>(
     let friends = MessageStore::open(db_path, db_passphrase)
         .and_then(|s| s.load_friends(Some("accepted")))
         .unwrap_or_default();
-    let dm_rooms = friends.into_iter().map(|(peer, ..)| {
+    // A blocked friend's room stays left (`social::holds_dm_room`).
+    let dm_rooms = friends.into_iter().filter(|(peer, ..)| !super::blocklist::is_blocked(peer)).map(|(peer, ..)| {
         super::dm_room::dm_room_code(local_master, &super::resolver::resolve(&peer))
     });
     for room in dm_rooms {
@@ -686,7 +730,11 @@ fn fold_in(
         }
     }
     let base = stored.clone().unwrap_or_else(|| Roster::new(master));
-    let merged = base.merged(incoming);
+    let merged = if master == local_master {
+        base.merged(&heard_for_own(&store, master, incoming))
+    } else {
+        base.merged(incoming)
+    };
     stamp_pending(&store, &merged);
     // Members as last saved, not re-folded now: a pending join that matured since
     // then is a member this ingest adds, and contacts are told.
@@ -864,18 +912,22 @@ mod tests {
         event_rx: mpsc::Receiver<NetworkEvent>,
         ws: tokio::sync::mpsc::UnboundedSender<super::super::ws_client::WsCommand>,
         _ws_rx: tokio::sync::mpsc::UnboundedReceiver<super::super::ws_client::WsCommand>,
-        _tmp: tempfile::TempDir,
+        _tmp: crate::test_tmp::TestDir,
     }
 
     impl Observer {
         fn new(master: u8, device: u8) -> Self {
-            let tmp = tempfile::tempdir().unwrap();
+            Self::with_master(kp(master), device)
+        }
+
+        fn with_master(master: NativeKeypair, device: u8) -> Self {
+            let tmp = crate::test_tmp::tempdir().unwrap();
             let db = tmp.path().join("roster.db").to_str().unwrap().to_string();
             let pass = "cd".repeat(32);
             MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
             let (events, event_rx) = mpsc::channel(256);
             let (ws, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
-            Observer { master: kp(master), device: kp(device), db, pass, events, event_rx, ws, _ws_rx, _tmp: tmp }
+            Observer { master, device: kp(device), db, pass, events, event_rx, ws, _ws_rx, _tmp: tmp }
         }
 
         fn store(&self) -> MessageStore {
@@ -1416,6 +1468,121 @@ mod tests {
         assert!(s.is_member(&laptop.peer_id()), "the laptop left with the phone it was linked from");
     }
 
+    /// Our own genesis, dated eleven minutes past this node's clock and saved as held:
+    /// as if the clock stepped back after the recovery arrived.
+    fn held_from_ahead(me: &Observer, recovery: &NativeKeypair) -> Roster {
+        let ahead = now_ms() + 11 * 60 * 1000;
+        let genesis = Roster::genesis(&me.master, recovery, &me.device, ahead);
+        let state = genesis.fold(|_| None, ahead);
+        save(&me.store(), &genesis, &state, &me.master.peer_id(), &me.device.peer_id()).unwrap();
+        genesis
+    }
+
+    /// C-IDENTITY-02. A clock that steps back behind the newest recovery forgets
+    /// nothing: what this node holds was judged for freshness when it arrived. A load,
+    /// a start and a change at that clock keep the recovery and its pinned key, so the
+    /// master key alone still orders no wipe and a forged recovery key is not adopted.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn authz_a_clock_behind_the_newest_recovery_keeps_the_phrase_pinned() {
+        use super::super::crypto_handler::build_destroy_identity;
+        use super::super::destroy::{judge_own_order, Verdict};
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let recovery = kp(0x03);
+        let own_master = me.master.peer_id();
+        held_from_ahead(&me, &recovery);
+        let pinned = r_pub_of(&recovery);
+        let stored = |what: &str| {
+            let raw = me.store().load_roster(&own_master).unwrap().expect("a stored roster");
+            assert_eq!(raw.r_pub, pinned, "{what} cleared the pinned recovery key");
+            assert_eq!(raw.recoveries.len(), 1, "{what} dropped the recovery");
+        };
+
+        let held = load(&me.store(), &own_master).expect("held");
+        assert_eq!(held.r_pub, pinned, "a load cleared the pinned recovery key");
+        assert_eq!(held.recoveries.len(), 1, "a load dropped the recovery");
+        let (_, state) = me.own();
+        assert!(state.protected && state.is_member(&me.device.peer_id()), "start-up lost the phrase's base: {state:?}");
+        stored("start-up");
+        vouch(&me.master, &me.device, &kp(0x07).peer_id(), &me.db, &me.pass).unwrap();
+        stored("a change");
+        let leaving = remove_self(&me.master, &me.device, &me.db, &me.pass).expect("a self-removal");
+        assert_eq!((leaving.r_pub.as_str(), leaving.recoveries.len()), (pinned.as_str(), 1), "a self-removal dropped the recovery");
+
+        let order = build_destroy_identity(&me.master, None, now_ms() + 1, Vec::new(), false);
+        assert!(
+            !matches!(judge_own_order(&order, &own_master, &me.device.peer_id(), &me.db, &me.pass), Verdict::Apply),
+            "the master key alone wiped a protected identity",
+        );
+
+        let thief = kp(0x66);
+        me.ingest(&thief.peer_id(), &Roster::genesis(&me.master, &kp(0x04), &thief, now_ms())).await;
+        stored("a forged recovery key");
+        assert!(!me.state_of(&own_master).is_member(&thief.peer_id()), "a forged recovery key admitted its device");
+    }
+
+    /// The phrase typed on a device whose clock stepped back behind the newest recovery
+    /// keeps the last word: its recovery starts the newest base, and an admission
+    /// counts in the base it was typed in.
+    #[test]
+    fn the_phrase_keeps_the_last_word_behind_a_stepped_back_clock() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let recovery = kp(0x03);
+        let genesis = held_from_ahead(&me, &recovery);
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass).unwrap();
+        assert_ne!(state.base, genesis.base(), "the recovery was dated before the base it meant to replace");
+
+        let other = Observer::new(0x01, 0x09);
+        let held = genesis.fold(|_| None, genesis.recoveries[0].at_ms);
+        save(&other.store(), &genesis, &held, &other.master.peer_id(), &other.device.peer_id()).unwrap();
+        let (_, state) = admit_by_phrase(&other.master, &recovery, &other.device, &other.db, &other.pass).unwrap();
+        assert!(state.is_member(&other.device.peer_id()), "the admission was dated before its base");
+    }
+
+    /// C-IDENTITY-06. While an identity from before 0.12 keeps its phrase here, a
+    /// recovery key a master-key holder publishes is never taken for our own master,
+    /// nor kept from before: the forged key's device is nobody, the stored phrase stays
+    /// until it has signed on 0.12, and the real phrase still recovers.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn authz_a_recovery_key_from_the_network_never_locks_out_our_own_phrase() {
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let _g = guard();
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let me = Observer::with_master(master, 0x02);
+        let own_master = me.master.peer_id();
+        let thief = kp(0x66);
+        let forged = Roster::genesis(&me.master, &kp(0x04), &thief, now_ms());
+        let stored_phrase = |me: &Observer| me.store().load_setting(STORED_PHRASE).unwrap();
+
+        me.store().save_setting(STORED_PHRASE, PHRASE).unwrap();
+        let (_, state) = me.own();
+        assert!(!state.protected && state.is_member(&me.device.peer_id()));
+        me.ingest(&thief.peer_id(), &forged).await;
+        assert!(!me.state_of(&own_master).is_member(&thief.peer_id()), "a forged recovery key admitted its device");
+        me.own();
+        assert_eq!(stored_phrase(&me).as_deref(), Some(PHRASE), "the stored phrase was erased for a forged key");
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass)
+            .expect("the real phrase was locked out");
+        assert!(state.protected && state.is_member(&me.device.peer_id()));
+        me.own();
+        assert_eq!(stored_phrase(&me), None, "the phrase outlived its own recovery");
+
+        // A forged key held from before this device knew better goes at start.
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let held = Observer::with_master(master, 0x09);
+        held.store().save_setting(STORED_PHRASE, PHRASE).unwrap();
+        held.own();
+        let merged = load(&held.store(), &own_master).unwrap().merged(&forged.verified(now_ms()));
+        let state = fold(&held.store(), &merged);
+        save(&held.store(), &merged, &state, &own_master, &held.device.peer_id()).unwrap();
+        let (roster, state) = held.own();
+        assert!(roster.r_pub.is_empty() && !state.is_member(&thief.peer_id()), "a forged key stayed pinned: {state:?}");
+        assert_eq!(stored_phrase(&held).as_deref(), Some(PHRASE));
+    }
+
     /// The first recovery key an identity shows is the one it keeps.
     #[test]
     fn a_recovery_keeps_the_phrase_key_pinned() {
@@ -1427,5 +1594,30 @@ mod tests {
             recover(&me.master, &kp(0x04), &me.device, &[], false, &me.db, &me.pass).is_err(),
             "a second recovery key replaced the pinned one",
         );
+    }
+
+    /// C-OLM-02: a roster notice reaches a friend through its DM room, but never puts
+    /// us back into the room of a friend we blocked.
+    #[test]
+    fn a_roster_notice_never_rejoins_a_blocked_friends_dm_room() {
+        use super::super::ws_client::WsCommand;
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (friend, blocked) = (kp(0x05).peer_id(), kp(0x06).peer_id());
+        me.store().save_friend(&friend, "accepted", "", 1).unwrap();
+        me.store().save_friend(&blocked, "accepted", "", 1).unwrap();
+        let (ws, mut ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let local = me.master.peer_id();
+        super::super::blocklist::block(&blocked);
+        fan_out(&ws, &local, Roster::new(&local), std::iter::empty(), &me.db, &me.pass);
+        super::super::blocklist::unblock(&blocked);
+        let mut joined = Vec::new();
+        while let Ok(cmd) = ws_rx.try_recv() {
+            if let WsCommand::JoinRoom { room_code } = cmd {
+                joined.push(room_code);
+            }
+        }
+        assert!(joined.contains(&super::super::dm_room::dm_room_code(&local, &friend)), "control: a friend's room");
+        assert!(!joined.contains(&super::super::dm_room::dm_room_code(&local, &blocked)), "a blocked friend's room");
     }
 }

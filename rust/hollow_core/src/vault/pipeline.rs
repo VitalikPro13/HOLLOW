@@ -770,7 +770,7 @@ mod tests {
         // The cache writes through the at-rest layer, whose process-global key
         // ring needs a store; a temp ring keeps this off the real identity.
         let _g = crate::node::resolver::test_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tmp::tempdir().expect("tempdir");
         let db = dir.path().join("messages.db").to_string_lossy().to_string();
         crate::node::at_rest::reset_for_test();
         crate::node::at_rest::init(&db, &"6b".repeat(32)).expect("init ring");
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn evict_dir_removes_oldest_first_to_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         // Three 1000-byte files, written oldest→newest with distinct mtimes.
         for name in ["old", "mid", "new"] {
             std::fs::write(dir.path().join(name), vec![0u8; 1000]).unwrap();
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn evict_dir_noop_when_under_cap() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         std::fs::write(dir.path().join("a"), vec![0u8; 100]).unwrap();
         let (deleted, freed) =
             evict_dir_if_needed(dir.path(), 10_000, &HashSet::new()).unwrap();
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn evict_dir_skips_exempt_paths() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tmp::tempdir().unwrap();
         // Oldest file is exempt — it must never be deleted even though it's the
         // first eviction candidate; the evictor moves on to the next-oldest.
         let exempt_path = dir.path().join("old_exempt");

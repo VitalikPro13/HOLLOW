@@ -1363,6 +1363,44 @@ static void test_door_rooms() {
     check("a hidden socket's leave to nobody", !got(*p, about("peer_left", room, w->id.peer)));
 }
 
+static std::string nested(size_t depth) { return std::string(depth, '[') + std::string(depth, ']'); }
+
+// Runs last: before the depth cap each of these frames overflowed the relay's stack
+// (C-RP-01), a crash that skips the snapshot.
+static void test_deep_json() {
+    printf("deep JSON: one frame nested past any real one is refused, the relay stays up\n");
+    constexpr size_t HOSTILE = 200000;
+    Ident master;
+    auto a = login(Ident());
+    a->ws.send_frame(0x1, R"({"type":"join","room":"inbox:)" + master.peer + R"(","inbox_roster":{"x":)" +
+                              nested(HOSTILE) + "}}");
+    check("a roster nested 200,000 deep leaves the sender's socket served", sync(*a));
+    auto b = login(Ident());
+    b->send({{"type", "get_turn_credentials"}});
+    check("and the relay serves a fresh login", next(*b, typed("turn_credentials")).has_value());
+
+    a->ws.send_frame(0x1, R"({"type":"subscribe","room":"deep-)" + g_tag + R"(","topics":)" + nested(HOSTILE) + "}");
+    check("subscription topics nested 200,000 deep leave the socket served", sync(*a));
+    auto c = login(Ident());
+    check("and the relay serves a fresh login", c->ok && sync(*c));
+
+    const std::string room = room_name("deep");
+    a->ws.send_frame(0x1, R"({"type":"join","room":")" + room + R"(","pad":)" + nested(16) + "}");
+    check("a frame nested deeper than any real one, yet within the cap, still works",
+          next(*a, typed("members", room)).has_value());
+
+    Ident d;
+    const std::string inbox = "inbox:" + master.peer;
+    b->send_bin(frame(0x04, {inbox, master.peer}, "mail-pad"));
+    settle({b.get()});
+    json padded = legacy_roster(master, {&d});
+    padded["pad"] = std::string(300 * 1024, 'x');
+    auto o = login(d);
+    join(*o, inbox, {{"inbox_roster", padded}});
+    check("a roster is measured as the relay holds it: a field it drops does not count",
+          next(*o, bin(frame(0x06, {inbox, b->id.peer}, "mail-pad"))).has_value());
+}
+
 int main(int argc, char** argv) {
     if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain> <on|off>\n");
@@ -1387,6 +1425,7 @@ int main(int argc, char** argv) {
     test_guests();
     test_fetch();
     test_door_rooms();
+    test_deep_json();
 
     SSL_CTX_free(g_ctx);
     if (failures) {

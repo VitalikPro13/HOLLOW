@@ -7,9 +7,9 @@
 /// build. Probing runs a decoder over bytes a stranger chose, and the sender
 /// also chooses the file name, so a name was never evidence of anything.
 ///
-/// What the eager path is allowed to touch now: a genuine voice note, small,
-/// that really does open with an Ogg header. Everything else waits for the
-/// play tap.
+/// Before the play tap no decoder runs at all (C-FILES-02): a genuine voice
+/// note, small, still gets its duration badge, read in Dart from the Ogg page
+/// headers. ffmpeg waits for the tap.
 library;
 
 import 'dart:async';
@@ -43,6 +43,80 @@ final List<int> _exeBytes = <int>[
   0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
 ];
 
+/// One Ogg page carrying [packet] whole. The CRC stays zero: nothing that
+/// reads the pages for a duration checks it.
+List<int> _oggPage({
+  required int serial,
+  required int granule,
+  required int sequence,
+  required int headerType,
+  required List<int> packet,
+}) {
+  final lacing = <int>[
+    for (var i = 0; i < packet.length ~/ 255; i++) 255,
+    packet.length % 255,
+  ];
+  final head = ByteData(27)
+    ..setUint32(0, 0x5367674F, Endian.little) // "OggS"
+    ..setUint8(4, 0)
+    ..setUint8(5, headerType)
+    ..setInt64(6, granule, Endian.little)
+    ..setUint32(14, serial, Endian.little)
+    ..setUint32(18, sequence, Endian.little)
+    ..setUint32(22, 0, Endian.little)
+    ..setUint8(26, lacing.length);
+  return <int>[...head.buffer.asUint8List(), ...lacing, ...packet];
+}
+
+/// A voice note shaped like the recorder's: OpusHead, then audio pages whose
+/// last granule position sits [seconds] past the pre-skip at 48 kHz.
+Uint8List _opusVoiceNote({required int seconds}) {
+  const serial = 0x1234;
+  const preSkip = 312;
+  final opusHead = <int>[
+    ...'OpusHead'.codeUnits, 1, 1, preSkip & 0xFF, preSkip >> 8,
+    0x80, 0xBB, 0x00, 0x00, 0, 0, 0, //
+  ];
+  final audio = List<int>.filled(300, 0x55);
+  return Uint8List.fromList(<int>[
+    ..._oggPage(
+        serial: serial, granule: 0, sequence: 0, headerType: 2, packet: opusHead),
+    ..._oggPage(
+        serial: serial,
+        granule: 48000,
+        sequence: 1,
+        headerType: 0,
+        packet: audio),
+    ..._oggPage(
+        serial: serial,
+        granule: preSkip + 48000 * seconds,
+        sequence: 2,
+        headerType: 4,
+        packet: audio),
+  ]);
+}
+
+/// A Vorbis stream at 44.1 kHz whose last page ends [seconds] in.
+Uint8List _vorbisStream({required int seconds}) {
+  const serial = 7;
+  const rate = 44100;
+  final ident = <int>[
+    1, ...'vorbis'.codeUnits, 0, 0, 0, 0, 2, //
+    rate & 0xFF, (rate >> 8) & 0xFF, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xB8, 1,
+  ];
+  return Uint8List.fromList(<int>[
+    ..._oggPage(
+        serial: serial, granule: 0, sequence: 0, headerType: 2, packet: ident),
+    ..._oggPage(
+        serial: serial,
+        granule: rate * seconds,
+        sequence: 1,
+        headerType: 4,
+        packet: List<int>.filled(40, 1)),
+  ]);
+}
+
 void main() {
   late Directory tmp;
   late List<List<String>> probeCalls;
@@ -73,25 +147,15 @@ void main() {
       transcodeCalls.add(args);
       return ProcessResult(0, 1, '', 'stubbed, no real ffmpeg in tests');
     };
-    // The container sniff reads the file through AtRest, whose real handle
-    // would never settle inside the widget binding's fake clock.
-    AtRest.debugReadRange = (path, offset, len) async {
-      final handle = File(path).openSync();
-      try {
-        handle.setPositionSync(offset);
-        return handle.readSync(len);
-      } catch (_) {
-        return Uint8List(0);
-      } finally {
-        handle.closeSync();
-      }
-    };
+    // The page reader goes through AtRest, whose real handle would never
+    // settle inside the widget binding's fake clock.
+    AtRest.debugRead = (path) async => File(path).readAsBytesSync();
   });
 
   tearDown(() {
     AudioProbeService.debugRunner = null;
     AudioTranscodeService.debugRunner = null;
-    AtRest.debugReadRange = null;
+    AtRest.debugRead = null;
     AudioProbeService.debugResetCache();
     try {
       tmp.deleteSync(recursive: true);
@@ -279,24 +343,53 @@ void main() {
       await drain(tester);
     });
 
-    testWidgets('genuine_small_ogg_voice_note_is_probed_on_build',
+    testWidgets('a_voice_note_reaches_no_decoder_before_a_tap',
         (tester) async {
-      final path = writeFile('voice_1725_ab12.ogg', _oggBytes);
+      // Voice notes skip the auto-download gate, so this one landed with no
+      // interaction. Everything a sender controls says voice note; that still
+      // buys no decoder run (C-FILES-02). The badge comes from the page headers.
+      final bytes = _opusVoiceNote(seconds: 3);
+      final path = writeFile('voice_1725_ab12.ogg', bytes);
       await pumpBubble(
         tester,
         attachment(
           name: 'voice_1725_ab12.ogg',
           ext: 'ogg',
           path: path,
-          sizeBytes: _oggBytes.length,
+          sizeBytes: bytes.length,
         ),
       );
 
-      expect(probeCalls, hasLength(1),
-          reason: 'a real voice note still gets its duration badge for free');
-      expect(probeCalls.single, contains(path));
+      expect(probeCalls, isEmpty,
+          reason: 'building a voice note must not run ffmpeg');
+      expect(transcodeCalls, isEmpty);
+      expect(find.text('0:03'), findsOneWidget,
+          reason: 'the duration badge is still there, read from the pages');
+
+      await tapPlay(tester);
+      expect(probeCalls, isEmpty,
+          reason: 'the duration is known, so the tap probes nothing');
 
       await drain(tester);
+    });
+
+    test('ogg_page_duration_reads_opus_and_vorbis_and_refuses_the_rest', () {
+      expect(AudioProbeService.oggDurationFromBytes(_opusVoiceNote(seconds: 7)),
+          7000);
+      expect(
+          AudioProbeService.oggDurationFromBytes(_vorbisStream(seconds: 2)), 2000);
+      expect(AudioProbeService.oggDurationFromBytes(Uint8List.fromList(_oggBytes)),
+          isNull,
+          reason: 'a bare page header carries no stream');
+      expect(AudioProbeService.oggDurationFromBytes(Uint8List.fromList(_exeBytes)),
+          isNull);
+      expect(AudioProbeService.oggDurationFromBytes(Uint8List(0)), isNull);
+      // Truncated anywhere: a null, never a throw.
+      final whole = _opusVoiceNote(seconds: 5);
+      for (var cut = 0; cut < whole.length; cut += 7) {
+        expect(() => AudioProbeService.oggDurationFromBytes(
+            Uint8List.sublistView(whole, 0, cut)), returnsNormally);
+      }
     });
 
     testWidgets('oversized_ogg_is_not_probed_until_tap', (tester) async {

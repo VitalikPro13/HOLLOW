@@ -28,6 +28,19 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
 - File card wording = ONE helper `file_card_status.dart`, mirrored by the hover bar,
   menu and sheet via `fileBarAction` (stop = `cancel_file_request`).
   `project_file_card_honest_states`.
+- A photo or video leaves WITHOUT its location (C-FILES-03): every read of a file being
+  sent goes through `media_strip::read_for_send` (`handle_send_file` for videos and HEIF,
+  `vault_upload_file`, `share_create_for_send`, which shares a cleaned copy from
+  `shares/send_*/`); the image conversion's fallback arms strip the container too. A video
+  keeps every byte position (metadata becomes `free`/Void/JUNK padding), so the file id,
+  `vthumb.size` and the share manifest still match. Media that does not parse is REFUSED
+  (`media_strip::REFUSED`), never sent raw; other files keep their bytes. Harness
+  `dm_video_send_strips_location_before_it_leaves`.
+- A received file reaches NO decoder before a tap (C-FILES-02): `VideoMessageBubble` cuts
+  its own poster only for `isMine` or after the user opens it (the sender's header poster
+  stands in); a voice note's duration comes from its Ogg pages in Dart
+  (`AudioProbeService.oggDurationMs`), ffmpeg waits for play. `video_thumb_gate_test`,
+  `audio_probe_gate_test`.
 
 ## Profile media, frames, showcase
 
@@ -53,3 +66,13 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   `feedback_antialiased_seam_bleed`.
 - Shop UI ONLY behind `shopAvailableProvider` (the store verdict AND
   `shopUnlockedProvider`). CLI for packs: `rust/hollow_art`. `project_shop_app_client`.
+- A thumbnail from a peer (file-card blur, video poster, link-card thumb) reaches Dart
+  ONLY via `image_convert::peer_thumb_for_display` (pure-Rust decode + our own re-encode,
+  or dropped); never change the stored bytes, they sit inside the author's signature.
+  Asset-rail blobs and auto-downloaded images still reach Skia (AR-28). HOL-SEC-151.
+- Sender-side link-preview fetches go through the `PublicResolver` client: no loopback,
+  private, link-local or metadata address on any hop, no proxy. HOL-SEC-148.
+- Vault shard streams ride `vault_ops::shard_stream_id(cid, si, from, to)`, never the
+  content id (one id per transfer, both ends derive it).
+- Any zip we unpack names entries via `enclosed_name()` against an allowlist and a size
+  budget (snapshot import, archive viewer, updater). HOL-SEC-129.

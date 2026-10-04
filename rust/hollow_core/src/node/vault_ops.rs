@@ -249,7 +249,7 @@ pub(crate) async fn handle_vault_upload_file(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    hollow_log!("[HOLLOW-VAULT] VaultUploadFile: {file_name} cid={content_id} in {server_id}/{channel_id}");
+    hollow_log!("[HOLLOW-VAULT] VaultUploadFile: cid={content_id} in {server_id}/{channel_id}");
 
     // Snapshot membership and pledges on the loop, then hop the Reed-Solomon encode
     // (up to 34MB of CPU) and the shard disk writes onto the blocking pool: this
@@ -403,6 +403,7 @@ pub(crate) async fn handle_vault_upload_prepared(
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
     local_peer_str: &str,
+    device_peer_id: &str,
     server_id: String,
     channel_id: String,
     content_id: String,
@@ -451,13 +452,10 @@ pub(crate) async fn handle_vault_upload_prepared(
                                     &ws_cmd_tx, &ws_room_peers,
                                 ).await;
 
-                                // Stream shard bytes directly from memory (no temp file for WS path).
-                                let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: placement.shard_index };
-                                super::file_handler::stream_to_peer_bytes(
-                                    &ws_cmd_tx, &ws_room_peers,
-                                    webrtc_peers, pending_webrtc_sends, &event_tx,
-                                    &dev, &shard_kind,
-                                    &content_id, shard_data,
+                                stream_shard(
+                                    ws_cmd_tx, ws_room_peers,
+                                    webrtc_peers, pending_webrtc_sends, event_tx,
+                                    device_peer_id, &dev, &content_id, placement.shard_index, shard_data,
                                 ).await;
                                 hollow_log!("[HOLLOW-VAULT] Streaming shard si={} ({} bytes) to {} (device {})", placement.shard_index, shard_data.len(), placement.target_peer, dev);
                             }
@@ -481,7 +479,7 @@ pub(crate) async fn handle_vault_upload_prepared(
                 // a plaintext fallback here: the manifest is encrypted content.
                 let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
                 if mls_ok
-                    && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &manifest_envelope, crypto_store)
+                    && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &manifest_envelope, crypto_store, Some(state))
                 {
                     hollow_log!("[HOLLOW-MLS] VaultManifest broadcast failed: {e}");
                 }
@@ -562,7 +560,7 @@ pub(crate) async fn handle_delete_vault_content(
         // would hold it forever. Never a plaintext fallback: encrypted content.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if mls_ok
-            && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &delete_envelope, crypto_store)
+            && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &delete_envelope, crypto_store, Some(state))
         {
             hollow_log!("[HOLLOW-MLS] ShardDelete broadcast failed: {e}");
         }
@@ -648,7 +646,7 @@ pub(crate) async fn handle_store_shard_on_peer(
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
-    local_peer_str: &str,
+    device_peer_id: &str,
     server_id: String,
     content_id: String,
     shard_index: u16,
@@ -660,7 +658,6 @@ pub(crate) async fn handle_store_shard_on_peer(
     data: Vec<u8>,
     target_peer: String,
 ) {
-    let _local_peer = local_peer_str.to_string();
     hollow_log!("[HOLLOW-VAULT] StoreShardOnPeer: cid={content_id} si={shard_index} -> {target_peer}");
 
         // MASTER-keyed target → one concrete online device; metadata + byte
@@ -700,13 +697,10 @@ pub(crate) async fn handle_store_shard_on_peer(
                     &ws_cmd_tx, &ws_room_peers,
                 ).await;
 
-                // Stream shard bytes directly from memory.
-                let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index };
-                super::file_handler::stream_to_peer_bytes(
-                    &ws_cmd_tx, &ws_room_peers,
-                    webrtc_peers, pending_webrtc_sends, &event_tx,
-                    &dev, &shard_kind,
-                    &content_id, &data,
+                stream_shard(
+                    ws_cmd_tx, ws_room_peers,
+                    webrtc_peers, pending_webrtc_sends, event_tx,
+                    device_peer_id, &dev, &content_id, shard_index, &data,
                 ).await;
                 hollow_log!("[HOLLOW-VAULT] Streaming shard si={shard_index} ({} bytes) to {target_peer} (device {dev})", data.len());
             }
@@ -929,6 +923,7 @@ pub(crate) async fn apply_recovery_plan(
                 total_size: meta.total_data_size,
                 tier: meta.storage_tier.clone(),
                 sender: assignment.source_peer.clone(),
+                stream_id: shard_stream_id(&assignment.content_id, assignment.shard_index, &assignment.source_peer, &pool.local_device),
                 pledge: our_pledge(server_states, &pool.server_id, local_peer_str),
                 asked: false,
                 recovery: true,
@@ -940,26 +935,16 @@ pub(crate) async fn apply_recovery_plan(
 
         if assignment.source_peer == pool.local_device && pool.members.contains_key(&assignment.dest_peer) {
             let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) else { continue };
-            let temp_dir = std::env::temp_dir().join("hollow_recovery");
-            let _ = tokio::fs::create_dir_all(&temp_dir).await;
-            let temp_path = temp_dir.join(format!("{sk}.shard"));
-            if tokio::fs::write(&temp_path, &shard_bytes).await.is_err() {
-                continue;
-            }
-            let total_size = shard_bytes.len() as u64;
             hollow_log!("[RECOVERY-POOL] Sending shard {}:{} ({} bytes) to {}",
-                assignment.content_id, assignment.shard_index, total_size, assignment.dest_peer);
-            super::ws_stream_transfer::ws_stream_send(
+                assignment.content_id, assignment.shard_index, shard_bytes.len(), assignment.dest_peer);
+            super::ws_stream_transfer::ws_stream_send_bytes(
                 ws_cmd_tx,
                 &pool.room_code(),
                 &assignment.dest_peer,
                 &super::ws_stream_transfer::StreamKind::Shard { shard_index: assignment.shard_index },
-                &assignment.content_id,
-                &temp_path,
-                total_size,
-                0,
+                &shard_stream_id(&assignment.content_id, assignment.shard_index, &pool.local_device, &assignment.dest_peer),
+                &shard_bytes,
             ).await;
-            let _ = tokio::fs::remove_file(&temp_path).await;
 
             let received = HavenMessage::RecoveryShardReceived {
                 content_id: assignment.content_id.clone(),
@@ -1189,11 +1174,48 @@ pub(crate) fn drop_unpinned_shards(
     dropped
 }
 
-/// The temp in `dir` a shard answer streams from. The cid is whatever a member stored the
-/// shard under, so only its alphanumerics name the file (a `\..\` walks out on Windows).
-pub(crate) fn shard_send_temp(dir: &std::path::Path, cid: &str, si: u16) -> std::path::PathBuf {
-    let prefix: String = cid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
-    dir.join(format!(".stream_shard_{prefix}_{si}.tmp"))
+/// The temp in `dir` a shard send over a data channel streams from: its transfer's own,
+/// named by the stream id, whose alphanumerics alone reach the name.
+pub(crate) fn shard_send_temp(dir: &std::path::Path, stream_id: &str) -> std::path::PathBuf {
+    let name: String = stream_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect();
+    dir.join(format!(".stream_shard_{name}.tmp"))
+}
+
+/// The wire id of the stream carrying shard `si` of `cid` from device `from` to device
+/// `to`. A content id fills the 64-byte id field by itself, and both lanes key their
+/// sends, temps and receive streams by this id, so every transfer needs its own: one
+/// holder streams shards of a file to several devices, several holders to one device.
+pub(crate) fn shard_stream_id(cid: &str, si: u16, from: &str, to: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"hollow-shard-stream1");
+    for part in [cid, from, to] {
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    h.update(si.to_be_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Stream shard `si` of `cid` from our device `us` to device `to`, under its own stream id.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stream_shard(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    us: &str,
+    to: &str,
+    cid: &str,
+    si: u16,
+    bytes: &[u8],
+) {
+    super::file_handler::stream_to_peer_bytes(
+        ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends, event_tx,
+        to, &super::ws_stream_transfer::StreamKind::Shard { shard_index: si },
+        &shard_stream_id(cid, si, us, to), bytes,
+    ).await;
 }
 
 /// Why `requester` may not pull a shard of `cid` in `sid`, `None` when it may. When
@@ -1338,8 +1360,8 @@ mod tests {
         (HashMap::from([("srv".to_string(), state)]), owner)
     }
 
-    fn temp_db() -> (tempfile::TempDir, String, String) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn temp_db() -> (crate::test_tmp::TestDir, String, String) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
         let db = tmp.path().join("vault.db").to_string_lossy().into_owned();
         (tmp, db, "ab".repeat(32))
     }
@@ -1468,17 +1490,41 @@ mod tests {
         assert!(shard_bytes_refused(&cs, &erasure, 1, &shards[2], true).is_some());
     }
 
-    /// V5-2: a shard answer's temp stays in its folder whatever id a member stored the
-    /// shard under, and a multi-byte id never panics the node.
+    /// V5-2: a shard send's temp stays in its folder whatever id a member stored the
+    /// shard under (the stream id it is named by is hex), and a multi-byte id never panics
+    /// the node.
     #[test]
-    fn a_shard_answer_temp_stays_in_its_folder() {
+    fn a_shard_send_temp_stays_in_its_folder() {
         let dir = std::path::Path::new("files");
         for cid in ["..\\..\\x", "../../x", "C:\\Users\\x\\Startup", "/etc/passwd", &format!("a{}", "é".repeat(40)), &"a1".repeat(32)] {
-            let temp = shard_send_temp(dir, cid, 3);
-            assert_eq!(temp.parent(), Some(dir), "V5-2: the temp for {cid:?} left its folder: {temp:?}");
-            let name = temp.file_name().and_then(|n| n.to_str()).expect("a plain name");
-            assert!(name.starts_with(".stream_shard_") && name.ends_with("_3.tmp"), "{name}");
-            assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._".contains(&b)), "V5-2: {name:?} carries a path character");
+            let id = shard_stream_id(cid, 3, "holder", "asker");
+            assert!(id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()), "the stream id of {cid:?} is {id:?}");
+            for named in [cid, id.as_str()] {
+                let temp = shard_send_temp(dir, named);
+                assert_eq!(temp.parent(), Some(dir), "V5-2: the temp for {named:?} left its folder: {temp:?}");
+                let name = temp.file_name().and_then(|n| n.to_str()).expect("a plain name");
+                assert!(name.starts_with(".stream_shard_") && name.ends_with(".tmp"), "{name}");
+                assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._".contains(&b)), "V5-2: {name:?} carries a path character");
+            }
+        }
+    }
+
+    /// Each transfer of a shard streams under its own id: another shard, sender or
+    /// receiver is another id, and both ends derive the same one.
+    #[test]
+    fn each_shard_transfer_has_its_own_stream_id() {
+        let cid = "ab".repeat(32);
+        let id = shard_stream_id(&cid, 1, "alice", "bob");
+        assert_eq!(id, shard_stream_id(&cid, 1, "alice", "bob"));
+        for other in [
+            shard_stream_id(&"cd".repeat(32), 1, "alice", "bob"),
+            shard_stream_id(&cid, 2, "alice", "bob"),
+            shard_stream_id(&cid, 1, "carol", "bob"),
+            shard_stream_id(&cid, 1, "alice", "carol"),
+            shard_stream_id(&cid, 1, "bob", "alice"),
+            shard_stream_id(&cid, 1, "alic", "ebob"),
+        ] {
+            assert_ne!(id, other, "two transfers share a stream id");
         }
     }
 
@@ -1693,8 +1739,8 @@ mod tests {
         assert!(!mls.contains("store_shard(") && !mls.contains("pending_shard_streams"), "an MLS arm writes shards again");
 
         assert!(
-            arm("Ok(MessageEnvelope::ShardRequest {").contains("vault_ops::shard_send_temp("),
-            "V5-2: the ShardRequest arm names its temp from the member's id unsanitised",
+            arm("Ok(MessageEnvelope::ShardRequest {").contains("vault_ops::stream_shard("),
+            "V5-2: the ShardRequest arm names its stream or temp from the member's id",
         );
         let response = arm("Ok(MessageEnvelope::ShardResponse {");
         let asked = response.find("vault_ops::take_shard_ask(").expect("A-V6: the ShardResponse arm takes no ask");
@@ -1729,7 +1775,8 @@ mod tests {
         let done = &handler[handler.find("async fn handle_shard_stream_complete(").expect("the shard completion")..];
         let done = &done[..done.find("store_shard(").expect("its store")];
         assert!(done.contains("vault_ops::pledge_refused("), "A-V1: a streamed shard is stored past the pledge");
-        assert!(done.contains("p.sender != sender_peer"), "A-V6: any device completes a shard stream registered for another");
+        assert!(done.contains("p.stream_id == request.id"), "a shard stream completes a transfer its id does not name");
+        assert!(done.contains("p.sender == sender_peer"), "A-V6: any device completes a shard stream registered for another");
 
         assert!(done.contains("vault_ops::shard_bytes_refused("), "HOL-SEC-117: a streamed shard lands unchecked against its manifest");
         for from in [
@@ -1758,6 +1805,44 @@ mod tests {
             2,
             "HOL-SEC-117: a shard completion's fresh pull is dropped on the floor",
         );
+    }
+
+    /// Every shard stream rides its own transfer's id, never the file's content id: the
+    /// byte senders go through `stream_shard`, the recovery plan and every receive
+    /// registration through `shard_stream_id`.
+    #[test]
+    fn shard_streams_ride_their_own_ids() {
+        let read = |file: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file)).expect("read the source")
+        };
+        let swarm = read("src/node/swarm.rs");
+        let ops = read("src/node/vault_ops.rs");
+        let ops = &ops[..ops.find("#[cfg(test)]").expect("the tests")];
+        let handler = read("src/node/file_handler.rs");
+        let handler = &handler[..handler.find("#[cfg(test)]").expect("the tests")];
+        assert_eq!(
+            [swarm.as_str(), ops, handler].iter().map(|s| s.matches("stream_to_peer_bytes(").count()).sum::<usize>(),
+            2,
+            "shard bytes stream past stream_shard, under an id of their own choosing",
+        );
+        let body = |src: &str, from: &str| {
+            let body = &src[src.find(from).unwrap_or_else(|| panic!("missing {from}"))..];
+            body[..body.find("\n}").expect("its end")].to_string()
+        };
+        for from in ["async fn handle_vault_upload_prepared(", "async fn handle_store_shard_on_peer("] {
+            assert!(body(ops, from).contains("stream_shard("), "{from} streams a shard under another id");
+        }
+        assert_eq!(
+            body(ops, "async fn apply_recovery_plan(").matches("shard_stream_id(").count(),
+            2,
+            "a recovery transfer streams, or is awaited, under another id",
+        );
+        let registrations: Vec<&str> = swarm.split("PendingShardStream {").skip(1).collect();
+        assert_eq!(registrations.len(), 2, "every shard stream registration is scanned");
+        for fields in registrations {
+            let fields = &fields[..fields.find("});").expect("its end")];
+            assert!(fields.contains("stream_id: vault_ops::shard_stream_id("), "a shard stream registration awaits another id");
+        }
     }
 
     /// H15: a manifest carries the file's key and names the card it backs, so it lands

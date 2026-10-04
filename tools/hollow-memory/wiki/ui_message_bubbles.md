@@ -48,12 +48,12 @@ Takes a single `FileAttachment attachment`.
 - `_isPlaying` — whether audio is actively playing (vs paused)
 - `_isVisible` — tracked via `VisibilityDetector`; auto-pauses when scrolled out of view (< 50% visible)
 - `_preparing` — true while Opus-to-WAV transcode is running
-- `_probedDurationMs` — pre-play duration from ffmpeg probe
-- `_probeStarted` — prevents duplicate probe attempts
+- `_probedDurationMs` — pre-play duration (Ogg page read before play, ffmpeg probe on the tap)
+- `_probeStarted` — the ffmpeg probe ran (only the play tap runs it)
 
 ### Duration Probe
 
-`_maybeProbe()` runs on `initState` and `didUpdateWidget`. Uses `AudioProbeService.probeDurationMs(path)` to get duration before playback starts. Also prewarms the Opus transcode cache via `AudioTranscodeService.ensurePlayable(path)` (fire-and-forget).
+`_maybeProbe()` runs on `initState` and `didUpdateWidget`, for a genuine voice note only (`isGenuineVoiceNote` + on-disk size). It reads the duration from the Ogg page headers in Dart (`AudioProbeService.oggDurationMs`: last granule position over the sample rate, less the Opus pre-skip); no decoder touches a received file before the play tap (C-FILES-02). The tap runs the ffmpeg probe when the duration is still unknown, then the Windows Opus transcode.
 
 ### Disk Path Resolution
 
@@ -139,7 +139,7 @@ Circular 36x36 container with the accent color. Play icon is nudged 1.5px right 
 ### Two Video Source Types
 
 1. **Vault video** (`attachment.videoThumb != null`): `attachment.diskPath` points to the local `.webp` thumbnail image. The actual video bytes are in the vault and are reconstructed on first play via `vault_download_file`.
-2. **Direct P2P video** (`videoThumb == null`): `attachment.diskPath` is the video file itself. A local thumbnail is extracted to `{file_id}.thumb.webp` next to the video file.
+2. **Direct P2P video** (`videoThumb == null`): `attachment.diskPath` is the video file itself. A local thumbnail is extracted to `{file_id}.thumb.webp` next to the video file, for our own videos at once and for received ones after the first tap.
 
 ### Display Size Calculation
 
@@ -199,7 +199,7 @@ Listens to `currentlyPlayingAudioProvider` -- if an audio bubble starts, this on
 `_maybeExtractLocalThumb()`:
 - Skipped for vault videos (they already have a `.webp` thumbnail).
 - Tries sync cache hit via `VideoThumbnailService.cachedThumbFor(videoPath)`.
-- Falls back to async extraction via `VideoThumbnailService.ensureCachedThumb(videoPath)`.
+- Falls back to async extraction via `VideoThumbnailService.ensureCachedThumb(videoPath)`, but only for our own video (`isMine`) or once the user opened it (`_markOpened` on play or the album tile's open): a received video is never fed to ffmpeg without a tap (C-FILES-02), and the sender's header poster stands in until then.
 - Sets `_localThumbPath` when complete.
 
 ### InlineVideoPlayer

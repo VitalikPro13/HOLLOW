@@ -21,6 +21,8 @@ class NotificationService: UNNotificationServiceExtension {
 
   var contentHandler: ((UNNotificationContent) -> Void)?
   var bestAttempt: UNMutableNotificationContent?
+  /// The push as APNs sent it, for an install wiped while the extension ran.
+  var original: UNNotificationContent?
 
   override func didReceive(
     _ request: UNNotificationRequest,
@@ -29,6 +31,15 @@ class NotificationService: UNNotificationServiceExtension {
     self.contentHandler = contentHandler
     let content = (request.content.mutableCopy() as! UNMutableNotificationContent)
     self.bestAttempt = content
+    self.original = request.content
+
+    // A wiped or never-used install delivers the push exactly as APNs sent it,
+    // "Hollow" / "New message", names nobody and writes nothing. Without the
+    // filtering entitlement the extension cannot drop it (audit phase G).
+    guard identityPresent() else {
+      contentHandler(content)
+      return
+    }
 
     // Channel pushes (type=channel_wake) take a separate path: server-room
     // fetch + MLS decrypt, "Server • #channel" banner.
@@ -58,6 +69,11 @@ class NotificationService: UNNotificationServiceExtension {
         .containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
     else {
       contentHandler(content)
+      return
+    }
+
+    if appLockOn(container) {
+      deliverHidden(content, contentHandler)
       return
     }
 
@@ -123,7 +139,8 @@ class NotificationService: UNNotificationServiceExtension {
       log(container, "fetch returned NULL, footprint=\(footMB)MB — deliver Tier A")
     }
 
-    contentHandler(content)
+    // The relay's parked destruction order can wipe this install mid-fetch.
+    contentHandler(identityPresent() ? content : request.content)
   }
 
   // MARK: - Channel wake (channel push)
@@ -160,6 +177,11 @@ class NotificationService: UNNotificationServiceExtension {
         .containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
     else {
       contentHandler(content)
+      return
+    }
+
+    if appLockOn(container) {
+      deliverHidden(content, contentHandler)
       return
     }
 
@@ -203,7 +225,7 @@ class NotificationService: UNNotificationServiceExtension {
       log(container, "channel fetch returned NULL, footprint=\(currentFootprintMB())MB — generic banner")
     }
 
-    contentHandler(content)
+    contentHandler(identityPresent() ? content : request.content)
   }
 
   /// Render channel-wake fetch JSON. Entries carry server/channel/sender names
@@ -242,7 +264,43 @@ class NotificationService: UNNotificationServiceExtension {
     return (title, body, subtitle)
   }
 
+  // MARK: - App Lock
+
+  /// The app writes only the `~locked` marker into the hints while App Lock is
+  /// on (PushHintsCache): every banner is then the generic one (C-35).
+  private func appLockOn(_ container: URL) -> Bool {
+    let url = container.appendingPathComponent("push_hints/hints.json")
+    guard let data = try? Data(contentsOf: url),
+          let map = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    else { return false }
+    return (map["~locked"] as? Bool) == true
+  }
+
+  /// No name, no text, no avatar, and nothing fetched: the identity is behind
+  /// the lock and so is everything it would show.
+  private func deliverHidden(
+    _ content: UNMutableNotificationContent,
+    _ contentHandler: @escaping (UNNotificationContent) -> Void
+  ) {
+    content.title = "Hollow"
+    content.subtitle = ""
+    content.body = "New message"
+    content.attachments = []
+    contentHandler(content)
+  }
+
   // MARK: - Tier B helpers
+
+  /// An identity lives in the App Group data root and no wipe waits on it.
+  private func identityPresent() -> Bool {
+    guard let container = FileManager.default
+      .containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
+    else { return false }
+    let root = container.appendingPathComponent("hollow_data")
+    let fm = FileManager.default
+    return fm.fileExists(atPath: root.appendingPathComponent("identity.key").path)
+      && !fm.fileExists(atPath: root.appendingPathComponent("pending_wipe.marker").path)
+  }
 
   /// True if the app reported itself active within the last ~12s (heartbeat file
   /// the app touches on resume; cleared/aged-out on pause/kill).
@@ -311,6 +369,7 @@ class NotificationService: UNNotificationServiceExtension {
   /// Append a diagnostic line to the App Group log the app's Security-tab export
   /// button reads. Best-effort; never throws into the push path.
   private func log(_ container: URL, _ msg: String) {
+    guard identityPresent() else { return }
     let dir = container.appendingPathComponent("push_diag")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("nse_metrics.log")
@@ -357,11 +416,13 @@ class NotificationService: UNNotificationServiceExtension {
   // iOS gives the extension ~30s, then calls this. Deliver whatever we have so
   // far (at minimum the original content) — never let the push silently drop.
   override func serviceExtensionTimeWillExpire() {
-    if let container = FileManager.default
+    let live = identityPresent()
+    if live, let container = FileManager.default
       .containerURL(forSecurityApplicationGroupIdentifier: appGroupId) {
       log(container, "serviceExtensionTimeWillExpire — delivering best attempt, footprint=\(currentFootprintMB())MB")
     }
-    if let handler = contentHandler, let content = bestAttempt {
+    let content: UNNotificationContent? = live ? bestAttempt : original
+    if let handler = contentHandler, let content {
       handler(content)
     }
   }

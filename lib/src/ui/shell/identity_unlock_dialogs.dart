@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/services/privacy_screen.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -229,6 +230,10 @@ class _RecoveryPhraseDialogState extends State<RecoveryPhraseDialog>
 
   @override
   Widget build(BuildContext context) {
+    return SecretScreen(child: _dialog(context));
+  }
+
+  Widget _dialog(BuildContext context) {
     return HollowDialog(
       title: widget.title,
       width: 420,

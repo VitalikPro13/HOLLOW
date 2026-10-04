@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
@@ -272,7 +273,14 @@ class FileTransferNotifier
           videoThumb: videoThumb,
           album: album,
         );
-        await share_api.shareCreateFromFile(sourcePath: filePath);
+        try {
+          // A photo or video is shared from a copy without its location and
+          // camera details; one that cannot be cleaned throws here.
+          await share_api.shareCreateForSend(sourcePath: filePath);
+        } catch (_) {
+          _pendingShareSends.remove(filePath);
+          rethrow;
+        }
         return;
       }
 
@@ -417,8 +425,12 @@ class FileTransferNotifier
       rethrow;
     }
 
-    // Write the thumbnail to a temp .webp so the existing sendFile FFI can take it.
-    final tempDir = await Directory.systemTemp.createTemp('hollow_vthumb_');
+    // Write the thumbnail to a temp .webp so the existing sendFile FFI can take
+    // it. The data root's temp, so a send that dies mid-way leaves nothing past
+    // the next launch or a wipe.
+    final stage = Directory(p.join(hollowDataDir, 'temp'));
+    await stage.create(recursive: true);
+    final tempDir = await stage.createTemp('vthumb_');
     final thumbPath = p.join(tempDir.path, '$messageId.webp');
     try {
       await File(thumbPath).writeAsBytes(thumb.webpBytes, flush: true);

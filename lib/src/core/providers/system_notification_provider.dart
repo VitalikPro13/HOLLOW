@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -76,6 +78,84 @@ class NotificationCard {
   }
 }
 
+/// The OS notification surfaces, behind a provider so a test can see what a
+/// locked device would be shown.
+class OsNotificationSink {
+  const OsNotificationSink();
+
+  bool get isMobile => Platform.isAndroid || Platform.isIOS;
+
+  Future<void> mobileDm({
+    required String personKey,
+    required String displayName,
+    required String messageId,
+    required String text,
+    Uint8List? avatarBytes,
+  }) =>
+      push.showLocalDmNotification(
+        personKey: personKey,
+        displayName: displayName,
+        messageId: messageId,
+        text: text,
+        avatarBytes: avatarBytes,
+      );
+
+  Future<void> mobileChannel({
+    required String serverId,
+    required String channelId,
+    required String serverName,
+    required String channelName,
+    required String senderName,
+    required String messageId,
+    required String text,
+  }) =>
+      push.showLocalChannelNotification(
+        serverId: serverId,
+        channelId: channelId,
+        serverName: serverName,
+        channelName: channelName,
+        senderName: senderName,
+        messageId: messageId,
+        text: text,
+      );
+
+  Future<void> desktopDm({
+    required String sourceKey,
+    required String title,
+    required String body,
+    Uint8List? avatarBytes,
+  }) =>
+      DesktopNotificationService.instance.showDm(
+        sourceKey: sourceKey,
+        title: title,
+        body: body,
+        avatarBytes: avatarBytes,
+      );
+
+  Future<void> desktopChannel({
+    required String serverId,
+    required String channelId,
+    required String title,
+    required String body,
+    Uint8List? avatarBytes,
+  }) =>
+      DesktopNotificationService.instance.showChannel(
+        serverId: serverId,
+        channelId: channelId,
+        title: title,
+        body: body,
+        avatarBytes: avatarBytes,
+      );
+
+  /// The one notification App Lock allows: no name, no text, no reply.
+  Future<void> hidden() => isMobile
+      ? push.showHiddenNotification()
+      : DesktopNotificationService.instance.showHidden();
+}
+
+final osNotificationSinkProvider =
+    Provider<OsNotificationSink>((_) => const OsNotificationSink());
+
 /// Manages notifications — in-app overlay cards when window is visible,
 /// native OS notifications when window is hidden (tray mode).
 class SystemNotificationNotifier
@@ -133,13 +213,18 @@ class SystemNotificationNotifier
     // once rather than in each of the four of them.
     text = messagePreviewText(text);
 
+    final sink = ref.read(osNotificationSinkProvider);
     // Mobile: route by lifecycle. Backgrounded-but-connected gets a real OS
     // banner, since in-app banners can't draw while backgrounded.
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (sink.isMobile) {
       final lifecycle = ref.read(appLifecycleProvider);
       if (lifecycle.isBackground) {
+        if (!_contentAllowed(mobile: true)) {
+          await sink.hidden();
+          return;
+        }
         final avatar = await _avatarFor(fromPeerId);
-        await push.showLocalDmNotification(
+        await sink.mobileDm(
           personKey: fromPeerId,
           displayName: senderName,
           messageId: messageId ?? '',
@@ -165,9 +250,13 @@ class SystemNotificationNotifier
       return;
     }
 
+    if (!_contentAllowed(mobile: false)) {
+      await sink.hidden();
+      return;
+    }
     if (await _useNativeToast()) {
       final avatar = await _avatarFor(fromPeerId);
-      DesktopNotificationService.instance.showDm(
+      sink.desktopDm(
         sourceKey: fromPeerId,
         title: senderName,
         body: text,
@@ -222,11 +311,16 @@ class SystemNotificationNotifier
     // See notifyDm.
     text = messagePreviewText(text);
 
+    final sink = ref.read(osNotificationSinkProvider);
     // Mobile: route by lifecycle (see notifyDm).
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (sink.isMobile) {
       final lifecycle = ref.read(appLifecycleProvider);
       if (lifecycle.isBackground) {
-        await push.showLocalChannelNotification(
+        if (!_contentAllowed(mobile: true)) {
+          await sink.hidden();
+          return;
+        }
+        await sink.mobileChannel(
           serverId: serverId,
           channelId: channelId,
           serverName: serverName,
@@ -254,11 +348,15 @@ class SystemNotificationNotifier
       return;
     }
 
+    if (!_contentAllowed(mobile: false)) {
+      await sink.hidden();
+      return;
+    }
     if (await _useNativeToast()) {
       // Native OS toast: the channel line carries the sender name. Use the SENDER's
       // avatar, since passing the serverId to getPushProfile would never resolve.
       final avatar = await _avatarFor(fromPeerId);
-      DesktopNotificationService.instance.showChannel(
+      sink.desktopChannel(
         serverId: serverId,
         channelId: channelId,
         title: '$serverName • #$resolvedChannelName',
@@ -343,6 +441,27 @@ class SystemNotificationNotifier
   /// tapped). Public so the toast open-handler in the shell can call it.
   Future<void> bringWindowToFront() => _bringWindowToFront();
 
+  /// The inline Reply on a desktop toast. A reply never leaves a locked app,
+  /// whichever toast it was typed into.
+  void replyFromToast(String peerId, String text) {
+    if (ref.read(appLockedProvider)) {
+      notifLog('toast reply refused: the app is locked');
+      return;
+    }
+    ref.read(chatProvider.notifier).sendMessage(peerId, text);
+  }
+
+  /// Whether an OS notification may name the sender or quote the message
+  /// (C-35). Never while the lock cover is up, and on a phone never with App
+  /// Lock on: a banner there sits on the lock screen and in the shade before
+  /// any unlock. A protection state not known yet counts as on.
+  bool _contentAllowed({required bool mobile}) {
+    if (ref.read(appLockedProvider)) return false;
+    if (!mobile) return true;
+    final status = ref.read(identityProtectionProvider).valueOrNull;
+    return status != null && !status.hasPassword;
+  }
+
   String _channelName(String serverId, String channelId) {
     final channels = ref.read(channelListProvider);
     return channels[channelId]?.name ?? 'channel';
@@ -356,9 +475,6 @@ class SystemNotificationNotifier
   /// Ties go to the toast: the card is invisible whenever the window isn't on top,
   /// so guessing "focused" loses the message, guessing "unfocused" costs a toast.
   Future<bool> _useNativeToast() async {
-    // Locked is away: the cover hides the in-app card, so the OS toast is the
-    // only surface left, exactly as on a phone's lock screen.
-    if (ref.read(appLockedProvider)) return true;
     if (await _isWindowHidden()) return true;
     if (!await _isWindowFocused()) return true;
     notifLog('window visible + focused — routing to the in-app card');

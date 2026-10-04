@@ -43,7 +43,7 @@ pub enum StreamKind {
 #[derive(Debug)]
 pub struct StreamRequest {
     pub kind: StreamKind,
-    /// Hex identifier (file_id for files, content_id for shards).
+    /// Hex identifier (file id for files, `vault_ops::shard_stream_id` for shards).
     pub id: String,
     /// Total bytes to transfer.
     pub size: u64,
@@ -525,7 +525,7 @@ fn pad_id(id: &str) -> [u8; 64] {
 ///
 /// The id becomes part of a temp file name (`.ws_recv_{id}.{n}.tmp`), so this is the
 /// gate: only the characters our own ids use pass (hex, `:` for the share-chunk
-/// and shard suffix, `_` for link snapshots, `-`). A `..` or a separator would
+/// suffix, `_` for link snapshots, `-`). A `..` or a separator would
 /// walk out of the files directory on Windows, where `..` is collapsed lexically
 /// before the filesystem is consulted. Mirrors `parseWireTransferId` in Dart.
 fn parse_id(buf: &[u8]) -> Option<String> {

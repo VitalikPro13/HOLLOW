@@ -1,6 +1,7 @@
 import AVFoundation
 import Flutter
 import UIKit
+import UniformTypeIdentifiers
 
 /// The bundled UI sound pack (issue #55) on iOS.
 ///
@@ -110,6 +111,8 @@ final class HollowSfxPlayer {
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    excludeDataFromBackup()
+    observeSwitcher()
 
     // hollow/app_group → returns the App Group container path so Dart can write
     // the push-hints cache there (getApplicationDocumentsDirectory is the PRIVATE
@@ -123,6 +126,11 @@ final class HollowSfxPlayer {
           let url = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: self?.appGroupId ?? "")
           result(url?.path)
+        } else if call.method == "unregisterForRemoteNotifications" {
+          // A wipe: APNs stops delivering here at once, with no network. Firebase
+          // registers again at the next launch, for whichever identity comes next.
+          UIApplication.shared.unregisterForRemoteNotifications()
+          result(nil)
         } else {
           result(FlutterMethodNotImplemented)
         }
@@ -157,8 +165,112 @@ final class HollowSfxPlayer {
           result(FlutterMethodNotImplemented)
         }
       }
+
+      // hollow/privacy → phrase screens, App Lock and secrets on the clipboard
+      // (privacy_screen.dart, secret_clipboard.dart).
+      let privacy = FlutterMethodChannel(
+        name: "hollow/privacy",
+        binaryMessenger: controller.binaryMessenger)
+      privacy.setMethodCallHandler { [weak self] call, result in
+        switch call.method {
+        case "setSecureScreen":
+          self?.secretScreenOpen = (call.arguments as? Bool) ?? false
+          result(nil)
+        case "setSwitcherCover":
+          let on = (call.arguments as? Bool) ?? false
+          UserDefaults.standard.set(on, forKey: AppDelegate.switcherCoverKey)
+          result(nil)
+        case "copySecret":
+          let args = call.arguments as? [String: Any] ?? [:]
+          let text = args["text"] as? String ?? ""
+          let seconds = (args["seconds"] as? NSNumber)?.doubleValue ?? 60
+          // Never handed to the person's other devices, and gone by itself.
+          UIPasteboard.general.setItems(
+            [[UTType.utf8PlainText.identifier: text]],
+            options: [
+              .localOnly: true,
+              .expirationDate: Date().addingTimeInterval(seconds),
+            ])
+          result(true)
+        default:
+          result(FlutterMethodNotImplemented)
+        }
+      }
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // MARK: - Backups
+
+  /// Hollow's data never enters an iCloud or Finder backup (C-RP-03): the
+  /// `.hollow` export is the only sanctioned copy, as on Android. iOS can drop
+  /// the flag when a backup is restored or a folder moves, so it is set at every
+  /// start, creating the folders first so the flag is on before anything lands.
+  private func excludeDataFromBackup() {
+    let fm = FileManager.default
+    var dirs: [URL] = []
+    if let group = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) {
+      for name in ["hollow_data", "push_hints", "push_diag"] {
+        dirs.append(group.appendingPathComponent(name, isDirectory: true))
+      }
+    }
+    if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+      dirs.append(docs.appendingPathComponent("hollow", isDirectory: true))
+    }
+    for dir in dirs {
+      var url = dir
+      do {
+        try fm.createDirectory(at: url, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try url.setResourceValues(values)
+      } catch {
+        NSLog("[HOLLOW] backup exclusion failed for \(url.lastPathComponent): \(error)")
+      }
+    }
+  }
+
+  // MARK: - App switcher cover
+
+  /// Set by Dart while App Lock is on; kept across launches so the cover is
+  /// right before Dart has started.
+  private static let switcherCoverKey = "hollow.switcherCover"
+
+  /// A recovery phrase screen is up.
+  private var secretScreenOpen = false
+  private var privacyCover: UIView?
+
+  // The switcher's picture is taken as the app resigns, before the lock (which
+  // rises on return) could cover anything; `queue: nil` runs the cover there
+  // and then, on the posting thread, not a turn later.
+  private func observeSwitcher() {
+    let center = NotificationCenter.default
+    center.addObserver(
+      forName: UIApplication.willResignActiveNotification, object: nil, queue: nil
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      if self.secretScreenOpen
+        || UserDefaults.standard.bool(forKey: AppDelegate.switcherCoverKey) {
+        self.showPrivacyCover()
+      }
+    }
+    center.addObserver(
+      forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
+    ) { [weak self] _ in
+      self?.privacyCover?.removeFromSuperview()
+      self?.privacyCover = nil
+    }
+  }
+
+  private func showPrivacyCover() {
+    guard privacyCover == nil, let window = window else { return }
+    let cover = UIStoryboard(name: "LaunchScreen", bundle: nil)
+      .instantiateInitialViewController()?.view ?? UIView()
+    if cover.backgroundColor == nil { cover.backgroundColor = .black }
+    cover.frame = window.bounds
+    cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    window.addSubview(cover)
+    privacyCover = cover
   }
 }

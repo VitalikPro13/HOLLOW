@@ -5,7 +5,8 @@
   "description": "Push notification sidecar for the Hollow relay: FCM/APNs and UnifiedPush",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "web-push": "3.6.7"

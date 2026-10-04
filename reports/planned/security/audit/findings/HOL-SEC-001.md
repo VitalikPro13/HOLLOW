@@ -23,7 +23,8 @@ never checked.
 
 ## Reproduction
 
-`a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices`: before
+`authz_a_foreign_roster_cannot_claim_or_remove_anyone_elses_devices` (at the fix:
+`a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices`): before
 the fix, a list signed by another identity that named our device as revoked
 wiped it.
 
@@ -41,5 +42,10 @@ variant analysis is phase D of the plan.
 
 ## Test
 
-`a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices`:
-failed before, passes after; lib suite 893/893 at the fix.
+`authz_a_foreign_roster_cannot_claim_or_remove_anyone_elses_devices`
+(`node/roster_book.rs`): since design ID-1 replaced the device list with the
+roster, a foreign roster that claims or removes our device, a friend's device or
+a friend's master leaves every binding as it was, revokes nothing and raises no
+`DeviceRemoved`. It replaces
+`a_foreign_device_list_cannot_revoke_or_claim_other_identities_devices`, which
+failed before the 0bb09321 fix and passed after (lib suite 893/893 then).
